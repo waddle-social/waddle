@@ -8,4 +8,32 @@ fileGroups:
 
 tasks:
   build:
-    command: "bun run astro build"
+    command: "bun run build"
+    options:
+      runInCI: true
+      outputStyle: stream
+
+  preview:
+    command: "bunx wrangler dev"
+    deps:
+      - "~:build"
+
+  deploy-preview:
+    command: "bunx wrangler versions upload"
+    deps:
+      - "~:build"
+    options:
+      runInCI: false
+
+  deploy-production:
+    command: "bunx wrangler deploy"
+    deps:
+      - "~:build"
+    options:
+      runInCI: false
+
+  dev:
+    command: "bun run dev"
+    options:
+      persistent: true
+      runInCI: false

@@ -1,0 +1,18 @@
+name = "waddle-website"
+main = "./dist/_worker.js/index.js"
+compatibility_date = "2025-06-26"
+account_id = "f90cc3950ab5b356ec869fe64c867ea7"
+
+compatibility_flags = ["nodejs_compat"]
+
+routes = [
+  { pattern = "waddle.social", custom_domain = true },
+  { pattern = "waddle.chat", custom_domain = true },
+]
+
+[assets]
+binding = "ASSETS"
+directory = "./dist"
+
+[observability]
+logs.enabled = true
