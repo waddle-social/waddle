@@ -1,0 +1,11 @@
+id: website
+
+language: typescript
+
+fileGroups:
+  sources:
+    - "src/**/*"
+
+tasks:
+  build:
+    command: "bun run astro build"

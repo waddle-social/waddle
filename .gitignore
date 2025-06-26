@@ -1,0 +1,8 @@
+
+# moon
+.moon/cache
+.moon/docker
+
+# IDE and tool directories
+.claude
+.vscode
