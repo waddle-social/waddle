@@ -17,6 +17,8 @@ tasks:
     command: "bunx wrangler dev"
     deps:
       - "~:build"
+    options:
+      runInCI: false
 
   deploy-preview:
     command: "bunx wrangler versions upload"
@@ -24,6 +26,9 @@ tasks:
       - "~:build"
     options:
       runInCI: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
 
   deploy-production:
     command: "bunx wrangler deploy"

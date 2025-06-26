@@ -22,7 +22,7 @@ jobs:
 
       - name: Deploy Preview
         if: github.event_name == 'pull_request'
-        run: moon
+        run: moon run website:deploy-preview
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
