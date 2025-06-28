@@ -1,5 +1,11 @@
 ---
+import { isAuthenticated } from "@/lib/workos";
 
+const { cookies, locals } = Astro;
+
+const authenticated = await isAuthenticated(cookies);
+
+const { user } = locals;
 ---
 
 <html lang="en">
@@ -11,6 +17,13 @@
 		<title>{Astro.site}</title>
 	</head>
 	<body>
-		Nothing to see here
+		<div>{JSON.stringify(user)}</div>
+		{
+			authenticated ? (
+				<a href="/api/auth/logout">Logout</a>
+			) : (
+				<a href="/api/auth/login">Login</a>
+			)
+		}
 	</body>
 </html>

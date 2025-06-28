@@ -3,11 +3,13 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
+    "dev": "astro dev",
     "build": "astro check && astro build"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",
     "@astrojs/cloudflare": "^12.6.0",
+    "@workos-inc/node": "^7.57.0",
     "astro": "^5.10.1",
     "typescript": "^5.8.3"
   },
