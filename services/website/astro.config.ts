@@ -11,7 +11,7 @@ const site = (): string => {
     return "http://localhost:4321";
   }
 
-  return "https://rawkode.studio";
+  return "https://waddle.social";
 };
 
 // https://astro.build/config
