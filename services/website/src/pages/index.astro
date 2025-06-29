@@ -1,29 +1,37 @@
 ---
-import { isAuthenticated } from "@/lib/workos";
-
-const { cookies, locals } = Astro;
-
-const authenticated = await isAuthenticated(cookies);
-
-const { user } = locals;
+import App from "@/layouts/App.astro";
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>{Astro.site}</title>
-	</head>
-	<body>
-		<div>{JSON.stringify(user)}</div>
-		{
-			authenticated ? (
-				<a href="/api/auth/logout">Logout</a>
-			) : (
-				<a href="/api/auth/login">Login</a>
-			)
-		}
-	</body>
-</html>
+<App title="WaddleSocial" showHeader={true}>
+  <div class="absolute inset-0 flex items-center justify-center" style="margin-top: -4rem;">
+    <div class="text-center">
+      <!-- Main heading -->
+      <h1 class="text-6xl md:text-8xl font-bold tracking-tighter mb-8">
+        <span class="bg-gradient-to-br from-slate-800 to-slate-600 dark:from-slate-100 dark:to-slate-300 bg-clip-text text-transparent">
+          Waddle
+        </span>
+        <span class="bg-gradient-to-br from-sky-600 to-cyan-600 dark:from-sky-400 dark:to-cyan-400 bg-clip-text text-transparent">
+          Social
+        </span>
+      </h1>
+
+      <!-- Coming soon badge -->
+      <div class="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+        <div class="w-2 h-2 bg-sky-500 rounded-full animate-pulse"></div>
+        <span class="text-sm font-medium text-slate-600 dark:text-slate-400">Coming Soon</span>
+      </div>
+    </div>
+  </div>
+</App>
+
+<style>
+  /* Override the default padding from App layout for this page */
+  :global(main > div) {
+    padding: 0 !important;
+  }
+
+  /* Ensure no scrollbars */
+  :global(body) {
+    overflow: hidden;
+  }
+</style>

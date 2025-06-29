@@ -1,71 +1,77 @@
-import { SESSION_COOKIE_NAME, workos } from '@/lib/workos';
 import { WORKOS_COOKIE_SECRET } from "astro:env/server";
-import { defineMiddleware, sequence } from 'astro:middleware';
+import { defineMiddleware, sequence } from "astro:middleware";
+import { SESSION_COOKIE_NAME, workos } from "@/lib/workos";
 
-const bypassUrls = ["/api/auth/login", "/api/auth/logout"];
+// Only these paths require authentication
+// All other paths (including "/") will pass through without auth checks
+// Add new protected paths here as needed
+const protectedPaths = ["/chat"];
 
 const authMiddleware = defineMiddleware(async (context, next) => {
-    console.log(context.url.pathname)
+	const url = new URL(context.request.url);
+	const { cookies, redirect } = context;
 
-    const url = new URL(context.request.url);
+	// Check if the current path or any parent path requires authentication
+	const requiresAuth = protectedPaths.some(
+		(path) => url.pathname === path || url.pathname.startsWith(`${path}/`),
+	);
 
-    if (bypassUrls.includes(url.pathname)) {
-        return next();
-    }
+	const cookie = cookies.get(SESSION_COOKIE_NAME);
 
-    const { cookies, redirect } = context;
+	if (!cookie) {
+		// If protected path and no cookie, redirect to login
+		if (requiresAuth) {
+			return redirect("/api/auth/login");
+		}
+		// Otherwise, continue without user data
+		return next();
+	}
 
-    const cookie = cookies.get(SESSION_COOKIE_NAME);
+	// Try to load and authenticate the session
+	const session = workos.userManagement.loadSealedSession({
+		sessionData: cookie.value,
+		cookiePassword: WORKOS_COOKIE_SECRET,
+	});
 
-    if (!cookie) {
-        console.log("no cookie")
-        return next()
-    }
+	const result = await session.authenticate();
 
-    const session = workos.userManagement.loadSealedSession({
-        sessionData: cookie.value,
-        cookiePassword: WORKOS_COOKIE_SECRET,
-    });
+	if (result.authenticated) {
+		context.locals.user = result.user;
+		return next();
+	}
 
-    const result = await session.authenticate();
+	// If not authenticated and it's a protected path
+	if (!result.authenticated && requiresAuth) {
+		if (result.reason === "no_session_cookie_provided") {
+			return redirect("/api/auth/login");
+		}
 
-    if (result.authenticated) {
-        context.locals.user = result.user;
+		// Try to refresh the session
+		try {
+			const refreshResult = await session.refresh();
 
-        console.log("already authenticated")
-        return next();
-    }
+			if (!refreshResult.authenticated) {
+				return redirect("/api/auth/login");
+			}
 
-    if (!result.authenticated && result.reason === 'no_session_cookie_provided') {
-        console.log("no session cookie provided")
-        return next();
-    }
+			context.locals.user = refreshResult.user;
 
-    try {
-        const result = await session.refresh();
+			cookies.set(SESSION_COOKIE_NAME, refreshResult.sealedSession as string, {
+				path: "/",
+				httpOnly: true,
+				secure: import.meta.env.MODE === "production",
+				sameSite: "lax",
+			});
 
-        if (!result.authenticated) {
-            console.log("no session refresh")
-            return next();
-        }
+			return redirect(url.pathname);
+		} catch (_error) {
+			cookies.delete(SESSION_COOKIE_NAME);
+			return redirect("/api/auth/login");
+		}
+	}
 
-        context.locals.user = result.user;
-
-        cookies.set(SESSION_COOKIE_NAME, result.sealedSession as string, {
-            path: '/',
-            httpOnly: true,
-            secure: import.meta.env.MODE === "production",
-            sameSite: 'lax',
-        });
-
-        console.log(context.locals.user)
-
-        return redirect(url.pathname)
-    } catch (error) {
-        console.log(error)
-        cookies.delete(SESSION_COOKIE_NAME);
-        return redirect('/api/auth/login');
-    }
-})
+	// For non-protected paths, just continue even if not authenticated
+	return next();
+});
 
 export const onRequest = sequence(authMiddleware);
