@@ -1,0 +1,19 @@
+name = "colony-auth"
+compatibility_date = "2024-01-01"
+
+[build]
+command = "bun run build"
+
+[site]
+bucket = "./dist"
+
+[[kv_namespaces]]
+binding = "AUTH_DB"
+id = "AUTH_DB_ID"
+preview_id = "AUTH_DB_PREVIEW_ID"
+
+[env.production]
+route = "auth.waddle.social/*"
+
+[env.preview]
+route = "auth-preview.waddle.social/*"

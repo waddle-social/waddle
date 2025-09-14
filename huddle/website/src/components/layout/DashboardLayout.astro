@@ -1,0 +1,72 @@
+---
+import '@styles/global.css'
+import Header from '@components/layout/Header.vue'
+import Sidebar from '@components/layout/Sidebar.vue'
+
+export interface Props {
+  title?: string
+  description?: string
+  user: {
+    name: string
+    handle: string
+    did: string
+  }
+  currentPath?: string
+  pendingBookings?: number
+}
+
+const { 
+  title = 'Dashboard - Huddle', 
+  description = 'Manage your meetings and calendar connections.',
+  user,
+  currentPath = '/dashboard',
+  pendingBookings = 0
+} = Astro.props
+---
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content={description} />
+    <meta name="generator" content={Astro.generator} />
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    
+    <title>{title}</title>
+    
+    <script>
+      // Dark mode initialization
+      const theme = localStorage.getItem('theme')
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+      
+      if (theme === 'dark' || (!theme && prefersDark)) {
+        document.documentElement.classList.add('dark')
+      }
+    </script>
+  </head>
+  <body class="min-h-screen bg-neutral-50 dark:bg-neutral-950">
+    <Header user={user} client:load />
+    
+    <div class="flex">
+      <Sidebar 
+        user={user} 
+        currentPath={currentPath}
+        pendingBookings={pendingBookings}
+        client:load 
+      />
+      
+      <main class="flex-1 p-8">
+        <slot />
+      </main>
+    </div>
+  </body>
+</html>

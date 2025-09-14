@@ -1,0 +1,79 @@
+---
+import '@styles/global.css'
+import Header from '@components/layout/Header.vue'
+import Footer from '@components/layout/Footer.vue'
+
+export interface Props {
+  title?: string
+  description?: string
+  user?: {
+    name: string
+    handle: string
+    did: string
+  }
+  noFooter?: boolean
+  noHeader?: boolean
+}
+
+const { 
+  title = 'Huddle - Smart Meeting Scheduling', 
+  description = 'Simplify your meeting scheduling with ATProto integration and smart calendar matching.',
+  user,
+  noFooter = false,
+  noHeader = false
+} = Astro.props
+---
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content={description} />
+    <meta name="generator" content={Astro.generator} />
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    
+    <!-- Open Graph / Social Media -->
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={import.meta.env.PUBLIC_SITE_URL} />
+    <meta property="og:image" content={`${import.meta.env.PUBLIC_SITE_URL}/og-image.png`} />
+    
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content={import.meta.env.PUBLIC_SITE_URL} />
+    <meta property="twitter:title" content={title} />
+    <meta property="twitter:description" content={description} />
+    <meta property="twitter:image" content={`${import.meta.env.PUBLIC_SITE_URL}/og-image.png`} />
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    
+    <title>{title}</title>
+    
+    <script>
+      // Dark mode initialization
+      const theme = localStorage.getItem('theme')
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+      
+      if (theme === 'dark' || (!theme && prefersDark)) {
+        document.documentElement.classList.add('dark')
+      }
+    </script>
+  </head>
+  <body class="min-h-screen flex flex-col">
+    {!noHeader && <Header user={user} client:load />}
+    
+    <main class="flex-1">
+      <slot />
+    </main>
+    
+    {!noFooter && <Footer client:visible />}
+  </body>
+</html>

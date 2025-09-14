@@ -1,0 +1,25 @@
+---
+import '../styles/global.css'
+import LoginForm from '../components/LoginForm.vue'
+---
+
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width" />
+		<meta name="generator" content={Astro.generator} />
+		<title>Waddle Chat</title>
+	</head>
+	<body>
+		<LoginForm client:only="vue" />
+		<script>
+			// Handle login success event
+			document.addEventListener('login-success', (event) => {
+				const { username } = event.detail
+				sessionStorage.setItem('username', username)
+				window.location.href = '/chat'
+			})
+		</script>
+	</body>
+</html>

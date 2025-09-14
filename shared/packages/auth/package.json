@@ -1,0 +1,18 @@
+{
+  "name": "@waddle/auth",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@workos-inc/node": "^7.57.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

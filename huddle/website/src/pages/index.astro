@@ -1,0 +1,207 @@
+---
+import PageLayout from '@components/layout/PageLayout.astro'
+---
+
+<PageLayout>
+  <section class="relative bg-gradient-to-b from-primary-50 to-white dark:from-neutral-950 dark:to-neutral-900">
+    <div class="container py-24 lg:py-32">
+      <div class="max-w-4xl mx-auto text-center">
+        <h1 class="text-5xl lg:text-6xl font-bold mb-6 gradient-text">
+          Smart Meeting Scheduling for the ATProto Era
+        </h1>
+        <p class="text-xl text-neutral-600 dark:text-neutral-400 mb-8">
+          Connect your calendar, set your availability, and let Huddle find the perfect meeting times. 
+          Built for the decentralized social web.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+          <a href="/auth/login" class="btn btn-primary btn-lg">
+            Get Started Free
+          </a>
+          <a href="#how-it-works" class="btn btn-outline btn-lg">
+            Learn More
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="py-20 bg-white dark:bg-neutral-900">
+    <div class="container">
+      <h2 class="text-3xl font-bold text-center mb-12">Why Choose Huddle?</h2>
+      <div class="grid md:grid-cols-3 gap-8">
+        <div class="card card-body text-center">
+          <div class="w-16 h-16 bg-primary-100 dark:bg-primary-900 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-primary-600 dark:text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold mb-2">Smart Calendar Matching</h3>
+          <p class="text-neutral-600 dark:text-neutral-400">
+            AI-powered algorithm finds optimal meeting times that work for everyone.
+          </p>
+        </div>
+        
+        <div class="card card-body text-center">
+          <div class="w-16 h-16 bg-secondary-100 dark:bg-secondary-900 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-secondary-600 dark:text-secondary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold mb-2">ATProto Integration</h3>
+          <p class="text-neutral-600 dark:text-neutral-400">
+            Native integration with the AT Protocol for decentralized identity and data.
+          </p>
+        </div>
+        
+        <div class="card card-body text-center">
+          <div class="w-16 h-16 bg-success-100 dark:bg-success-900 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-success-600 dark:text-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+          </div>
+          <h3 class="text-xl font-semibold mb-2">Lightning Fast</h3>
+          <p class="text-neutral-600 dark:text-neutral-400">
+            Edge-optimized performance with Cloudflare Workers for instant responses.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how-it-works" class="py-20 bg-neutral-50 dark:bg-neutral-950">
+    <div class="container">
+      <h2 class="text-3xl font-bold text-center mb-12">How It Works</h2>
+      <div class="max-w-4xl mx-auto">
+        <div class="space-y-8">
+          <div class="flex gap-4">
+            <div class="flex-shrink-0 w-12 h-12 bg-primary-500 text-white rounded-full flex items-center justify-center font-bold">
+              1
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold mb-2">Connect Your Calendars</h3>
+              <p class="text-neutral-600 dark:text-neutral-400">
+                Link your Google Calendar, Outlook, or other calendar services to sync your availability.
+              </p>
+            </div>
+          </div>
+          
+          <div class="flex gap-4">
+            <div class="flex-shrink-0 w-12 h-12 bg-primary-500 text-white rounded-full flex items-center justify-center font-bold">
+              2
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold mb-2">Set Your Availability</h3>
+              <p class="text-neutral-600 dark:text-neutral-400">
+                Define your office hours and availability preferences for different types of meetings.
+              </p>
+            </div>
+          </div>
+          
+          <div class="flex gap-4">
+            <div class="flex-shrink-0 w-12 h-12 bg-primary-500 text-white rounded-full flex items-center justify-center font-bold">
+              3
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold mb-2">Share Your Booking Link</h3>
+              <p class="text-neutral-600 dark:text-neutral-400">
+                Share your personalized booking page with others or let them find you through ATProto.
+              </p>
+            </div>
+          </div>
+          
+          <div class="flex gap-4">
+            <div class="flex-shrink-0 w-12 h-12 bg-primary-500 text-white rounded-full flex items-center justify-center font-bold">
+              4
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold mb-2">Automatic Scheduling</h3>
+              <p class="text-neutral-600 dark:text-neutral-400">
+                Huddle finds the perfect time that works for everyone and adds it to your calendars.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="pricing" class="py-20 bg-white dark:bg-neutral-900">
+    <div class="container">
+      <h2 class="text-3xl font-bold text-center mb-12">Simple, Transparent Pricing</h2>
+      <div class="max-w-4xl mx-auto grid md:grid-cols-2 gap-8">
+        <div class="card">
+          <div class="card-body">
+            <h3 class="text-2xl font-bold mb-4">Free</h3>
+            <p class="text-4xl font-bold mb-6">$0<span class="text-lg font-normal text-neutral-600 dark:text-neutral-400">/month</span></p>
+            <ul class="space-y-3 mb-8">
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                Up to 5 meetings per month
+              </li>
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                1 calendar connection
+              </li>
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                Basic availability settings
+              </li>
+            </ul>
+            <a href="/auth/login" class="btn btn-outline w-full">Get Started</a>
+          </div>
+        </div>
+        
+        <div class="card border-2 border-primary-500">
+          <div class="card-body">
+            <div class="badge badge-primary mb-2">Most Popular</div>
+            <h3 class="text-2xl font-bold mb-4">Pro</h3>
+            <p class="text-4xl font-bold mb-6">$9<span class="text-lg font-normal text-neutral-600 dark:text-neutral-400">/month</span></p>
+            <ul class="space-y-3 mb-8">
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                Unlimited meetings
+              </li>
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                Unlimited calendar connections
+              </li>
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                Advanced scheduling rules
+              </li>
+              <li class="flex items-center">
+                <svg class="w-5 h-5 text-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                Priority support
+              </li>
+            </ul>
+            <a href="/auth/login" class="btn btn-primary w-full">Start Free Trial</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="py-20 bg-primary-600 dark:bg-primary-900">
+    <div class="container text-center">
+      <h2 class="text-3xl font-bold text-white mb-4">Ready to Simplify Your Scheduling?</h2>
+      <p class="text-xl text-primary-100 mb-8">Join thousands of professionals using Huddle to manage their meetings.</p>
+      <a href="/auth/login" class="btn bg-white text-primary-600 hover:bg-neutral-100 btn-lg">
+        Get Started for Free
+      </a>
+    </div>
+  </section>
+</PageLayout>

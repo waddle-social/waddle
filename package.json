@@ -1,0 +1,46 @@
+{
+  "name": "@waddle/monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "colony/*",
+    "waddle/*",
+    "huddle/*",
+    "huddle/services/*",
+    "shared/packages/*",
+    "shared/services/*"
+  ],
+  "scripts": {
+    "dev": "bun run dev:colony & bun run dev:waddle & bun run dev:huddle",
+    "dev:colony": "bun run --filter './colony/*' dev",
+    "dev:waddle": "bun run --filter './waddle/*' dev",
+    "dev:huddle": "bun run --filter './huddle/*' dev",
+    "build": "bun run build:shared && bun run build:colony && bun run build:waddle && bun run build:huddle",
+    "build:shared": "bun run --filter './shared/packages/*' build",
+    "build:colony": "bun run --filter './colony/*' build",
+    "build:waddle": "bun run --filter './waddle/*' build",
+    "build:huddle": "bun run --filter './huddle/*' build",
+    "test": "bun test",
+    "test:unit": "bun test --filter './shared/packages/*'",
+    "test:apps": "bun test --filter './{colony,waddle,huddle}/*'",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "deploy": "bun run deploy:colony && bun run deploy:waddle && bun run deploy:huddle",
+    "deploy:colony": "bun run --filter './colony/*' deploy",
+    "deploy:waddle": "bun run --filter './waddle/*' deploy",
+    "deploy:huddle": "bun run --filter './huddle/*' deploy",
+    "clean": "rm -rf node_modules **/node_modules **/dist **/.turbo"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.6",
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "@types/bun": "latest",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.33.1"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}

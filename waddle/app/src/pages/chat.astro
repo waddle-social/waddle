@@ -1,0 +1,48 @@
+---
+import '../styles/global.css'
+---
+
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width" />
+		<meta name="generator" content={Astro.generator} />
+		<title>Waddle - Community Platform</title>
+	</head>
+	<body>
+		<div id="app-container"></div>
+		<script>
+			// Check if user is authenticated
+			const username = sessionStorage.getItem('username')
+			if (!username) {
+				window.location.href = '/'
+			} else {
+				// Create the enhanced community app
+				const container = document.getElementById('app-container')
+				container.innerHTML = `<div data-astro-component="CommunityApp" data-username="${username}"></div>`
+				
+				// Import and mount the Vue community app
+				import('../components/CommunityApp.vue').then(({ default: CommunityApp }) => {
+					import('vue').then(({ createApp }) => {
+						const app = createApp(CommunityApp, { 
+							username,
+							initialView: 'chat' // Start with chat since that's what users expect
+						})
+						app.mount(container.firstElementChild)
+					})
+				}).catch(error => {
+					console.error('Failed to load community app:', error)
+					// Fallback to basic chat if the enhanced app fails
+					container.innerHTML = `
+						<div style="padding: 2rem; text-align: center; color: white; background: linear-gradient(135deg, #000 0%, #1a1a1a 100%); min-height: 100vh;">
+							<h1>🏠 Waddle</h1>
+							<p>Loading community platform...</p>
+							<p style="margin-top: 1rem; font-size: 0.9rem; opacity: 0.7;">Welcome back, ${username}!</p>
+						</div>
+					`
+				})
+			}
+		</script>
+	</body>
+</html>
