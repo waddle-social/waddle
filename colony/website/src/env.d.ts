@@ -1,9 +1,13 @@
 /// <reference types="astro/client" />
 
+type D1Database = import('@cloudflare/workers-types').D1Database;
+
+interface SecretStore {
+  get(): Promise<string>;
+}
+
 interface ImportMetaEnv {
-  readonly WORKOS_API_KEY: string;
-  readonly WORKOS_CLIENT_ID: string;
-  readonly SESSION_SECRET: string;
+  readonly ATPROTO_PRIVATE_KEY: string;
 }
 
 interface ImportMeta {
@@ -14,10 +18,8 @@ declare namespace App {
   interface Locals {
     runtime: {
       env: {
-        AUTH_DB: KVNamespace;
-        WORKOS_API_KEY: string;
-        WORKOS_CLIENT_ID: string;
-        SESSION_SECRET: string;
+        DB: D1Database;
+        ATPROTO_PRIVATE_KEY: SecretStore;
       };
     };
   }

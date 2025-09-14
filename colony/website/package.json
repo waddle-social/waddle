@@ -6,11 +6,24 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply colony --local",
+    "db:migrate:remote": "wrangler d1 migrations apply colony --remote",
+    "generate-keys": "bun run scripts/generate-keys.ts"
   },
   "dependencies": {
+    "@astrojs/cloudflare": "^12.6.8",
+    "@atproto/api": "^0.16.9",
+    "@atproto/oauth-client-node": "^0.3.8",
+    "@better-auth/client": "^0.0.2-alpha.3",
+    "@cloudflare/workers-types": "^4.20250913.0",
     "@tailwindcss/vite": "^4.1.13",
     "astro": "^5.13.7",
+    "better-auth": "^1.3.9",
+    "drizzle-kit": "^0.31.4",
+    "drizzle-orm": "^0.44.5",
+    "jose": "^6.1.0",
     "tailwindcss": "^4.1.13"
   }
 }

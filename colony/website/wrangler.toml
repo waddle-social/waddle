@@ -1,19 +1,29 @@
-name = "colony-auth"
-compatibility_date = "2024-01-01"
+name = "colony"
+compatibility_date = "2025-09-10"
+compatibility_flags = ["nodejs_compat"]
+main = "dist/_worker.js/index.js"
 
 [build]
 command = "bun run build"
 
-[site]
-bucket = "./dist"
-
-[[kv_namespaces]]
-binding = "AUTH_DB"
-id = "AUTH_DB_ID"
-preview_id = "AUTH_DB_PREVIEW_ID"
-
 [env.production]
-route = "auth.waddle.social/*"
+route = "colony.waddle.social"
+custom_domain = true
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "colony"
+database_id = "ba0f22e3-6428-4715-a9d3-ae1ae8aab02d"
+
+[[env.production.secrets_store_secrets]]
+binding = "ATPROTO_PRIVATE_KEY"
+store_id = "421985d6f384493c938c0554fea33c77"
+secret_name = "ATPROTO_PRIVATE_KEY"
 
 [env.preview]
-route = "auth-preview.waddle.social/*"
+route = "colony.preview.waddle.social"
+
+[observability]
+enabled = true
+head_sampling_rate = 1 # optional. default = 1.
+

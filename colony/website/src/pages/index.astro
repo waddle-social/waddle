@@ -8,145 +8,151 @@ import '../tailwind.css';
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-		<title>Colony - Authentication</title>
+		<title>Colony - Bluesky Authentication</title>
 	</head>
 	<body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
 		<div class="w-full max-w-md">
 			<div class="bg-white rounded-2xl shadow-xl p-8">
 				<div class="text-center mb-8">
 					<h1 class="text-3xl font-bold text-gray-900 mb-2">Colony</h1>
-					<p class="text-gray-600">Welcome to your authentication portal</p>
+					<p class="text-gray-600">Connect with your Bluesky account</p>
 				</div>
 
 				<div class="space-y-6">
-					<!-- Login Form -->
+					<!-- Bluesky Login Form -->
 					<div id="login-form" class="space-y-4">
-						<h2 class="text-xl font-semibold text-gray-800">Sign In</h2>
-						<form class="space-y-4">
+						<h2 class="text-xl font-semibold text-gray-800">Sign In with Bluesky</h2>
+						<form id="bluesky-auth-form" class="space-y-4">
 							<div>
-								<label for="login-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-								<input
-									type="email"
-									id="login-email"
-									name="email"
-									required
-									class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-									placeholder="you@example.com"
-								/>
-							</div>
-							<div>
-								<label for="login-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-								<input
-									type="password"
-									id="login-password"
-									name="password"
-									required
-									class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-									placeholder="••••••••"
-								/>
-							</div>
-							<button
-								type="submit"
-								class="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200 font-medium"
-							>
-								Sign In
-							</button>
-						</form>
-						<p class="text-center text-sm text-gray-600">
-							Don't have an account?
-							<button
-								id="show-register"
-								class="text-blue-600 hover:text-blue-700 font-medium"
-							>
-								Sign Up
-							</button>
-						</p>
-					</div>
-
-					<!-- Register Form (Initially Hidden) -->
-					<div id="register-form" class="space-y-4 hidden">
-						<h2 class="text-xl font-semibold text-gray-800">Create Account</h2>
-						<form class="space-y-4">
-							<div>
-								<label for="register-name" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+								<label for="bluesky-handle" class="block text-sm font-medium text-gray-700 mb-1">
+									Bluesky Handle
+								</label>
 								<input
 									type="text"
-									id="register-name"
-									name="name"
+									id="bluesky-handle"
+									name="handle"
 									required
 									class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-									placeholder="John Doe"
+									placeholder="@yourhandle.bsky.social"
 								/>
-							</div>
-							<div>
-								<label for="register-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-								<input
-									type="email"
-									id="register-email"
-									name="email"
-									required
-									class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-									placeholder="you@example.com"
-								/>
-							</div>
-							<div>
-								<label for="register-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-								<input
-									type="password"
-									id="register-password"
-									name="password"
-									required
-									class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-									placeholder="••••••••"
-								/>
-							</div>
-							<div>
-								<label for="register-confirm-password" class="block text-sm font-medium text-gray-700 mb-1">Confirm Password</label>
-								<input
-									type="password"
-									id="register-confirm-password"
-									name="confirm_password"
-									required
-									class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-									placeholder="••••••••"
-								/>
+								<p class="mt-1 text-xs text-gray-500">
+									Enter your full Bluesky handle (e.g., @alice.bsky.social)
+								</p>
 							</div>
 							<button
 								type="submit"
-								class="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200 font-medium"
+								id="connect-button"
+								class="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
 							>
-								Create Account
+								Connect with Bluesky
 							</button>
 						</form>
-						<p class="text-center text-sm text-gray-600">
-							Already have an account?
-							<button
-								id="show-login"
-								class="text-blue-600 hover:text-blue-700 font-medium"
-							>
-								Sign In
-							</button>
-						</p>
+						
+						<div class="mt-6 pt-6 border-t border-gray-200">
+							<p class="text-sm text-gray-600 text-center">
+								By connecting, you agree to authenticate with your Bluesky account.
+							</p>
+						</div>
 					</div>
+
+					<!-- Error Message -->
+					<div id="error-message" class="hidden bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+						<p class="text-sm font-medium">Authentication failed</p>
+						<p class="text-xs mt-1">Please check your handle and try again.</p>
+					</div>
+
+					<!-- Loading State -->
+					<div id="loading-state" class="hidden">
+						<div class="flex items-center justify-center space-x-2">
+							<div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+							<span class="text-gray-600">Redirecting to Bluesky...</span>
+						</div>
+					</div>
+				</div>
+
+				<div class="mt-8 text-center">
+					<p class="text-xs text-gray-500">
+						Don't have a Bluesky account? 
+						<a href="https://bsky.app" target="_blank" class="text-blue-600 hover:text-blue-700 font-medium">
+							Sign up here
+						</a>
+					</p>
 				</div>
 			</div>
 		</div>
 
 		<script>
-			// Toggle between login and register forms
+			// Check for error in URL
+			const urlParams = new URLSearchParams(window.location.search);
+			const error = urlParams.get('error');
+			if (error === 'auth_failed') {
+				const errorMessage = document.getElementById('error-message');
+				errorMessage?.classList.remove('hidden');
+			}
+
+			// Handle Bluesky authentication
+			const form = document.getElementById('bluesky-auth-form');
+			const connectButton = document.getElementById('connect-button');
+			const loadingState = document.getElementById('loading-state');
 			const loginForm = document.getElementById('login-form');
-			const registerForm = document.getElementById('register-form');
-			const showRegisterBtn = document.getElementById('show-register');
-			const showLoginBtn = document.getElementById('show-login');
+			const errorMessage = document.getElementById('error-message');
 
-			showRegisterBtn?.addEventListener('click', () => {
+			form?.addEventListener('submit', async (e) => {
+				e.preventDefault();
+				
+				const formData = new FormData(form);
+				let handle = formData.get('handle')?.toString() || '';
+				
+				// Clean up handle format
+				handle = handle.trim();
+				if (!handle.startsWith('@')) {
+					handle = '@' + handle;
+				}
+				if (!handle.includes('.')) {
+					handle = handle + '.bsky.social';
+				}
+				
+				// Show loading state
 				loginForm?.classList.add('hidden');
-				registerForm?.classList.remove('hidden');
-			});
-
-			showLoginBtn?.addEventListener('click', () => {
-				registerForm?.classList.add('hidden');
-				loginForm?.classList.remove('hidden');
+				errorMessage?.classList.add('hidden');
+				loadingState?.classList.remove('hidden');
+				
+				try {
+					// Use the simple OAuth endpoint
+					const response = await fetch('/api/auth/bluesky-simple', {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({ handle: handle.substring(1) }), // Remove @ for API
+					});
+					
+					const data = await response.json();
+					
+					if (!response.ok) {
+						throw new Error(data.error || 'Failed to initiate authentication');
+					}
+					
+					// Redirect to Bluesky OAuth
+					if (data.authUrl) {
+						window.location.href = data.authUrl;
+					} else {
+						throw new Error('No authorization URL received');
+					}
+				} catch (error) {
+					console.error('Authentication error:', error);
+					loadingState?.classList.add('hidden');
+					loginForm?.classList.remove('hidden');
+					errorMessage?.classList.remove('hidden');
+					
+					const errorDiv = document.getElementById('error-message');
+					if (errorDiv) {
+						errorDiv.innerHTML = `
+							<p class="text-sm font-medium">Authentication Error</p>
+							<p class="text-xs mt-1">${error.message || 'Failed to connect with Bluesky'}</p>
+						`;
+					}
+				}
 			});
 		</script>
 	</body>
