@@ -54,11 +54,17 @@ bun run db:migrate:remote
 
 ### 5. Environment Variables
 
-Create a `.env` file based on `.env.example`:
+Create a `.env` file based on `.env.example` and set:
 
 ```env
-BLUESKY_PRIVATE_KEY='{"kty":"EC","use":"sig","alg":"ES256","kid":"your-key-id","crv":"P-256","x":"your-x","y":"your-y","d":"your-private-d"}'
+# Required for OAuth (private_key_jwt)
+ATPROTO_PRIVATE_KEY='{"kty":"EC","use":"sig","alg":"ES256","kid":"your-key-id","crv":"P-256","x":"your-x","y":"your-y","d":"your-private-d"}'
+
+# Required for Better Auth cookie/token signing
+BETTER_AUTH_SECRET="replace-with-strong-secret"
 ```
+
+For Cloudflare production, set these as Secrets (or Secret Store bindings) matching the same names.
 
 ### 6. Development
 

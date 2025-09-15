@@ -1,79 +1,45 @@
 ---
+import Dashboard from '../components/Dashboard.vue';
 import '../tailwind.css';
+import { createAuth } from '../lib/auth/better-auth';
 
-// Check if user is authenticated
-const sessionToken = Astro.cookies.get('session')?.value;
-if (!sessionToken) {
+// Create auth instance and verify session via Better Auth (handles cookie name/signature)
+const auth = await createAuth(Astro.locals.runtime.env.DB, Astro.locals.runtime.env, Astro.request);
+
+let session;
+try {
+  session = await auth.api.getSession({
+    headers: Astro.request.headers,
+  });
+} catch (error) {
+  console.error('Dashboard: Failed to get session:', error);
   return Astro.redirect('/');
 }
 
-// Get user info from session
-const response = await fetch(new URL('/api/auth/session', Astro.url.origin), {
-  headers: {
-    Cookie: `session=${sessionToken}`,
-  },
-});
-
-const data = await response.json();
-if (!data.authenticated) {
+if (!session) {
   return Astro.redirect('/');
 }
 
-const user = data.user;
+// Enhance user data with AT Protocol specific info
+const userDid = Astro.cookies.get('atproto_user_did')?.value;
+const handle = Astro.cookies.get('atproto_handle')?.value;
+
+const user = {
+  ...session.user,
+  did: userDid ? decodeURIComponent(userDid) : session.user.id,
+  handle: handle ? decodeURIComponent(handle) : session.user.email?.split('@')[0],
+};
 ---
 
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Colony Dashboard</title>
-	</head>
-	<body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-		<div class="container mx-auto px-4 py-8">
-			<div class="bg-white rounded-2xl shadow-xl p-8 max-w-4xl mx-auto">
-				<div class="flex items-center justify-between mb-8">
-					<h1 class="text-3xl font-bold text-gray-900">Welcome to Colony</h1>
-					<form method="POST" action="/api/auth/logout">
-						<button type="submit" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition">
-							Sign Out
-						</button>
-					</form>
-				</div>
-				
-				<div class="bg-gray-50 rounded-lg p-6">
-					<h2 class="text-xl font-semibold text-gray-800 mb-4">Your Profile</h2>
-					<div class="space-y-3">
-						{user.image && (
-							<div class="flex items-center space-x-4">
-								<img src={user.image} alt={user.name || user.handle} class="w-16 h-16 rounded-full" />
-								<div>
-									{user.name && <p class="font-semibold text-gray-900">{user.name}</p>}
-									<p class="text-gray-600">@{user.handle}</p>
-								</div>
-							</div>
-						)}
-						{!user.image && (
-							<>
-								{user.name && <p class="font-semibold text-gray-900">{user.name}</p>}
-								<p class="text-gray-600">@{user.handle}</p>
-							</>
-						)}
-						<div class="mt-4 pt-4 border-t border-gray-200">
-							<p class="text-sm text-gray-500">DID: {user.did}</p>
-						</div>
-					</div>
-				</div>
-				
-				<div class="mt-8 p-6 bg-blue-50 rounded-lg">
-					<h3 class="text-lg font-semibold text-blue-900 mb-2">Authentication Successful!</h3>
-					<p class="text-blue-700">
-						You're now authenticated with your Bluesky account. This dashboard demonstrates 
-						the successful integration of Bluesky OAuth with Colony.
-					</p>
-				</div>
-			</div>
-		</div>
-	</body>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <title>Colony Dashboard - {user.name || user.handle}</title>
+  </head>
+  <body>
+    <Dashboard client:load user={user} />
+  </body>
 </html>
