@@ -2,16 +2,22 @@
 import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 import cloudflare from '@astrojs/cloudflare';
+import vue from '@astrojs/vue';
 
 // https://astro.build/config
 export default defineConfig({
   output: 'server',
   adapter: cloudflare({
-    mode: 'directory',
+    mode: 'advanced',
     platformProxy: {
       enabled: true,
     },
   }),
+  integrations: [
+    vue({
+      appEntrypoint: '/src/pages/_app'
+    }),
+  ],
   vite: {
     plugins: [tailwindcss()],
     ssr: {

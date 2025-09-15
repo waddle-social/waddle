@@ -2,10 +2,20 @@ import type { APIRoute } from 'astro';
 import { getPublicKeyFromPrivate, type BlueskyJWK } from '../lib/auth/keys';
 
 export const GET: APIRoute = async ({ locals }) => {
-  // Get the private key from Secrets Store
-  let privateKeyStr;
+  // Get the private key from Secrets Store (supports both D1 secret store and env string for local dev)
+  let privateKeyStr: string | undefined;
   try {
-    privateKeyStr = await locals.runtime.env.ATPROTO_PRIVATE_KEY.get();
+    const binding: any = (locals as any).runtime?.env?.ATPROTO_PRIVATE_KEY;
+    if (binding) {
+      if (typeof binding.get === 'function') {
+        privateKeyStr = await binding.get();
+      } else if (typeof binding === 'string') {
+        privateKeyStr = binding;
+      }
+    }
+    if (!privateKeyStr && (locals as any).runtime?.env?.BLUESKY_PRIVATE_KEY) {
+      privateKeyStr = (locals as any).runtime.env.BLUESKY_PRIVATE_KEY as string;
+    }
   } catch (error) {
     console.error('Failed to retrieve private key for JWKS:', error);
     return new Response(JSON.stringify({ error: 'Keys not available' }), {
@@ -15,7 +25,7 @@ export const GET: APIRoute = async ({ locals }) => {
       },
     });
   }
-  
+
   if (!privateKeyStr) {
     return new Response(JSON.stringify({ error: 'Keys not configured' }), {
       status: 500,

@@ -1,5 +1,5 @@
 {
-  "name": "temp-astro",
+  "name": "waddle-colony",
   "type": "module",
   "version": "0.0.1",
   "scripts": {
@@ -14,8 +14,8 @@
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.8",
-    "@atproto/api": "^0.16.9",
-    "@atproto/oauth-client-node": "^0.3.8",
+    "@astrojs/vue": "^5.1.1",
+    "@atproto/oauth-client-browser": "^0.3.32",
     "@better-auth/client": "^0.0.2-alpha.3",
     "@cloudflare/workers-types": "^4.20250913.0",
     "@tailwindcss/vite": "^4.1.13",
@@ -24,6 +24,7 @@
     "drizzle-kit": "^0.31.4",
     "drizzle-orm": "^0.44.5",
     "jose": "^6.1.0",
-    "tailwindcss": "^4.1.13"
+    "tailwindcss": "^4.1.13",
+    "vue": "^3.5.21"
   }
 }
