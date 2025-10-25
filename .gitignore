@@ -6,4 +6,8 @@ node_modules
 
 # direnv
 .direnv
-
+dist/
+build/
+coverage/
+.turbo/
+bun.lockb

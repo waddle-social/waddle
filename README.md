@@ -1,5 +1,14 @@
 # Waddle
 
+## Workspace Quickstart
+
+This repository uses a single workspace at the root with internal catalogs.
+
+- Install: `bun install`
+- Build: `bun run build`
+- Test: `bun test`
+
+See full instructions: `specs/001-migrate-bun-workspaces/quickstart.md`.
 A modern web application built with Astro and deployed on Cloudflare Workers.
 
 ## Tech Stack
