@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "colony/*",
-    "waddle/*",
+    "generators/**",
+    "waddle/**",
     "huddle/*",
     "huddle/services/*",
     "shared/packages/*",
@@ -37,6 +38,7 @@
     "@biomejs/biome": "^2.0.6",
     "@cloudflare/workers-types": "^4.20250109.0",
     "@types/bun": "latest",
+    "projen": "^0.98.4",
     "typescript": "^5.8.3",
     "wrangler": "^4.33.1"
   },
