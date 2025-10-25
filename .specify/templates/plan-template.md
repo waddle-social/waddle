@@ -35,7 +35,8 @@
 - **Testing**: Detail the fail-first test strategy (unit, integration, contract) and how it will run locally and in CI.
 - **User Experience**: Confirm the feature uses components from `shared/packages/ui-web`, documents accessibility verification (WCAG 2.1 AA), and lists copy/localization updates.
 - **Performance**: Define p95 server response <= 150 ms and p75 LCP <= 2.5 s budgets plus the instrumentation that will verify them.
-- **Exceptions**: Log any temporary deviations, the owner, and the planned remediation before release.
+- **Federated CQRS**: Map read flows to GraphQL federation subgraphs, show write orchestration through Cloudflare Workflows or `capnweb`, and outline the contract tests that protect the boundary.
+- **Exceptions**: Log any temporary deviations (including CQRS/federation gaps), the owner, and the planned remediation before release.
 
 ## Project Structure
 

@@ -1,14 +1,10 @@
 <!--
 Sync Impact Report
-Version change: N/A → 1.0.0
+Version change: 1.0.0 → 1.1.0
 Modified principles:
-- (new) I. Intentional Code Quality
-- (new) II. Test-First Delivery
-- (new) III. Unified User Experience
-- (new) IV. Performance Budget Ownership
+- (new) V. Federated Read/Write Discipline
 Added sections:
-- Delivery Quality Standards
-- Delivery Workflow & Reviews
+- None
 Removed sections:
 - None
 Templates requiring updates:
@@ -55,16 +51,26 @@ Follow-up TODOs:
 
 *Rationale: Explicit budgets keep the experience fast on resource-constrained devices and maintain platform efficiency at scale.*
 
+### V. Federated Read/Write Discipline
+
+- All read-facing resolvers MUST be exposed through the GraphQL federation gateway; teams MAY NOT introduce direct service reads that bypass federation.
+- Read services MUST honor CQRS boundaries: resolvers stay side-effect free and persist no state beyond caches declared in the plan; write logic lives in Cloudflare Workflows or `capnweb`.
+- Write operations MUST orchestrate via Cloudflare Workflows or `capnweb` actions; direct datastore writes from read services require an approved architecture RFC and migration plan.
+- Feature plans MUST include contract or integration tests that validate federation schema composition and workflow invocations before merge.
+
+*Rationale: Enforcing CQRS with federated reads and workflow-driven writes preserves service boundaries, operational resilience, and auditability.*
+
 ## Delivery Quality Standards
 
 - Feature specs MUST enumerate code-quality, testing, UX, and performance acceptance criteria and reference how compliance will be verified.
-- Implementation plans MUST list linting, type-check, accessibility, and performance validation tasks before feature work begins.
+- Implementation plans MUST list linting, type-check, accessibility, performance, and CQRS/federation validation tasks before feature work begins.
+- Architecture sections in specs MUST map read paths through GraphQL federation and write paths through Cloudflare Workflows or `capnweb`, including failure handling.
 - Release notes and docs updates in `docs/` MUST be included when behavior, UX, or performance expectations change.
 
 ## Delivery Workflow & Reviews
 
-- Constitution Check in plans MUST confirm all four principles are satisfied, highlighting mitigations when temporary exceptions are required.
-- Pull requests MUST link to plan and spec artifacts and record outcomes of linting, testing, accessibility, and performance checks in review comments.
+- Constitution Check in plans MUST confirm all five principles are satisfied, highlighting mitigations when temporary exceptions are required.
+- Pull requests MUST link to plan and spec artifacts and record outcomes of linting, testing, accessibility, performance, and CQRS/federation checks in review comments.
 - Quarterly governance reviews MUST sample recent releases to audit adherence and publish findings in `docs/adr/` or `docs/rfc/`.
 
 ## Governance
@@ -73,4 +79,4 @@ Follow-up TODOs:
 - Semantic versioning applies to this constitution: MAJOR for principle removals or incompatible rewrites, MINOR for new principles or enforcement scope, PATCH for clarifications.
 - Compliance reviews occur monthly within the engineering sync; unresolved violations gain owners and due dates tracked in project management tooling.
 
-**Version**: 1.0.0 | **Ratified**: 2025-10-25 | **Last Amended**: 2025-10-25
+**Version**: 1.1.0 | **Ratified**: 2025-10-25 | **Last Amended**: 2025-10-25

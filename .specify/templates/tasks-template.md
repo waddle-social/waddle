@@ -8,7 +8,7 @@ description: "Task list template for feature implementation"
 **Input**: Design documents from `/specs/[###-feature-name]/`
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
-**Tests**: Tests are mandatory per the constitution—capture fail-first unit, integration, contract, accessibility, and performance validations for every story.
+**Tests**: Tests are mandatory per the constitution—capture fail-first unit, integration, contract, accessibility, performance, and CQRS/federation validations for every story.
 
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
@@ -51,8 +51,8 @@ description: "Task list template for feature implementation"
 - [ ] T001 Create project structure per implementation plan
 - [ ] T002 Initialize [language] project with [framework] dependencies
 - [ ] T003 [P] Configure linting, formatting, and strict type-check commands documented in the plan
-- [ ] T004 [P] Establish shared test harness (`bun test`, `moon run test:*`, etc.) with sample fail-first cases
-- [ ] T005 [P] Configure performance monitoring or logging baselines to measure p95 response and p75 LCP
+- [ ] T004 [P] Establish shared test harness (`bun test`, `moon run test:*`, etc.) with sample fail-first cases covering GraphQL federation and workflow orchestration.
+- [ ] T005 [P] Configure performance monitoring or logging baselines to measure p95 response and p75 LCP, plus workflow and federation tracing hooks.
 
 ---
 
@@ -66,7 +66,7 @@ Examples of foundational tasks (adjust based on your project):
 
 - [ ] T006 Setup database schema and migrations framework
 - [ ] T007 [P] Implement authentication/authorization framework
-- [ ] T008 [P] Setup API routing and middleware structure
+- [ ] T008 [P] Setup API routing, GraphQL federation gateway composition, and middleware structure
 - [ ] T009 Create base models/entities that all stories depend on
 - [ ] T010 Configure error handling and logging infrastructure
 - [ ] T011 Setup environment configuration management
@@ -96,12 +96,12 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] T017 [US1] Implement [Service] in src/services/[service].ts (depends on T015, T016)
 - [ ] T018 [US1] Implement [endpoint/feature] in src/[location]/[file].ts
 - [ ] T019 [US1] Add validation and error handling
-- [ ] T020 [US1] Add logging and telemetry for user story 1 operations
+- [ ] T020 [US1] Add logging and telemetry for user story 1 operations, including workflow execution traces
 
 ### Experience & Performance Validation (MANDATORY)
 
 - [ ] T021 [US1] Perform accessibility audit (WCAG 2.1 AA) using shared components from `shared/packages/ui-web`
-- [ ] T022 [US1] Measure performance budgets (p95 <= 150 ms, p75 LCP <= 2.5 s) and document evidence in plan/spec
+- [ ] T022 [US1] Measure performance budgets (p95 <= 150 ms, p75 LCP <= 2.5 s) and document evidence in plan/spec alongside CQRS/federation validation artifacts
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
 
@@ -156,7 +156,7 @@ Examples of foundational tasks (adjust based on your project):
 ### Experience & Performance Validation (MANDATORY)
 
 - [ ] T038 [US3] Perform accessibility audit (WCAG 2.1 AA) for new/updated UI
-- [ ] T039 [US3] Measure performance budgets (p95 <= 150 ms, p75 LCP <= 2.5 s) and document evidence
+- [ ] T039 [US3] Measure performance budgets (p95 <= 150 ms, p75 LCP <= 2.5 s) and document evidence plus CQRS/federation validation
 
 **Checkpoint**: All user stories should now be independently functional
 
