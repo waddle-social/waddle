@@ -3,7 +3,7 @@
 **Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
 **Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/scripts/` for the execution workflow.
 
 ## Summary
 
@@ -31,7 +31,11 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+- **Code Quality**: Identify the lint, formatting, and type-check commands that will gate delivery and describe reuse of `shared/packages/` modules instead of new packages.
+- **Testing**: Detail the fail-first test strategy (unit, integration, contract) and how it will run locally and in CI.
+- **User Experience**: Confirm the feature uses components from `shared/packages/ui-web`, documents accessibility verification (WCAG 2.1 AA), and lists copy/localization updates.
+- **Performance**: Define p95 server response <= 150 ms and p75 LCP <= 2.5 s budgets plus the instrumentation that will verify them.
+- **Exceptions**: Log any temporary deviations, the owner, and the planned remediation before release.
 
 ## Project Structure
 

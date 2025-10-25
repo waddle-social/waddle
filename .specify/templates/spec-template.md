@@ -75,6 +75,13 @@
 - What happens when [boundary condition]?
 - How does system handle [error scenario]?
 
+## Quality & Non-Functional Standards *(mandatory)*
+
+- **Code Quality**: Identify linting, formatting, type-checking, and shared package reuse considerations (for example, which modules from `shared/packages/` will be extended).
+- **Testing Strategy**: Describe the fail-first automated tests (unit, integration, contract) and how they run locally (`bun test`, `moon run test:*`, etc.) and in CI.
+- **User Experience**: Specify required components or tokens from `shared/packages/ui-web`, accessibility verification steps (WCAG 2.1 AA), and copy/localization updates.
+- **Performance Budgets**: Declare p95 server response <= 150 ms and p75 LCP <= 2.5 s targets alongside the instrumentation that will validate them.
+
 ## Requirements *(mandatory)*
 
 <!--
