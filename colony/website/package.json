@@ -21,10 +21,15 @@
     "@tailwindcss/vite": "^4.1.13",
     "astro": "^5.13.7",
     "better-auth": "^1.3.9",
+    "better-call": "^1.0.18",
     "drizzle-kit": "^0.31.4",
     "drizzle-orm": "^0.44.5",
     "jose": "^6.1.0",
     "tailwindcss": "^4.1.13",
     "vue": "^3.5.21"
+  },
+  "devDependencies": {
+    "@waddle/ui-web": "workspace:*",
+    "@waddle/types": "workspace:*"
   }
 }

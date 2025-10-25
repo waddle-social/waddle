@@ -32,7 +32,9 @@
     "deploy:colony": "bun run --filter './colony/*' deploy",
     "deploy:waddle": "bun run --filter './waddle/*' deploy",
     "deploy:huddle": "bun run --filter './huddle/*' deploy",
-    "clean": "rm -rf node_modules **/node_modules **/dist **/.turbo"
+    "clean": "rm -rf node_modules **/node_modules **/dist **/.turbo",
+    "verify:install": "./scripts/verify-install.sh",
+    "smoke:build": "./scripts/smoke-build.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.6",
@@ -43,7 +45,7 @@
     "wrangler": "^4.33.1"
   },
   "engines": {
-    "bun": ">=1.0.0"
+    "bun": ">=1.3.0"
   },
   "packageManager": "bun@1.3.0"
 }

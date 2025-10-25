@@ -4,3 +4,8 @@
 # Keep a human-readable lockfile alongside bun.lockb
 saveTextLockfile = true
 
+[catalog]
+"@waddle/ui-web" = "*"
+"@waddle/types" = "*"
+"@waddle/core" = "*"
+"@waddle/auth" = "*"

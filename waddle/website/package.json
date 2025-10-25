@@ -17,7 +17,9 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.0.6",
-		"wrangler": "^4.22.0"
+		"wrangler": "^4.22.0",
+		"@waddle/ui-web": "workspace:*",
+		"@waddle/types": "workspace:*"
 	},
 	"trustedDependencies": [
 		"@tailwindcss/oxide",
