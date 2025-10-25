@@ -1,20 +1,9 @@
 # Bun
 node_modules
 
-# moon
-.moon/cache
-.moon/docker
-
-# IDE and tool directories
-.claude
-.vscode
-
-# Devenv
-.devenv*
-devenv.local.nix
+# Codex
+.codex
 
 # direnv
 .direnv
 
-# pre-commit
-.pre-commit-config.yaml
