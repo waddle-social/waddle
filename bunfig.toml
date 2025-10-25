@@ -1,0 +1,6 @@
+# Bun configuration for the workspace
+
+[install]
+# Keep a human-readable lockfile alongside bun.lockb
+saveTextLockfile = true
+

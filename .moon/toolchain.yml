@@ -1,5 +1,0 @@
-node:
-  version: 22.17.0
-  packageManager: bun
-  bun:
-    version: 1.2.17

@@ -1,5 +1,0 @@
-tasks:
-  update-dependencies:
-    command: "bunx npm-check-updates --interactive"
-    options:
-      runInCI: false
