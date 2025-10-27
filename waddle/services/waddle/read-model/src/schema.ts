@@ -5,7 +5,8 @@ import federationPlugin from "@pothos/plugin-federation";
 import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { GraphQLSchema } from "graphql";
-import * as dataSchema from "../../data-model/schema.ts";
+import * as dataSchema from "@waddlesocial/waddle-service-waddle-data-model/schema";
+import { WADDLE_VISIBILITY_VALUES } from "@waddlesocial/waddle-service-waddle-data-model/zod";
 import type { Env } from "./index.ts";
 
 interface SchemaBuilderTypes {
@@ -23,11 +24,9 @@ const buildSchema = (env: Env) => {
   });
 
   const visibilityEnum = builder.enumType("WaddleVisibility", {
-    values: {
-      PUBLIC: { value: "public" },
-      PRIVATE: { value: "private" },
-      SECRET: { value: "secret" },
-    },
+    values: Object.fromEntries(
+      WADDLE_VISIBILITY_VALUES.map((value) => [value.toUpperCase(), { value }]),
+    ),
   });
 
   type WaddleRecord = typeof dataSchema.waddle.$inferSelect;
@@ -53,7 +52,7 @@ const buildSchema = (env: Env) => {
       health: t.boolean({
         resolve: () => true,
       }),
-      waddle: t.field({
+      getWaddle: t.field({
         type: waddleRef,
         nullable: true,
         args: {
@@ -64,7 +63,7 @@ const buildSchema = (env: Env) => {
             where: eq(dataSchema.waddle.slug, args.slug),
           }),
       }),
-      waddles: t.field({
+      getWaddles: t.field({
         type: [waddleRef],
         resolve: () =>
           db

@@ -1,4 +1,5 @@
 import { createYoga } from "graphql-yoga";
+import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import { getSchema } from "./schema";
 
 export interface Env {
@@ -10,6 +11,9 @@ export default {
 		const yoga = createYoga({
 			schema: getSchema(env),
 			graphqlEndpoint: "/",
+			fetchAPI: {
+				Response,
+			},
 		});
 
 		return yoga.fetch(request, env, ctx);
