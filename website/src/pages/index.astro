@@ -1,0 +1,40 @@
+---
+import "../styles/global.css";
+import WaddleChat from '../components/WaddleChat.vue';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Waddle Chat</title>
+  </head>
+  <body class="min-h-screen bg-background text-foreground font-sans antialiased">
+    <WaddleChat client:only="vue" />
+    <script>
+      (function () {
+        var storageKey = 'waddle:theme';
+        var theme = 'light';
+        try {
+          var stored = localStorage.getItem(storageKey);
+          if (stored === 'light' || stored === 'dark') {
+            theme = stored;
+          } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            theme = 'dark';
+          }
+        } catch (err) {
+          if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            theme = 'dark';
+          }
+        }
+        var root = document.documentElement;
+        root.dataset.theme = theme;
+        if (theme === 'dark') {
+          root.classList.add('dark');
+        } else {
+          root.classList.remove('dark');
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -12,7 +12,8 @@
     "build": "bun run typecheck"
   },
   "dependencies": {
-    "vue": "^3.5.20"
+    "vue": "^3.5.20",
+    "@ark-ui/vue": "^3.0.0"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

@@ -1,76 +1,103 @@
-# Implementation Plan: Migrate Repo to Bun Workspaces with Catalogs (Keep Colony)
+# Implementation Plan: [FEATURE]
 
-**Branch**: `001-migrate-bun-workspaces` | **Date**: October 25, 2025 | **Spec**: /Users/icepuma/development/waddle/specs/001-migrate-bun-workspaces/spec.md
-**Input**: Feature specification from `/specs/001-migrate-bun-workspaces/spec.md`
+**Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
+**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
 
-**Note**: This plan is produced by `/speckit.plan` following the repository’s constitution and templates.
+**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/scripts/` for the execution workflow.
 
 ## Summary
 
-Move the repository to a single Bun workspace with a centralized catalog, while fully migrating the `colony` app to the new workflow. Windows developer support is out of scope for this phase. The catalog covers internal aliases only. The plan standardizes root‑level install/build/test commands, ensures deterministic installs via the lockfile, and documents how to add workspaces and aliases.
+[Extract from feature spec: primary requirement + technical approach from research]
 
 ## Technical Context
 
-**Language/Version**: TypeScript 5.8.x; Bun 1.3.x  
-**Primary Dependencies**: Astro 5, Vue 3, Tailwind, TypeScript, Biome; Cloudflare Workers toolchain for apps that deploy there  
-**Storage**: Existing app storage remains unchanged (e.g., Cloudflare D1 used by `colony`); no new storage introduced by this feature  
-**Testing**: `bun test` at repo root; type‑checking via `tsc --noEmit` and `vue-tsc` where relevant; linting via `biome`  
-**Target Platform**: macOS/Linux developer environments; Cloudflare Workers and static hosting for deployments  
-**Project Type**: Monorepo with multiple apps (`colony`, `waddle`, `huddle`) and shared packages under `shared/packages`  
-**Performance Goals**: No user‑visible performance regressions; adhere to existing budgets (p95 server <= 150 ms; p75 LCP <= 2.5 s)  
-**Constraints**: Deterministic root‑level install; Windows developer support out of scope; catalog covers internal aliases only; `colony` fully migrates to the new workflow  
-**Scale/Scope**: Multiple apps and shared packages; all must participate in the single workspace install/build/test flow
+<!--
+  ACTION REQUIRED: Replace the content in this section with the technical details
+  for the project. The structure here is presented in advisory capacity to guide
+  the iteration process.
+-->
+
+**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]  
+**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]  
+**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]  
+**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]  
+**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
+**Project Type**: [single/web/mobile - determines source structure]  
+**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]  
+**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
+**Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
 
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-- **Code Quality**: Gate on `bun run lint`, `bun run format --check` (or CI equivalent), and `bun run typecheck` at repo root. Prefer reuse of `shared/packages/*` over adding new packages. New shared packages require an ADR in `docs/adr/`.
-- **Testing**: Fail‑first tests accompany changes to scripts/config. Run `bun test` locally and in CI at the repo root. Add a smoke test that builds one app and one shared package using workspace links.
-- **User Experience**: No UI changes expected; this feature does not add or modify web surfaces. If any UI scripts change inside apps, those apps must continue using `shared/packages/ui-web` components as before.
-- **Performance**: No production runtime changes expected. Existing budgets (p95 server <= 150 ms; p75 LCP <= 2.5 s) remain in force; no new instrumentation required for this change.
-- **Exceptions**: None anticipated.
+- **Code Quality**: Identify the lint, formatting, and type-check commands that will gate delivery and describe reuse of `shared/packages/` modules instead of new packages.
+- **Testing**: Detail the fail-first test strategy (unit, integration, contract) and how it will run locally and in CI.
+- **User Experience**: Confirm the feature uses components from `shared/packages/ui-web`, documents accessibility verification (WCAG 2.1 AA), and lists copy/localization updates.
+- **Performance**: Define p95 server response <= 150 ms and p75 LCP <= 2.5 s budgets plus the instrumentation that will verify them.
+- **Federated CQRS**: Map read flows to GraphQL federation subgraphs, show write orchestration through Cloudflare Workflows or `capnweb`, and outline the contract tests that protect the boundary.
+- **Exceptions**: Log any temporary deviations (including CQRS/federation gaps), the owner, and the planned remediation before release.
 
 ## Project Structure
 
 ### Documentation (this feature)
 
 ```text
-specs/001-migrate-bun-workspaces/
-├── plan.md
-├── research.md
-├── data-model.md
-├── quickstart.md
-└── contracts/
+specs/[###-feature]/
+├── plan.md              # This file (/speckit.plan command output)
+├── research.md          # Phase 0 output (/speckit.plan command)
+├── data-model.md        # Phase 1 output (/speckit.plan command)
+├── quickstart.md        # Phase 1 output (/speckit.plan command)
+├── contracts/           # Phase 1 output (/speckit.plan command)
+└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
 ```
 
 ### Source Code (repository root)
+<!--
+  ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
+  for this feature. Delete unused options and expand the chosen structure with
+  real paths (e.g., apps/admin, packages/something). The delivered plan must
+  not include Option labels.
+-->
 
 ```text
-colony/
-└── website/
-
-waddle/
-├── app/
-└── website/
-
-huddle/
+# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
+src/
+├── models/
 ├── services/
-└── website/
+├── cli/
+└── lib/
 
-shared/
-└── packages/
-    ├── auth/
-    ├── core/
-    ├── huddle-core/
-    ├── types/
-    └── ui-web/
+tests/
+├── contract/
+├── integration/
+└── unit/
 
-.specify/
-docs/
+# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
+backend/
+├── src/
+│   ├── models/
+│   ├── services/
+│   └── api/
+└── tests/
+
+frontend/
+├── src/
+│   ├── components/
+│   ├── pages/
+│   └── services/
+└── tests/
+
+# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
+api/
+└── [same as backend above]
+
+ios/ or android/
+└── [platform-specific structure: feature modules, UI flows, platform tests]
 ```
 
-**Structure Decision**: Monorepo with apps in `colony`, `waddle`, and `huddle`, and shared libraries in `shared/packages`. A single workspace defined at the repo root discovers these projects via existing globs. A central catalog enumerates internal package aliases.
+**Structure Decision**: [Document the selected structure and reference the real
+directories captured above]
 
 ## Complexity Tracking
 
@@ -78,8 +105,5 @@ docs/
 
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
-|           |            |                                     |
-
----
-
-Post‑design Constitution Check: PASS (no exceptions).
+| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
+| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |
