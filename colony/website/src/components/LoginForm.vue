@@ -144,6 +144,10 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 
+const props = defineProps<{
+  redirectTo?: string;
+}>();
+
 const handle = ref('');
 const loading = ref(false);
 const error = ref('');
@@ -176,12 +180,19 @@ const handleSubmit = async () => {
     }
 
     // Use the Better Auth ATProto signin endpoint
+    const payload: Record<string, string> = {
+      handle: processedHandle.substring(1),
+    };
+    if (props.redirectTo) {
+      payload.redirectTo = props.redirectTo;
+    }
+
     const response = await fetch('/api/auth/atproto/signin', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ handle: processedHandle.substring(1) }), // Remove @ for API
+      body: JSON.stringify(payload),
     });
 
     const data = await response.json();

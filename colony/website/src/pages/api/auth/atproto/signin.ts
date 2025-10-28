@@ -1,4 +1,5 @@
 import type { APIRoute } from "astro";
+import { buildRedirectCookie, clearRedirectCookie, resolveRedirectTarget } from "../../../../lib/auth/redirect";
 
 // Generate code verifier for PKCE (43-128 characters)
 function generateCodeVerifier(): string {
@@ -36,7 +37,9 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 
 export const POST: APIRoute = async ({ request, url, locals }) => {
 	try {
-		const { handle } = await request.json();
+		const body = await request.json();
+		const handle = typeof body.handle === 'string' ? body.handle : '';
+		const redirectCandidate = typeof body.redirectTo === 'string' ? body.redirectTo : null;
 
 		if (!handle) {
 			return new Response(
@@ -80,6 +83,13 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
 			`atproto_oauth_state=${encodeURIComponent(state)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
 			`atproto_oauth_verifier=${encodeURIComponent(codeVerifier)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
 		];
+
+		const redirectTarget = resolveRedirectTarget(redirectCandidate, origin, locals.runtime.env ?? {});
+		if (redirectTarget) {
+			cookies.push(buildRedirectCookie(redirectTarget, origin));
+		} else {
+			cookies.push(clearRedirectCookie(origin));
+		}
 
 		// Create headers with multiple Set-Cookie headers
 		const headers = new Headers({

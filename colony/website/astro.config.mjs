@@ -13,6 +13,10 @@ export default defineConfig({
       enabled: true,
     },
   }),
+  server: {
+    port: 4321,
+    host: true,
+  },
   integrations: [
     vue({
       appEntrypoint: '/src/pages/_app'

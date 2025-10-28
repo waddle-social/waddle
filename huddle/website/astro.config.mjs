@@ -9,6 +9,10 @@ export default defineConfig({
   output: 'server',
   // Temporarily disabled for local dev on NixOS - uncomment for production builds
   // adapter: cloudflare(),
+  server: {
+    port: 4323,
+    host: true,
+  },
   integrations: [
     vue()
   ],

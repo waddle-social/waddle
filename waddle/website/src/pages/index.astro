@@ -1,6 +1,10 @@
 ---
 import "../styles/global.css";
+import AuthGate from '../components/AuthGate.vue';
 import WaddleChat from '../components/WaddleChat.vue';
+import { PUBLIC_COLONY_BASE_URL } from 'astro:env/client';
+
+const colonyBaseUrl = PUBLIC_COLONY_BASE_URL ?? 'https://colony.waddle.social';
 ---
 
 <html lang="en">
@@ -10,7 +14,9 @@ import WaddleChat from '../components/WaddleChat.vue';
     <title>Waddle Chat</title>
   </head>
   <body class="min-h-screen bg-background text-foreground font-sans antialiased">
-    <WaddleChat client:only="vue" />
+    <AuthGate client:only="vue" colonyBaseUrl={colonyBaseUrl}>
+      <WaddleChat />
+    </AuthGate>
     <script>
       (function () {
         var storageKey = 'waddle:theme';

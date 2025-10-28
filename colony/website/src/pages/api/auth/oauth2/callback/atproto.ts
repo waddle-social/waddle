@@ -3,6 +3,7 @@ import { createAuth } from "../../../../../lib/auth/better-auth";
 import { WorkerOAuthClient } from "../../../../../lib/auth/atproto-oauth-worker";
 import type { BlueskyJWK } from "../../../../../lib/auth/keys";
 import { serializeSignedCookie } from "better-call";
+import { REDIRECT_COOKIE_NAME, clearRedirectCookie, extractCookieValue, resolveRedirectTarget } from "../../../../../lib/auth/redirect";
 
 export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 	try {
@@ -57,6 +58,7 @@ export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 		// Get code verifier from cookie
 		const cookieHeader = request.headers.get("cookie");
 		let codeVerifier = "";
+		let redirectCookieValue: string | null = null;
 		if (cookieHeader) {
 			console.log("Cookie header:", cookieHeader);
 			const cookies = cookieHeader.split(';').map(c => c.trim());
@@ -67,6 +69,7 @@ export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 			} else {
 				console.log("No verifier cookie found in:", cookies);
 			}
+			redirectCookieValue = extractCookieValue(cookieHeader, REDIRECT_COOKIE_NAME);
 		} else {
 			console.log("No cookie header found");
 		}
@@ -437,9 +440,12 @@ export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 		// Clear the OAuth state cookies
 		additionalCookies.push('atproto_oauth_state=; Path=/; Max-Age=0');
 		additionalCookies.push('atproto_oauth_verifier=; Path=/; Max-Age=0');
+		additionalCookies.push(clearRedirectCookie(origin));
+
+		const redirectLocation = resolveRedirectTarget(redirectCookieValue, origin, locals.runtime.env) ?? "/dashboard";
 
 		const headers = new Headers({
-			"Location": "/dashboard"
+			"Location": redirectLocation
 		});
 
 		// Set session cookie

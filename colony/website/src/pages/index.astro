@@ -1,6 +1,8 @@
 ---
 import LoginForm from '../components/LoginForm.vue';
 import '../tailwind.css';
+
+const redirectTo = Astro.url.searchParams.get('redirect') ?? undefined;
 ---
 
 <html lang="en">
@@ -12,6 +14,6 @@ import '../tailwind.css';
     <title>Colony - AT Protocol Authentication</title>
   </head>
   <body>
-    <LoginForm client:load />
+    <LoginForm client:load redirectTo={redirectTo} />
   </body>
 </html>
