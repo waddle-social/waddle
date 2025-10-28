@@ -1,0 +1,21 @@
+id: waddle-website
+
+language: typescript
+
+fileGroups:
+  sources:
+    - "src/**/*"
+
+tasks:
+  build:
+    command: "bun run build"
+    options:
+      runInCI: true
+      outputStyle: stream
+
+  dev:
+    command: "bun run dev"
+    options:
+      persistent: true
+      runInCI: false
+

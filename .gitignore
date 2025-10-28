@@ -11,3 +11,6 @@ build/
 coverage/
 .turbo/
 bun.lockb
+
+# Moonrepo cache
+.moon/
