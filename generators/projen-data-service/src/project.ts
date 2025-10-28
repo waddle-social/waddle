@@ -1,28 +1,28 @@
 import { Liquid } from "liquidjs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { JsonFile, Project, TextFile } from "projen";
-import { Biome } from "./biome";
-import { Bun } from "./bun";
-import type { WaddleDataServiceOptions } from "./options";
-import { DataModel } from "./service/data-model";
-import { ReadModel } from "./service/read-model";
-import { WriteModel } from "./service/write-model";
-import { TypeScriptConfig } from "./tsconfig";
+import { Project, TextFile } from "projen";
+import type { WaddleDataServiceOptions } from "./options.ts";
+import { DataModel } from "./service/data-model/index.ts";
+import { ReadModel } from "./service/read-model/index.ts";
+import { WriteModel } from "./service/write-model/index.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class WaddleDataService extends Project {
   private readonly options: Required<WaddleDataServiceOptions>;
-  private readonly dependencies: Record<string, string>;
-  private readonly devDependencies: Record<string, string>;
+  private readonly dataModelProject: DataModel;
+  private readonly readModelProject: ReadModel;
 
   constructor(options: WaddleDataServiceOptions) {
     super({
       name: options.serviceName,
       outdir: ".",
       commitGenerated: false,
+      gitIgnoreOptions: {
+        ignorePatterns: ["data-model/", "read-model/", "write-model/"],
+      },
     });
 
     this.tasks.tryFind("default")?.reset("bun run .projenrc.ts");
@@ -34,8 +34,17 @@ export class WaddleDataService extends Project {
       ...options,
     };
 
-    // Initialize dependencies
-    this.dependencies = {
+    const dataModelDependencies = {
+      "drizzle-orm": "^0.38.4",
+      "drizzle-zod": "^0.6.1",
+      zod: "^3.24.3",
+    };
+
+    const dataModelDevDependencies = {
+      "drizzle-kit": "^0.30.6",
+    };
+
+    const readModelDependencies = {
       "@apollo/subgraph": "^2.10.2",
       "@graphql-tools/utils": "^10.8.6",
       "@paralleldrive/cuid2": "^2.2.2",
@@ -44,17 +53,13 @@ export class WaddleDataService extends Project {
       "@pothos/plugin-drizzle": "^0.8.1",
       "@pothos/plugin-federation": "^4.3.2",
       "@sindresorhus/slugify": "^2.2.1",
-      "drizzle-kit": "^0.30.6",
       "drizzle-orm": "^0.38.4",
-      "drizzle-zod": "^0.6.1",
       graphql: "^16.10.0",
       "graphql-scalars": "^1.24.2",
       "graphql-yoga": "^5.13.4",
-      zod: "^3.24.3",
-      ...this.options.additionalDependencies,
     };
 
-    this.devDependencies = {
+    const readModelDevDependencies = {
       "@biomejs/biome": "^1.9.4",
       "@cloudflare/vite-plugin": "^1.13.15",
       "@cloudflare/workers-types": "^4.20250426.0",
@@ -63,15 +68,32 @@ export class WaddleDataService extends Project {
       vite: "^7.1.12",
       vitest: "^1.2.17",
       wrangler: "^4.45.0",
-      ...this.options.additionalDevDependencies,
     };
 
-    new DataModel(this);
+    this.dataModelProject = new DataModel(this, {
+      serviceName: this.options.serviceName,
+      projectName: this.getDataModelProjectName(),
+      packageName: this.getDataModelPackageName(),
+      dependencies: dataModelDependencies,
+      devDependencies: dataModelDevDependencies,
+    });
 
-    new ReadModel(this, {
+    this.readModelProject = new ReadModel(this, {
       serviceName: this.options.serviceName,
       databaseId: this.options.databaseId,
+      projectName: this.getReadModelProjectName(),
+      packageName: this.getReadModelPackageName(),
+      dataModelPackageName: this.getDataModelPackageName(),
+      dependencies: readModelDependencies,
+      devDependencies: readModelDevDependencies,
     });
+
+    this.readModelProject.addRuntimeDependencies(
+      this.options.additionalDependencies,
+    );
+    this.readModelProject.addDevelopmentDependencies(
+      this.options.additionalDevDependencies,
+    );
 
     if (this.options.includeWriteModel) {
       new WriteModel(this, {
@@ -81,88 +103,34 @@ export class WaddleDataService extends Project {
     }
 
     this.createReadme();
-    this.createPackageJson();
-    this.createConfigFiles();
   }
 
   /**
    * Register additional dependencies
    */
   public addDependency(name: string, version: string): void {
-    this.dependencies[name] = version;
+    this.readModelProject.addRuntimeDependency(name, version);
   }
 
   /**
    * Register multiple dependencies at once
    */
   public addDependencies(deps: Record<string, string>): void {
-    Object.assign(this.dependencies, deps);
+    this.readModelProject.addRuntimeDependencies(deps);
   }
 
   /**
    * Register additional dev dependencies
    */
   public addDevDependency(name: string, version: string): void {
-    this.devDependencies[name] = version;
+    this.readModelProject.addDevelopmentDependency(name, version);
   }
 
   /**
    * Register multiple dev dependencies at once
    */
   public addDevDependencies(deps: Record<string, string>): void {
-    Object.assign(this.devDependencies, deps);
-  }
-
-  private createPackageJson() {
-    // Sort dependencies alphabetically
-    const sortedDeps = Object.keys(this.dependencies)
-      .sort()
-      .reduce(
-        (acc, key) => {
-          acc[key] = this.dependencies[key];
-          return acc;
-        },
-        {} as Record<string, string>,
-      );
-
-    const sortedDevDeps = Object.keys(this.devDependencies)
-      .sort()
-      .reduce(
-        (acc, key) => {
-          acc[key] = this.devDependencies[key];
-          return acc;
-        },
-        {} as Record<string, string>,
-      );
-
-    const scripts = {
-      build: "vite build --config read-model/vite.config.ts",
-      deploy:
-        "bun run build && wrangler deploy --config read-model/wrangler.jsonc",
-      dev: "vite dev --config read-model/vite.config.ts",
-      preview:
-        "bun run build && vite preview --config read-model/vite.config.ts",
-      "schema:publish": "bun run read-model/publish.ts",
-    };
-
-    new JsonFile(this, "package.json", {
-      obj: {
-        name: this.getPackageName(),
-        private: true,
-        type: "module",
-        scripts,
-        dependencies: sortedDeps,
-        devDependencies: sortedDevDeps,
-      },
-    });
-  }
-
-  private createConfigFiles() {
-    new TypeScriptConfig(this, {});
-
-    new Biome(this);
-
-    new Bun(this);
+    this.readModelProject.addDevelopmentDependencies(deps);
   }
 
   private createReadme() {
@@ -208,11 +176,29 @@ export class WaddleDataService extends Project {
       .join("");
   }
 
-  private getPackageName(): string {
-    const normalized = this.options.serviceName
+  private getDataModelPackageName(): string {
+    const normalized = this.getNormalizedServiceName();
+
+    return `@waddlesocial/waddle-service-${normalized}-data-model`;
+  }
+
+  private getReadModelPackageName(): string {
+    const normalized = this.getNormalizedServiceName();
+
+    return `@waddlesocial/waddle-service-${normalized}-read-model`;
+  }
+
+  private getDataModelProjectName(): string {
+    return `${this.getNormalizedServiceName()}-data-model`;
+  }
+
+  private getReadModelProjectName(): string {
+    return `${this.getNormalizedServiceName()}-read-model`;
+  }
+
+  private getNormalizedServiceName(): string {
+    return this.options.serviceName
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
-
-    return `@waddlesocial/waddle-service-${normalized}`;
   }
 }

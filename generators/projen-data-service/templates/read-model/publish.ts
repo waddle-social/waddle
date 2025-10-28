@@ -1,9 +1,10 @@
 import { printSchemaWithDirectives } from "@graphql-tools/utils";
+import type { D1Database } from "@cloudflare/workers-types";
 import { lexicographicSortSchema } from "graphql";
 import { writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getSchema } from "./src/schema";
+import { getSchema } from "./src/schema.ts";
 
 const schemaAsString = printSchemaWithDirectives(
   lexicographicSortSchema(
