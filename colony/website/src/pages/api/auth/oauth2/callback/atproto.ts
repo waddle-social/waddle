@@ -5,6 +5,63 @@ import type { BlueskyJWK } from "../../../../../lib/auth/keys";
 import { serializeSignedCookie } from "better-call";
 import { REDIRECT_COOKIE_NAME, clearRedirectCookie, extractCookieValue, resolveRedirectTarget } from "../../../../../lib/auth/redirect";
 
+const DEFAULT_PLC_HOSTS = [
+	"https://plc.directory",
+	"https://plc.directory",
+] as const;
+
+const normalizeHost = (host: string) => host.replace(/\/+$/, "");
+
+const buildPlcHostList = (env: Record<string, unknown>) => {
+	const hosts = new Set<string>();
+
+	for (const host of DEFAULT_PLC_HOSTS) {
+		hosts.add(normalizeHost(host));
+	}
+
+	const envHosts =
+		typeof env["ATPROTO_PLC_DIRECTORY_URL"] === "string"
+			? env["ATPROTO_PLC_DIRECTORY_URL"]
+			: typeof env["PLC_DIRECTORY_URL"] === "string"
+				? env["PLC_DIRECTORY_URL"]
+				: typeof env["PLCDIR_URL"] === "string"
+					? env["PLCDIR_URL"]
+					: null;
+
+	if (envHosts) {
+		envHosts
+			.split(",")
+			.map(host => host.trim())
+			.filter(Boolean)
+			.forEach(host => hosts.add(normalizeHost(host)));
+	}
+
+	return Array.from(hosts);
+};
+
+const fetchPlcDidDocument = async (did: string, env: Record<string, unknown>) => {
+	const plcHosts = buildPlcHostList(env);
+
+	for (const host of plcHosts) {
+		const url = `${host}/${did}`;
+		try {
+			const response = await fetch(url);
+			if (response.ok) {
+				return {
+					document: await response.json(),
+					source: host,
+				};
+			}
+
+			console.warn(`Failed to resolve DID via ${url}:`, response.status);
+		} catch (error) {
+			console.warn(`Error fetching DID document from ${url}:`, error);
+		}
+	}
+
+	return null;
+};
+
 export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 	try {
 		// Extract query parameters
@@ -188,12 +245,12 @@ export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 		let userProfile: any = {};
 		let userEmail: string | null = null;
 		try {
-			// For did:plc DIDs, use plc.directory
+			// For did:plc DIDs, use available PLC directories
 			if (userDid.startsWith('did:plc:')) {
-				const didDocRes = await fetch(`https://plc.directory/${userDid}`);
-				if (didDocRes.ok) {
-					const didDoc = await didDocRes.json();
-					console.log("DID document:", didDoc);
+				const didDocResult = await fetchPlcDidDocument(userDid, locals.runtime.env as Record<string, unknown>);
+				if (didDocResult) {
+					const didDoc = didDocResult.document;
+					console.log(`DID document (resolved via ${didDocResult.source}):`, didDoc);
 
 					// Find the PDS service endpoint
 					const pdsService = didDoc.service?.find((s: any) =>
@@ -204,6 +261,8 @@ export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 						pdsUrl = pdsService.serviceEndpoint;
 						console.log("Found PDS URL:", pdsUrl);
 					}
+				} else {
+					console.warn("Failed to resolve DID document from known PLC directories");
 				}
 			}
 
