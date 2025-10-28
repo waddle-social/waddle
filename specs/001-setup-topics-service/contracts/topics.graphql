@@ -1,0 +1,58 @@
+schema {
+  query: Query
+}
+
+type Query {
+  """Return every topic across scopes with cursor pagination (admin use only)."""
+  getAllTopics(pagination: TopicsPaginationInput = { first: 50 }): TopicConnection!
+
+  """Return topics filtered by owner or waddle context for the current user."""
+  getTopics(filter: TopicFilterInput!): TopicConnection!
+}
+
+input TopicsPaginationInput {
+  first: Int = 50
+  after: String
+}
+
+input TopicFilterInput {
+  """Return owner-scoped topics; caller must be the owner."""
+  ownerId: ID
+  """Return waddle-scoped topics; caller must be a member."""
+  waddleSlug: ID
+  first: Int = 50
+  after: String
+}
+
+type TopicConnection {
+  edges: [TopicEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type TopicEdge {
+  cursor: String!
+  node: Topic!
+}
+
+type Topic {
+  id: ID!
+  title: String!
+  description: String
+  scope: TopicScope!
+  ownerId: ID
+  waddleSlug: ID
+  createdAt: String!
+  updatedAt: String!
+}
+
+enum TopicScope {
+  GLOBAL
+  OWNER
+  WADDLE
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}

@@ -11,6 +11,10 @@ build/
 coverage/
 .turbo/
 bun.lockb
+.env
+.env.*
+*.log
+.DS_Store
 
 # Moonrepo cache
 .moon/

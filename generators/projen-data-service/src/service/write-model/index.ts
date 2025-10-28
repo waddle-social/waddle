@@ -1,7 +1,7 @@
 import { Liquid } from "liquidjs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Component, type Project, TextFile } from "projen";
+import { Component, type Project, TextFile } from "projen/lib/index.js";
 import type { WaddleDataService } from "../../project";
 
 const __filename = fileURLToPath(import.meta.url);

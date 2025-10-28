@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Liquid } from "liquidjs";
-import { SampleFile, TextFile, type Project, javascript } from "projen";
+import { SampleFile, TextFile, type Project, javascript } from "projen/lib/index.js";
 import { Biome } from "../../biome/index.ts";
 import { Bun } from "../../bun/index.ts";
 import { TypeScriptConfig } from "../../tsconfig/index.ts";

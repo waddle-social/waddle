@@ -1,7 +1,7 @@
 import { Liquid } from "liquidjs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Project, TextFile } from "projen";
+import { Project, TextFile } from "projen/lib/index.js";
 import type { WaddleDataServiceOptions } from "./options.ts";
 import { DataModel } from "./service/data-model/index.ts";
 import { ReadModel } from "./service/read-model/index.ts";

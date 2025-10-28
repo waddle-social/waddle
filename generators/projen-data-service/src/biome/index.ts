@@ -1,4 +1,4 @@
-import { Component, JsonFile, type Project } from "projen";
+import { Component, JsonFile, type Project } from "projen/lib/index.js";
 import {
   Configuration,
   VcsClientKind,

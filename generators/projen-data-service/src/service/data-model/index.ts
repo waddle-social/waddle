@@ -1,4 +1,4 @@
-import { SampleFile, TextFile, type Project, javascript } from "projen";
+import { SampleFile, TextFile, type Project, javascript } from "projen/lib/index.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

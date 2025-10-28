@@ -82,6 +82,7 @@
 - **User Experience**: Specify required components or tokens from `shared/packages/ui-web`, accessibility verification steps (WCAG 2.1 AA), and copy/localization updates.
 - **Performance Budgets**: Declare p95 server response <= 150 ms and p75 LCP <= 2.5 s targets alongside the instrumentation that will validate them.
 - **Federated CQRS**: Detail the GraphQL federation subgraphs serving reads, the Cloudflare Workflows or `capnweb` steps handling writes, and how contracts will enforce the separation.
+- **Data Services** *(if applicable)*: Call out the projen generator settings (`serviceName`, `databaseId`, `includeWriteModel`, extra dependencies), schema snapshot location, Bun scripts, and documentation/quickstart assets that must ship with the service.
 
 ## Requirements *(mandatory)*
 

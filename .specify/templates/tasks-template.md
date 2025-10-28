@@ -24,6 +24,14 @@ description: "Task list template for feature implementation"
 - **Web app**: `backend/src/`, `frontend/src/`
 - **Mobile**: `api/src/`, `ios/src/` or `android/src/`
 - Paths shown below assume single project - adjust based on plan.md structure
+- **Data service**: `waddle/services/<name>/` with `generate.ts`, `data-model/`, `read-model/`, `read-model/schema.gql`, Bun scripts (`bun run test:<name>`) captured in package scripts, and docs updates linked in plan/spec.
+
+### Data Service-Specific Tasks *(add when applicable)*
+
+- Generator synthesis (`bunx tsx waddle/services/<name>/generate.ts`) with recorded options.
+- D1 schema/migration updates in `data-model/` and corresponding Zod exports.
+- Schema snapshot refresh (`read-model/schema.gql`) and Wrangler binding configuration.
+- Quickstart/documentation validation (docs/README.md, service README, specs quickstart).
 
 <!-- 
   ============================================================================
