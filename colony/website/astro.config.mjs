@@ -1,5 +1,5 @@
 // @ts-check
-import { defineConfig } from 'astro/config';
+import { defineConfig, envField } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 import cloudflare from '@astrojs/cloudflare';
 import vue from '@astrojs/vue';
@@ -53,6 +53,17 @@ export default defineConfig({
         'node:console'
       ],
       noExternal: ['@atproto/oauth-client-node', '@atproto/api'],
+    },
+  },
+  env: {
+    schema: {
+      // Comma-separated list of allowed web origins for redirects/CORS
+      // Example: "http://localhost:4322,http://127.0.0.1:4322"
+      COLONY_ALLOWED_REDIRECTS: envField.string({
+        context: 'server',
+        access: 'secret',
+        default: 'http://localhost:4322,http://127.0.0.1:4322',
+      }),
     },
   },
 });

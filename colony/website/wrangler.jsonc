@@ -18,6 +18,9 @@
 				"pattern": "colony.waddle.social",
 				"custom_domain": true
 			},
+            "vars": {
+                "COLONY_ALLOWED_REDIRECTS": "http://localhost:4322,http://127.0.0.1:4322"
+            },
 			"d1_databases": [
 				{
 					"binding": "DB",

@@ -1,3 +1,5 @@
+import { COLONY_ALLOWED_REDIRECTS } from 'astro:env/server';
+
 const REDIRECT_COOKIE_NAME = 'colony_redirect_to';
 const REDIRECT_MAX_AGE_SECONDS = 600;
 
@@ -26,8 +28,8 @@ const collectAllowedOrigins = (origin: string, env: Record<string, unknown>): Se
     if (normalised) allowed.add(normalised);
   }
 
-  const envValueRaw = env['COLONY_ALLOWED_REDIRECTS'];
-  const envValue = typeof envValueRaw === 'string' ? envValueRaw : null;
+  // Only use the value provided via Astro env schema.
+  const envValue = COLONY_ALLOWED_REDIRECTS || '';
   if (envValue) {
     envValue
       .split(',')
