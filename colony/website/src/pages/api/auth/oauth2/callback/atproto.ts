@@ -453,18 +453,22 @@ export const GET: APIRoute = async ({ request, url, locals, redirect }) => {
 		}
 		const signedToken = (await serializeSignedCookie("", sessionToken, resolvedSecret)).replace("=", "");
 
-		// Build Set-Cookie using Better Auth's configured cookie name and attributes
+		// Build Set-Cookie ensuring cross-site compatibility for the session cookie.
+		// We force SameSite=None and Secure so the cookie is sent on cross-site fetches
+		// from the local website (localhost:4322) to the production Colony origin.
 		const cookieName = context.authCookies.sessionToken.name; // may include __Secure- prefix
 		const cookieOpts = context.authCookies.sessionToken.options;
-		const parts: string[] = [];
-		parts.push(`${cookieName}=${signedToken}`);
-		if (cookieOpts.path) parts.push(`Path=${cookieOpts.path}`);
-		if (cookieOpts.domain) parts.push(`Domain=${cookieOpts.domain}`);
-		if (cookieOpts.httpOnly) parts.push('HttpOnly');
-		if (cookieOpts.secure) parts.push('Secure');
-		if (cookieOpts.sameSite) parts.push(`SameSite=${String(cookieOpts.sameSite).charAt(0).toUpperCase()}${String(cookieOpts.sameSite).slice(1)}`);
-		if (cookieOpts.maxAge) parts.push(`Max-Age=${cookieOpts.maxAge}`);
-		const sessionCookie = parts.join('; ');
+		const cookieParts: string[] = [];
+		cookieParts.push(`${cookieName}=${signedToken}`);
+		if (cookieOpts.path) cookieParts.push(`Path=${cookieOpts.path}`);
+		if (cookieOpts.domain) cookieParts.push(`Domain=${cookieOpts.domain}`);
+		if (cookieOpts.httpOnly) cookieParts.push('HttpOnly');
+		// Force Secure on HTTPS origins
+		if (origin.startsWith('https')) cookieParts.push('Secure');
+		// Force cross-site cookie so XHR with credentials works in dev
+		cookieParts.push('SameSite=None');
+		if (cookieOpts.maxAge) cookieParts.push(`Max-Age=${cookieOpts.maxAge}`);
+		const sessionCookie = cookieParts.join('; ');
 
 		// Additional cookies for AT Protocol specific data
 		const additionalCookies = [
