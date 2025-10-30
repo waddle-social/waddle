@@ -15,7 +15,7 @@ const colonyBaseUrl = PUBLIC_COLONY_BASE_URL ?? 'https://colony.waddle.social';
   </head>
   <body class="min-h-screen bg-background text-foreground font-sans antialiased">
     <AuthGate client:only="vue" colonyBaseUrl={colonyBaseUrl}>
-      <WaddleChat />
+      <WaddleChat client:only="vue" />
     </AuthGate>
     <script>
       (function () {
