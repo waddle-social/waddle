@@ -32,10 +32,6 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Verify deterministic install
         run: bun run verify:install
-      - name: Build (colony website)
-        working-directory: colony/website
-        run: bun run build
-
       - name: Deploy Preview (colony)
         if: github.event_name == 'pull_request'
         working-directory: colony/website
