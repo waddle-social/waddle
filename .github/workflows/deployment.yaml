@@ -19,8 +19,6 @@ jobs:
           fetch-depth: 0
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
-      - name: Setup moon toolchain (proto)
-        uses: moonrepo/setup-toolchain@v0
       - name: Cache dependencies (node_modules and bun cache)
         uses: actions/cache@v4
         with:
@@ -34,16 +32,22 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Verify deterministic install
         run: bun run verify:install
+      - name: Build (colony website)
+        working-directory: colony/website
+        run: bun run build
+
       - name: Deploy Preview (colony)
         if: github.event_name == 'pull_request'
-        run: moon run colony-website:deploy-preview
+        working-directory: colony/website
+        run: bunx wrangler versions upload --config wrangler.jsonc
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy Production (colony)
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
-        run: moon run colony-website:deploy-production
+        working-directory: colony/website
+        run: bunx wrangler deploy --config wrangler.jsonc --env production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
