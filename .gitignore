@@ -38,6 +38,11 @@ terraform.tfstate.d/
 .env.local
 secrets.yaml
 kubeconfig*
+talosconfig*
+
+# 1Password
+1password-credentials.json
+*.1password
 
 # Alerting secrets
 alertmanager-config.yaml

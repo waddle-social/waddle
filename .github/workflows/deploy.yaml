@@ -1,0 +1,123 @@
+# Infrastructure Deployment Workflow with 1Password Secrets
+# =========================================================
+#
+# Deploys infrastructure to Proxmox using CDKTF with secrets from 1Password.
+#
+# PREREQUISITES:
+# 1. Create 1Password Service Account at https://my.1password.com
+#    - Go to Developer Tools > Service Accounts
+#    - Create account with access to "waddle-infra" vault
+#
+# 2. Add GitHub Secret:
+#    - Go to repo Settings > Secrets and variables > Actions
+#    - Add secret: OP_SERVICE_ACCOUNT_TOKEN
+#
+# 3. 1Password Vault Structure (waddle-infra):
+#    - proxmox-api: endpoint, api_token, ssh_username, ssh_password
+#    - teleport: domain, email, ssh_public_key
+#
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - deploy
+          - destroy
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  NODE_VERSION: '20'
+  TERRAFORM_VERSION: '1.6.0'
+
+jobs:
+  deploy:
+    name: ${{ github.event.inputs.action }} Infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          # Proxmox API credentials
+          PROXMOX_VE_ENDPOINT: op://waddle-infra/proxmox-api/endpoint
+          PROXMOX_VE_API_TOKEN: op://waddle-infra/proxmox-api/api_token
+          PROXMOX_VE_SSH_USERNAME: op://waddle-infra/proxmox-api/ssh_username
+          PROXMOX_VE_SSH_PASSWORD: op://waddle-infra/proxmox-api/ssh_password
+          # Teleport credentials
+          TELEPORT_DOMAIN: op://waddle-infra/teleport/domain
+          TELEPORT_LETSENCRYPT_EMAIL: op://waddle-infra/teleport/email
+          TELEPORT_SSH_KEYS: op://waddle-infra/teleport/ssh_public_key
+
+      - name: Set environment variables
+        run: |
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "PROXMOX_VE_INSECURE=true" >> $GITHUB_ENV
+          echo "PROXMOX_VE_SSH_AGENT=false" >> $GITHUB_ENV
+
+      - name: Synthesize Terraform configuration
+        run: npm run synth
+
+      - name: Terraform Init
+        working-directory: infrastructure/cdktf.out/stacks/waddle-infra
+        run: terraform init
+
+      - name: Terraform Plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'deploy'
+        working-directory: infrastructure/cdktf.out/stacks/waddle-infra
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: github.event.inputs.action == 'deploy'
+        working-directory: infrastructure/cdktf.out/stacks/waddle-infra
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: github.event.inputs.action == 'destroy'
+        working-directory: infrastructure/cdktf.out/stacks/waddle-infra
+        run: terraform destroy -auto-approve
+
+      - name: Upload Terraform State
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-state-${{ github.run_id }}
+          path: |
+            infrastructure/cdktf.out/stacks/waddle-infra/terraform.tfstate
+            infrastructure/cdktf.out/stacks/waddle-infra/terraform.tfstate.backup
+          retention-days: 30
