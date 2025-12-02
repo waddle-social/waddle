@@ -125,7 +125,46 @@ Configure port forwarding on your router:
    - Zone Resources: Include > All zones (or specific zones)
 5. Create and SAVE the token
 
-#### 1.3.2 Environment File Setup
+#### 1.3.2 Option A: 1Password Integration (Recommended)
+
+Use 1Password to manage all secrets securely. This provides audit trails, automatic rotation, and CI/CD integration.
+
+**Setup 1Password Vault:**
+
+1. Install 1Password CLI:
+   ```bash
+   # macOS
+   brew install --cask 1password-cli
+   
+   # Verify installation
+   op --version
+   ```
+
+2. Create a vault called `waddle-infra` with these items:
+
+   | Item Name | Type | Fields |
+   |-----------|------|--------|
+   | `proxmox-api` | API Credential | `endpoint`, `api_token`, `ssh_username`, `ssh_password` |
+   | `proxmox-csi` | API Credential | `endpoint`, `token_id`, `token_secret`, `region` |
+   | `teleport` | SSH Key | `domain`, `email`, `ssh_public_key`, `ssh_private_key` |
+   | `cloudflare` | API Credential | `api_token` |
+   | `grafana` | Login | `username`, `password` |
+   | `spicedb` | API Credential | `preshared_key` |
+
+3. Sign in to 1Password:
+   ```bash
+   op signin
+   ```
+
+4. Run commands with secrets injected:
+   ```bash
+   # Uses infrastructure/.env.op for 1Password references
+   npm run deploy:secure
+   ```
+
+See `infrastructure/.env.op` for the full mapping of environment variables to 1Password references.
+
+#### 1.3.2 Option B: Traditional Environment File
 
 ```bash
 cd infrastructure
@@ -138,6 +177,8 @@ cp .env.example .env
 # - TALOS_* settings
 # - TELEPORT_* settings (if using Teleport)
 ```
+
+**Security Warning:** The `.env` file contains sensitive credentials. Never commit it to git.
 
 #### 1.3.3 Kubernetes Secrets to Create (After Cluster Bootstrap)
 
@@ -248,14 +289,67 @@ kubectl get secret spicedb-config -n spicedb -o jsonpath='{.data.preshared_key}'
 
 ### Phase 1-4: Infrastructure Provisioning
 
-#### Deploy Infrastructure
+#### Network Access Challenge
+
+When Proxmox has only one public IP, the internal VMs (192.168.1.x) are not directly reachable from your local machine. This affects cluster bootstrapping which requires TCP connectivity to Talos API (port 50000).
+
+**Solution Options:**
+
+1. **Teleport TCP Tunnels** (Recommended after Teleport is set up)
+2. **SSH Tunnel through Proxmox** (Quick temporary access)
+3. **Run from Proxmox host** (Direct network access)
+
+#### Option A: Deploy VMs First, Bootstrap via Teleport Later
+
+This two-phase approach creates VMs first, then bootstraps after Teleport is configured.
 
 ```bash
 cd infrastructure
 npm install
 npm run get      # Generate provider bindings (first time only)
-npm run synth    # Generate Terraform config
-npm run deploy   # Provision VMs and bootstrap cluster
+
+# Phase 1: Create VMs only (bootstrap is disabled by default when unreachable)
+npm run synth
+npm run deploy   # or: npm run deploy:secure (with 1Password)
+
+# VMs are now created. Continue to Phase 5 to set up Teleport.
+# After Teleport TCP apps are configured, return here for bootstrapping.
+```
+
+#### Option B: Deploy with Teleport Tunnels (After Phase 5)
+
+Once Teleport is configured with TCP Application Access:
+
+```bash
+# Install Teleport CLI
+brew install teleport
+
+# Login to Teleport
+tsh login --proxy=teleport.waddle.social:443
+
+# Deploy through Teleport tunnels
+npm run deploy:teleport
+```
+
+This automatically:
+1. Establishes TCP tunnels via `tsh proxy app`
+2. Sets `TALOS_USE_TUNNEL=true` for tunneled endpoints
+3. Runs CDKTF with 1Password secrets (if available)
+
+#### Option C: Deploy from Proxmox Host
+
+For direct network access, run CDKTF from the Proxmox host:
+
+```bash
+# On Proxmox host
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs git
+
+# Clone and deploy
+git clone <your-repo> waddle-infra
+cd waddle-infra/infrastructure
+npm install && npm run get
+npm run synth && npm run deploy
 ```
 
 #### Test Phase 1-4
@@ -299,23 +393,116 @@ kubectl cluster-info
 
 Skip if `TELEPORT_ENABLED=false`.
 
-#### Test Phase 5
+#### 5.1 Initial SSH Access to Teleport VM
+
+Since Teleport VM is on the internal network, use temporary port forwarding:
 
 ```bash
-# 1. SSH to Teleport VM
-ssh admin@<TELEPORT_IP_ADDRESS>
+# On Proxmox host, add temporary port forward
+iptables -t nat -A PREROUTING -p tcp --dport 2222 -j DNAT --to 192.168.1.100:22
+iptables -A FORWARD -p tcp -d 192.168.1.100 --dport 22 -j ACCEPT
 
-# 2. Install Teleport (on Teleport VM)
+# From your local machine
+ssh -p 2222 admin@<PROXMOX_PUBLIC_IP>
+```
+
+#### 5.2 Install and Configure Teleport
+
+```bash
+# On Teleport VM
 curl https://apt.releases.teleport.dev/gpg -o /usr/share/keyrings/teleport-archive-keyring.asc
 echo "deb [signed-by=/usr/share/keyrings/teleport-archive-keyring.asc] https://apt.releases.teleport.dev/debian bookworm stable/v17" | sudo tee /etc/apt/sources.list.d/teleport.list
 sudo apt-get update && sudo apt-get install -y teleport
 
-# 3. Configure and start Teleport
-# Follow docs/teleport-setup.md
+# Configure and start Teleport
+# Follow docs/teleport-setup.md for full configuration
+```
 
-# 4. Test Teleport access
+#### 5.3 Configure TCP Application Access for Talos Nodes
+
+This enables secure access to internal Talos nodes through Teleport.
+
+```bash
+# On Teleport VM, add to /etc/teleport.yaml:
+sudo tee -a /etc/teleport.yaml << 'EOF'
+
+app_service:
+  enabled: true
+  apps:
+    - name: talos-cp1
+      uri: tcp://192.168.1.101:50000
+      labels:
+        type: talos-api
+    - name: talos-cp2
+      uri: tcp://192.168.1.102:50000
+      labels:
+        type: talos-api
+    - name: talos-cp3
+      uri: tcp://192.168.1.103:50000
+      labels:
+        type: talos-api
+    - name: kubernetes-api
+      uri: tcp://192.168.1.101:6443
+      labels:
+        type: kubernetes
+EOF
+
+sudo systemctl restart teleport
+```
+
+See `docs/teleport-tcp-apps.yaml` for the complete configuration template.
+
+#### 5.4 Create Machine ID for Automation (Optional)
+
+For CI/CD and automated provisioning without interactive login:
+
+```bash
+# On Teleport VM
+# Create provisioner role
+sudo tctl create -f /path/to/docs/provisioner-bot-role.yaml
+
+# Create bot
+sudo tctl bots add provisioner-bot --roles=provisioner --logins=root
+# SAVE the token shown - it's displayed only once!
+```
+
+See `docs/provisioner-bot-role.yaml` for the role definition.
+
+#### 5.5 Remove Temporary Port Forward
+
+```bash
+# On Proxmox host
+iptables -t nat -D PREROUTING -p tcp --dport 2222 -j DNAT --to 192.168.1.100:22
+iptables -D FORWARD -p tcp -d 192.168.1.100 --dport 22 -j ACCEPT
+```
+
+#### Test Phase 5
+
+```bash
+# 1. Login to Teleport
 tsh login --proxy=teleport.waddle.social:443 --user=admin
 tsh status
+
+# 2. Verify TCP apps are registered
+tsh apps ls
+# Expected: talos-cp1, talos-cp2, talos-cp3, kubernetes-api
+
+# 3. Test TCP tunnel to Talos
+tsh proxy app talos-cp1 -p 50001 &
+talosctl --talosconfig=/dev/null -e 127.0.0.1:50001 version --insecure
+# Expected: Talos version info
+
+# 4. Stop test tunnel
+pkill -f "tsh proxy app"
+```
+
+#### 5.6 Return to Phase 4 Bootstrap
+
+Now that Teleport TCP access is configured, bootstrap the Talos cluster:
+
+```bash
+# From your local machine
+npm run deploy:teleport
 ```
 
 ---
@@ -738,6 +925,22 @@ kubectl logs -n observability -l app.kubernetes.io/name=alertmanager | grep "Loa
 
 ---
 
+## NPM Scripts Reference
+
+| Script | Description |
+|--------|-------------|
+| `npm run synth` | Generate Terraform configuration |
+| `npm run deploy` | Deploy infrastructure (direct) |
+| `npm run destroy` | Destroy infrastructure |
+| `npm run synth:secure` | Synth with 1Password secrets |
+| `npm run deploy:secure` | Deploy with 1Password secrets |
+| `npm run destroy:secure` | Destroy with 1Password secrets |
+| `npm run synth:teleport` | Synth via Teleport tunnels |
+| `npm run deploy:teleport` | Deploy via Teleport tunnels + 1Password |
+| `npm run destroy:teleport` | Destroy via Teleport tunnels |
+
+---
+
 ## Troubleshooting Quick Commands
 
 ```bash
@@ -771,17 +974,27 @@ talosctl -n <node-ip> health
 
 ## Success Checklist
 
+**Prerequisites:**
 - [ ] Proxmox API tokens created
-- [ ] Environment file configured
+- [ ] 1Password vault configured (or .env file)
 - [ ] DNS records created
 - [ ] Port forwarding configured
+
+**Infrastructure:**
 - [ ] VMs provisioned and healthy
+- [ ] Teleport installed and accessible
+- [ ] Teleport TCP apps configured
+- [ ] Talos cluster bootstrapped
 - [ ] Kubernetes cluster accessible
+
+**Platform:**
 - [ ] Cilium CNI operational
 - [ ] CSI driver provisioning volumes
 - [ ] Flux reconciling successfully
 - [ ] Certificates issuing correctly
 - [ ] Gateway routing traffic
+
+**Applications:**
 - [ ] PostgreSQL clusters healthy
 - [ ] SpiceDB responding to API calls
 - [ ] Grafana accessible with data
