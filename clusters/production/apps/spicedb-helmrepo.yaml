@@ -1,0 +1,35 @@
+# SpiceDB Operator Helm Repository
+# =================================
+#
+# This HelmRepository resource defines the source for the SpiceDB operator
+# Helm chart. The chart is community-maintained by Bushel and provides
+# the SpiceDB operator for managing SpiceDBCluster custom resources.
+#
+# Chart Information:
+#   - Repository: https://bushelpowered.github.io/spicedb-operator-chart/
+#   - Chart Name: spicedb-operator
+#   - Chart Version: 2.2.0 (as of July 2025)
+#
+# GitHub Repository:
+#   https://github.com/bushelpowered/spicedb-operator-chart
+#
+# IMPORTANT: This is a community-maintained chart, not officially from
+# AuthZed (SpiceDB maintainers). Review chart updates before upgrading.
+#
+# Sync Interval: The repository index is fetched hourly to check for
+# new chart versions. Increase interval for more stability, decrease
+# for faster updates.
+#
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: spicedb-operator
+  namespace: flux-system
+spec:
+  # Helm repository URL
+  url: https://bushelpowered.github.io/spicedb-operator-chart/
+
+  # Sync interval - how often to fetch the repository index
+  # 1 hour is appropriate for stable infrastructure components
+  interval: 1h

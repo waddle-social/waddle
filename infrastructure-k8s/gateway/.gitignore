@@ -1,0 +1,33 @@
+# Gateway API Local Files
+# =======================
+#
+# Prevent committing sensitive or temporary files
+
+# Local testing overrides
+*.local.yaml
+*.local.yml
+
+# Accidentally created secrets
+*.secret.yaml
+*.secret.yml
+
+# Cluster access files
+kubeconfig*
+*.kubeconfig
+
+# macOS
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.*.swp
+
+# IDE directories
+.idea/
+.vscode/
+
+# Temporary files
+*.tmp
+*.bak

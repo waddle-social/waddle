@@ -1,0 +1,13 @@
+{
+  "name": "waddle-infra",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "infrastructure"
+  ],
+  "scripts": {
+    "synth": "npm run synth --workspace=infrastructure",
+    "deploy": "npm run deploy --workspace=infrastructure",
+    "destroy": "npm run destroy --workspace=infrastructure"
+  }
+}

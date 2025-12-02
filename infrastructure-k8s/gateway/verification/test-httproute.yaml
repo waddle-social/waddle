@@ -1,0 +1,212 @@
+# Sample HTTPRoute for Gateway Testing
+# =====================================
+#
+# Demonstrates Gateway API routing capabilities.
+# Routes traffic from Gateway to echo-service backend.
+#
+# Cross-Namespace Routing:
+# - This HTTPRoute is in 'gateway-test' namespace
+# - It references Gateway in 'gateway-ingress' namespace
+# - Gateway must have 'allowedRoutes.namespaces.from: All'
+# - Production deployments should use ReferenceGrant (see example below)
+#
+# IMPORTANT: Update hostname before deployment!
+# Replace 'echo.waddle.social' with your actual subdomain.
+#
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: gateway-test
+  labels:
+    app: echo-route
+    app.kubernetes.io/part-of: gateway-api
+spec:
+  # Parent Gateway reference (cross-namespace)
+  parentRefs:
+    - name: gateway
+      namespace: gateway-ingress
+      sectionName: https  # Attach to HTTPS listener only
+
+  # Hostname matching
+  # Traffic to this hostname is routed to this HTTPRoute
+  hostnames:
+    - echo.waddle.social
+
+  # Routing rules
+  rules:
+    # Rule 1: Match all paths, route to echo-service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: echo-service
+          port: 8080
+          weight: 100
+
+# =============================================================================
+# ADVANCED ROUTING EXAMPLES (uncomment to use)
+# =============================================================================
+#
+# Example: Header-based routing
+# ---
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: header-route
+#   namespace: gateway-test
+# spec:
+#   parentRefs:
+#     - name: gateway
+#       namespace: gateway-ingress
+#   hostnames:
+#     - api.waddle.social
+#   rules:
+#     - matches:
+#         - headers:
+#             - name: X-Version
+#               value: v2
+#       backendRefs:
+#         - name: api-v2
+#           port: 8080
+#     - matches:
+#         - path:
+#             type: PathPrefix
+#             value: /
+#       backendRefs:
+#         - name: api-v1
+#           port: 8080
+#
+# Example: HTTP to HTTPS redirect
+# ---
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: http-redirect
+#   namespace: gateway-ingress
+# spec:
+#   parentRefs:
+#     - name: gateway
+#       namespace: gateway-ingress
+#       sectionName: http  # Attach to HTTP listener
+#   hostnames:
+#     - waddle.social
+#     - "*.waddle.social"
+#   rules:
+#     - filters:
+#         - type: RequestRedirect
+#           requestRedirect:
+#             scheme: https
+#             statusCode: 301
+#
+# Example: Path rewriting
+# ---
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: rewrite-route
+#   namespace: gateway-test
+# spec:
+#   parentRefs:
+#     - name: gateway
+#       namespace: gateway-ingress
+#   hostnames:
+#     - api.waddle.social
+#   rules:
+#     - matches:
+#         - path:
+#             type: PathPrefix
+#             value: /api/v1
+#       filters:
+#         - type: URLRewrite
+#           urlRewrite:
+#             path:
+#               type: ReplacePrefixMatch
+#               replacePrefixMatch: /v1
+#       backendRefs:
+#         - name: api-service
+#           port: 8080
+#
+# Example: Traffic splitting (canary deployment)
+# ---
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: canary-route
+#   namespace: gateway-test
+# spec:
+#   parentRefs:
+#     - name: gateway
+#       namespace: gateway-ingress
+#   hostnames:
+#     - app.waddle.social
+#   rules:
+#     - backendRefs:
+#         - name: app-stable
+#           port: 8080
+#           weight: 90
+#         - name: app-canary
+#           port: 8080
+#           weight: 10
+#
+# =============================================================================
+
+# =============================================================================
+# REFERENCEGRANT FOR CROSS-NAMESPACE ROUTING (PRODUCTION)
+# =============================================================================
+#
+# ReferenceGrant allows explicit cross-namespace references.
+# Required when Gateway namespace differs from HTTPRoute namespace.
+#
+# This grants permission for Gateways in 'gateway-ingress' namespace
+# to reference Services in 'gateway-test' namespace.
+#
+# ---
+# apiVersion: gateway.networking.k8s.io/v1beta1
+# kind: ReferenceGrant
+# metadata:
+#   name: allow-gateway-to-services
+#   namespace: gateway-test
+# spec:
+#   from:
+#     - group: gateway.networking.k8s.io
+#       kind: HTTPRoute
+#       namespace: gateway-test
+#   to:
+#     - group: ""
+#       kind: Service
+#
+# =============================================================================
+
+# =============================================================================
+# VERIFICATION STEPS
+# =============================================================================
+#
+# 1. Ensure echo-service is deployed:
+#    kubectl get pods,svc -n gateway-test
+#
+# 2. Deploy HTTPRoute:
+#    kubectl apply -f test-httproute.yaml
+#
+# 3. Check HTTPRoute status:
+#    kubectl get httproute -n gateway-test
+#    kubectl describe httproute echo-route -n gateway-test
+#
+# 4. Verify parentRef is accepted:
+#    Status should show: "Accepted: True"
+#    If not, check Gateway allowedRoutes configuration
+#
+# 5. Test routing (replace with your domain):
+#    # Get Gateway IP
+#    export GATEWAY_IP=$(kubectl get gateway gateway -n gateway-ingress -o jsonpath='{.status.addresses[0].value}')
+#
+#    # Test with Host header
+#    curl -H "Host: echo.waddle.social" http://$GATEWAY_IP/
+#    curl -k -H "Host: echo.waddle.social" https://$GATEWAY_IP/
+#
+#    # Test with DNS (after A record configured)
+#    curl https://echo.waddle.social/
+#
+# =============================================================================

@@ -1,0 +1,219 @@
+# cert-manager Helm Values for Talos Kubernetes
+# This file configures cert-manager v1.16.2 for automated TLS certificate
+# management using Let's Encrypt ACME with Cloudflare DNS01 solver.
+#
+# Usage:
+#   helm repo add jetstack https://charts.jetstack.io
+#   helm repo update
+#   helm install cert-manager jetstack/cert-manager \
+#     --version v1.16.2 \
+#     --namespace cert-manager \
+#     --create-namespace \
+#     --values helm-values.yaml
+#
+# Prerequisites:
+#   1. Create namespace: kubectl create namespace cert-manager
+#   2. Create Cloudflare API token Secret (see cloudflare-api-token-secret.yaml)
+#   3. Verify Cilium CNI is operational
+#
+# Note: Flux will automate this deployment in Phase 9.
+#
+# =============================================================================
+# ENVIRONMENT VARIABLE REFERENCE
+# =============================================================================
+# The following environment variables from infrastructure/.env.example should
+# be used as the canonical source for cert-manager configuration:
+#
+#   CERT_MANAGER_EMAIL  -> ClusterIssuer email for Let's Encrypt notifications
+#                          (can reuse TELEPORT_LETSENCRYPT_EMAIL)
+#
+# Note: CLOUDFLARE_API_TOKEN is stored in Kubernetes Secret, not in values file.
+# =============================================================================
+
+# =============================================================================
+# REPLICA COUNT
+# =============================================================================
+# Number of controller replicas. Single replica is sufficient for small clusters.
+# For HA, increase to 2-3 replicas.
+replicaCount: 1
+
+# =============================================================================
+# CRD INSTALLATION
+# =============================================================================
+# Install cert-manager CRDs via Helm. This is the recommended approach
+# for single-namespace deployments.
+installCRDs: true
+
+# =============================================================================
+# GLOBAL SETTINGS
+# =============================================================================
+global:
+  # Leader election namespace for HA deployments
+  leaderElection:
+    namespace: cert-manager
+
+  # Log level (1=info, 2=debug)
+  logLevel: 2
+
+# =============================================================================
+# CONTROLLER CONFIGURATION
+# =============================================================================
+# The cert-manager controller watches for Certificate resources and
+# coordinates certificate issuance with ACME servers.
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Enable Prometheus metrics
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: false  # Enable if Prometheus Operator is installed
+
+# =============================================================================
+# WEBHOOK CONFIGURATION
+# =============================================================================
+# The webhook validates and mutates cert-manager resources.
+# Required for proper Certificate and Issuer validation.
+
+webhook:
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  # Secure port for webhook server
+  securePort: 10250
+
+  # Host network is not required
+  hostNetwork: false
+
+  # Timeout for webhook calls
+  timeoutSeconds: 30
+
+# =============================================================================
+# CAINJECTOR CONFIGURATION
+# =============================================================================
+# The cainjector injects CA bundles into webhook configurations.
+# Required for API server to trust the webhook TLS certificate.
+
+cainjector:
+  enabled: true
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# =============================================================================
+# DNS01 SOLVER CONFIGURATION
+# =============================================================================
+# Configure recursive nameservers for DNS01 challenge verification.
+# This ensures cert-manager can verify DNS records even when using
+# split-horizon DNS or when cluster DNS doesn't resolve external names.
+
+# Use recursive nameservers for DNS01 challenges
+# This is important for Cloudflare DNS01 solver
+dns01RecursiveNameservers: "1.1.1.1:53,8.8.8.8:53"
+dns01RecursiveNameserversOnly: true
+
+# =============================================================================
+# CONTROLLER SCHEDULING
+# =============================================================================
+# Prefer scheduling on control plane nodes for reliability.
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+# Tolerate control plane taints
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+# =============================================================================
+# SECURITY CONTEXT
+# =============================================================================
+# Run as non-root user with read-only filesystem
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# =============================================================================
+# SERVICE ACCOUNT
+# =============================================================================
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+
+# =============================================================================
+# ADDITIONAL CONFIGURATION
+# =============================================================================
+
+# Enable the startupapicheck to verify API server connectivity
+startupapicheck:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 32Mi
+
+# =============================================================================
+# NOTES
+# =============================================================================
+#
+# After installation, verify cert-manager is working:
+#
+#   1. Check controller pod:
+#      kubectl get pods -n cert-manager -l app.kubernetes.io/component=controller
+#
+#   2. Check webhook pod:
+#      kubectl get pods -n cert-manager -l app.kubernetes.io/component=webhook
+#
+#   3. Check cainjector pod:
+#      kubectl get pods -n cert-manager -l app.kubernetes.io/component=cainjector
+#
+#   4. Check CRDs installed:
+#      kubectl get crds | grep cert-manager
+#
+#   5. Create ClusterIssuers (see clusterissuer-*.yaml files):
+#      kubectl apply -f clusterissuer-letsencrypt-staging.yaml
+#      kubectl apply -f clusterissuer-letsencrypt-production.yaml
+#
+#   6. Test certificate issuance:
+#      kubectl apply -f verification/test-certificate.yaml
+#      kubectl get certificate -n cert-manager
+#
+# For troubleshooting, check controller logs:
+#   kubectl logs -n cert-manager -l app.kubernetes.io/component=controller
+#
+# =============================================================================

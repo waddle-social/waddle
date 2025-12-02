@@ -1,0 +1,89 @@
+# =============================================================================
+# DEFAULT DENY ALL NETWORK POLICY
+# =============================================================================
+#
+# Zero-trust baseline: Deny all ingress and egress traffic by default.
+# Applied to application namespaces requiring network isolation.
+#
+# Excluded namespaces (managed separately):
+# - kube-system: Core Kubernetes components
+# - flux-system: GitOps controller
+#
+# All traffic must be explicitly allowed by other NetworkPolicies.
+#
+# =============================================================================
+
+# SpiceDB namespace - application workloads
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}  # Match all pods in namespace
+  policyTypes:
+    - Ingress
+    - Egress
+
+# Observability namespace - monitoring stack
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: observability
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+# CNPG System namespace - PostgreSQL operator
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: cnpg-system
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+# cert-manager namespace - certificate management
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+# Gateway ingress namespace - ingress controller
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: gateway-ingress
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

@@ -1,0 +1,126 @@
+# SpiceDB Test Client Pod
+# =======================
+#
+# This Pod provides an environment for testing SpiceDB connectivity from
+# within the Kubernetes cluster. It includes tools for making gRPC calls
+# and testing the SpiceDB API.
+#
+# =============================================================================
+# USAGE INSTRUCTIONS
+# =============================================================================
+#
+# 1. Apply this manifest:
+#
+#    kubectl apply -f test-client.yaml
+#
+# 2. Wait for the pod to be running:
+#
+#    kubectl wait --for=condition=Ready pod/spicedb-test-client -n spicedb --timeout=60s
+#
+# 3. Exec into the pod:
+#
+#    kubectl exec -it spicedb-test-client -n spicedb -- /bin/sh
+#
+# 4. Inside the pod, install grpcurl (for gRPC API testing):
+#
+#    apk add --no-cache curl
+#    curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.8.9/grpcurl_1.8.9_linux_x86_64.tar.gz | tar -xz
+#    mv grpcurl /usr/local/bin/
+#
+# 5. Test gRPC connectivity to SpiceDB:
+#
+#    # List available gRPC services
+#    grpcurl -plaintext spicedb.spicedb.svc.cluster.local:50051 list
+#
+#    # Expected services:
+#    # authzed.api.v1.ExperimentalService
+#    # authzed.api.v1.PermissionsService
+#    # authzed.api.v1.SchemaService
+#    # authzed.api.v1.WatchService
+#    # grpc.reflection.v1.ServerReflection
+#    # grpc.reflection.v1alpha.ServerReflection
+#
+# 6. Test permission check (requires preshared key from environment):
+#
+#    # Check permission (returns HAS_PERMISSION or NO_PERMISSION)
+#    grpcurl -plaintext \
+#      -H "authorization: Bearer $SPICEDB_TOKEN" \
+#      -d '{
+#        "resource": {"objectType": "document", "objectId": "readme"},
+#        "permission": "view",
+#        "subject": {"object": {"objectType": "user", "objectId": "alice"}}
+#      }' \
+#      spicedb.spicedb.svc.cluster.local:50051 \
+#      authzed.api.v1.PermissionsService/CheckPermission
+#
+# 7. Read schema:
+#
+#    grpcurl -plaintext \
+#      -H "authorization: Bearer $SPICEDB_TOKEN" \
+#      spicedb.spicedb.svc.cluster.local:50051 \
+#      authzed.api.v1.SchemaService/ReadSchema
+#
+# =============================================================================
+# ENVIRONMENT VARIABLES
+# =============================================================================
+#
+# The pod has these environment variables pre-configured:
+#
+# - SPICEDB_ENDPOINT: SpiceDB service DNS name and port
+# - SPICEDB_TOKEN: Preshared key from spicedb-config secret
+#
+# =============================================================================
+# CLEANUP
+# =============================================================================
+#
+# When done testing, delete the pod:
+#
+#    kubectl delete pod spicedb-test-client -n spicedb
+#
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spicedb-test-client
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/name: spicedb-test-client
+    app.kubernetes.io/component: verification
+    app.kubernetes.io/part-of: spicedb
+spec:
+  # Run indefinitely for interactive testing
+  containers:
+    - name: test-client
+      image: alpine:latest
+      command: ['sleep', 'infinity']
+      env:
+        # SpiceDB endpoint within the cluster
+        - name: SPICEDB_ENDPOINT
+          value: "spicedb.spicedb.svc.cluster.local:50051"
+        # Preshared key from SpiceDB config secret
+        - name: SPICEDB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: spicedb-config
+              key: preshared_key
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        readOnlyRootFilesystem: false  # Allow package installation
+
+  # Don't restart the pod - it's for manual testing
+  restartPolicy: Never
+
+  # Tolerate running on any node
+  tolerations:
+    - operator: Exists

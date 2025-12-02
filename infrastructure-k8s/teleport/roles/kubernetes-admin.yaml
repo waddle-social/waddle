@@ -1,0 +1,66 @@
+# Teleport Role: Kubernetes Admin
+#
+# This role grants full administrative access to Kubernetes clusters
+# labeled with env=production. Use with caution - this role has
+# system:masters privileges.
+#
+# Usage:
+#   sudo tctl create -f kubernetes-admin.yaml
+#
+# Assign to user:
+#   sudo tctl users update <username> --set-roles=kubernetes-admin,access
+
+kind: role
+version: v7
+metadata:
+  name: kubernetes-admin
+  description: Full administrative access to production Kubernetes clusters
+spec:
+  allow:
+    # Access to Kubernetes clusters with label env=production
+    kubernetes_labels:
+      env: production
+
+    # Kubernetes groups to inject (maps to K8s RBAC)
+    # system:masters grants full cluster admin privileges
+    kubernetes_groups:
+      - system:masters
+
+    # Kubernetes users to inject
+    kubernetes_users:
+      - "{{internal.kubernetes_users}}"
+
+    # Kubernetes resources this role can access
+    kubernetes_resources:
+      - kind: "*"
+        namespace: "*"
+        name: "*"
+        verbs: ["*"]
+
+    # Session recording configuration
+    record_session:
+      desktop: true
+      default: best_effort
+
+    # Maximum session duration (12 hours)
+    max_session_ttl: 12h
+
+  # Deny rules (empty - no explicit denials for admin)
+  deny: {}
+
+  # Role options
+  options:
+    # Require MFA for each session (security best practice)
+    require_session_mfa: true
+
+    # Allow SSH agent forwarding (for kubectl exec)
+    forward_agent: true
+
+    # Allow port forwarding (for kubectl port-forward)
+    port_forwarding: true
+
+    # Desktop clipboard access
+    desktop_clipboard: true
+
+    # Don't create host users
+    create_host_user: false

@@ -1,0 +1,105 @@
+# =============================================================================
+# CILIUM CNI ALERTS
+# =============================================================================
+#
+# PrometheusRule for Cilium CNI alerts:
+# - Agent health (down, not ready)
+# - Endpoint health (not ready)
+# - Policy enforcement (high denial rate)
+# - BPF map pressure
+#
+# =============================================================================
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cilium-alerts
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability
+    app.kubernetes.io/component: alerting
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: cilium.rules
+      rules:
+        - alert: CiliumAgentDown
+          expr: up{job="cilium-agent"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cilium agent is down on {{ $labels.instance }}"
+            description: "Cilium agent on node {{ $labels.instance }} has been unreachable for more than 5 minutes. Network policies may not be enforced."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/node-down.md"
+
+        - alert: CiliumAgentNotReady
+          expr: cilium_agent_api_process_time_seconds_count == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cilium agent not ready on {{ $labels.instance }}"
+            description: "Cilium agent on {{ $labels.instance }} is running but not processing requests."
+
+        - alert: CiliumEndpointNotReady
+          expr: |
+            sum by (namespace, pod) (cilium_endpoint_state{state!="ready"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Cilium endpoint not ready in {{ $labels.namespace }}"
+            description: "{{ $value }} Cilium endpoints in namespace {{ $labels.namespace }} are not in ready state."
+
+        - alert: CiliumHighPolicyDenialRate
+          expr: |
+            sum(rate(cilium_drop_count_total{reason=~"Policy denied.*"}[5m])) > 100
+          for: 5m
+          labels:
+            severity: info
+          annotations:
+            summary: "High NetworkPolicy denial rate"
+            description: "More than 100 packets/second are being denied by network policies. This may indicate misconfiguration or an attack."
+
+        - alert: CiliumBPFMapPressure
+          expr: |
+            (
+              cilium_bpf_map_pressure > 0.8
+            )
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Cilium BPF map pressure high on {{ $labels.instance }}"
+            description: "BPF map {{ $labels.map_name }} on {{ $labels.instance }} is at {{ $value | printf \"%.1f\" }}% capacity."
+
+        - alert: CiliumOperatorDown
+          expr: up{job="cilium-operator"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cilium operator is down"
+            description: "Cilium operator has been unreachable for more than 5 minutes. Cluster-wide network operations may be affected."
+
+        - alert: CiliumIPAMExhaustion
+          expr: |
+            cilium_ipam_available < 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Cilium IPAM pool running low"
+            description: "Only {{ $value }} IP addresses available in Cilium IPAM pool. New pods may fail to get IP addresses."
+
+        - alert: CiliumConnectivityTestFailure
+          expr: |
+            cilium_connectivity_test_failed > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cilium connectivity test failing"
+            description: "Cilium connectivity tests are failing. Network connectivity between pods may be impaired."

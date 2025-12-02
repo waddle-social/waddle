@@ -1,0 +1,72 @@
+# cert-manager Kustomization
+# ==========================
+#
+# Applies the cert-manager configuration from infrastructure-k8s/cert-manager/.
+# This Kustomization generates the ConfigMap with Helm values
+# that the HelmRelease references.
+#
+# Note: The actual cert-manager deployment is handled by the HelmRelease.
+# This Kustomization ensures the values ConfigMap is created.
+#
+# SECURITY NOTE: The Cloudflare API token Secret is NOT managed by Flux.
+# It must be created manually before deploying cert-manager:
+#
+#   kubectl create namespace cert-manager
+#   kubectl create secret generic cloudflare-api-token \
+#     --from-literal=api-token=<your-cloudflare-api-token> \
+#     -n cert-manager
+#
+# See infrastructure-k8s/cert-manager/README.md for detailed instructions.
+#
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cert-manager
+  namespace: flux-system
+spec:
+  # Reference the flux-system GitRepository
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+
+  # Path to cert-manager configuration in the repository
+  path: ./infrastructure-k8s/cert-manager
+
+  # Reconcile hourly (TLS is stable, infrequent changes)
+  interval: 1h
+
+  # IMPORTANT: Do NOT prune cert-manager resources - could break TLS certificates
+  prune: false
+
+  # Wait for resources to be ready
+  wait: true
+
+  # Timeout for deployment
+  timeout: 10m
+
+  # Dependencies
+  dependsOn:
+    # Cilium must be ready for networking
+    - name: cilium
+
+  # Target namespace for generated resources
+  targetNamespace: cert-manager
+
+  # Health checks for cert-manager components
+  healthChecks:
+    # cert-manager controller Deployment
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: cert-manager
+      namespace: cert-manager
+    # cert-manager webhook Deployment
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: cert-manager-webhook
+      namespace: cert-manager
+    # cert-manager cainjector Deployment
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: cert-manager-cainjector
+      namespace: cert-manager

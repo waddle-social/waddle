@@ -1,0 +1,108 @@
+# Production Gateway Resource
+# ===========================
+#
+# Gateway API Gateway resource for HTTP/HTTPS ingress.
+# Uses Cilium GatewayClass (enabled in Phase 6) for traffic handling.
+#
+# TLS Configuration:
+# - cert-manager annotation triggers Certificate creation
+# - ClusterIssuer 'letsencrypt-production' handles DNS01 challenges
+# - Certificate stored in Secret 'gateway-tls'
+#
+# Prerequisites:
+# - Cilium with Gateway API enabled (Phase 6)
+# - cert-manager with ClusterIssuers (Phase 9)
+# - Cloudflare DNS A record pointing to LoadBalancer IP
+#
+# IMPORTANT: Update hostnames before deployment!
+# Replace 'waddle.social' with your actual domain.
+#
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway
+  namespace: gateway-ingress
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: gateway-api
+  annotations:
+    # cert-manager integration: triggers Certificate creation
+    # ClusterIssuer must exist (created in Phase 9)
+    cert-manager.io/cluster-issuer: letsencrypt-production
+spec:
+  # Cilium GatewayClass (created by Cilium Helm chart)
+  gatewayClassName: cilium
+
+  listeners:
+    # HTTP Listener (port 80)
+    # -----------------------
+    # Accepts HTTP traffic for redirect to HTTPS
+    # In production, configure HTTPRoute to redirect HTTP->HTTPS
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: "*.waddle.social"
+      allowedRoutes:
+        namespaces:
+          from: All
+        kinds:
+          - kind: HTTPRoute
+
+    # HTTPS Listener (port 443)
+    # -------------------------
+    # Terminates TLS using certificate from cert-manager
+    # Certificate auto-provisioned via annotation above
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.waddle.social"
+      tls:
+        # Terminate: Gateway terminates TLS, forwards plaintext to backends
+        # Passthrough: Gateway passes TLS directly to backend (not recommended)
+        mode: Terminate
+        certificateRefs:
+          # Secret created by cert-manager based on Certificate resource
+          # or auto-created via Gateway annotation
+          - name: gateway-tls
+            kind: Secret
+      allowedRoutes:
+        namespaces:
+          # All: Routes from any namespace can attach (requires ReferenceGrant)
+          # Same: Only routes from same namespace can attach
+          # Selector: Routes from namespaces matching selector can attach
+          from: All
+        kinds:
+          - kind: HTTPRoute
+
+# =============================================================================
+# CONFIGURATION NOTES
+# =============================================================================
+#
+# 1. Hostname Configuration:
+#    - Update '*.waddle.social' to your actual domain
+#    - Use wildcard for subdomain routing (e.g., *.waddle.social)
+#    - Or specify exact hostnames (e.g., www.waddle.social)
+#
+# 2. TLS Certificate:
+#    - cert-manager annotation auto-creates Certificate resource
+#    - Certificate Secret name: 'gateway-tls'
+#    - For manual control, use separate Certificate resource (certificate.yaml)
+#
+# 3. Cross-Namespace Routing:
+#    - 'allowedRoutes.namespaces.from: All' enables cross-namespace HTTPRoutes
+#    - Requires ReferenceGrant in target namespace for security
+#    - Change to 'Same' for single-namespace deployments
+#
+# 4. LoadBalancer IP:
+#    - Cilium allocates LoadBalancer IP via IPAM
+#    - Get IP: kubectl get gateway gateway -n gateway-ingress -o jsonpath='{.status.addresses[0].value}'
+#    - Create DNS A record pointing to this IP
+#
+# 5. Multiple Listeners:
+#    - Add additional listeners for other ports/protocols
+#    - Each listener can have its own TLS certificate
+#    - Example: TCP listener for database access
+#
+# =============================================================================

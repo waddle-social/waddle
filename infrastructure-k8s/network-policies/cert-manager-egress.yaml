@@ -1,0 +1,118 @@
+# =============================================================================
+# CERT-MANAGER NAMESPACE NETWORK POLICY
+# =============================================================================
+#
+# Allow traffic for cert-manager certificate management:
+# - Cloudflare API (HTTPS/443) for DNS01 challenges
+# - Let's Encrypt ACME servers (HTTPS/443)
+# - Kubernetes API for certificate management
+# - Metrics scraping from observability
+#
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cert-manager
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cert-manager
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Webhook traffic from Kubernetes API server
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 10250  # Webhook
+    
+    # Metrics scraping from observability
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 9402  # Prometheus metrics
+
+  egress:
+    # Cloudflare API for DNS01 challenges
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    # Kubernetes API server
+    # Using ipBlock to correctly target the API server ClusterIP
+    # Default service CIDR typically assigns 10.96.0.1 to kubernetes.default.svc
+    # Adjust the CIDR if your cluster uses a different service IP range
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+
+---
+# cert-manager webhook
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cert-manager-webhook
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: webhook
+  policyTypes:
+    - Ingress
+  ingress:
+    # Webhook traffic from API server
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 10250
+
+---
+# cert-manager cainjector
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cert-manager-cainjector
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cainjector
+  policyTypes:
+    - Egress
+  egress:
+    # Kubernetes API server for injecting CA bundles
+    # Using ipBlock to correctly target the API server ClusterIP
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443

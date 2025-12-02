@@ -1,0 +1,123 @@
+# CloudNativePG Cluster for SpiceDB Datastore
+# ============================================
+#
+# This manifest creates a dedicated PostgreSQL cluster for SpiceDB's datastore
+# using the CloudNativePG operator (Phase 11). SpiceDB stores all relationship
+# data, schema definitions, and transaction history in PostgreSQL.
+#
+# PREREQUISITE:
+#   - CloudNativePG operator must be installed (Phase 11)
+#   - Proxmox CSI StorageClass 'proxmox-csi' must be available (Phase 7)
+#
+# Usage:
+#   1. Ensure CloudNativePG operator is ready:
+#      kubectl get pods -n cnpg-system
+#
+#   2. Apply this manifest:
+#      kubectl apply -f postgres-cluster.yaml
+#
+#   3. Watch cluster creation:
+#      kubectl get cluster -n spicedb -w
+#
+#   4. Wait for cluster to be ready:
+#      kubectl wait --for=condition=Ready cluster/spicedb-postgres -n spicedb --timeout=300s
+#
+#   5. Check pods (should see 3 pods: 1 primary + 2 replicas):
+#      kubectl get pods -n spicedb -l postgresql=spicedb-postgres
+#
+#   6. Get application user password (for SpiceDB connection):
+#      kubectl get secret spicedb-postgres-app -n spicedb -o jsonpath='{.data.password}' | base64 -d
+#
+# Expected Results:
+#   - Cluster status: Ready
+#   - 3 pods running (spicedb-postgres-1, -2, -3)
+#   - 3 PVCs bound (20Gi each, using proxmox-csi)
+#   - 3 Services created (spicedb-postgres-rw, -ro, -r)
+#   - 2 Secrets created (superuser, app)
+#
+# Sizing Rationale:
+#   - 20Gi storage: Sufficient for authorization data (relationships and schema)
+#   - 3 instances: HA configuration with automatic failover
+#   - 512MB shared_buffers: Appropriate for authorization workload
+#   - 100 max_connections: SpiceDB uses connection pooling internally
+#
+# =============================================================================
+
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: spicedb-postgres
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/name: spicedb-postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: spicedb
+    app.kubernetes.io/instance: production
+spec:
+  # Number of PostgreSQL instances (1 primary + 2 replicas for HA)
+  instances: 3
+
+  # PostgreSQL image configuration
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+
+  # Storage configuration using Proxmox CSI (Phase 7)
+  storage:
+    # Use the Proxmox CSI StorageClass
+    storageClass: proxmox-csi
+    # 20Gi is sufficient for SpiceDB authorization data
+    # SpiceDB stores relationships and schema, not application data
+    size: 20Gi
+
+  # Bootstrap configuration - initialize new database for SpiceDB
+  bootstrap:
+    initdb:
+      database: spicedb
+      owner: spicedb
+      # UTF8 encoding is required for SpiceDB
+      encoding: UTF8
+
+  # Resource limits (conservative for authorization workload)
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+  # PostgreSQL configuration parameters tuned for SpiceDB workload
+  # SpiceDB performs many small reads with occasional writes
+  postgresql:
+    parameters:
+      # Shared buffers (25% of memory limit)
+      shared_buffers: "512MB"
+      # Effective cache size (75% of memory limit)
+      effective_cache_size: "1536MB"
+      # Work memory for sorts/hashes
+      work_mem: "32MB"
+      # Max connections (SpiceDB uses pooling internally)
+      max_connections: "100"
+      # Log slow queries (> 1 second) for debugging
+      log_min_duration_statement: "1000"
+      # Maintenance work memory
+      maintenance_work_mem: "64MB"
+
+  # Monitoring configuration (for Prometheus integration in Phase 13)
+  monitoring:
+    # Enable PodMonitor for Prometheus Operator
+    enablePodMonitor: true
+
+  # Affinity rules for pod distribution across nodes
+  affinity:
+    # Spread pods across different nodes for HA
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+
+  # Primary update strategy - unsupervised allows automatic switchover
+  primaryUpdateStrategy: unsupervised
+
+  # Synchronous replication configuration
+  # At least 1 replica must acknowledge writes for durability
+  minSyncReplicas: 1
+  maxSyncReplicas: 2

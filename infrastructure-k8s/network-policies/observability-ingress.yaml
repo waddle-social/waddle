@@ -1,0 +1,144 @@
+# =============================================================================
+# OBSERVABILITY NAMESPACE NETWORK POLICY
+# =============================================================================
+#
+# Allow traffic for observability stack components:
+# - Grafana: Dashboard access (port 3000)
+# - Loki: Log ingestion (port 3100)
+# - Tempo: Trace ingestion (ports 4317, 4318)
+# - Mimir: Metric ingestion (port 9009)
+# - Prometheus: Metric scraping (port 9090)
+#
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-ingress
+  namespace: observability
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Grafana - dashboard access from any namespace
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3000
+    
+    # Loki - log ingestion from any namespace (OpenTelemetry Collector)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3100
+    
+    # Tempo - trace ingestion (OTLP gRPC and HTTP)
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 4317  # OTLP gRPC
+        - protocol: TCP
+          port: 4318  # OTLP HTTP
+        - protocol: TCP
+          port: 3200  # Tempo HTTP API
+    
+    # Mimir - metric ingestion via remote write
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9009
+        - protocol: TCP
+          port: 8080  # Mimir HTTP API
+    
+    # Prometheus - allow scraping and federation
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9090
+
+  egress:
+    # Allow observability components to scrape metrics from all namespaces
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9090   # Prometheus metrics
+        - protocol: TCP
+          port: 9100   # Node exporter
+        - protocol: TCP
+          port: 9187   # PostgreSQL exporter
+        - protocol: TCP
+          port: 9402   # cert-manager metrics
+        - protocol: TCP
+          port: 9962   # Cilium agent metrics
+        - protocol: TCP
+          port: 9963   # Cilium operator metrics
+        - protocol: TCP
+          port: 9964   # Cilium Hubble metrics
+    
+    # Allow egress to Kubernetes API for service discovery
+    # Using ipBlock to correctly target the API server ClusterIP
+    # Default service CIDR typically assigns 10.96.0.1 to kubernetes.default.svc
+    # Adjust the CIDR if your cluster uses a different service IP range
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+
+---
+# Allow OpenTelemetry Collector DaemonSet to reach backends
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otel-collector-egress
+  namespace: observability
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opentelemetry-collector
+  policyTypes:
+    - Egress
+  egress:
+    # To Loki for logs
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - protocol: TCP
+          port: 3100
+    
+    # To Tempo for traces
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
+    
+    # To Mimir for metrics
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mimir
+      ports:
+        - protocol: TCP
+          port: 9009

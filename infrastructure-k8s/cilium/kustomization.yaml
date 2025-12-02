@@ -1,0 +1,104 @@
+# Kustomization for Cilium CNI Deployment
+# ========================================
+#
+# This Kustomization prepares Cilium for Flux GitOps deployment in Phase 7.
+# It defines the resource ordering and namespace configuration.
+#
+# IMPORTANT: Gateway API CRDs must be installed BEFORE Cilium deployment.
+# Flux will handle the dependency ordering via dependsOn in HelmRelease.
+#
+# =============================================================================
+# MANUAL INSTALLATION (PHASE 6)
+# =============================================================================
+#
+# For manual installation, follow these steps in order:
+#
+# 1. Install Gateway API CRDs:
+#    kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/experimental-install.yaml
+#
+# 2. Install Cilium via Helm:
+#    helm repo add cilium https://helm.cilium.io/
+#    helm repo update
+#    helm install cilium cilium/cilium \
+#      --version 1.18.4 \
+#      --namespace kube-system \
+#      --values helm-values.yaml
+#
+# =============================================================================
+# FLUX DEPLOYMENT (PHASE 7)
+# =============================================================================
+#
+# Flux will create a HelmRelease resource referencing helm-values.yaml.
+# The HelmRelease will be placed in clusters/production/infrastructure/cilium.yaml
+#
+# Example Flux HelmRelease (created in Phase 7):
+#
+# apiVersion: helm.toolkit.fluxcd.io/v2
+# kind: HelmRelease
+# metadata:
+#   name: cilium
+#   namespace: kube-system
+# spec:
+#   interval: 1h
+#   chart:
+#     spec:
+#       chart: cilium
+#       version: 1.18.4
+#       sourceRef:
+#         kind: HelmRepository
+#         name: cilium
+#         namespace: flux-system
+#   valuesFrom:
+#     - kind: ConfigMap
+#       name: cilium-values
+#       valuesKey: values.yaml
+#
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Cilium runs in the kube-system namespace
+namespace: kube-system
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/part-of: cilium
+  app.kubernetes.io/managed-by: kustomize
+
+# Resources in this directory
+# Note: Helm values are not a Kubernetes resource, so we include
+# a ConfigMap wrapper for Flux valuesFrom reference
+resources: []
+
+# ConfigMap generators for Helm values
+# This creates a ConfigMap from helm-values.yaml for Flux to reference
+configMapGenerator:
+  - name: cilium-values
+    files:
+      - values.yaml=helm-values.yaml
+    options:
+      disableNameSuffixHash: true
+
+# Namespace will be created by Helm (kube-system already exists)
+# No namespace resource needed
+
+# =============================================================================
+# DEPENDENCY NOTES
+# =============================================================================
+#
+# Resource ordering for Cilium deployment:
+#
+# 1. Gateway API CRDs (prerequisite)
+#    - Must exist before Cilium Helm release
+#    - Managed separately via Flux Kustomization or direct apply
+#
+# 2. Cilium Helm Release (this configuration)
+#    - Depends on Gateway API CRDs
+#    - Creates DaemonSet, Operator, and supporting resources in kube-system
+#
+# 3. Verification resources (optional)
+#    - Test pods and Gateway resources in verification/ directory
+#    - Apply after Cilium is fully operational
+#
+# =============================================================================

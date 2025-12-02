@@ -1,0 +1,22 @@
+# ServiceMonitors and PodMonitors for existing infrastructure components
+# These enable automatic metric discovery for Cilium, cert-manager, CloudNativePG
+#
+# Prerequisites:
+# - Prometheus Operator CRDs installed (prometheus-operator HelmRelease)
+# - Components exposing metrics endpoints
+#
+# Add more monitors as components are instrumented:
+# - Gateway API controller
+# - Proxmox CSI driver
+# - SpiceDB (if metrics enabled)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - cilium-servicemonitor.yaml
+  - cert-manager-servicemonitor.yaml
+  - cnpg-podmonitor.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: observability
+  app.kubernetes.io/managed-by: kustomize

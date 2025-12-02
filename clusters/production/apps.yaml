@@ -1,0 +1,52 @@
+# Root Kustomization for Applications
+# ====================================
+#
+# This Flux Kustomization watches the apps/ directory and
+# reconciles all application resources (SpiceDB, observability, etc.).
+#
+# IMPORTANT: This Kustomization depends on infrastructure being ready.
+# Applications require networking, storage, and other infrastructure
+# components to be operational before deployment.
+#
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  # Reference the flux-system GitRepository (created by bootstrap)
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+
+  # Path to apps Kustomizations within the repository
+  path: ./clusters/production/apps
+
+  # Reconciliation interval
+  interval: 10m
+
+  # Remove resources deleted from Git
+  prune: true
+
+  # Wait for resources to be ready before marking Kustomization as ready
+  wait: true
+
+  # Timeout for resource reconciliation
+  timeout: 5m
+
+  # Retry configuration for transient failures
+  retryInterval: 1m
+
+  # CRITICAL: Wait for infrastructure to be ready before deploying apps
+  dependsOn:
+    - name: infrastructure
+
+  # Force apply changes (disabled for apps - safer rollouts)
+  force: false
+
+  # Substitute variables in manifests (useful for app configuration)
+  # postBuild:
+  #   substitute:
+  #     CLUSTER_NAME: waddle-cluster
+  #     DOMAIN: waddle.social

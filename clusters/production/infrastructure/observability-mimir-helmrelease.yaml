@@ -1,0 +1,35 @@
+# Flux HelmRelease for Mimir
+# Metrics storage with PromQL query support (Prometheus-compatible)
+# Deploys after Proxmox CSI for storage provisioning
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: mimir
+  namespace: observability
+spec:
+  chart:
+    spec:
+      chart: mimir-distributed
+      version: "5.x"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+  interval: 1h
+  valuesFrom:
+    - kind: ConfigMap
+      name: mimir-values
+      valuesKey: values.yaml
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  timeout: 10m
+  dependsOn:
+    - name: proxmox-csi
+      namespace: csi-proxmox

@@ -1,0 +1,38 @@
+# =============================================================================
+# NETWORK POLICIES KUSTOMIZATION
+# =============================================================================
+#
+# Phase 14: Network Segmentation with Zero-Trust Networking
+#
+# This kustomization deploys NetworkPolicy resources to implement
+# default-deny networking with explicit allow rules per component.
+#
+# Prerequisites:
+# - Phase 6: Cilium CNI operational (enforces NetworkPolicies)
+#
+# Policy Application Order:
+# 1. default-deny-all.yaml - Establish zero-trust baseline
+# 2. allow-dns.yaml - Enable DNS resolution
+# 3. Component-specific policies - Allow required traffic
+#
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+commonLabels:
+  app.kubernetes.io/part-of: network-policies
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+  # Default deny policy (applied first)
+  - default-deny-all.yaml
+  
+  # DNS allow (required for all namespaces)
+  - allow-dns.yaml
+  
+  # Component-specific allow rules
+  - observability-ingress.yaml
+  - spicedb-ingress.yaml
+  - cnpg-ingress.yaml
+  - cert-manager-egress.yaml
+  - gateway-ingress.yaml

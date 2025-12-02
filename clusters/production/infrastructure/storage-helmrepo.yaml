@@ -1,0 +1,21 @@
+# Proxmox CSI Helm Repository
+# ===========================
+#
+# Defines the Helm repository source for Proxmox CSI plugin chart.
+# Referenced by the proxmox-csi HelmRelease.
+#
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: proxmox-csi
+  namespace: flux-system
+spec:
+  # Official Proxmox CSI plugin Helm repository
+  url: https://sergelogvinov.github.io/proxmox-csi-plugin
+
+  # Check for chart updates hourly
+  interval: 1h
+
+  # Timeout for fetching repository index
+  timeout: 1m

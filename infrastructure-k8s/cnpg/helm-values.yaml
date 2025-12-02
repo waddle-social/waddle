@@ -1,0 +1,277 @@
+# CloudNativePG Helm Values for Talos Kubernetes
+# This file configures the CloudNativePG operator v1.25.0 for automated PostgreSQL
+# cluster management on a Talos-based Kubernetes cluster.
+#
+# Usage:
+#   helm repo add cnpg https://cloudnative-pg.github.io/charts
+#   helm repo update
+#   helm install cloudnative-pg cnpg/cloudnative-pg \
+#     --version 0.22.1 \
+#     --namespace cnpg-system \
+#     --create-namespace \
+#     --values helm-values.yaml
+#
+# Prerequisites:
+#   1. Cilium CNI operational (Phase 6)
+#   2. Proxmox CSI driver installed (Phase 7)
+#   3. StorageClass 'proxmox-csi' available
+#
+# Note: Flux will automate this deployment in Phase 11.
+#
+# =============================================================================
+# ENVIRONMENT VARIABLE REFERENCE
+# =============================================================================
+# CloudNativePG operator does not require environment variables for deployment.
+# Configuration for individual PostgreSQL clusters is defined in Cluster resources.
+#
+# PostgreSQL clusters will use:
+#   - StorageClass: proxmox-csi (from Phase 7)
+#   - Networking: Cilium CNI (from Phase 6)
+#   - TLS: cert-manager certificates (Phase 9) - optional
+#
+# Backup configuration (optional, Phase 11+):
+#   - S3-compatible object store (MinIO, AWS S3, etc.)
+#   - Credentials stored in Kubernetes Secret (not in values)
+#
+# See infrastructure-k8s/cnpg/README.md for PostgreSQL cluster configuration.
+# =============================================================================
+
+# =============================================================================
+# REPLICA COUNT
+# =============================================================================
+# Number of operator replicas. Single replica is sufficient for small clusters.
+# The operator is stateless and can be restarted without affecting running
+# PostgreSQL clusters. For HA, increase to 2-3 replicas.
+replicaCount: 1
+
+# =============================================================================
+# CRD INSTALLATION
+# =============================================================================
+# Install CloudNativePG CRDs via Helm. This is the recommended approach
+# for single-namespace deployments.
+#
+# CRDs installed:
+#   - Cluster (postgresql.cnpg.io/v1) - PostgreSQL cluster definition
+#   - Pooler (postgresql.cnpg.io/v1) - PgBouncer connection pooler
+#   - Backup (postgresql.cnpg.io/v1) - On-demand backup
+#   - ScheduledBackup (postgresql.cnpg.io/v1) - Scheduled backups
+#   - ClusterImageCatalog (postgresql.cnpg.io/v1) - Image catalog
+#   - ImageCatalog (postgresql.cnpg.io/v1) - Namespace-scoped image catalog
+crds:
+  create: true
+
+# =============================================================================
+# IMAGE CONFIGURATION
+# =============================================================================
+# CloudNativePG operator image settings.
+# Default images are pulled from ghcr.io/cloudnative-pg/cloudnative-pg
+image:
+  repository: ghcr.io/cloudnative-pg/cloudnative-pg
+  # Defaults to chart appVersion if not specified
+  # tag: ""
+  pullPolicy: IfNotPresent
+
+# =============================================================================
+# OPERATOR CONFIGURATION
+# =============================================================================
+# Operator behavior configuration
+
+# Namespaces to watch for Cluster resources
+# Empty list means watch all namespaces (default)
+# watchNamespaces: []
+
+# Log level: debug, info, warning, error
+# Default is info
+config:
+  logLevel: info
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+# Conservative resources for operator (not PostgreSQL clusters).
+# PostgreSQL cluster resources are configured in each Cluster resource.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# =============================================================================
+# CONTROLLER SCHEDULING
+# =============================================================================
+# Prefer scheduling on control plane nodes for reliability.
+# The operator is lightweight and can share control plane resources.
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+# Tolerate control plane taints (Talos compatibility)
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+# =============================================================================
+# SECURITY CONTEXT
+# =============================================================================
+# Run as non-root user with minimal privileges.
+# CloudNativePG operator follows security best practices.
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+# =============================================================================
+# SERVICE ACCOUNT
+# =============================================================================
+serviceAccount:
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set, a name is generated using the fullname template
+  name: ""
+
+# =============================================================================
+# MONITORING CONFIGURATION
+# =============================================================================
+# Prometheus metrics are exposed on port 9187 by default.
+# For ServiceMonitor, enable Prometheus Operator (Phase 13).
+#
+# Individual PostgreSQL clusters expose metrics via enablePodMonitor in
+# Cluster spec.monitoring configuration.
+
+monitoring:
+  # Create PodMonitor for operator metrics
+  podMonitorEnabled: false
+  # Grafana dashboard ConfigMap
+  grafanaDashboard:
+    create: false
+
+# ServiceMonitor for Prometheus Operator (Phase 13)
+# Uncomment when Prometheus Operator is installed
+# serviceMonitor:
+#   enabled: true
+#   labels:
+#     release: prometheus
+
+# =============================================================================
+# PRIORITY CLASS
+# =============================================================================
+# Use system-cluster-critical priority to ensure operator availability.
+# This prevents operator eviction during resource pressure.
+priorityClassName: system-cluster-critical
+
+# =============================================================================
+# WEBHOOK CONFIGURATION
+# =============================================================================
+# Admission webhook validates and mutates CloudNativePG resources.
+# Port 9443 is the default webhook server port.
+
+webhook:
+  port: 9443
+  mutating:
+    create: true
+    failurePolicy: Fail
+  validating:
+    create: true
+    failurePolicy: Fail
+
+# =============================================================================
+# ADDITIONAL SETTINGS
+# =============================================================================
+
+# Pod labels and annotations
+podLabels: {}
+podAnnotations: {}
+
+# Affinity rules (in addition to nodeSelector)
+affinity: {}
+
+# =============================================================================
+# NOTES
+# =============================================================================
+#
+# After installation, verify the CloudNativePG operator is working:
+#
+#   1. Check operator pod:
+#      kubectl get pods -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg
+#
+#   2. Check CRDs installed:
+#      kubectl get crds | grep cnpg
+#
+#   3. Check operator logs:
+#      kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg
+#
+#   4. Create a test PostgreSQL cluster:
+#      kubectl apply -f verification/sample-cluster.yaml
+#
+#   5. Check cluster status:
+#      kubectl get cluster -n cnpg-test
+#      kubectl get pods -n cnpg-test
+#
+# For troubleshooting:
+#   kubectl describe cluster <name> -n <namespace>
+#   kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg
+#
+# See infrastructure-k8s/cnpg/README.md for:
+#   - PostgreSQL cluster configuration examples
+#   - Backup and recovery setup
+#   - Monitoring configuration
+#   - Troubleshooting guide
+#
+# =============================================================================
+# BACKUP CONFIGURATION (Phase 11+)
+# =============================================================================
+#
+# CloudNativePG supports backup to S3-compatible object stores using Barman Cloud.
+# Backup configuration is specified in each Cluster resource, not in operator values.
+#
+# Example Cluster backup configuration:
+#
+#   spec:
+#     backup:
+#       barmanObjectStore:
+#         destinationPath: s3://bucket-name/path
+#         s3Credentials:
+#           accessKeyId:
+#             name: s3-creds
+#             key: ACCESS_KEY_ID
+#           secretAccessKey:
+#             name: s3-creds
+#             key: ACCESS_SECRET_KEY
+#         wal:
+#           compression: gzip
+#         data:
+#           compression: gzip
+#       retentionPolicy: "30d"
+#
+# Create S3 credentials secret:
+#   kubectl create secret generic s3-creds \
+#     --from-literal=ACCESS_KEY_ID=<key> \
+#     --from-literal=ACCESS_SECRET_KEY=<secret> \
+#     -n <namespace>
+#
+# For MinIO (local S3-compatible storage):
+#   - Install MinIO operator or standalone deployment
+#   - Configure endpoint URL in Cluster barmanObjectStore
+#   - Use MinIO access credentials
+#
+# See CloudNativePG documentation for full backup/recovery guide:
+# https://cloudnative-pg.io/documentation/current/backup/
+#
+# =============================================================================

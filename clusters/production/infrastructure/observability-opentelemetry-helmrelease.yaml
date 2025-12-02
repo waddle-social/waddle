@@ -1,0 +1,39 @@
+# Flux HelmRelease for OpenTelemetry Collector
+# Unified telemetry collection (logs, metrics, traces)
+# Deploys after LGTM stack is ready (exports to Loki/Tempo/Mimir)
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  chart:
+    spec:
+      chart: opentelemetry-collector
+      version: "0.x"
+      sourceRef:
+        kind: HelmRepository
+        name: opentelemetry
+        namespace: flux-system
+  interval: 1h
+  valuesFrom:
+    - kind: ConfigMap
+      name: otel-collector-values
+      valuesKey: values.yaml
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  timeout: 10m
+  dependsOn:
+    - name: loki
+      namespace: observability
+    - name: tempo
+      namespace: observability
+    - name: mimir
+      namespace: observability

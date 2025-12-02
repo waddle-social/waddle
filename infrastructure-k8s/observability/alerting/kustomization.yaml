@@ -1,0 +1,30 @@
+# =============================================================================
+# ALERTING KUSTOMIZATION
+# =============================================================================
+#
+# Phase 15: Prometheus Alerting Rules
+#
+# This kustomization deploys PrometheusRule resources for alerting.
+#
+# Prerequisites:
+# - Phase 13: Prometheus Operator deployed (PrometheusRule CRD)
+# - Alertmanager deployed and configured
+#
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: observability
+
+commonLabels:
+  app.kubernetes.io/part-of: observability
+  app.kubernetes.io/component: alerting
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+  # PrometheusRule resources
+  - infrastructure-alerts.yaml
+  - cilium-alerts.yaml
+  - cert-manager-alerts.yaml
+  - cnpg-alerts.yaml
+  - flux-alerts.yaml

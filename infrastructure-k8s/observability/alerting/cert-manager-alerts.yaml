@@ -1,0 +1,106 @@
+# =============================================================================
+# CERT-MANAGER ALERTS
+# =============================================================================
+#
+# PrometheusRule for cert-manager certificate lifecycle alerts:
+# - Certificate expiration (7 days, 3 days warning)
+# - Certificate not ready
+# - ACME challenge failures
+# - Certificate renewal failures
+#
+# =============================================================================
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cert-manager-alerts
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability
+    app.kubernetes.io/component: alerting
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: cert-manager.rules
+      rules:
+        - alert: CertificateExpiringSoon7Days
+          expr: |
+            (
+              certmanager_certificate_expiration_timestamp_seconds - time()
+            ) / 86400 < 7
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expiring soon"
+            description: "Certificate {{ $labels.namespace }}/{{ $labels.name }} will expire in {{ $value | printf \"%.1f\" }} days."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/certificate-expiring.md"
+
+        - alert: CertificateExpiringSoon3Days
+          expr: |
+            (
+              certmanager_certificate_expiration_timestamp_seconds - time()
+            ) / 86400 < 3
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expiring very soon"
+            description: "Certificate {{ $labels.namespace }}/{{ $labels.name }} will expire in {{ $value | printf \"%.1f\" }} days. Immediate action required."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/certificate-expiring.md"
+
+        - alert: CertificateNotReady
+          expr: |
+            certmanager_certificate_ready_status{condition="False"} == 1
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} not ready"
+            description: "Certificate {{ $labels.namespace }}/{{ $labels.name }} has been in not-ready state for more than 1 hour."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/certificate-expiring.md"
+
+        - alert: CertificateRenewalFailed
+          expr: |
+            increase(certmanager_certificate_renewal_timestamp_seconds[1h]) == 0
+            and
+            (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 7
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} renewal failed"
+            description: "Certificate {{ $labels.namespace }}/{{ $labels.name }} has not renewed and expires in less than 7 days."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/certificate-expiring.md"
+
+        - alert: ACMEChallengesFailing
+          expr: |
+            increase(certmanager_http_acme_client_request_count{status!="200"}[15m]) > 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ACME challenges failing"
+            description: "ACME HTTP requests to Let's Encrypt are failing. Certificate issuance may be impaired."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/certificate-expiring.md"
+
+        - alert: CertManagerDown
+          expr: up{job="cert-manager"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "cert-manager is down"
+            description: "cert-manager controller has been unreachable for more than 5 minutes. Certificate renewals will not occur."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/certificate-expiring.md"
+
+        - alert: HighCertificateRequestRate
+          expr: |
+            increase(certmanager_certificate_request_total[1h]) > 20
+          for: 0m
+          labels:
+            severity: info
+          annotations:
+            summary: "High certificate request rate"
+            description: "More than 20 certificate requests in the last hour. May hit Let's Encrypt rate limits."

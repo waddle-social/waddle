@@ -1,0 +1,81 @@
+# Kustomization for SpiceDB Authorization Service
+# ===============================================
+#
+# This Kustomization aggregates all SpiceDB resources for deployment.
+# It is referenced by the Flux Kustomization in clusters/production/apps/spicedb.yaml.
+#
+# Resource Ordering:
+# 1. Namespace - must exist before other resources
+# 2. PostgreSQL Cluster - SpiceDB's datastore (managed by CloudNativePG)
+# 3. SpiceDB Cluster - the SpiceDBCluster CRD managed by the operator
+#
+# NOTE: The SpiceDB secret (spicedb-config) is NOT managed by Flux to avoid
+# deploying placeholder secrets. See spicedb-secret.example.yaml for
+# instructions on creating the secret manually or via sealed-secrets/external-secrets/sops.
+#
+# IMPORTANT:
+# - The SpiceDB operator is deployed via HelmRelease (spicedb-helmrelease.yaml)
+# - The operator must be running before SpiceDBCluster resources are applied
+# - Flux handles this dependency ordering via dependsOn in the Kustomization
+#
+# ConfigMap Generator:
+# The configMapGenerator creates a ConfigMap from helm-values.yaml that
+# the HelmRelease references via valuesFrom. This pattern allows Helm
+# values to be managed alongside application manifests.
+#
+# =============================================================================
+# MANUAL INSTALLATION
+# =============================================================================
+#
+# For manual installation (without Flux), apply resources in this order:
+#
+# 1. Apply namespace:
+#    kubectl apply -f namespace.yaml
+#
+# 2. Install SpiceDB operator via Helm:
+#    helm repo add spicedb https://bushelpowered.github.io/spicedb-operator-chart/
+#    helm repo update
+#    helm install spicedb-operator spicedb/spicedb-operator \
+#      --version 2.2.0 \
+#      --namespace spicedb \
+#      --values helm-values.yaml
+#
+# 3. Apply PostgreSQL cluster:
+#    kubectl apply -f postgres-cluster.yaml
+#
+# 4. Wait for PostgreSQL to be ready:
+#    kubectl wait --for=condition=Ready cluster/spicedb-postgres -n spicedb --timeout=300s
+#
+# 5. Create SpiceDB secret (see spicedb-secret.example.yaml for instructions)
+#
+# 6. Apply SpiceDB cluster:
+#    kubectl apply -f spicedb-cluster.yaml
+#
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# All resources are created in the spicedb namespace
+namespace: spicedb
+
+# Common labels applied to all resources for consistent identification
+commonLabels:
+  app.kubernetes.io/part-of: spicedb
+
+# Resources to include in this kustomization
+# Order matters for dependencies - namespace first, then supporting resources
+resources:
+  - namespace.yaml
+  - postgres-cluster.yaml
+  - spicedb-cluster.yaml
+
+# ConfigMap generators for Helm values
+# This creates a ConfigMap from helm-values.yaml for Flux HelmRelease to reference
+configMapGenerator:
+  - name: spicedb-operator-values
+    files:
+      - values.yaml=helm-values.yaml
+    options:
+      # Disable hash suffix for predictable ConfigMap name
+      disableNameSuffixHash: true

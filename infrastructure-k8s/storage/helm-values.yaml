@@ -1,0 +1,242 @@
+# Proxmox CSI Plugin Helm Values for Talos Kubernetes
+# This file configures the Proxmox CSI plugin v0.13.0 for persistent storage
+# provisioning on a Talos-based Kubernetes cluster.
+#
+# Usage:
+#   helm repo add proxmox-csi https://sergelogvinov.github.io/proxmox-csi-plugin
+#   helm repo update
+#   helm install proxmox-csi proxmox-csi/proxmox-csi-plugin \
+#     --version 0.13.0 \
+#     --namespace csi-proxmox \
+#     --values helm-values.yaml
+#
+# Prerequisites:
+#   1. Create namespace: kubectl create namespace csi-proxmox
+#   2. Create credentials Secret (see proxmox-credentials-secret.yaml)
+#   3. Verify Proxmox storage backend: pvesm status (on Proxmox host)
+#
+# Note: Flux will automate this deployment in Phase 8.
+#
+# =============================================================================
+# ENVIRONMENT VARIABLE REFERENCE
+# =============================================================================
+# The following environment variables from infrastructure/.env.example should
+# be used as the canonical source for CSI configuration values:
+#
+#   PROXMOX_CSI_STORAGE_ID  -> storageClass[].storage parameter below
+#   PROXMOX_CSI_ENDPOINT    -> clusters[].url in proxmox-csi-config.yaml
+#   PROXMOX_CSI_REGION      -> clusters[].region in proxmox-csi-config.yaml
+#   PROXMOX_CSI_TOKEN_ID    -> clusters[].token_id in proxmox-csi-config.yaml
+#   PROXMOX_CSI_INSECURE    -> clusters[].insecure in proxmox-csi-config.yaml
+#
+# Ensure these values are consistent between VM provisioning and CSI driver
+# configuration to avoid storage mismatches.
+# =============================================================================
+
+# =============================================================================
+# REPLICA COUNT
+# =============================================================================
+# Number of controller replicas. Single replica is sufficient for small clusters.
+# Increase to 2-3 for HA in production.
+replicaCount: 1
+
+# =============================================================================
+# CREDENTIALS CONFIGURATION
+# =============================================================================
+# Reference the existing Secret containing Proxmox API credentials.
+# The Secret must be created BEFORE installing the Helm chart.
+#
+# The Secret should contain a 'config.yaml' key with cluster configuration.
+# See proxmox-credentials-secret.yaml for the expected format.
+
+# Use existing Secret for Proxmox credentials
+existingConfigSecret: proxmox-csi-credentials
+existingConfigSecretKey: config.yaml
+
+# Empty clusters config - credentials loaded from existing Secret
+config:
+  clusters: []
+
+# =============================================================================
+# STORAGECLASS CONFIGURATION
+# =============================================================================
+# Creates StorageClass(es) for Proxmox CSI volumes.
+# The storage ID must match a valid Proxmox storage backend.
+#
+# IMPORTANT: StorageClass Mutual Exclusivity
+# ------------------------------------------
+# If you want to use the standalone storageclass.yaml manifest instead of
+# Helm-managed StorageClasses, set this to an empty array:
+#   storageClass: []
+# And apply storageclass.yaml manually. Do NOT use both simultaneously
+# to avoid duplicate or conflicting StorageClass definitions.
+#
+# The 'storage' value below should match PROXMOX_CSI_STORAGE_ID from .env
+# to ensure consistency with VM disk storage.
+
+storageClass:
+  - name: proxmox-csi
+    # Proxmox storage ID (must match a storage backend in Proxmox)
+    # Common values: 'local-lvm', 'local-zfs', 'ceph-pool'
+    # Use 'pvesm status' on Proxmox to list available storage
+    # This should match PROXMOX_CSI_STORAGE_ID from .env
+    storage: local-lvm
+
+    # Disk cache mode
+    # Options:
+    #   - directsync: Safest, slowest (recommended for databases)
+    #   - writethrough: Balanced performance and safety (default)
+    #   - writeback: Fastest, but risky (data loss on crash)
+    #   - none: Let storage backend decide
+    cache: writethrough
+
+    # Mark as SSD storage (affects I/O scheduler selection in guest)
+    # Set to true if your Proxmox storage is on SSDs
+    ssd: false
+
+    # Filesystem type for volumes (ext4 or xfs)
+    fstype: ext4
+
+    # Reclaim policy when PVC is deleted
+    # Options:
+    #   - Delete: Volume is deleted (default)
+    #   - Retain: Volume is kept for manual cleanup
+    reclaimPolicy: Delete
+
+# =============================================================================
+# CSI CONTROLLER CONFIGURATION
+# =============================================================================
+# The CSI Controller handles volume provisioning, attaching, and deletion.
+# It communicates with the Proxmox API to manage storage.
+
+controller:
+  plugin:
+    # Resource limits and requests for the controller plugin
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+  attacher:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+
+  provisioner:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+
+  resizer:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+
+  # Snapshotter is disabled by default (not supported in v0.13.0)
+  snapshotter:
+    enabled: false
+
+# =============================================================================
+# CSI NODE PLUGIN CONFIGURATION
+# =============================================================================
+# The CSI Node Plugin runs on every node (DaemonSet) and handles volume
+# mounting/unmounting operations.
+
+node:
+  plugin:
+    # Resource limits and requests (minimal for node plugin)
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+  driverRegistrar:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+
+  # Kubelet directory path (Talos default)
+  kubeletDir: /var/lib/kubelet
+
+  # Run on all nodes including control planes
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/unschedulable
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/disk-pressure
+      operator: Exists
+      effect: NoSchedule
+
+# =============================================================================
+# CONTROLLER SCHEDULING
+# =============================================================================
+# Prefer scheduling on control plane nodes
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+# Tolerate control plane taints
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+# =============================================================================
+# ADDITIONAL SETTINGS
+# =============================================================================
+
+# Timeout for volume operations (duration format)
+timeout: 3m
+
+# Log verbosity (1-5, higher is more verbose)
+logVerbosityLevel: 2
+
+# Controller priority class
+priorityClassName: system-cluster-critical
+
+# =============================================================================
+# NOTES
+# =============================================================================
+#
+# After installation, verify the CSI driver is working:
+#
+#   1. Check controller pod:
+#      kubectl get pods -n csi-proxmox -l app.kubernetes.io/component=controller
+#
+#   2. Check node pods (one per node):
+#      kubectl get pods -n csi-proxmox -l app.kubernetes.io/component=node
+#
+#   3. Check StorageClass:
+#      kubectl get storageclass proxmox-csi
+#
+#   4. Test volume provisioning:
+#      kubectl apply -f verification/namespace.yaml
+#      kubectl apply -f verification/test-pvc.yaml
+#      kubectl get pvc -n csi-test
+#
+# For troubleshooting, check CSI controller logs:
+#   kubectl logs -n csi-proxmox -l app.kubernetes.io/component=controller
+#
+# =============================================================================

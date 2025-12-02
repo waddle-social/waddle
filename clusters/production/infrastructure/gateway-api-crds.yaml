@@ -1,0 +1,53 @@
+# Gateway API CRDs Kustomization
+# ===============================
+#
+# Installs Gateway API Custom Resource Definitions required for Cilium
+# Gateway API controller. These CRDs must be installed BEFORE Cilium.
+#
+# Version: v1.4.0 (experimental channel)
+# Source: https://github.com/kubernetes-sigs/gateway-api
+#
+# CRDs Installed:
+#   - GatewayClass
+#   - Gateway
+#   - HTTPRoute
+#   - GRPCRoute (experimental)
+#   - ReferenceGrant (experimental)
+#   - BackendTLSPolicy (experimental)
+#
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: gateway-api-crds
+  namespace: flux-system
+spec:
+  # Use a direct URL source for upstream CRDs
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+
+  # Path within the repo containing the CRD reference
+  # This applies the gateway-api-crds.yaml from infrastructure-k8s/cilium/
+  path: ./infrastructure-k8s/cilium
+
+  # Reconcile infrequently - CRDs change rarely
+  interval: 24h
+
+  # CRITICAL: Never prune CRDs - could break entire cluster
+  prune: false
+
+  # Wait for CRDs to be established
+  wait: true
+
+  # CRD installation timeout
+  timeout: 5m
+
+  # No dependencies - CRDs are foundational
+  # dependsOn: []
+
+  # Health check for GatewayClass CRD (indicates all CRDs are ready)
+  healthChecks:
+    - apiVersion: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      name: gatewayclasses.gateway.networking.k8s.io

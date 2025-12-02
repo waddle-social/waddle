@@ -1,0 +1,21 @@
+# Cilium Helm Repository
+# ======================
+#
+# Defines the Helm repository source for Cilium chart.
+# Referenced by the cilium HelmRelease.
+#
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cilium
+  namespace: flux-system
+spec:
+  # Official Cilium Helm repository
+  url: https://helm.cilium.io/
+
+  # Check for chart updates hourly
+  interval: 1h
+
+  # Timeout for fetching repository index
+  timeout: 1m

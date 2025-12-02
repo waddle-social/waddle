@@ -1,0 +1,21 @@
+# Gateway Ingress Namespace
+# =========================
+#
+# Dedicated namespace for Gateway API ingress resources.
+# Isolates Gateway and related resources from application namespaces.
+#
+# Phase 10: Gateway API with TLS
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-ingress
+  labels:
+    app.kubernetes.io/name: gateway-ingress
+    app.kubernetes.io/component: networking
+    app.kubernetes.io/part-of: gateway-api
+    app.kubernetes.io/managed-by: flux
+  annotations:
+    description: "Gateway API ingress resources for external traffic routing"
+    phase: "10"

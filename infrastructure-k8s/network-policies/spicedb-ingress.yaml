@@ -1,0 +1,107 @@
+# =============================================================================
+# SPICEDB NAMESPACE NETWORK POLICY
+# =============================================================================
+#
+# Allow traffic for SpiceDB authorization service:
+# - gRPC API (port 50051) from application namespaces
+# - HTTP API (port 8443) for health checks
+# - PostgreSQL egress (port 5432) to CloudNativePG cluster
+#
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-spicedb-ingress
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spicedb
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # gRPC API - from application namespaces
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: applications
+      ports:
+        - protocol: TCP
+          port: 50051
+    
+    # HTTP API - health checks and metrics
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 9090  # Prometheus metrics
+    
+    # Observability - metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 9090
+
+  egress:
+    # PostgreSQL - connect to CloudNativePG cluster in same namespace
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: spicedb-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# PostgreSQL cluster network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-cluster
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: spicedb-postgres
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # From SpiceDB application pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spicedb
+      ports:
+        - protocol: TCP
+          port: 5432
+    
+    # Metrics scraping from observability
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 9187  # PostgreSQL exporter
+
+  egress:
+    # PostgreSQL replication between cluster instances
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: spicedb-postgres
+      ports:
+        - protocol: TCP
+          port: 5432

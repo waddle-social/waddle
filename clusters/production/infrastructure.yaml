@@ -1,0 +1,49 @@
+# Root Kustomization for Infrastructure Components
+# ================================================
+#
+# This Flux Kustomization watches the infrastructure/ directory and
+# reconciles all infrastructure components (CNI, storage, cert-manager, etc.).
+#
+# Applied by the root flux-system Kustomization.
+# All apps depend on this Kustomization being ready.
+#
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure
+  namespace: flux-system
+spec:
+  # Reference the flux-system GitRepository (created by bootstrap)
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+
+  # Path to infrastructure Kustomizations within the repository
+  path: ./clusters/production/infrastructure
+
+  # Reconciliation interval
+  interval: 10m
+
+  # Remove resources deleted from Git
+  prune: true
+
+  # Wait for resources to be ready before marking Kustomization as ready
+  wait: true
+
+  # Timeout for resource reconciliation
+  timeout: 5m
+
+  # Retry configuration for transient failures
+  retryInterval: 1m
+
+  # Force apply changes (useful for CRD updates)
+  force: false
+
+  # Substitute variables in manifests (disabled for infrastructure)
+  # postBuild:
+  #   substitute:
+  #     CLUSTER_NAME: waddle-cluster
+
+  # Health checks are inherited from individual resources
+  # No explicit healthChecks needed here as each component defines its own

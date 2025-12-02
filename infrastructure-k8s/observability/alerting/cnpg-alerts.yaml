@@ -1,0 +1,138 @@
+# =============================================================================
+# CLOUDNATIVEPG ALERTS
+# =============================================================================
+#
+# PrometheusRule for CloudNativePG PostgreSQL alerts:
+# - Instance health (down, not ready)
+# - Replication lag
+# - Connection pool exhaustion
+# - Backup failures
+# - Transaction performance
+#
+# =============================================================================
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cnpg-alerts
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability
+    app.kubernetes.io/component: alerting
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: postgresql.rules
+      rules:
+        - alert: PostgreSQLDown
+          expr: |
+            cnpg_collector_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PostgreSQL cluster {{ $labels.cluster }} is down"
+            description: "PostgreSQL cluster {{ $labels.cluster }} in namespace {{ $labels.namespace }} has been unreachable for more than 5 minutes."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLInstanceNotHealthy
+          expr: |
+            cnpg_pg_database_xact_commit == 0
+            and
+            cnpg_pg_database_xact_rollback == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PostgreSQL instance {{ $labels.pod }} not processing transactions"
+            description: "PostgreSQL instance {{ $labels.pod }} has not processed any transactions for 5 minutes."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLReplicationLagWarning
+          expr: |
+            cnpg_pg_replication_lag > 100000000  # 100MB in bytes
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL replication lag warning for {{ $labels.cluster }}"
+            description: "PostgreSQL cluster {{ $labels.cluster }} has replication lag of {{ $value | humanize1024 }}B."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLReplicationLagCritical
+          expr: |
+            cnpg_pg_replication_lag > 1000000000  # 1GB in bytes
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PostgreSQL replication lag critical for {{ $labels.cluster }}"
+            description: "PostgreSQL cluster {{ $labels.cluster }} has replication lag of {{ $value | humanize1024 }}B. Data loss risk if primary fails."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLTooManyConnections
+          expr: |
+            (
+              sum by (cluster, namespace) (cnpg_pg_stat_activity_count) /
+              sum by (cluster, namespace) (cnpg_pg_settings_max_connections)
+            ) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL {{ $labels.cluster }} connection pool near limit"
+            description: "PostgreSQL cluster {{ $labels.cluster }} is using {{ $value | printf \"%.1f\" }}% of available connections."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLBackupFailed
+          expr: |
+            cnpg_pg_last_backup_status == 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PostgreSQL backup failed for {{ $labels.cluster }}"
+            description: "The last backup for PostgreSQL cluster {{ $labels.cluster }} failed. Check operator logs for details."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLBackupStale
+          expr: |
+            (time() - cnpg_pg_last_backup_timestamp_seconds) > 86400  # 24 hours
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL backup stale for {{ $labels.cluster }}"
+            description: "PostgreSQL cluster {{ $labels.cluster }} has not had a successful backup in {{ $value | humanizeDuration }}."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"
+
+        - alert: PostgreSQLHighTransactionTime
+          expr: |
+            rate(cnpg_pg_stat_database_blk_read_time[5m]) > 1000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL {{ $labels.cluster }} high I/O wait"
+            description: "PostgreSQL cluster {{ $labels.cluster }} is experiencing high block read times, indicating storage performance issues."
+
+        - alert: PostgreSQLDeadlocks
+          expr: |
+            increase(cnpg_pg_stat_database_deadlocks[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL deadlocks detected in {{ $labels.cluster }}"
+            description: "{{ $value }} deadlocks detected in PostgreSQL cluster {{ $labels.cluster }} in the last 5 minutes."
+
+        - alert: CNPGOperatorDown
+          expr: up{job="cloudnative-pg"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CloudNativePG operator is down"
+            description: "CloudNativePG operator has been unreachable for more than 5 minutes. PostgreSQL cluster management is impaired."
+            runbook_url: "https://github.com/<org>/waddle-infra/blob/main/docs/runbooks/postgresql-down.md"

@@ -1,0 +1,19 @@
+# Flux Kustomization for Grafana dashboard ConfigMaps
+# Deploys after observability namespace is ready
+# Grafana sidecar auto-discovers ConfigMaps with label grafana_dashboard="1"
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: observability-dashboards
+  namespace: flux-system
+spec:
+  interval: 1h
+  path: ./infrastructure-k8s/observability/dashboards
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  dependsOn:
+    - name: observability
+  wait: true
+  timeout: 5m

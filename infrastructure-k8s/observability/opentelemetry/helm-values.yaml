@@ -1,0 +1,402 @@
+# =============================================================================
+# OPENTELEMETRY COLLECTOR HELM VALUES
+# =============================================================================
+#
+# Chart: open-telemetry/opentelemetry-collector
+# Version: 0.x.x
+#
+# Purpose: Deploy OpenTelemetry Collector for unified telemetry collection.
+# Collects logs, metrics, and traces from all cluster components and forwards
+# to LGTM backends (Loki, Tempo, Mimir).
+#
+# Usage:
+#   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+#   helm install otel-collector open-telemetry/opentelemetry-collector \
+#     -n observability -f helm-values.yaml
+#
+# Prerequisites:
+# - Namespace 'observability' created
+# - Loki, Tempo, Mimir deployed and accessible
+#
+# Deployment Mode: DaemonSet
+#   Runs on all nodes to collect logs and node-level metrics.
+#   Applications send traces directly to the collector service.
+#
+# Receivers:
+# - OTLP (gRPC/HTTP): Application traces and metrics
+# - Prometheus: Scrape ServiceMonitor/PodMonitor targets
+# - Filelog: Container logs from /var/log/pods
+#
+# Exporters:
+# - Loki: Container logs (HTTP push)
+# - Tempo: Traces (OTLP)
+# - Mimir: Metrics (Prometheus remote_write)
+#
+# Verification:
+#   kubectl get pods -n observability -l app.kubernetes.io/name=opentelemetry-collector
+#   kubectl logs -n observability -l app.kubernetes.io/name=opentelemetry-collector
+#
+# Troubleshooting:
+# - No logs in Loki: Check filelog receiver config, Loki endpoint
+# - No metrics in Mimir: Check prometheus receiver, remote_write endpoint
+# - No traces in Tempo: Check OTLP receiver, Tempo endpoint
+# - OOM: Increase memory_limiter, reduce batch size
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Deployment Mode
+# -----------------------------------------------------------------------------
+mode: daemonset
+
+# -----------------------------------------------------------------------------
+# Image Configuration
+# -----------------------------------------------------------------------------
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: ""  # Uses chart default
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -----------------------------------------------------------------------------
+# Tolerations - Run on ALL nodes including control-plane
+# -----------------------------------------------------------------------------
+tolerations:
+  - operator: Exists
+
+# -----------------------------------------------------------------------------
+# Security Context
+# -----------------------------------------------------------------------------
+securityContext:
+  runAsNonRoot: false  # Needs root for filelog access
+  runAsUser: 0
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - DAC_READ_SEARCH  # For reading log files
+
+# -----------------------------------------------------------------------------
+# Host Network - Disabled
+# -----------------------------------------------------------------------------
+hostNetwork: false
+
+# -----------------------------------------------------------------------------
+# Ports
+# -----------------------------------------------------------------------------
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  prometheus:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+
+# -----------------------------------------------------------------------------
+# Service
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+
+# -----------------------------------------------------------------------------
+# ServiceMonitor
+# -----------------------------------------------------------------------------
+serviceMonitor:
+  enabled: true
+  extraLabels:
+    app.kubernetes.io/part-of: observability
+
+# -----------------------------------------------------------------------------
+# Extra Volumes for Log Collection
+# -----------------------------------------------------------------------------
+extraVolumes:
+  - name: varlogpods
+    hostPath:
+      path: /var/log/pods
+  - name: varlibdockercontainers
+    hostPath:
+      path: /var/lib/docker/containers
+
+extraVolumeMounts:
+  - name: varlogpods
+    mountPath: /var/log/pods
+    readOnly: true
+  - name: varlibdockercontainers
+    mountPath: /var/lib/docker/containers
+    readOnly: true
+
+# -----------------------------------------------------------------------------
+# Collector Configuration
+# -----------------------------------------------------------------------------
+config:
+  # ---------------------------------------------------------------------------
+  # Receivers
+  # ---------------------------------------------------------------------------
+  receivers:
+    # OTLP receiver for traces and metrics from applications
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+    # Prometheus receiver for scraping ServiceMonitors/PodMonitors
+    prometheus:
+      config:
+        scrape_configs:
+          # Scrape Kubernetes pods with prometheus.io annotations
+          - job_name: 'kubernetes-pods'
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                action: keep
+                regex: true
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                action: replace
+                target_label: __metrics_path__
+                regex: (.+)
+              - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^:]+)(?::\d+)?;(\d+)
+                replacement: $1:$2
+                target_label: __address__
+              - source_labels: [__meta_kubernetes_namespace]
+                action: replace
+                target_label: namespace
+              - source_labels: [__meta_kubernetes_pod_name]
+                action: replace
+                target_label: pod
+
+    # Filelog receiver for container logs
+    filelog:
+      include:
+        - /var/log/pods/*/*/*.log
+      exclude:
+        - /var/log/pods/*/otel-collector/*.log  # Exclude self
+      start_at: end
+      include_file_path: true
+      include_file_name: false
+      operators:
+        # Parse container log format
+        - type: router
+          id: get-format
+          routes:
+            - output: parser-docker
+              expr: 'body matches "^\\{"'
+            - output: parser-containerd
+              expr: 'body matches "^[^ Z]+ "'
+        # Docker JSON format
+        - type: json_parser
+          id: parser-docker
+          output: extract-metadata
+          timestamp:
+            parse_from: attributes.time
+            layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+        # Containerd format
+        - type: regex_parser
+          id: parser-containerd
+          regex: '^(?P<time>[^ Z]+) (?P<stream>stdout|stderr) (?P<logtag>[^ ]*) ?(?P<log>.*)$'
+          output: extract-metadata
+          timestamp:
+            parse_from: attributes.time
+            layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+        # Extract Kubernetes metadata from file path
+        - type: regex_parser
+          id: extract-metadata
+          regex: '^.*\/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<uid>[a-f0-9\-]+)\/(?P<container_name>[^\._]+)\/(?P<restart_count>\d+)\.log$'
+          parse_from: attributes["log.file.path"]
+        # Move to resource attributes
+        - type: move
+          from: attributes.namespace
+          to: resource["k8s.namespace.name"]
+        - type: move
+          from: attributes.pod_name
+          to: resource["k8s.pod.name"]
+        - type: move
+          from: attributes.container_name
+          to: resource["k8s.container.name"]
+        - type: move
+          from: attributes.uid
+          to: resource["k8s.pod.uid"]
+
+  # ---------------------------------------------------------------------------
+  # Processors
+  # ---------------------------------------------------------------------------
+  processors:
+    # Batch processor for efficient exports
+    batch:
+      send_batch_size: 1000
+      send_batch_max_size: 1500
+      timeout: 5s
+
+    # Memory limiter to prevent OOM
+    memory_limiter:
+      check_interval: 1s
+      limit_mib: 400
+      spike_limit_mib: 100
+
+    # Resource processor for adding cluster labels
+    resource:
+      attributes:
+        - key: cluster
+          value: waddle
+          action: upsert
+
+    # Kubernetes attributes processor
+    k8sattributes:
+      auth_type: serviceAccount
+      passthrough: false
+      extract:
+        metadata:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.pod.uid
+          - k8s.deployment.name
+          - k8s.node.name
+        labels:
+          - tag_name: app
+            key: app
+            from: pod
+          - tag_name: app.kubernetes.io/name
+            key: app.kubernetes.io/name
+            from: pod
+      pod_association:
+        - sources:
+            - from: resource_attribute
+              name: k8s.pod.uid
+        - sources:
+            - from: resource_attribute
+              name: k8s.pod.name
+            - from: resource_attribute
+              name: k8s.namespace.name
+
+  # ---------------------------------------------------------------------------
+  # Exporters
+  # ---------------------------------------------------------------------------
+  exporters:
+    # Loki exporter for logs
+    loki:
+      endpoint: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+      default_labels_enabled:
+        exporter: false
+        job: true
+      labels:
+        attributes:
+          k8s.namespace.name: namespace
+          k8s.pod.name: pod
+          k8s.container.name: container
+        resource:
+          k8s.namespace.name: namespace
+          k8s.pod.name: pod
+          k8s.container.name: container
+
+    # OTLP exporter for traces to Tempo
+    otlp/tempo:
+      endpoint: tempo.observability.svc.cluster.local:4317
+      tls:
+        insecure: true
+
+    # Prometheus remote write for metrics to Mimir
+    prometheusremotewrite:
+      endpoint: http://mimir-nginx.observability.svc.cluster.local:80/api/v1/push
+      tls:
+        insecure: true
+      resource_to_telemetry_conversion:
+        enabled: true
+
+    # Debug exporter (uncomment for troubleshooting)
+    # debug:
+    #   verbosity: detailed
+
+  # ---------------------------------------------------------------------------
+  # Service Pipelines
+  # ---------------------------------------------------------------------------
+  service:
+    telemetry:
+      logs:
+        level: info
+      metrics:
+        address: 0.0.0.0:8888
+
+    pipelines:
+      # Logs pipeline
+      logs:
+        receivers:
+          - filelog
+        processors:
+          - memory_limiter
+          - batch
+          - resource
+        exporters:
+          - loki
+
+      # Metrics pipeline
+      metrics:
+        receivers:
+          - otlp
+          - prometheus
+        processors:
+          - memory_limiter
+          - batch
+          - resource
+          - k8sattributes
+        exporters:
+          - prometheusremotewrite
+
+      # Traces pipeline
+      traces:
+        receivers:
+          - otlp
+        processors:
+          - memory_limiter
+          - batch
+          - resource
+          - k8sattributes
+        exporters:
+          - otlp/tempo
+
+# -----------------------------------------------------------------------------
+# Cluster Role for Kubernetes API access
+# -----------------------------------------------------------------------------
+clusterRole:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources:
+        - nodes
+        - nodes/proxy
+        - services
+        - endpoints
+        - pods
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources:
+        - configmaps
+      verbs: ["get"]
+    - nonResourceURLs:
+        - /metrics
+        - /metrics/cadvisor
+      verbs: ["get"]

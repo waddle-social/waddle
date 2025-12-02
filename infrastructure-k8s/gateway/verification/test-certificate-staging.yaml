@@ -1,0 +1,123 @@
+# Staging Certificate for Gateway Testing
+# ========================================
+#
+# Tests TLS certificate issuance using Let's Encrypt staging environment.
+# Staging certificates are NOT trusted by browsers but:
+# - Have much higher rate limits (avoid hitting production limits)
+# - Verify DNS01 challenge workflow is working
+# - Confirm cert-manager and Cloudflare integration
+#
+# ALWAYS test with staging before production to avoid rate limit issues.
+# Let's Encrypt production limits: 50 certificates/week per domain
+#
+# IMPORTANT: Update dnsNames with your actual test domain!
+#
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: test-gateway-tls-staging
+  namespace: gateway-test
+  labels:
+    app.kubernetes.io/name: test-gateway-tls-staging
+    app.kubernetes.io/purpose: verification
+spec:
+  # Secret where certificate will be stored
+  secretName: test-gateway-tls-staging
+
+  # Use staging ClusterIssuer (not production!)
+  issuerRef:
+    name: letsencrypt-staging
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+  # Test domain(s) - update with your actual domain
+  dnsNames:
+    - test.waddle.social
+
+  # ECDSA key for better performance
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+
+# =============================================================================
+# VERIFICATION STEPS
+# =============================================================================
+#
+# 1. Create test namespace (if not exists):
+#    kubectl apply -f namespace.yaml
+#
+# 2. Deploy staging certificate:
+#    kubectl apply -f test-certificate-staging.yaml
+#
+# 3. Monitor certificate status:
+#    kubectl get certificate -n gateway-test -w
+#    # Wait for READY=True
+#
+# 4. Check certificate details:
+#    kubectl describe certificate test-gateway-tls-staging -n gateway-test
+#
+# 5. If stuck, check challenges:
+#    kubectl get challenges -A
+#    kubectl describe challenge <name> -n gateway-test
+#
+# 6. Verify DNS01 TXT record (during challenge):
+#    dig _acme-challenge.test.waddle.social TXT
+#    # Should show TXT record created by cert-manager
+#
+# 7. Inspect issued certificate:
+#    kubectl get secret test-gateway-tls-staging -n gateway-test -o jsonpath='{.data.tls\.crt}' | \
+#      base64 -d | openssl x509 -text -noout | head -20
+#    # Note: Issuer will be "Fake LE Intermediate X1" for staging
+#
+# 8. Cleanup after testing:
+#    kubectl delete -f test-certificate-staging.yaml
+#    kubectl delete secret test-gateway-tls-staging -n gateway-test
+#
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+#
+# Problem: Certificate stuck in 'Issuing' state
+# Solutions:
+#   a) Check cert-manager logs:
+#      kubectl logs -n cert-manager -l app=cert-manager -f
+#
+#   b) Check challenge status:
+#      kubectl get challenges -A
+#      kubectl describe challenge <name>
+#
+#   c) Verify Cloudflare API token:
+#      - Token has Zone:DNS:Edit permission
+#      - Token is valid (not expired)
+#      - Zone includes your domain
+#
+# Problem: DNS01 challenge failed - TXT record not found
+# Solutions:
+#   a) Check DNS propagation:
+#      dig _acme-challenge.test.waddle.social TXT @1.1.1.1
+#      dig _acme-challenge.test.waddle.social TXT @8.8.8.8
+#
+#   b) Verify zone in Cloudflare:
+#      - Domain is active in Cloudflare
+#      - Not in "Pending" status
+#
+#   c) Wait for propagation (up to 5 minutes):
+#      DNS changes may take time to propagate globally
+#
+# Problem: Challenge keeps retrying
+# Solutions:
+#   a) Delete and recreate certificate:
+#      kubectl delete certificate test-gateway-tls-staging -n gateway-test
+#      kubectl delete challenges -n gateway-test --all
+#      kubectl apply -f test-certificate-staging.yaml
+#
+#   b) Check Secret exists:
+#      kubectl get secret cloudflare-api-token -n cert-manager
+#
+# Problem: 'Order not found' error
+# Solutions:
+#   - ACME order expired, delete certificate and recreate
+#   - Network issue reaching Let's Encrypt, check cluster egress
+#
+# =============================================================================

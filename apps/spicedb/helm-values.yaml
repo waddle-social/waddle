@@ -1,0 +1,159 @@
+# SpiceDB Operator Helm Values for Talos Kubernetes
+# ==================================================
+#
+# This file configures the SpiceDB operator (community chart from Bushel).
+# The operator manages SpiceDBCluster custom resources, handling the deployment
+# and lifecycle of SpiceDB authorization service instances.
+#
+# Chart: spicedb-operator
+# Repository: https://bushelpowered.github.io/spicedb-operator-chart/
+# Version: 2.2.0 (as of July 2025)
+#
+# Usage:
+#   helm repo add spicedb https://bushelpowered.github.io/spicedb-operator-chart/
+#   helm repo update
+#   helm install spicedb-operator spicedb/spicedb-operator \
+#     --version 2.2.0 \
+#     --namespace spicedb \
+#     --create-namespace \
+#     --values helm-values.yaml
+#
+# Prerequisites:
+#   1. Cilium CNI operational (Phase 6)
+#   2. CloudNativePG operator installed (Phase 11) - for PostgreSQL datastore
+#   3. Proxmox CSI driver installed (Phase 7) - for PostgreSQL storage
+#
+# Note: Flux will automate this deployment via HelmRelease.
+#
+# =============================================================================
+# ENVIRONMENT VARIABLE REFERENCE
+# =============================================================================
+# The SpiceDB operator does not require environment variables for deployment.
+# Configuration for individual SpiceDB clusters is defined in SpiceDBCluster
+# resources, not in operator values.
+#
+# SpiceDB clusters will use:
+#   - PostgreSQL datastore (CloudNativePG cluster in this namespace)
+#   - Preshared key for API authentication (stored in Kubernetes Secret)
+#   - gRPC API on port 50051
+#
+# See apps/spicedb/spicedb-cluster.yaml for SpiceDBCluster configuration.
+# =============================================================================
+
+# =============================================================================
+# REPLICA COUNT
+# =============================================================================
+# Number of operator replicas. Single replica is sufficient as the operator
+# is stateless and can be restarted without affecting running SpiceDB clusters.
+# For HA in larger deployments, increase to 2.
+replicaCount: 1
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+# Conservative resources for the operator (not SpiceDB clusters).
+# SpiceDB cluster resources are configured in each SpiceDBCluster resource.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# =============================================================================
+# CONTROLLER SCHEDULING
+# =============================================================================
+# Prefer scheduling on control plane nodes for reliability.
+# The operator is lightweight and can share control plane resources.
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+# Tolerate control plane taints (Talos compatibility)
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+# =============================================================================
+# SECURITY CONTEXT
+# =============================================================================
+# Run as non-root user with minimal privileges.
+# Following Kubernetes security best practices.
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+# =============================================================================
+# SERVICE ACCOUNT
+# =============================================================================
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# =============================================================================
+# PRIORITY CLASS
+# =============================================================================
+# Use system-cluster-critical priority to ensure operator availability.
+# This prevents operator eviction during resource pressure.
+priorityClassName: system-cluster-critical
+
+# =============================================================================
+# ADDITIONAL SETTINGS
+# =============================================================================
+
+# Pod labels and annotations
+podLabels: {}
+podAnnotations: {}
+
+# Affinity rules (in addition to nodeSelector)
+affinity: {}
+
+# =============================================================================
+# NOTES
+# =============================================================================
+#
+# After installation, verify the SpiceDB operator is working:
+#
+#   1. Check operator pod:
+#      kubectl get pods -n spicedb -l app.kubernetes.io/name=spicedb-operator
+#
+#   2. Check CRDs installed:
+#      kubectl get crds | grep authzed
+#
+#   3. Check operator logs:
+#      kubectl logs -n spicedb -l app.kubernetes.io/name=spicedb-operator
+#
+#   4. Create a SpiceDB cluster:
+#      kubectl apply -f spicedb-cluster.yaml
+#
+#   5. Check cluster status:
+#      kubectl get spicedbcluster -n spicedb
+#      kubectl get pods -n spicedb
+#
+# For troubleshooting:
+#   kubectl describe spicedbcluster spicedb -n spicedb
+#   kubectl logs -n spicedb -l app.kubernetes.io/name=spicedb-operator
+#
+# See apps/spicedb/README.md for:
+#   - SpiceDB cluster configuration examples
+#   - Schema management with zed CLI
+#   - API usage examples
+#   - Troubleshooting guide
+#
+# =============================================================================

@@ -1,0 +1,100 @@
+# Cilium Network Connectivity Test
+# =================================
+#
+# This manifest creates test pods to verify Cilium CNI networking is working.
+#
+# Usage:
+#   1. Apply manifest:
+#      kubectl apply -f test-connectivity.yaml
+#
+#   2. Wait for pods to be ready:
+#      kubectl wait --for=condition=Ready pod -l app=test-server -n cilium-test --timeout=60s
+#      kubectl wait --for=condition=Ready pod -l app=test-client -n cilium-test --timeout=60s
+#
+#   3. Test pod-to-pod connectivity:
+#      kubectl exec -n cilium-test test-client -- wget -qO- http://test-server:80
+#
+#   4. Test DNS resolution:
+#      kubectl exec -n cilium-test test-client -- nslookup test-server.cilium-test.svc.cluster.local
+#
+#   5. Test external connectivity:
+#      kubectl exec -n cilium-test test-client -- wget -qO- --timeout=5 https://waddle.social
+#
+#   6. Cleanup:
+#      kubectl delete -f test-connectivity.yaml
+#
+# Expected Results:
+#   - Pod-to-pod: Returns nginx welcome page
+#   - DNS: Resolves to test-server ClusterIP
+#   - External: Returns waddle.social HTML (if egress is allowed)
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cilium-test
+  labels:
+    app.kubernetes.io/name: cilium-test
+    app.kubernetes.io/purpose: verification
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-server
+  namespace: cilium-test
+  labels:
+    app: test-server
+spec:
+  containers:
+    - name: nginx
+      image: nginx:alpine
+      ports:
+        - containerPort: 80
+          name: http
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-server
+  namespace: cilium-test
+  labels:
+    app: test-server
+spec:
+  selector:
+    app: test-server
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  namespace: cilium-test
+  labels:
+    app: test-client
+spec:
+  containers:
+    - name: busybox
+      image: busybox:latest
+      command:
+        - sleep
+        - "3600"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

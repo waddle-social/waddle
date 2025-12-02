@@ -1,0 +1,140 @@
+# SpiceDB Test Schema ConfigMap
+# =============================
+#
+# This ConfigMap contains a sample SpiceDB schema for testing the SpiceDB
+# deployment. The schema defines a simple document/user relationship model
+# with viewer and editor roles.
+#
+# =============================================================================
+# USAGE INSTRUCTIONS
+# =============================================================================
+#
+# 1. Install zed CLI (SpiceDB command-line tool):
+#
+#    macOS:
+#      brew install authzed/tap/zed
+#
+#    Linux:
+#      curl -sL https://github.com/authzed/zed/releases/latest/download/zed_linux_amd64 -o zed
+#      chmod +x zed
+#      sudo mv zed /usr/local/bin/
+#
+#    Or download from: https://github.com/authzed/zed/releases
+#
+# 2. Port-forward to SpiceDB service:
+#
+#    kubectl port-forward -n spicedb svc/spicedb 50051:50051
+#
+# 3. Get the preshared key:
+#
+#    kubectl get secret spicedb-config -n spicedb -o jsonpath='{.data.preshared_key}' | base64 -d
+#
+# 4. Set up zed context:
+#
+#    zed context set local localhost:50051 "<preshared_key>" --insecure
+#
+# 5. Apply the schema:
+#
+#    # Extract schema from ConfigMap
+#    kubectl get configmap spicedb-test-schema -n spicedb -o jsonpath='{.data.schema\.zed}' > /tmp/schema.zed
+#
+#    # Write schema to SpiceDB
+#    zed schema write /tmp/schema.zed
+#
+# 6. Verify schema was applied:
+#
+#    zed schema read
+#
+# =============================================================================
+# TESTING THE SCHEMA
+# =============================================================================
+#
+# After applying the schema, test with these commands:
+#
+# 1. Create a document:
+#
+#    zed relationship create document:readme viewer user:alice
+#    zed relationship create document:readme editor user:bob
+#
+# 2. Check permissions:
+#
+#    # Alice should have 'view' permission (she's a viewer)
+#    zed permission check document:readme view user:alice
+#    # Output: true
+#
+#    # Alice should NOT have 'edit' permission (viewers can't edit)
+#    zed permission check document:readme edit user:alice
+#    # Output: false
+#
+#    # Bob should have both 'view' and 'edit' permissions (editors can do both)
+#    zed permission check document:readme view user:bob
+#    # Output: true
+#    zed permission check document:readme edit user:bob
+#    # Output: true
+#
+# 3. List relationships:
+#
+#    zed relationship read document:readme
+#
+# 4. Delete a relationship:
+#
+#    zed relationship delete document:readme viewer user:alice
+#
+# =============================================================================
+# SCHEMA EXPLANATION
+# =============================================================================
+#
+# The schema defines:
+#
+# - user: A basic type representing users (no relations, just referenced)
+#
+# - document: A type with two relations and two permissions
+#   - viewer: Users who can view the document
+#   - editor: Users who can edit the document
+#   - view: Permission granted to viewers AND editors (editors can also view)
+#   - edit: Permission granted only to editors
+#
+# This demonstrates SpiceDB's relationship-based access control (ReBAC) model
+# where permissions are computed from relationships, not stored directly.
+#
+# =============================================================================
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spicedb-test-schema
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/name: spicedb
+    app.kubernetes.io/component: verification
+    app.kubernetes.io/part-of: spicedb
+data:
+  # SpiceDB schema definition in Zed format
+  schema.zed: |
+    // SpiceDB Test Schema
+    // ===================
+    //
+    // A simple document/user authorization model demonstrating:
+    // - Type definitions (user, document)
+    // - Relations (viewer, editor)
+    // - Computed permissions (view, edit)
+    // - Union operations (view = viewer + editor)
+
+    // User type - represents users in the system
+    // No relations defined as users are referenced by other types
+    definition user {}
+
+    // Document type - represents documents with access control
+    definition document {
+        // Relations define who has what relationship to the document
+        relation viewer: user
+        relation editor: user
+
+        // Permissions are computed from relations
+        // view permission: granted to viewers OR editors
+        permission view = viewer + editor
+
+        // edit permission: granted only to editors
+        permission edit = editor
+    }

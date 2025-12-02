@@ -1,0 +1,37 @@
+# Flux HelmRelease for Prometheus Operator
+# Deploys only CRDs (ServiceMonitor, PodMonitor, PrometheusRule)
+# Prometheus/Alertmanager/Grafana disabled (using Mimir and separate Grafana)
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prometheus-operator
+  namespace: observability
+spec:
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: "67.x"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+  interval: 1h
+  valuesFrom:
+    - kind: ConfigMap
+      name: prometheus-operator-values
+      valuesKey: values.yaml
+  install:
+    createNamespace: true
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  upgrade:
+    cleanupOnFail: true
+    crds: CreateReplace
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  timeout: 10m
+  dependsOn:
+    - name: cilium
+      namespace: kube-system

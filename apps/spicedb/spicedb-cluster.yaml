@@ -1,0 +1,101 @@
+# SpiceDB Cluster Resource
+# ========================
+#
+# This manifest creates a SpiceDBCluster custom resource managed by the
+# SpiceDB operator. The operator handles deployment, scaling, and lifecycle
+# management of SpiceDB instances.
+#
+# SpiceDB is a Google Zanzibar-inspired authorization system providing:
+# - Relationship-based access control (ReBAC)
+# - Consistency guarantees (new enemy problem protection)
+# - Schema language for defining authorization models
+# - gRPC API (port 50051) for permission checks
+#
+# PREREQUISITES:
+#   1. SpiceDB operator must be installed (via HelmRelease)
+#   2. PostgreSQL cluster must be ready:
+#      kubectl wait --for=condition=Ready cluster/spicedb-postgres -n spicedb --timeout=300s
+#
+#   3. SpiceDB secret must be created with actual values (see spicedb-secret.example.yaml)
+#
+# Usage:
+#   1. Verify prerequisites are met
+#
+#   2. Apply this manifest:
+#      kubectl apply -f spicedb-cluster.yaml
+#
+#   3. Watch SpiceDB cluster creation:
+#      kubectl get spicedbcluster -n spicedb -w
+#
+#   4. Check SpiceDB pods:
+#      kubectl get pods -n spicedb -l app.kubernetes.io/name=spicedb
+#
+#   5. Port-forward to access gRPC API:
+#      kubectl port-forward -n spicedb svc/spicedb 50051:50051
+#
+#   6. Test with zed CLI:
+#      zed context set local localhost:50051 "<preshared_key>" --insecure
+#      zed schema read
+#
+# Expected Results:
+#   - SpiceDBCluster status: Running
+#   - 3 SpiceDB pods running (for HA)
+#   - Service created: spicedb (ClusterIP, port 50051)
+#   - gRPC API accessible on port 50051
+#
+# Version Selection:
+#   The version field specifies the SpiceDB version to deploy.
+#   Check https://github.com/authzed/spicedb/releases for latest versions.
+#   Update version periodically for security patches and new features.
+#
+# =============================================================================
+
+---
+apiVersion: authzed.com/v1alpha1
+kind: SpiceDBCluster
+metadata:
+  name: spicedb
+  namespace: spicedb
+  labels:
+    app.kubernetes.io/name: spicedb
+    app.kubernetes.io/component: authorization
+    app.kubernetes.io/part-of: spicedb
+    app.kubernetes.io/instance: production
+spec:
+  # SpiceDB cluster configuration
+  config:
+    # =======================================================================
+    # Datastore Configuration
+    # =======================================================================
+    # Use PostgreSQL as the datastore engine
+    # PostgreSQL is recommended for production deployments
+    datastoreEngine: postgres
+
+    # =======================================================================
+    # Logging Configuration
+    # =======================================================================
+    # Log level: debug, info, warn, error
+    # Use 'debug' for troubleshooting, 'info' for production
+    logLevel: info
+
+    # =======================================================================
+    # Replica Configuration
+    # =======================================================================
+    # Number of SpiceDB instances for high availability
+    # 3 replicas provides fault tolerance and load distribution
+    replicas: 3
+
+  # ===========================================================================
+  # Secret Reference
+  # ===========================================================================
+  # Reference to the Secret containing preshared_key and datastore_uri
+  # The Secret must exist before the SpiceDBCluster is created
+  secretName: spicedb-config
+
+  # ===========================================================================
+  # SpiceDB Version
+  # ===========================================================================
+  # SpiceDB version to deploy
+  # Check https://github.com/authzed/spicedb/releases for latest versions
+  # Update periodically for security patches and new features
+  version: v1.35.0

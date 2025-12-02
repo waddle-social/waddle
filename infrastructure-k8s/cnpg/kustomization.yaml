@@ -1,0 +1,194 @@
+# Kustomization for CloudNativePG Operator Deployment
+# ====================================================
+#
+# This Kustomization prepares CloudNativePG for Flux GitOps deployment
+# in Phase 11. It defines the resource ordering and namespace configuration.
+#
+# CloudNativePG provides automated PostgreSQL cluster management on Kubernetes,
+# including high availability, backup, monitoring, and declarative configuration.
+#
+# =============================================================================
+# MANUAL INSTALLATION (PHASE 11)
+# =============================================================================
+#
+# For manual installation, follow these steps in order:
+#
+# 1. Create namespace:
+#    kubectl create namespace cnpg-system
+#
+# 2. Add Helm repository:
+#    helm repo add cnpg https://cloudnative-pg.github.io/charts
+#    helm repo update
+#
+# 3. Install CloudNativePG operator:
+#    helm install cloudnative-pg cnpg/cloudnative-pg \
+#      --version 0.22.1 \
+#      --namespace cnpg-system \
+#      --values helm-values.yaml
+#
+# 4. Verify installation:
+#    kubectl get pods -n cnpg-system
+#    kubectl get crds | grep cnpg
+#
+# 5. Test with sample PostgreSQL cluster:
+#    kubectl apply -f verification/namespace.yaml
+#    kubectl apply -f verification/sample-cluster.yaml
+#    kubectl get cluster -n cnpg-test
+#    kubectl get pods -n cnpg-test
+#
+# =============================================================================
+# FLUX DEPLOYMENT (PHASE 11)
+# =============================================================================
+#
+# Flux will create a HelmRelease resource referencing helm-values.yaml.
+# The HelmRelease will be placed in clusters/production/infrastructure/cnpg-helmrelease.yaml
+#
+# Example Flux HelmRelease (created in Phase 11):
+#
+# ---
+# apiVersion: source.toolkit.fluxcd.io/v1
+# kind: HelmRepository
+# metadata:
+#   name: cnpg
+#   namespace: flux-system
+# spec:
+#   interval: 1h
+#   url: https://cloudnative-pg.github.io/charts
+#
+# ---
+# apiVersion: helm.toolkit.fluxcd.io/v2
+# kind: HelmRelease
+# metadata:
+#   name: cloudnative-pg
+#   namespace: cnpg-system
+# spec:
+#   interval: 1h
+#   chart:
+#     spec:
+#       chart: cloudnative-pg
+#       version: "0.22.1"
+#       sourceRef:
+#         kind: HelmRepository
+#         name: cnpg
+#         namespace: flux-system
+#   valuesFrom:
+#     - kind: ConfigMap
+#       name: cnpg-values
+#       valuesKey: values.yaml
+#   dependsOn:
+#     - name: cilium
+#       namespace: kube-system
+#     - name: proxmox-csi
+#       namespace: csi-proxmox
+#
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# CloudNativePG operator runs in a dedicated namespace
+namespace: cnpg-system
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/part-of: cloudnative-pg
+  app.kubernetes.io/managed-by: kustomize
+
+# Resources in this directory
+# Note: Helm values are not a Kubernetes resource, so we create
+# a ConfigMap wrapper for Flux valuesFrom reference.
+# PostgreSQL Cluster resources are created separately in application namespaces.
+resources: []
+
+# ConfigMap generators for Helm values
+# This creates a ConfigMap from helm-values.yaml for Flux to reference
+configMapGenerator:
+  - name: cnpg-values
+    files:
+      - values.yaml=helm-values.yaml
+    options:
+      disableNameSuffixHash: true
+
+# =============================================================================
+# DEPENDENCY NOTES
+# =============================================================================
+#
+# Resource ordering for CloudNativePG deployment:
+#
+# 1. Prerequisites:
+#    - Cilium CNI installed and operational (Phase 6)
+#    - Proxmox CSI driver installed (Phase 7)
+#    - StorageClass 'proxmox-csi' available
+#
+# 2. Namespace:
+#    - cnpg-system namespace for operator
+#    - Application namespaces for PostgreSQL clusters
+#
+# 3. CloudNativePG Operator (Helm release):
+#    - Operator Deployment
+#    - CRDs (Cluster, Backup, ScheduledBackup, Pooler, etc.)
+#    - Webhook for resource validation
+#    - RBAC (ClusterRole, ClusterRoleBinding)
+#
+# 4. PostgreSQL Clusters (after operator is ready):
+#    - Create Cluster resources in application namespaces
+#    - Each Cluster creates: StatefulSet, Services, Secrets, PVCs
+#    - Optional: Backup configuration, PodMonitor for monitoring
+#
+# 5. Verification:
+#    - Test with sample cluster in verification/ directory
+#    - Check cluster status and pod readiness
+#    - Connect to PostgreSQL and verify replication
+#
+# =============================================================================
+# SECURITY NOTES
+# =============================================================================
+#
+# 1. NEVER commit PostgreSQL credentials to Git
+#
+# 2. CloudNativePG auto-generates credentials in Kubernetes Secrets:
+#    - <cluster-name>-superuser - PostgreSQL superuser credentials
+#    - <cluster-name>-app - Application user credentials
+#
+# 3. For production, use one of these secret management approaches:
+#    - sealed-secrets: Encrypt secrets client-side, store in Git
+#    - external-secrets: Fetch from Vault, AWS SM, etc.
+#    - sops: Mozilla SOPS with age/gpg encryption
+#
+# 4. Rotate PostgreSQL credentials regularly:
+#    - Update credentials in Secret
+#    - CloudNativePG will synchronize with PostgreSQL
+#
+# 5. Enable TLS for PostgreSQL connections in production:
+#    - Configure serverTLSSecret in Cluster spec
+#    - Use cert-manager for certificate management
+#
+# 6. Configure network policies to restrict PostgreSQL access:
+#    - Allow only application pods to connect
+#    - Block external access by default
+#
+# 7. Monitor operator and cluster logs for security events:
+#    kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg
+#    kubectl logs -n <namespace> -l postgresql -c postgres
+#
+# =============================================================================
+# BACKUP CONFIGURATION NOTES
+# =============================================================================
+#
+# Backup credentials are stored in Kubernetes Secrets, not in this file.
+#
+# For S3-compatible backup storage (MinIO, AWS S3):
+#
+# 1. Create credentials Secret in the PostgreSQL cluster namespace:
+#    kubectl create secret generic s3-creds \
+#      --from-literal=ACCESS_KEY_ID=<key> \
+#      --from-literal=ACCESS_SECRET_KEY=<secret> \
+#      -n <namespace>
+#
+# 2. Reference in Cluster spec.backup.barmanObjectStore.s3Credentials
+#
+# 3. Configure retention policy and WAL archiving in Cluster spec
+#
+# See infrastructure-k8s/cnpg/README.md for full backup configuration guide.
+#
+# =============================================================================

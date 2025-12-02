@@ -1,0 +1,54 @@
+# =============================================================================
+# FLUX KUSTOMIZATION: ALERTING RULES
+# =============================================================================
+#
+# Phase 15: PrometheusRule resources for alerting
+#
+# Deploys alerting rules from infrastructure-k8s/observability/alerting/
+#
+# Dependencies:
+# - Prometheus Operator (PrometheusRule CRD)
+# - Observability namespace exists
+#
+# =============================================================================
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: observability-alerting
+  namespace: flux-system
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./infrastructure-k8s/observability/alerting
+  prune: true
+  timeout: 5m
+  targetNamespace: observability
+
+  # Requires Prometheus Operator for PrometheusRule CRD
+  dependsOn:
+    - name: prometheus-operator
+
+  healthChecks:
+    - apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      name: infrastructure-alerts
+      namespace: observability
+    - apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      name: cilium-alerts
+      namespace: observability
+    - apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      name: cert-manager-alerts
+      namespace: observability
+    - apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      name: cnpg-alerts
+      namespace: observability
+    - apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      name: flux-alerts
+      namespace: observability

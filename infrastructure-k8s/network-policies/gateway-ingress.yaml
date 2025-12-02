@@ -1,0 +1,76 @@
+# =============================================================================
+# GATEWAY INGRESS NAMESPACE NETWORK POLICY
+# =============================================================================
+#
+# Allow traffic for Cilium Gateway API ingress controller:
+# - External traffic (0.0.0.0/0) to Gateway listeners (ports 80, 443)
+# - Egress to backend services in application namespaces
+# - Egress to cert-manager for certificate retrieval
+#
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  namespace: gateway-ingress
+  labels:
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      io.cilium.gateway/owning-gateway: main-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # External traffic to Gateway listeners
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    
+    # Metrics scraping from observability
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 9090  # Envoy metrics
+
+  egress:
+    # Backend services - SpiceDB
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: spicedb
+      ports:
+        - protocol: TCP
+          port: 50051  # gRPC
+        - protocol: TCP
+          port: 8443   # HTTP
+    
+    # Backend services - observability (Grafana)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 3000  # Grafana
+    
+    # cert-manager for certificate secrets
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cert-manager
+      ports:
+        - protocol: TCP
+          port: 443
+
+

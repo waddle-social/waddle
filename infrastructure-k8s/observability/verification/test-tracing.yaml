@@ -1,0 +1,98 @@
+# Test Job for Tempo trace ingestion verification
+#
+# This creates a simple job that sends test traces to Tempo via OpenTelemetry
+#
+# Usage:
+#   kubectl apply -f test-tracing.yaml
+#   # Wait for job to complete
+#   kubectl wait --for=condition=complete job/trace-generator -n observability --timeout=60s
+#   # Query in Grafana Explore (Tempo data source):
+#   #   Search for traces with service.name="test-trace-generator"
+#   # Cleanup:
+#   kubectl delete -f test-tracing.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trace-generator
+  namespace: observability
+  labels:
+    app: trace-generator
+    app.kubernetes.io/name: trace-generator
+    app.kubernetes.io/part-of: observability
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: trace-generator
+    spec:
+      containers:
+        - name: tracer
+          image: curlimages/curl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Sending test traces to OpenTelemetry Collector..."
+              
+              # Generate a trace ID (32 hex chars)
+              TRACE_ID=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1)
+              SPAN_ID=$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 16 | head -n 1)
+              
+              # Send trace via OTLP HTTP
+              curl -v -X POST \
+                "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4318/v1/traces" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"resourceSpans\": [{
+                    \"resource\": {
+                      \"attributes\": [{
+                        \"key\": \"service.name\",
+                        \"value\": { \"stringValue\": \"test-trace-generator\" }
+                      }]
+                    },
+                    \"scopeSpans\": [{
+                      \"scope\": { \"name\": \"test-tracer\" },
+                      \"spans\": [{
+                        \"traceId\": \"${TRACE_ID}\",
+                        \"spanId\": \"${SPAN_ID}\",
+                        \"name\": \"test-span\",
+                        \"kind\": 1,
+                        \"startTimeUnixNano\": \"$(date +%s)000000000\",
+                        \"endTimeUnixNano\": \"$(date +%s)500000000\",
+                        \"attributes\": [{
+                          \"key\": \"test.attribute\",
+                          \"value\": { \"stringValue\": \"verification-trace\" }
+                        }],
+                        \"status\": { \"code\": 1 }
+                      }]
+                    }]
+                  }]
+                }"
+              
+              echo ""
+              echo "Test trace sent with traceId: ${TRACE_ID}"
+              echo "Search in Grafana Tempo for service.name='test-trace-generator'"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+      restartPolicy: Never
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+  backoffLimit: 3

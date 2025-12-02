@@ -1,0 +1,181 @@
+# CloudNativePG Sample PostgreSQL Cluster
+# ========================================
+#
+# This manifest creates a sample PostgreSQL cluster for testing the CloudNativePG
+# operator installation. The cluster uses Proxmox CSI storage (Phase 7) and
+# demonstrates high availability with 3 instances.
+#
+# PREREQUISITE:
+#   Apply the namespace manifest first:
+#     kubectl apply -f verification/namespace.yaml
+#
+# Usage:
+#   1. Apply namespace (if not already created):
+#      kubectl apply -f verification/namespace.yaml
+#
+#   2. Apply this manifest:
+#      kubectl apply -f verification/sample-cluster.yaml
+#
+#   3. Watch cluster creation:
+#      kubectl get cluster -n cnpg-test -w
+#
+#   4. Check pods (should see 3 pods: 1 primary + 2 replicas):
+#      kubectl get pods -n cnpg-test
+#
+#   5. Wait for cluster to be ready:
+#      kubectl wait --for=condition=Ready cluster/sample-pg-cluster -n cnpg-test --timeout=300s
+#
+#   6. Check cluster status:
+#      kubectl describe cluster sample-pg-cluster -n cnpg-test
+#
+#   7. Get superuser credentials:
+#      kubectl get secret sample-pg-cluster-superuser -n cnpg-test -o jsonpath='{.data.password}' | base64 -d
+#
+#   8. Connect to PostgreSQL:
+#      kubectl exec -it sample-pg-cluster-1 -n cnpg-test -- psql -U postgres -d testdb
+#
+#   9. Verify replication is working:
+#      kubectl exec -it sample-pg-cluster-1 -n cnpg-test -- psql -U postgres -c "SELECT * FROM pg_stat_replication;"
+#
+#  10. Test failover (delete primary and watch new election):
+#      kubectl delete pod sample-pg-cluster-1 -n cnpg-test
+#      kubectl get pods -n cnpg-test -w
+#
+#  11. Cleanup:
+#      kubectl delete cluster sample-pg-cluster -n cnpg-test
+#      kubectl delete namespace cnpg-test
+#
+# Expected Results:
+#   - Cluster status: Ready
+#   - 3 pods running (sample-pg-cluster-1, -2, -3)
+#   - 3 PVCs bound (10Gi each, using proxmox-csi)
+#   - 3 Services created (sample-pg-cluster-rw, -ro, -r)
+#   - 2 Secrets created (superuser, app)
+#   - Replication established between primary and replicas
+#
+# Troubleshooting:
+#   - Cluster not ready:
+#     kubectl describe cluster sample-pg-cluster -n cnpg-test
+#     kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg
+#
+#   - PVC stuck in Pending:
+#     kubectl describe pvc sample-pg-cluster-1 -n cnpg-test
+#     kubectl logs -n csi-proxmox -l app=proxmox-csi-plugin-controller
+#
+#   - Pod not starting:
+#     kubectl describe pod sample-pg-cluster-1 -n cnpg-test
+#     kubectl logs sample-pg-cluster-1 -n cnpg-test -c postgres
+#
+# =============================================================================
+
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: sample-pg-cluster
+  namespace: cnpg-test
+  labels:
+    app.kubernetes.io/name: sample-pg-cluster
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: cloudnative-pg
+    app.kubernetes.io/instance: verification
+spec:
+  # Number of PostgreSQL instances (1 primary + 2 replicas for HA)
+  instances: 3
+
+  # PostgreSQL image configuration
+  # Uses default CloudNativePG image catalog
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+
+  # Storage configuration using Proxmox CSI (Phase 7)
+  storage:
+    # Use the Proxmox CSI StorageClass
+    storageClass: proxmox-csi
+    # Reasonable test size (production would be larger)
+    size: 10Gi
+
+  # Bootstrap configuration - initialize new database
+  bootstrap:
+    initdb:
+      database: testdb
+      owner: testuser
+      # Optional: Set locale and encoding
+      # localeCollate: en_US.UTF-8
+      # localeCType: en_US.UTF-8
+      # encoding: UTF8
+
+  # Resource limits (conservative for testing)
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  # PostgreSQL configuration parameters
+  postgresql:
+    parameters:
+      # Log slow queries (> 1 second) for debugging
+      log_min_duration_statement: "1000"
+      # Shared buffers (25% of memory limit)
+      shared_buffers: "256MB"
+      # Effective cache size (50% of memory limit)
+      effective_cache_size: "512MB"
+      # Work memory for sorts/hashes
+      work_mem: "16MB"
+      # Maintenance work memory
+      maintenance_work_mem: "64MB"
+
+  # Monitoring configuration (for Prometheus integration in Phase 13)
+  monitoring:
+    # Enable PodMonitor for Prometheus Operator
+    enablePodMonitor: true
+    # Custom metrics can be added via ConfigMap
+    # customQueriesConfigMap:
+    #   - name: custom-queries
+    #     key: queries.yaml
+
+  # Affinity rules for pod distribution across nodes
+  affinity:
+    # Prefer spreading pods across different nodes
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+
+  # Primary update strategy
+  primaryUpdateStrategy: unsupervised
+
+  # Number of instances to keep during rolling updates
+  minSyncReplicas: 1
+  maxSyncReplicas: 2
+
+  # ==========================================================================
+  # BACKUP CONFIGURATION (Optional - requires S3-compatible storage)
+  # ==========================================================================
+  # Uncomment and configure for backup testing with MinIO or S3:
+  #
+  # backup:
+  #   barmanObjectStore:
+  #     destinationPath: s3://cnpg-backups/sample-cluster
+  #     endpointURL: https://minio.waddle.social
+  #     s3Credentials:
+  #       accessKeyId:
+  #         name: s3-creds
+  #         key: ACCESS_KEY_ID
+  #       secretAccessKey:
+  #         name: s3-creds
+  #         key: ACCESS_SECRET_KEY
+  #     wal:
+  #       compression: gzip
+  #       maxParallel: 2
+  #     data:
+  #       compression: gzip
+  #   retentionPolicy: "7d"
+  #
+  # Before enabling backup, create the S3 credentials Secret:
+  #   kubectl create secret generic s3-creds \
+  #     --from-literal=ACCESS_KEY_ID=<key> \
+  #     --from-literal=ACCESS_SECRET_KEY=<secret> \
+  #     -n cnpg-test
+  #
+  # ==========================================================================
