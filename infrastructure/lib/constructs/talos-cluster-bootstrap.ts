@@ -74,9 +74,22 @@ export interface TalosClusterBootstrapConfig {
  * CNI is configured to 'none' by default, allowing external CNI (Cilium)
  * to be installed separately in Phase 6.
  *
+ * Tunnel Mode:
+ * When TALOS_USE_TUNNEL=true, connections are routed through Teleport TCP tunnels
+ * instead of directly to node IPs. This enables provisioning from outside the
+ * internal network. Set TALOS_TUNNEL_HOST (default: 127.0.0.1) and
+ * TALOS_TUNNEL_PORT_START (default: 50001) to configure tunnel endpoints.
+ *
  * @see https://www.talos.dev/v1.11/talos-guides/install/virtualized-platforms/proxmox/
  */
 export class TalosClusterBootstrapConstruct extends Construct {
+  /** Whether tunnel mode is enabled */
+  private readonly useTunnel: boolean;
+  /** Tunnel host for connections (default: 127.0.0.1) */
+  private readonly tunnelHost: string;
+  /** Starting port for tunneled connections (default: 50001) */
+  private readonly tunnelPortStart: number;
+
   /** The machine secrets resource */
   public readonly machineSecrets: MachineSecrets;
   /** Control plane machine configuration data source */
@@ -100,6 +113,15 @@ export class TalosClusterBootstrapConstruct extends Construct {
 
   constructor(scope: Construct, id: string, config: TalosClusterBootstrapConfig) {
     super(scope, id);
+
+    // Initialize tunnel mode settings from environment variables
+    this.useTunnel = process.env.TALOS_USE_TUNNEL === "true";
+    this.tunnelHost = process.env.TALOS_TUNNEL_HOST ?? "127.0.0.1";
+    this.tunnelPortStart = parseInt(process.env.TALOS_TUNNEL_PORT_START ?? "50001", 10);
+
+    if (this.useTunnel) {
+      console.log(`Tunnel mode enabled: Using ${this.tunnelHost}:${this.tunnelPortStart}+ for Talos API connections`);
+    }
 
     const clusterDomain = config.clusterDomain ?? "cluster.local";
     const clusterNetwork = config.clusterNetwork ?? "10.244.0.0/16";
@@ -243,6 +265,7 @@ export class TalosClusterBootstrapConstruct extends Construct {
 
     // Step 3: Apply machine configuration to control plane nodes
     this.controlPlaneConfigApply = config.controlPlaneNodes.map((node, index) => {
+      const endpoint = this.getNodeEndpoint(node.ipAddress, index);
       const apply = new MachineConfigurationApply(this, `cp-apply-${index.toString().padStart(2, "0")}`, {
         clientConfiguration: {
           caCertificate: this.machineSecrets.clientConfiguration.caCertificate,
@@ -251,7 +274,7 @@ export class TalosClusterBootstrapConstruct extends Construct {
         },
         machineConfigurationInput: this.controlPlaneConfig.machineConfiguration,
         nodeAttribute: node.ipAddress,
-        endpoint: node.ipAddress,
+        endpoint: endpoint,
         timeouts: {
           create: "10m",
           update: "10m",
@@ -261,9 +284,12 @@ export class TalosClusterBootstrapConstruct extends Construct {
     });
 
     // Step 3b: Apply machine configuration to worker nodes
+    // Worker node indices are offset by control plane count for tunnel port mapping
     this.workerConfigApply = [];
     if (hasWorkers && config.workerNodes && this.workerConfig) {
+      const cpCount = config.controlPlaneNodes.length;
       this.workerConfigApply = config.workerNodes.map((node, index) => {
+        const endpoint = this.getNodeEndpoint(node.ipAddress, cpCount + index);
         const apply = new MachineConfigurationApply(this, `worker-apply-${index.toString().padStart(2, "0")}`, {
           clientConfiguration: {
             caCertificate: this.machineSecrets.clientConfiguration.caCertificate,
@@ -272,7 +298,7 @@ export class TalosClusterBootstrapConstruct extends Construct {
           },
           machineConfigurationInput: this.workerConfig!.machineConfiguration,
           nodeAttribute: node.ipAddress,
-          endpoint: node.ipAddress,
+          endpoint: endpoint,
           timeouts: {
             create: "10m",
             update: "10m",
@@ -284,6 +310,7 @@ export class TalosClusterBootstrapConstruct extends Construct {
 
     // Step 4: Bootstrap the cluster on the first control plane node
     const firstCpNode = config.controlPlaneNodes[0];
+    const firstCpEndpoint = this.getNodeEndpoint(firstCpNode.ipAddress, 0);
     this.bootstrap = new MachineBootstrap(this, "bootstrap", {
       clientConfiguration: {
         caCertificate: this.machineSecrets.clientConfiguration.caCertificate,
@@ -291,7 +318,7 @@ export class TalosClusterBootstrapConstruct extends Construct {
         clientKey: this.machineSecrets.clientConfiguration.clientKey,
       },
       nodeAttribute: firstCpNode.ipAddress,
-      endpoint: firstCpNode.ipAddress,
+      endpoint: firstCpEndpoint,
       timeouts: {
         create: "10m",
       },
@@ -313,7 +340,7 @@ export class TalosClusterBootstrapConstruct extends Construct {
         clientKey: this.machineSecrets.clientConfiguration.clientKey,
       },
       nodeAttribute: firstCpNode.ipAddress,
-      endpoint: firstCpNode.ipAddress,
+      endpoint: firstCpEndpoint,
       timeouts: {
         create: "10m",
       },
@@ -336,6 +363,23 @@ export class TalosClusterBootstrapConstruct extends Construct {
     // Expose raw configs for outputs
     this.kubeconfigRaw = this.kubeconfig.kubeconfigRaw;
     this.talosconfigRaw = this.talosClientConfig.talosConfig;
+  }
+
+  /**
+   * Get the endpoint for a node, using tunnel mode if enabled.
+   * In tunnel mode, connections are routed through local ports (50001, 50002, etc.)
+   * that are tunneled via Teleport to the actual node IPs.
+   *
+   * @param nodeIpAddress - The actual IP address of the node
+   * @param nodeIndex - The index of the node (0-based)
+   * @returns The endpoint to use for connections
+   */
+  private getNodeEndpoint(nodeIpAddress: string, nodeIndex: number): string {
+    if (this.useTunnel) {
+      const port = this.tunnelPortStart + nodeIndex;
+      return `${this.tunnelHost}:${port}`;
+    }
+    return nodeIpAddress;
   }
 
   /**

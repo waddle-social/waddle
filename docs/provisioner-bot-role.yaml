@@ -1,0 +1,156 @@
+# =============================================================================
+# Teleport Machine ID Role for Infrastructure Provisioning
+# =============================================================================
+#
+# This role grants automated access to Talos and Kubernetes endpoints
+# for CI/CD pipelines and provisioning scripts.
+#
+# Machine ID (tbot) provides:
+# - Automated, renewable credentials without human interaction
+# - Short-lived certificates that auto-renew
+# - Audit trail for all automated actions
+#
+# Installation:
+#   1. Copy to Teleport server:
+#      scp docs/provisioner-bot-role.yaml admin@teleport-vm:/tmp/
+#
+#   2. Create the role:
+#      sudo tctl create -f /tmp/provisioner-bot-role.yaml
+#
+#   3. Create the bot:
+#      sudo tctl bots add provisioner-bot --roles=provisioner --logins=root
+#
+#   4. Save the join token (shown only once!)
+#
+# Local Setup (for scripts):
+#   1. Install Teleport CLI: brew install teleport
+#
+#   2. Create tbot config (~/.tbot/config.yaml):
+#      version: v2
+#      onboarding:
+#        join_method: token
+#        token: <bot-token-from-step-3>
+#      proxy_server: teleport.waddle.social:443
+#      storage:
+#        type: directory
+#        path: ~/.tbot/data
+#      outputs:
+#        - type: identity
+#          destination:
+#            type: directory
+#            path: ~/.tbot/identity
+#
+#   3. Start tbot:
+#      tbot start -c ~/.tbot/config.yaml
+#
+# CI/CD Setup (GitHub Actions):
+#   See .github/workflows/deploy.yaml for integration example.
+#
+# =============================================================================
+
+kind: role
+version: v7
+metadata:
+  name: provisioner
+  description: "Role for automated infrastructure provisioning via Machine ID"
+  labels:
+    purpose: automation
+    managed-by: waddle-infra
+spec:
+  allow:
+    # TCP Application Access for Talos and Kubernetes
+    app_labels:
+      type:
+        - talos-api
+        - kubernetes
+      env:
+        - production
+        - staging
+
+    # Node access for debugging (optional)
+    node_labels:
+      role:
+        - teleport-server
+
+    # Logins allowed on nodes
+    logins:
+      - root
+      - admin
+
+    # Kubernetes access (after Kube Agent is deployed)
+    kubernetes_labels:
+      env:
+        - production
+        - staging
+    kubernetes_groups:
+      - system:masters
+    kubernetes_resources:
+      - kind: "*"
+        namespace: "*"
+        name: "*"
+        verbs: ["*"]
+
+    # Rules for Teleport resources
+    rules:
+      - resources:
+          - app
+          - node
+          - session
+        verbs:
+          - read
+          - list
+
+  # Session settings
+  options:
+    # Maximum session duration
+    max_session_ttl: 4h
+
+    # Forward agent for SSH
+    forward_agent: true
+
+    # Require session MFA (disabled for automation)
+    require_session_mfa: false
+
+    # Lock mode for compromised credentials
+    lock: best_effort
+
+---
+# =============================================================================
+# Read-Only Variant for Monitoring/Auditing
+# =============================================================================
+# Use this role for systems that only need to read cluster state.
+
+kind: role
+version: v7
+metadata:
+  name: provisioner-readonly
+  description: "Read-only access to Talos and Kubernetes for monitoring"
+spec:
+  allow:
+    app_labels:
+      type:
+        - talos-api
+        - kubernetes
+
+    kubernetes_labels:
+      env:
+        - production
+    kubernetes_groups:
+      - system:monitoring
+    kubernetes_resources:
+      - kind: "*"
+        namespace: "*"
+        name: "*"
+        verbs: ["get", "list", "watch"]
+
+    rules:
+      - resources:
+          - app
+          - session
+        verbs:
+          - read
+          - list
+
+  options:
+    max_session_ttl: 1h
+    require_session_mfa: false

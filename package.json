@@ -11,6 +11,9 @@
     "destroy": "npm run destroy --workspace=infrastructure",
     "synth:secure": "./scripts/run-with-secrets.sh npm run synth",
     "deploy:secure": "./scripts/run-with-secrets.sh npm run deploy",
-    "destroy:secure": "./scripts/run-with-secrets.sh npm run destroy"
+    "destroy:secure": "./scripts/run-with-secrets.sh npm run destroy",
+    "synth:teleport": "./scripts/deploy-via-teleport.sh synth",
+    "deploy:teleport": "./scripts/deploy-via-teleport.sh deploy",
+    "destroy:teleport": "./scripts/deploy-via-teleport.sh destroy"
   }
 }
