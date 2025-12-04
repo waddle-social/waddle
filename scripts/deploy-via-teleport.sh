@@ -115,16 +115,16 @@ cd "$PROJECT_ROOT"
 case "$ACTION" in
     synth)
         if [[ "$USE_1PASSWORD" == "true" ]]; then
-            "$SCRIPT_DIR/run-with-secrets.sh" npm run synth
+            "$SCRIPT_DIR/run-with-secrets.sh" bun run synth
         else
-            npm run synth
+            bun run synth
         fi
         ;;
     deploy)
         if [[ "$USE_1PASSWORD" == "true" ]]; then
-            "$SCRIPT_DIR/run-with-secrets.sh" npm run deploy
+            "$SCRIPT_DIR/run-with-secrets.sh" bun run deploy
         else
-            npm run deploy
+            bun run deploy
         fi
         ;;
     destroy)
@@ -132,9 +132,9 @@ case "$ACTION" in
         read -p "Are you sure? (yes/no): " confirm
         if [[ "$confirm" == "yes" ]]; then
             if [[ "$USE_1PASSWORD" == "true" ]]; then
-                "$SCRIPT_DIR/run-with-secrets.sh" npm run destroy
+                "$SCRIPT_DIR/run-with-secrets.sh" bun run destroy
             else
-                npm run destroy
+                bun run destroy
             fi
         else
             echo "Aborted."

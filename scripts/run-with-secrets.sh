@@ -5,8 +5,8 @@
 #
 # Usage:
 #   ./scripts/run-with-secrets.sh <command>
-#   ./scripts/run-with-secrets.sh npm run deploy
-#   ./scripts/run-with-secrets.sh npm run synth
+#   ./scripts/run-with-secrets.sh bun run deploy
+#   ./scripts/run-with-secrets.sh bun run synth
 #
 # Prerequisites:
 #   1. Install 1Password CLI: https://developer.1password.com/docs/cli/get-started
@@ -69,8 +69,8 @@ if [[ $# -eq 0 ]]; then
     echo "Usage: $0 <command>"
     echo ""
     echo "Examples:"
-    echo "  $0 npm run deploy"
-    echo "  $0 npm run synth"
+    echo "  $0 bun run deploy"
+    echo "  $0 bun run synth"
     echo "  $0 cdktf deploy"
     exit 1
 fi

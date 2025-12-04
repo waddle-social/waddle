@@ -6,12 +6,12 @@
     "infrastructure"
   ],
   "scripts": {
-    "synth": "npm run synth --workspace=infrastructure",
-    "deploy": "npm run deploy --workspace=infrastructure",
-    "destroy": "npm run destroy --workspace=infrastructure",
-    "synth:secure": "./scripts/run-with-secrets.sh npm run synth",
-    "deploy:secure": "./scripts/run-with-secrets.sh npm run deploy",
-    "destroy:secure": "./scripts/run-with-secrets.sh npm run destroy",
+    "synth": "bun run --filter infrastructure synth",
+    "deploy": "bun run --filter infrastructure deploy",
+    "destroy": "bun run --filter infrastructure destroy",
+    "synth:secure": "./scripts/run-with-secrets.sh bun run synth",
+    "deploy:secure": "./scripts/run-with-secrets.sh bun run deploy",
+    "destroy:secure": "./scripts/run-with-secrets.sh bun run destroy",
     "synth:teleport": "./scripts/deploy-via-teleport.sh synth",
     "deploy:teleport": "./scripts/deploy-via-teleport.sh deploy",
     "destroy:teleport": "./scripts/deploy-via-teleport.sh destroy"

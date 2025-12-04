@@ -6,6 +6,8 @@ This document outlines all manual steps required before deploying the cluster an
 
 - [Part 1: Manual Prerequisites](#part-1-manual-prerequisites)
   - [1.1 Proxmox Configuration](#11-proxmox-configuration)
+    - [1.1.4 Create Internal NAT Network for VMs](#114-create-internal-nat-network-for-vms)
+    - [1.1.5 Configure DHCP Server for Internal Network](#115-configure-dhcp-server-for-internal-network)
   - [1.2 Network and DNS Setup](#12-network-and-dns-setup)
   - [1.3 Secrets and Credentials](#13-secrets-and-credentials)
 - [Part 2: Step-by-Step Cluster Deployment and Testing](#part-2-step-by-step-cluster-deployment-and-testing)
@@ -72,6 +74,62 @@ pvesm status
 # Note which storage supports 'iso' content (for Talos images)
 # Note which storage to use for VM disks (local-lvm, local-zfs, ceph-pool, etc.)
 ```
+
+#### 1.1.4 Create Internal NAT Network for VMs
+
+**IMPORTANT:** If your Proxmox host only has a public IP (e.g., cloud/VPS deployment), you need to create an internal NAT network for the Kubernetes VMs. Talos Linux does not use cloud-init for network configuration and requires either DHCP or static IPs configured via Talos machine config.
+
+```bash
+# SSH to Proxmox host
+ssh root@<proxmox-host>
+
+# Add internal bridge vmbr1 with NAT to /etc/network/interfaces
+cat >> /etc/network/interfaces << 'EOF'
+
+auto vmbr1
+iface vmbr1 inet static
+    address 192.168.1.1/24
+    bridge_ports none
+    bridge_stp off
+    bridge_fd 0
+    post-up   echo 1 > /proc/sys/net/ipv4/ip_forward
+    post-up   iptables -t nat -A POSTROUTING -s 192.168.1.0/24 -o vmbr0 -j MASQUERADE
+    post-down iptables -t nat -D POSTROUTING -s 192.168.1.0/24 -o vmbr0 -j MASQUERADE
+EOF
+
+# Bring up the new interface
+ifup vmbr1
+
+# Verify it's working
+ip addr show vmbr1
+```
+
+#### 1.1.5 Configure DHCP Server for Internal Network
+
+Talos VMs need DHCP to obtain IP addresses on initial boot (before machine config is applied):
+
+```bash
+# Install dnsmasq
+apt-get install -y dnsmasq
+
+# Configure DHCP for vmbr1
+cat > /etc/dnsmasq.d/vmbr1.conf << 'EOF'
+interface=vmbr1
+bind-interfaces
+dhcp-range=192.168.1.100,192.168.1.200,24h
+dhcp-option=3,192.168.1.1
+dhcp-option=6,1.1.1.1,8.8.8.8
+EOF
+
+# Restart dnsmasq
+systemctl restart dnsmasq
+systemctl enable dnsmasq
+
+# Verify it's listening
+ss -ulnp | grep dnsmasq
+```
+
+**Note:** After Talos bootstrap, VMs will use static IPs configured in the machine config. The DHCP is only needed for initial boot and maintenance mode.
 
 ### 1.2 Network and DNS Setup
 
@@ -159,7 +217,7 @@ Use 1Password to manage all secrets securely. This provides audit trails, automa
 4. Run commands with secrets injected:
    ```bash
    # Uses infrastructure/.env.op for 1Password references
-   npm run deploy:secure
+   bun run deploy:secure
    ```
 
 See `infrastructure/.env.op` for the full mapping of environment variables to 1Password references.
@@ -305,12 +363,12 @@ This two-phase approach creates VMs first, then bootstraps after Teleport is con
 
 ```bash
 cd infrastructure
-npm install
-npm run get      # Generate provider bindings (first time only)
+bun install
+bun run get      # Generate provider bindings (first time only)
 
 # Phase 1: Create VMs only (bootstrap is disabled by default when unreachable)
-npm run synth
-npm run deploy   # or: npm run deploy:secure (with 1Password)
+bun run synth
+bun run deploy   # or: bun run deploy:secure (with 1Password)
 
 # VMs are now created. Continue to Phase 5 to set up Teleport.
 # After Teleport TCP apps are configured, return here for bootstrapping.
@@ -328,7 +386,7 @@ brew install teleport
 tsh login --proxy=teleport.waddle.social:443
 
 # Deploy through Teleport tunnels
-npm run deploy:teleport
+bun run deploy:teleport
 ```
 
 This automatically:
@@ -348,8 +406,8 @@ apt-get install -y nodejs git
 # Clone and deploy
 git clone <your-repo> waddle-infra
 cd waddle-infra/infrastructure
-npm install && npm run get
-npm run synth && npm run deploy
+bun install && bun run get
+bun run synth && bun run deploy
 ```
 
 #### Test Phase 1-4
@@ -502,7 +560,7 @@ Now that Teleport TCP access is configured, bootstrap the Talos cluster:
 
 ```bash
 # From your local machine
-npm run deploy:teleport
+bun run deploy:teleport
 ```
 
 ---
@@ -929,15 +987,15 @@ kubectl logs -n observability -l app.kubernetes.io/name=alertmanager | grep "Loa
 
 | Script | Description |
 |--------|-------------|
-| `npm run synth` | Generate Terraform configuration |
-| `npm run deploy` | Deploy infrastructure (direct) |
-| `npm run destroy` | Destroy infrastructure |
-| `npm run synth:secure` | Synth with 1Password secrets |
-| `npm run deploy:secure` | Deploy with 1Password secrets |
-| `npm run destroy:secure` | Destroy with 1Password secrets |
-| `npm run synth:teleport` | Synth via Teleport tunnels |
-| `npm run deploy:teleport` | Deploy via Teleport tunnels + 1Password |
-| `npm run destroy:teleport` | Destroy via Teleport tunnels |
+| `bun run synth` | Generate Terraform configuration |
+| `bun run deploy` | Deploy infrastructure (direct) |
+| `bun run destroy` | Destroy infrastructure |
+| `bun run synth:secure` | Synth with 1Password secrets |
+| `bun run deploy:secure` | Deploy with 1Password secrets |
+| `bun run destroy:secure` | Destroy with 1Password secrets |
+| `bun run synth:teleport` | Synth via Teleport tunnels |
+| `bun run deploy:teleport` | Deploy via Teleport tunnels + 1Password |
+| `bun run destroy:teleport` | Destroy via Teleport tunnels |
 
 ---
 

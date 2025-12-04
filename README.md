@@ -32,7 +32,7 @@ waddle-infra/
 
 - Node.js 20.9+ and npm
 - Terraform CLI
-- CDKTF CLI (`npm install -g cdktf-cli`)
+- CDKTF CLI (`bun install -g cdktf-cli`)
 - Proxmox 9.1 with API access
 - Flux CLI
 - kubectl (Kubernetes CLI)
@@ -55,7 +55,7 @@ Provider bindings are generated via `cdktf get` (not npm packages). Versions are
 
 2. **Install dependencies**
    ```bash
-   npm install
+   bun install
    ```
 
 3. **Configure Proxmox credentials**
@@ -119,12 +119,12 @@ Provider bindings are generated via `cdktf get` (not npm packages). Versions are
 
 5. **Synthesize Terraform configuration**
    ```bash
-   npm run synth
+   bun run synth
    ```
 
 6. **Deploy infrastructure**
    ```bash
-   npm run deploy
+   bun run deploy
    ```
 
 7. **Verify VMs in Proxmox web UI**
@@ -188,8 +188,8 @@ Provider bindings are generated via `cdktf get` (not npm packages). Versions are
 
 ### Infrastructure Changes
 1. Modify TypeScript in `infrastructure/`
-2. Run `npm run synth` to generate Terraform config
-3. Run `npm run deploy` to apply changes
+2. Run `bun run synth` to generate Terraform config
+3. Run `bun run deploy` to apply changes
 
 ### Cluster Configuration Changes (GitOps)
 1. Edit YAML in `clusters/`, `apps/`, or `infrastructure-k8s/`

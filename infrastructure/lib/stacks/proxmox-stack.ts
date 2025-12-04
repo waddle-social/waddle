@@ -251,6 +251,12 @@ export class ProxmoxStack extends TerraformStack {
 
         // Ensure image is downloaded before VM creation
         vmConstruct.addDependency(this.talosImage);
+        // Serialize VM creation to avoid race conditions when importing disk images
+        // This is needed because the bpg/proxmox provider has issues with concurrent
+        // disk imports from the same source image, especially with ZFS storage
+        if (this.controlPlaneVms.length > 0) {
+          vmConstruct.addDependency(this.controlPlaneVms[this.controlPlaneVms.length - 1]);
+        }
         this.controlPlaneVms.push(vmConstruct);
       }
 
@@ -289,6 +295,12 @@ export class ProxmoxStack extends TerraformStack {
 
           // Ensure image is downloaded before VM creation
           vmConstruct.addDependency(this.talosImage);
+          // Serialize VM creation: workers depend on last CP or previous worker
+          if (this.workerVms.length > 0) {
+            vmConstruct.addDependency(this.workerVms[this.workerVms.length - 1]);
+          } else if (this.controlPlaneVms.length > 0) {
+            vmConstruct.addDependency(this.controlPlaneVms[this.controlPlaneVms.length - 1]);
+          }
           this.workerVms.push(vmConstruct);
         }
       }
@@ -390,6 +402,7 @@ export class ProxmoxStack extends TerraformStack {
           );
         }
 
+        /* BOOTSTRAP DISABLED TEMPORARILY - Local machine cannot reach internal VM IPs
         // Build control plane node configs with labels
         const controlPlaneNodeConfigs = this.controlPlaneVms.map((vm, index) => ({
           name: `${cluster.clusterName}-cp-${index.toString().padStart(2, "0")}`,
@@ -412,7 +425,6 @@ export class ProxmoxStack extends TerraformStack {
         const allowSchedulingOnCPs = cluster.allowSchedulingOnControlPlanes ?? (this.workerVms.length === 0);
 
         // Create the bootstrap construct
-        /* BOOTSTRAP DISABLED TEMPORARILY - Local machine cannot reach internal VM IPs
         (this as { clusterBootstrap: TalosClusterBootstrapConstruct }).clusterBootstrap = new TalosClusterBootstrapConstruct(this, "cluster-bootstrap", {
           clusterName: cluster.clusterName,
           clusterEndpoint: cluster.clusterEndpoint,

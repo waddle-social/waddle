@@ -220,6 +220,14 @@ export class TalosVmConstruct extends Construct {
         floating: 0, // Disable ballooning - Talos doesn't support it
       },
 
+      // Use virtio-scsi-single controller for iothread support
+      scsiHardware: "virtio-scsi-single",
+
+      // VGA display for console access (Talos outputs to both serial and VGA)
+      vga: {
+        type: "std",
+      },
+
       disk: [
         {
           datastoreId: config.disk.datastoreId,

@@ -91,7 +91,7 @@ jobs:
           echo "PROXMOX_VE_SSH_AGENT=false" >> $GITHUB_ENV
 
       - name: Synthesize Terraform configuration
-        run: npm run synth
+        run: bun run synth
 
       - name: Terraform Init
         working-directory: infrastructure/cdktf.out/stacks/waddle-infra

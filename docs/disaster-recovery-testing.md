@@ -217,7 +217,7 @@ kubectl get secrets -A --show-labels > /tmp/secrets-list.txt
 
 # 4. Rebuild infrastructure with CDKTF
 cd infrastructure
-npm run deploy
+bun run deploy
 
 # 5. Bootstrap Talos
 # (Follow Talos setup documentation)

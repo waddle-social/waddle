@@ -158,7 +158,7 @@ If the node is unrecoverable:
 4. **Rebuild VM** via CDKTF:
    ```bash
    cd infrastructure
-   npm run deploy
+   bun run deploy
    ```
 
 5. **Re-provision with Talos**:

@@ -13,7 +13,7 @@ The infrastructure code provisions:
 
 - **Node.js** 20.9 or later
 - **Terraform CLI** 1.0 or later
-- **CDKTF CLI** (`npm install -g cdktf-cli`)
+- **CDKTF CLI** (`bun install -g cdktf-cli`)
 - **Proxmox VE** 9.1 with API access enabled
 - **API Token** created in Proxmox (see setup below)
 
@@ -23,8 +23,8 @@ The infrastructure code provisions:
 
 ```bash
 cd infrastructure
-npm install
-npm run get  # Generate provider bindings
+bun install
+bun run get  # Generate provider bindings
 ```
 
 ### 2. Configure Environment
@@ -125,7 +125,7 @@ Reusable constructs encapsulate provider and resource configurations:
 ### Generate Terraform Configuration
 
 ```bash
-npm run synth
+bun run synth
 ```
 
 This generates Terraform JSON in `cdktf.out/`.
@@ -133,7 +133,7 @@ This generates Terraform JSON in `cdktf.out/`.
 ### Deploy Infrastructure
 
 ```bash
-npm run deploy
+bun run deploy
 ```
 
 Apply the infrastructure changes to Proxmox.
@@ -141,7 +141,7 @@ Apply the infrastructure changes to Proxmox.
 ### Destroy Infrastructure
 
 ```bash
-npm run destroy
+bun run destroy
 ```
 
 Tear down all provisioned resources.
@@ -149,7 +149,7 @@ Tear down all provisioned resources.
 ### Build TypeScript
 
 ```bash
-npm run build
+bun run build
 ```
 
 Compile TypeScript to JavaScript.
@@ -157,7 +157,7 @@ Compile TypeScript to JavaScript.
 ### Run Tests
 
 ```bash
-npm test
+bun test
 ```
 
 Execute unit tests with Jest.
@@ -165,7 +165,7 @@ Execute unit tests with Jest.
 ### Watch Mode
 
 ```bash
-npm run watch
+bun run watch
 ```
 
 Watch for TypeScript changes and recompile.
@@ -255,9 +255,9 @@ See `.env.example` for complete list with defaults and optional variables.
 ### Deploying VMs
 
 1. Copy `.env.example` to `.env` and configure required variables
-2. Run `npm run get` to generate provider bindings (first time only)
-3. Run `npm run synth` to generate Terraform configuration
-4. Run `npm run deploy` to provision VMs on Proxmox
+2. Run `bun run get` to generate provider bindings (first time only)
+3. Run `bun run synth` to generate Terraform configuration
+4. Run `bun run deploy` to provision VMs on Proxmox
 5. Verify VMs in Proxmox web UI
 6. Check outputs: `cdktf output` to see VM IPs and cluster info
 
@@ -352,7 +352,7 @@ Verify:
 ### Enable Debug Logging
 
 ```bash
-TF_LOG=DEBUG npm run deploy
+TF_LOG=DEBUG bun run deploy
 ```
 
 ### VM Provisioning Issues
@@ -436,7 +436,7 @@ See `.env.example` for detailed documentation.
 
 1. **Ensure VMs are deployed** (Phase 3 complete):
    ```bash
-   npm run deploy
+   bun run deploy
    ```
 
 2. **Verify VMs are running** in Proxmox web UI
@@ -598,8 +598,8 @@ See `.env.example` for detailed documentation and examples.
 
 2. **Deploy infrastructure**:
    ```bash
-   npm run synth
-   npm run deploy
+   bun run synth
+   bun run deploy
    ```
 
 3. **Verify deployment**:

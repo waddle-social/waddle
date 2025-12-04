@@ -62,8 +62,8 @@ TELEPORT_SSH_KEYS="ssh-ed25519 AAAA..."
 
 ```bash
 cd infrastructure
-npm run synth
-npm run deploy
+bun run synth
+bun run deploy
 ```
 
 This provisions a Teleport VM on Proxmox with:

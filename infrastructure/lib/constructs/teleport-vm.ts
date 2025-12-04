@@ -199,6 +199,9 @@ export class TeleportVmConstruct extends Construct {
         floating: 0,
       },
 
+      // Use virtio-scsi-single controller for iothread support
+      scsiHardware: "virtio-scsi-single",
+
       disk: [
         {
           datastoreId: config.storageId,
