@@ -5,8 +5,8 @@ import federationPlugin from "@pothos/plugin-federation";
 import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { GraphQLSchema } from "graphql";
-import * as dataSchema from "@waddlesocial/waddle-service-waddle-data-model/schema";
-import { WADDLE_VISIBILITY_VALUES } from "@waddlesocial/waddle-service-waddle-data-model/zod";
+import * as dataSchema from "../../data-model/schema.ts";
+import { WADDLE_VISIBILITY_VALUES } from "../../data-model/zod.ts";
 import type { Env } from "./index.ts";
 
 interface SchemaBuilderTypes {

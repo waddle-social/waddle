@@ -10,6 +10,7 @@ node_modules/
 /read-model/wrangler.jsonc
 /read-model/vite.config.ts
 /read-model/schema.gql
+/read-model/.wrangler/
 /README.md
 /package.json
 /tsconfig.json

@@ -8,10 +8,10 @@
     "waddle/website",
     "generators/**",
     "huddle/*",
-    "huddle/services/*",
-    "shared/packages/*",
-    "shared/services/*",
-    "waddle/services/*/*"
+    "huddle/services/**",
+    "shared/packages/**",
+    "shared/services/**",
+    "waddle/services/**"
   ],
   "scripts": {
     "dev": "bun run dev:colony & bun run dev:website & bun run dev:huddle",
