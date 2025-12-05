@@ -38,7 +38,7 @@ jobs:
         uses: cuenv/setup-cuenv@main
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
 
       - name: Collect schemas
         working-directory: gateway
