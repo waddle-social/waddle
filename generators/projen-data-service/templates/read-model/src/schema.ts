@@ -1,5 +1,5 @@
 import SchemaBuilder from "@pothos/core";
-import * as dataSchema from "{{ dataModelPackageName }}/schema";
+import * as dataSchema from "../../data-model/schema";
 import type { Env } from "./index";
 
 // TODO: Extend this schema with the fields required by your service.
