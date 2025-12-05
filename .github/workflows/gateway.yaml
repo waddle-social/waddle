@@ -14,7 +14,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build:
@@ -34,17 +34,8 @@ jobs:
       - name: Install 1Password CLI
         uses: 1password/install-cli-action@v2
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cuenv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cuenv
-          key: cuenv-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Install cuenv
-        run: command -v cuenv || cargo install cuenv
+      - name: Setup cuenv
+        uses: cuenv/setup-cuenv@v1
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

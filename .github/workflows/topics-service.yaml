@@ -9,6 +9,10 @@ on:
     paths:
       - "waddle/services/topics/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   deploy:
     uses: ./.github/workflows/service-deploy.yaml
