@@ -35,7 +35,7 @@ jobs:
         uses: 1password/install-cli-action@v2
 
       - name: Setup cuenv
-        uses: cuenv/setup-cuenv@v1
+        uses: cuenv/setup-cuenv@main
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
