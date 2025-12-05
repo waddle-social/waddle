@@ -7,10 +7,6 @@ on:
     paths:
       - ".github/workflows/deployment.yaml"
       - "colony/website/**"
-  pull_request:
-    paths:
-      - ".github/workflows/deployment.yaml"
-      - "colony/website/**"
   workflow_dispatch:
 
 concurrency:
@@ -23,7 +19,6 @@ jobs:
     environment: production
     permissions:
       contents: read
-      pull-requests: write
 
     steps:
       - name: Checkout
@@ -54,54 +49,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Deploy Production (colony)
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         working-directory: colony/website
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
         run: cuenv task deploy
-
-      - name: Deploy Preview (colony)
-        id: preview
-        if: github.event_name == 'pull_request'
-        working-directory: colony/website
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        run: |
-          eval $(cuenv env --export)
-          npx wrangler versions upload --experimental-versions
-          echo "preview_url=https://pr-${{ github.event.pull_request.number }}.colony-website.workers.dev" >> $GITHUB_OUTPUT
-
-      - name: Comment Preview URL
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const previewUrl = '${{ steps.preview.outputs.preview_url }}';
-            const body = `## 🚀 Preview Deployment\n\n**Colony Website Preview:** ${previewUrl}\n\n_This preview will be updated on each push to this PR._`;
-
-            // Find existing comment
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            const botComment = comments.data.find(comment =>
-              comment.user.type === 'Bot' && comment.body.includes('Preview Deployment')
-            );
-
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body,
-              });
-            }
