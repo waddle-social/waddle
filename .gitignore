@@ -18,3 +18,10 @@ bun.lockb
 
 # Moonrepo cache
 .moon/
+
+# CUE generated
+cue.mod/pkg/
+
+# Gateway generated schemas
+gateway/schemas/
+gateway/supergraph.graphql

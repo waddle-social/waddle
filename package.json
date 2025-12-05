@@ -7,6 +7,7 @@
     "colony/*",
     "waddle/website",
     "generators/**",
+    "gateway",
     "huddle/*",
     "huddle/services/**",
     "shared/packages/**",
@@ -39,7 +40,10 @@
     "build:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model build",
     "test:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model test",
     "schema:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model schema:publish",
-    "migrate:topics": "bun run --filter @waddlesocial/waddle-service-topics-data-model migrate:dev"
+    "migrate:topics": "bun run --filter @waddlesocial/waddle-service-topics-data-model migrate:dev",
+    "dev:gateway": "bun run --filter @waddle/gateway dev",
+    "build:gateway": "bun run --filter @waddle/gateway build",
+    "deploy:gateway": "bun run --filter @waddle/gateway deploy"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.6",
