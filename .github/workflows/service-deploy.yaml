@@ -37,9 +37,7 @@ jobs:
 
       - name: Install generator dependencies
         working-directory: generators/projen-data-service
-        run: |
-          bun install
-          bun run build
+        run: bun install
 
       - name: Run projen
         working-directory: ${{ inputs.service-path }}
@@ -78,9 +76,7 @@ jobs:
 
       - name: Install generator dependencies
         working-directory: generators/projen-data-service
-        run: |
-          bun install
-          bun run build
+        run: bun install
 
       - name: Run projen
         working-directory: ${{ inputs.service-path }}

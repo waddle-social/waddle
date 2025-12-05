@@ -160,6 +160,11 @@ export class WaddleDataService extends Project {
 				name: this.options.serviceName,
 				private: true,
 				type: "module",
+				scripts: {
+					lint: "biome check .",
+					tsc: "tsc --noEmit",
+					test: "vitest run",
+				},
 				dependencies: sortedDeps,
 				devDependencies: sortedDevDeps,
 			},
