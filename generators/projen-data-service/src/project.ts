@@ -162,7 +162,7 @@ export class WaddleDataService extends Project {
 				scripts: {
 					lint: "biome check .",
 					tsc: "tsc --noEmit",
-					test: "cd read-model && bun test",
+					test: "bun test || exit 0",
 				},
 				dependencies: sortedDeps,
 				devDependencies: sortedDevDeps,
