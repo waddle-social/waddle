@@ -11,8 +11,8 @@ const service = new WaddleDataService({
 		d1Databases: [
 			{
 				binding: "DB",
-				database_name: "waddle-topics",
-				database_id: "TODO-REPLACE-WITH-TOPICS-D1-ID",
+				database_name: "waddle-service-topics",
+				database_id: "a4aea118-e1e2-44ff-83e6-2ffb6bd18c28",
 			},
 		],
 	},

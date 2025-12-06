@@ -79,4 +79,4 @@ jobs:
         working-directory: gateway
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        run: cuenv task deploy
+        run: cuenv -e production task deploy
