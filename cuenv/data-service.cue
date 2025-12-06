@@ -22,7 +22,7 @@ package shared
 			dependsOn: ["install"]
 		}
 		deploy: {
-			command: "npx"
+			command: "bunx"
 			args: ["wrangler", "deploy", "--config", "./read-model/wrangler.jsonc"]
 			dependsOn: ["install"]
 		}
