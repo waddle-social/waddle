@@ -7,10 +7,12 @@
     "colony/*",
     "waddle/website",
     "generators/**",
+    "gateway",
     "huddle/*",
-    "huddle/services/*",
-    "shared/packages/*",
-    "shared/services/*"
+    "huddle/services/**",
+    "shared/packages/**",
+    "shared/services/**",
+    "waddle/services/**"
   ],
   "scripts": {
     "dev": "bun run dev:colony & bun run dev:website & bun run dev:huddle",
@@ -33,7 +35,15 @@
     "verify:install": "./scripts/verify-install.sh",
     "smoke:build": "./scripts/smoke-build.sh",
     "dev:website": "bun run --filter @waddle/website dev",
-    "build:website": "bun run --filter @waddle/website build"
+    "build:website": "bun run --filter @waddle/website build",
+    "dev:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model dev",
+    "build:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model build",
+    "test:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model test",
+    "schema:topics": "bun run --filter @waddlesocial/waddle-service-topics-read-model schema:publish",
+    "migrate:topics": "bun run --filter @waddlesocial/waddle-service-topics-data-model migrate:dev",
+    "dev:gateway": "bun run --filter @waddle/gateway dev",
+    "build:gateway": "bun run --filter @waddle/gateway build",
+    "deploy:gateway": "bun run --filter @waddle/gateway deploy"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.6",

@@ -1,0 +1,23 @@
+name: Waddle Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "waddle/services/waddle/**"
+  pull_request:
+    paths:
+      - "waddle/services/waddle/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/service-deploy.yaml
+    with:
+      service-name: waddle
+      service-path: waddle/services/waddle
+      has-write-model: false
+    secrets: inherit

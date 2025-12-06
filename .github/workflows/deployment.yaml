@@ -1,24 +1,49 @@
-name: deployment
+name: Colony Website Deployment
 
 on:
   push:
     branches:
       - main
-  pull_request:
+    paths:
+      - ".github/workflows/deployment.yaml"
+      - "colony/website/**"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
+
+      - name: Install 1Password CLI
+        uses: 1password/install-cli-action@v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cuenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cuenv
+          key: cuenv-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install cuenv
+        run: command -v cuenv || cargo install cuenv
+
       - name: Cache dependencies (node_modules and bun cache)
         uses: actions/cache@v4
         with:
@@ -28,22 +53,12 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock', 'bun.lockb') }}
           restore-keys: |
             ${{ runner.os }}-bun-
+
       - name: Install dependencies (workspace root)
         run: bun install --frozen-lockfile
-      - name: Verify deterministic install
-        run: bun run verify:install
-      - name: Deploy Preview (colony)
-        if: github.event_name == 'pull_request'
-        working-directory: colony/website
-        run: bunx wrangler versions upload --config wrangler.jsonc
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy Production (colony)
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         working-directory: colony/website
-        run: bunx wrangler deploy --config wrangler.jsonc --env production
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        run: cuenv task deploy

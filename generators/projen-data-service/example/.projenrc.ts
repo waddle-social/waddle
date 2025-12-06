@@ -1,45 +1,27 @@
-import { Project } from "projen";
-import { PlatformServiceProject } from "../src/index";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { WaddleDataService } from "../src/index";
 
-// Create a test project
-const project = new Project({
-	name: "example-services",
-	outdir: "example-output",
-});
+const __dirname = dirname(fileURLToPath(import.meta.url));
+process.chdir(__dirname);
 
-// Example 1: Basic service
-new PlatformServiceProject(project, {
-	serviceName: "video-bookmarks",
-	serviceDescription: "Allows users to bookmark specific timestamps in videos",
-	tableName: "video_bookmarks",
-	graphqlTypeName: "VideoBookmark",
-});
-
-// Example 2: Service with write model and tests
-new PlatformServiceProject(project, {
-	serviceName: "watch-history",
-	serviceDescription: "Tracks user watch history and progress",
-	tableName: "watch_history",
-	graphqlTypeName: "WatchHistory",
-	includeWriteModel: true,
-	includeTests: true,
-	// Note: schemaFields and databaseColumns are deprecated
-	// You need to manually create schema files
-});
-
-// Example 3: Service that doesn't extend Video
-new PlatformServiceProject(project, {
-	serviceName: "user-preferences",
-	serviceDescription: "Manages user preferences and settings",
-	tableName: "user_preferences",
-	graphqlTypeName: "UserPreference",
-	extendsVideo: false,
-	includeWriteModel: true,
-	// Note: schemaFields and databaseColumns are deprecated
-	// You need to manually create schema files
-	customScripts: {
-		"migrate:seed": "bun run data-model/seed.ts",
+// Example: Basic data service
+const service = new WaddleDataService({
+	serviceName: "example-service",
+	bindings: {
+		d1Databases: [
+			{
+				binding: "DB",
+				database_name: "waddle-example",
+				database_id: "YOUR-D1-DATABASE-ID-HERE",
+			},
+		],
+		// Optional: Add other bindings as needed
+		// kvNamespaces: [{ binding: "KV", id: "YOUR-KV-ID" }],
+		// r2Buckets: [{ binding: "BUCKET", bucket_name: "my-bucket" }],
+		// services: [{ binding: "OTHER_SERVICE", service: "other-service" }],
 	},
+	includeWriteModel: false,
 });
 
-project.synth();
+service.synth();

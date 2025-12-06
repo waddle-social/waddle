@@ -1,218 +1,126 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Liquid } from "liquidjs";
-import { SampleFile, TextFile, type Project, javascript } from "projen";
-import { Biome } from "../../biome/index.ts";
-import { Bun } from "../../bun/index.ts";
-import { TypeScriptConfig } from "../../tsconfig/index.ts";
+import { Component, type Project, SampleFile, TextFile } from "projen";
+import type { CloudflareBindings } from "../../options.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 interface Options {
-  serviceName: string;
-  databaseId: string;
-  projectName: string;
-  packageName: string;
-  dataModelPackageName: string;
-  dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
+	serviceName: string;
+	bindings?: CloudflareBindings;
 }
 
-export class ReadModel extends javascript.NodeProject {
-  private readonly options: Options;
-  private readonly liquid: Liquid;
+export class ReadModel extends Component {
+	public readonly project: Project;
+	private options: Options;
+	private liquid: Liquid;
 
-  constructor(parent: Project, options: Options) {
-    super({
-      parent,
-      outdir: "read-model",
-      name: options.projectName,
-      packageName: options.packageName,
-      defaultReleaseBranch: "main",
-      packageManager: javascript.NodePackageManager.BUN,
-      entrypoint: "",
-      github: false,
-      release: false,
-      depsUpgrade: false,
-      jest: false,
-      eslint: false,
-      prettier: false,
-      projenrcTs: false,
-      projenrcJs: false,
-      projenrcJson: false,
-      sampleCode: false,
-      buildWorkflow: false,
-      pullRequestTemplate: false,
-    });
+	constructor(project: Project, options: Options) {
+		super(project);
 
-    this.options = options;
-    this.liquid = new Liquid({
-      root: path.join(__dirname, "../../../templates/read-model"),
-    });
+		this.project = project;
+		this.options = options;
 
-    this.package.installTask.reset();
-    this.package.installTask.exec("true");
-    this.package.installCiTask.reset();
-    this.package.installCiTask.exec("true");
+		this.liquid = new Liquid({
+			root: path.join(__dirname, "../../../templates/read-model"),
+		});
 
-    this.package.addField("license", "UNLICENSED");
-    this.tryRemoveFile("LICENSE");
+		// Create files during construction
+		this.createWorkerEntry();
+		this.createSchema();
+		this.createSchemaWriter();
+		this.createWranglerConfig();
+		this.createViteConfig();
 
-    new TypeScriptConfig(this, {});
-    new Biome(this);
-    new Bun(this);
+		// Ignore generated schema file (output by publish.ts)
+		project.addGitIgnore("/read-model/schema.gql");
+		// Ignore wrangler local state
+		project.addGitIgnore("/read-model/.wrangler/");
+	}
 
-    this.configurePackage();
-    this.createWorkerEntry();
-    this.createSchema();
-    this.createSchemaWriter();
-    this.createWranglerConfig();
-    this.createViteConfig();
-    this.createReadme();
-  }
+	private getTemplateContext() {
+		const bindings = this.options.bindings ?? {};
 
-  public addRuntimeDependency(name: string, version: string) {
-    this.addDeps(`${name}@${version}`);
-  }
+		// Ensure DB binding has migrations_dir for read-model
+		const d1Databases = (bindings.d1Databases ?? []).map((db) => {
+			if (db.binding === "DB" && !db.migrations_dir) {
+				return { ...db, migrations_dir: "../data-model/migrations" };
+			}
+			return db;
+		});
 
-  public addRuntimeDependencies(deps: Record<string, string>) {
-    for (const [name, version] of Object.entries(deps)) {
-      this.addRuntimeDependency(name, version);
-    }
-  }
+		return {
+			serviceName: this.options.serviceName,
+			bindings: {
+				d1Databases,
+				secretStoreSecrets: bindings.secretStoreSecrets ?? [],
+				kvNamespaces: bindings.kvNamespaces ?? [],
+				r2Buckets: bindings.r2Buckets ?? [],
+				services: bindings.services ?? [],
+				workflows: bindings.workflows ?? [],
+				sendEmail: bindings.sendEmail ?? [],
+				ai: bindings.ai,
+				vars: bindings.vars ?? {},
+				crons: bindings.crons ?? [],
+				routes: bindings.routes ?? [],
+			},
+		};
+	}
 
-  public addDevelopmentDependency(name: string, version: string) {
-    this.addDevDeps(`${name}@${version}`);
-  }
+	private createWorkerEntry() {
+		const content = this.liquid.renderFileSync(
+			"src/index.ts",
+			this.getTemplateContext(),
+		);
 
-  public addDevelopmentDependencies(deps: Record<string, string>) {
-    for (const [name, version] of Object.entries(deps)) {
-      this.addDevelopmentDependency(name, version);
-    }
-  }
+		new TextFile(this.project, "read-model/src/index.ts", {
+			lines: content.split("\n"),
+		});
+	}
 
-  private configurePackage() {
-    this.package.addVersion("0.0.0");
-    this.package.addField("type", "module");
-    this.package.addField("private", true);
-    this.package.addField("exports", {
-      ".": "./src/index.ts",
-      "./schema": "./src/schema.ts",
-      "./publish": "./publish.ts",
-    });
-    this.package.addField("files", [
-      "src",
-      "publish.ts",
-      "vite.config.ts",
-      "wrangler.jsonc",
-    ]);
+	private createSchema() {
+		const content = this.liquid.renderFileSync(
+			"src/schema.ts",
+			this.getTemplateContext(),
+		);
 
-    const workspaceDependencies = {
-      ...this.options.dependencies,
-      [this.options.dataModelPackageName]: "workspace:*",
-    };
+		new SampleFile(this.project, "read-model/src/schema.ts", {
+			contents: content,
+		});
+	}
 
-    this.addRuntimeDependencies(workspaceDependencies);
-    this.addDevelopmentDependencies(this.options.devDependencies);
+	private createSchemaWriter() {
+		const content = this.liquid.renderFileSync(
+			"publish.ts",
+			this.getTemplateContext(),
+		);
 
-    this.setScript("build", "vite build --config ./vite.config.ts");
-    this.setScript("dev", "vite dev --config ./vite.config.ts");
-    this.setScript(
-      "preview",
-      "bun run build && vite preview --config ./vite.config.ts",
-    );
-    this.setScript(
-      "deploy",
-      "bun run build && wrangler deploy --config ./wrangler.jsonc",
-    );
-    this.setScript("schema:publish", "bun run ./publish.ts");
-  }
+		new TextFile(this.project, "read-model/publish.ts", {
+			lines: content.split("\n"),
+		});
+	}
 
-  private renderTemplate(relativePath: string) {
-    return this.liquid.renderFileSync(relativePath, this.options);
-  }
+	private createWranglerConfig() {
+		const content = this.liquid.renderFileSync(
+			"wrangler.jsonc",
+			this.getTemplateContext(),
+		);
 
-  private createWorkerEntry() {
-    const content = this.renderTemplate("src/index.ts");
+		new TextFile(this.project, "read-model/wrangler.jsonc", {
+			lines: content.split("\n"),
+		});
+	}
 
-    new TextFile(this, "src/index.ts", {
-      lines: content.split("\n"),
-    });
-  }
+	private createViteConfig() {
+		const content = this.liquid.renderFileSync(
+			"vite.config.ts",
+			this.getTemplateContext(),
+		);
 
-  private createSchema() {
-    const content = this.renderTemplate("src/schema.ts");
-
-    new SampleFile(this, "src/schema.ts", {
-      contents: content,
-    });
-  }
-
-  private createSchemaWriter() {
-    const content = this.renderTemplate("publish.ts");
-
-    new TextFile(this, "publish.ts", {
-      lines: content.split("\n"),
-    });
-  }
-
-  private createWranglerConfig() {
-    const content = this.renderTemplate("wrangler.jsonc");
-
-    new TextFile(this, "wrangler.jsonc", {
-      lines: content.split("\n"),
-    });
-  }
-
-  private createViteConfig() {
-    const content = this.renderTemplate("vite.config.ts");
-
-    new TextFile(this, "vite.config.ts", {
-      lines: content.split("\n"),
-    });
-  }
-
-  private createReadme() {
-    const serviceTitle = this.formatServiceName(this.options.serviceName);
-
-    const lines = [
-      `# ${serviceTitle} Read Model`,
-      "",
-      "GraphQL read model powered by Cloudflare Workers and Vite.",
-      "",
-      "## Scripts",
-      "",
-      "- `bun run dev` – start the local worker with Vite.",
-      "- `bun run build` – bundle the worker for production.",
-      "- `bun run deploy` – deploy via Wrangler.",
-      "- `bun run schema:publish` – emit the GraphQL schema to `schema.gql`.",
-      "",
-      "## Workspace Imports",
-      "",
-      `This package depends on \`${this.options.dataModelPackageName}\` for shared schema helpers.`,
-      "",
-      "```ts",
-      `import * as dataSchema from "${this.options.dataModelPackageName}/schema";`,
-      "```",
-      "",
-      "## Files",
-      "",
-      "- `src/index.ts` – Cloudflare Worker entry point.",
-      "- `src/schema.ts` – Pothos GraphQL schema.",
-      "- `publish.ts` – writes a federated schema snapshot.",
-      "- `vite.config.ts` / `wrangler.jsonc` – tooling configuration.",
-    ];
-
-    new TextFile(this, "README.md", {
-      lines,
-    });
-  }
-
-  private formatServiceName(name: string) {
-    return name
-      .split("-")
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ");
-  }
+		new TextFile(this.project, "read-model/vite.config.ts", {
+			lines: content.split("\n"),
+		});
+	}
 }

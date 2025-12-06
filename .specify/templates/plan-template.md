@@ -37,6 +37,7 @@
 - **Performance**: Define p95 server response <= 150 ms and p75 LCP <= 2.5 s budgets plus the instrumentation that will verify them.
 - **Federated CQRS**: Map read flows to GraphQL federation subgraphs, show write orchestration through Cloudflare Workflows or `capnweb`, and outline the contract tests that protect the boundary.
 - **Exceptions**: Log any temporary deviations (including CQRS/federation gaps), the owner, and the planned remediation before release.
+- **Data Services** *(if applicable)*: Document the `generate.ts` entry point, generator options (database bindings, write-model toggle, extra deps), schema snapshot path (e.g., `read-model/schema.gql`), Bun scripts added (`bun run test:<service>`), and which quickstart/docs will be updated.
 
 ## Project Structure
 

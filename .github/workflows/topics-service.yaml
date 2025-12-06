@@ -1,0 +1,23 @@
+name: Topics Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "waddle/services/topics/**"
+  pull_request:
+    paths:
+      - "waddle/services/topics/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/service-deploy.yaml
+    with:
+      service-name: topics
+      service-path: waddle/services/topics
+      has-write-model: false
+    secrets: inherit

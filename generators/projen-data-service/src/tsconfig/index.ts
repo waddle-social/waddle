@@ -1,5 +1,5 @@
 import type { JSONSchemaForTheTypeScriptCompilerSConfigurationFile as Configuration } from "@schemastore/tsconfig";
-import { Component, JsonFile, type Project } from "projen";
+import { Component, JsonFile, type Project } from "projen/lib/index.js";
 
 export class TypeScriptConfig extends Component {
 	constructor(project: Project, options: Configuration) {
