@@ -51,7 +51,7 @@ jobs:
           for service in waddle/services/*/; do
             if [ -f "$service/.projenrc.ts" ]; then
               echo "Running projen in $service"
-              (cd "$service" && bun run .projenrc.ts)
+              (cd "$service" && bun run .projenrc.ts && bun install)
             fi
           done
 
