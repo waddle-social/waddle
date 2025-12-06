@@ -7,11 +7,13 @@ on:
       - "gateway/**"
       - "waddle/services/**/read-model/schema.gql"
       - "generators/projen-data-service/**"
+      - ".github/workflows/gateway.yaml"
   pull_request:
     paths:
       - "gateway/**"
       - "waddle/services/**/read-model/schema.gql"
       - "generators/projen-data-service/**"
+      - ".github/workflows/gateway.yaml"
   workflow_dispatch:
 
 concurrency:
