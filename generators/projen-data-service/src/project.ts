@@ -80,7 +80,6 @@ export class WaddleDataService extends Project {
 			"@types/node": "^22.15.2",
 			"drizzle-kit": "^0.30.6",
 			vite: "^7.1.12",
-			vitest: "^1.2.17",
 			wrangler: "^4.45.0",
 			...this.options.additionalDevDependencies,
 		};
@@ -163,7 +162,7 @@ export class WaddleDataService extends Project {
 				scripts: {
 					lint: "biome check .",
 					tsc: "tsc --noEmit",
-					test: "cd read-model && vitest run",
+					test: "cd read-model && bun test",
 				},
 				dependencies: sortedDeps,
 				devDependencies: sortedDevDeps,

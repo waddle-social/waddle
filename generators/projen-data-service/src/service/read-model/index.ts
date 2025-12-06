@@ -33,7 +33,6 @@ export class ReadModel extends Component {
 		this.createSchemaWriter();
 		this.createWranglerConfig();
 		this.createViteConfig();
-		this.createVitestConfig();
 
 		// Ignore generated schema file (output by publish.ts)
 		project.addGitIgnore("/read-model/schema.gql");
@@ -122,17 +121,6 @@ export class ReadModel extends Component {
 
 		new TextFile(this.project, "read-model/vite.config.ts", {
 			lines: content.split("\n"),
-		});
-	}
-
-	private createVitestConfig() {
-		const content = this.liquid.renderFileSync(
-			"vitest.config.ts",
-			this.getTemplateContext(),
-		);
-
-		new SampleFile(this.project, "read-model/vitest.config.ts", {
-			contents: content,
 		});
 	}
 }

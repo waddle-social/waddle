@@ -1,35 +1,27 @@
-import initSqlJs, { Database, Statement } from "sql.js";
+import { Database, type Statement } from "bun:sqlite";
 import type { D1Database, D1Result, D1PreparedStatement } from "@cloudflare/workers-types";
 
-type SqlJsModule = Awaited<ReturnType<typeof initSqlJs>>;
-
-class SqlJsPreparedStatement implements D1PreparedStatement {
+class BunSqlitePreparedStatement implements D1PreparedStatement {
   readonly statement: string;
   private readonly dbStatement: Statement;
-  params: unknown[] = [];
+  private params: unknown[] = [];
 
   constructor(statement: string, dbStatement: Statement) {
     this.statement = statement;
     this.dbStatement = dbStatement;
   }
 
-  bind(...values: any[]): SqlJsPreparedStatement {
+  bind(...values: any[]): BunSqlitePreparedStatement {
     this.params = values;
-    this.dbStatement.bind(values);
     return this;
   }
 
   async first<T = unknown>(colName?: string): Promise<T | null> {
-    this.dbStatement.reset();
-    this.dbStatement.bind(this.params);
-    const hasRow = this.dbStatement.step();
-    if (!hasRow) {
-      this.dbStatement.reset();
+    const row = this.dbStatement.get(...this.params) as Record<string, unknown> | undefined;
+
+    if (!row) {
       return null;
     }
-
-    const row = this.dbStatement.getAsObject();
-    this.dbStatement.reset();
 
     if (!colName) {
       const value = Object.values(row)[0] as T | undefined;
@@ -40,11 +32,7 @@ class SqlJsPreparedStatement implements D1PreparedStatement {
   }
 
   async run<T = unknown>(): Promise<D1Result<T>> {
-    this.dbStatement.reset();
-    this.dbStatement.bind(this.params);
-    this.dbStatement.step();
-    this.dbStatement.reset();
-
+    this.dbStatement.run(...this.params);
     return {
       success: true,
       meta: {},
@@ -52,16 +40,9 @@ class SqlJsPreparedStatement implements D1PreparedStatement {
   }
 
   async all<T = unknown>(): Promise<D1Result<T>> {
-    this.dbStatement.reset();
-    this.dbStatement.bind(this.params);
-    const results: unknown[] = [];
-    while (this.dbStatement.step()) {
-      results.push(this.dbStatement.getAsObject());
-    }
-    this.dbStatement.reset();
-
+    const results = this.dbStatement.all(...this.params) as T[];
     return {
-      results: results as T[],
+      results,
       success: true,
       meta: {},
     } satisfies D1Result<T>;
@@ -73,15 +54,15 @@ class SqlJsPreparedStatement implements D1PreparedStatement {
   }
 }
 
-class SqlJsD1Database implements D1Database {
-  constructor(private readonly sql: SqlJsModule, private readonly db: Database) {}
+class BunSqliteD1Database implements D1Database {
+  constructor(private readonly db: Database) {}
 
-  prepare(query: string): SqlJsPreparedStatement {
+  prepare(query: string): BunSqlitePreparedStatement {
     const statement = this.db.prepare(query);
-    return new SqlJsPreparedStatement(query, statement);
+    return new BunSqlitePreparedStatement(query, statement);
   }
 
-  async batch<T = unknown>(statements: SqlJsPreparedStatement[]): Promise<D1Result<T>[]> {
+  async batch<T = unknown>(statements: BunSqlitePreparedStatement[]): Promise<D1Result<T>[]> {
     const results: D1Result<T>[] = [];
     for (const statement of statements) {
       results.push(await statement.run<T>());
@@ -90,7 +71,7 @@ class SqlJsD1Database implements D1Database {
   }
 
   async exec<T = unknown>(query: string): Promise<D1Result<T>> {
-    this.db.exec(query);
+    this.db.run(query);
     return {
       success: true,
       meta: {},
@@ -98,13 +79,12 @@ class SqlJsD1Database implements D1Database {
   }
 
   dump(): Promise<ArrayBuffer> {
-    return Promise.resolve(this.db.export().buffer as ArrayBuffer);
+    const buffer = this.db.serialize();
+    return Promise.resolve(buffer.buffer as ArrayBuffer);
   }
 }
 
 export const createSqlJsD1Database = async () => {
-  const sql = await initSqlJs();
-  const database = new sql.Database();
-  const d1 = new SqlJsD1Database(sql, database);
-  return d1 as D1Database;
+  const db = new Database(":memory:");
+  return new BunSqliteD1Database(db) as D1Database;
 };
