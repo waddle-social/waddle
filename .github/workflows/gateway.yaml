@@ -40,6 +40,21 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install generator dependencies
+        working-directory: generators/projen-data-service
+        run: |
+          bun install
+          bun run types
+
+      - name: Generate service files
+        run: |
+          for service in waddle/services/*/; do
+            if [ -f "$service/.projenrc.ts" ]; then
+              echo "Running projen in $service"
+              (cd "$service" && bun run .projenrc.ts)
+            fi
+          done
+
       - name: Collect schemas
         working-directory: gateway
         run: bun run collect-schemas

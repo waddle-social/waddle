@@ -11,7 +11,9 @@
       "types": "./src/index.ts"
     }
   },
-  "scripts": {},
+  "scripts": {
+    "types": "bun run quicktype -s schema -l ts ./node_modules/@biomejs/biome/configuration_schema.json -o src/biome/types.ts"
+  },
   "keywords": [
     "projen",
     "data-service",
