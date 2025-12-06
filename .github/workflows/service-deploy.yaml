@@ -123,7 +123,9 @@ jobs:
         working-directory: ${{ inputs.service-path }}
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        run: cuenv task deploy
+        run: |
+          eval $(op run --env-file=./env.cue -- env | grep -E '^CLOUDFLARE')
+          cuenv task deploy
 
       - name: Deploy Write Model
         if: inputs.has-write-model

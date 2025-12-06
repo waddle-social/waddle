@@ -55,6 +55,7 @@ export class Biome extends Component {
 				...defaultConfig,
 				...options,
 			},
+			marker: false,
 		});
 	}
 }

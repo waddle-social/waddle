@@ -73,7 +73,7 @@ export class WaddleDataService extends Project {
 		Object.assign(this.dependencies, this.options.additionalDependencies);
 
 		this.devDependencies = {
-			"@biomejs/biome": "^1.9.4",
+			"@biomejs/biome": "2.0.5",
 			"@cloudflare/vite-plugin": "^1.13.15",
 			"@cloudflare/workers-types": "^4.20250426.0",
 			"@types/bun": "latest",
