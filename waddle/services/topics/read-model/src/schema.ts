@@ -184,6 +184,6 @@ export const getSchema = (env: Env): GraphQLSchema => {
 
   return builder.toSubGraphSchema({
     linkUrl: "https://specs.apollo.dev/federation/v2.6",
-    federationDirectives: ["@extends", "@external", "@key"],
+    federationDirectives: ["@extends", "@external", "@key", "@shareable"],
   });
 };
