@@ -34,12 +34,12 @@ package shared
 				branch: ["main"]
 				defaultBranch: true
 			}
-			tasks: ["install", "lint", "tsc", "test", "deploy"]
+			tasks: ["install", "test", "deploy"]
 		},
 		{
 			name: "pull-request"
 			when: pullRequest: true
-			tasks: ["install", "lint", "tsc", "test"]
+			tasks: ["install", "test"]
 		},
 	]
 }

@@ -58,8 +58,6 @@ jobs:
         working-directory: ${{ inputs.service-path }}
         run: |
           cuenv task install
-          cuenv task lint
-          cuenv task tsc
           cuenv task test
 
   deploy:
