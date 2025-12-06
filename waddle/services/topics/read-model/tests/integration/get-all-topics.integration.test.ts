@@ -14,7 +14,7 @@ const migrationSql = readFileSync(
 let env: Env;
 
 const createRequest = (query: string, variables?: Record<string, unknown>) =>
-  new Request("http://localhost/graphql", {
+  new Request("http://localhost/", {
     method: "POST",
     headers: {
       "content-type": "application/json",

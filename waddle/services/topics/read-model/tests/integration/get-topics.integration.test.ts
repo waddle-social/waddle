@@ -18,7 +18,7 @@ const createRequest = (
   variables: Record<string, unknown> | undefined,
   headers: Record<string, string> = {},
 ) =>
-  new Request("http://localhost/graphql", {
+  new Request("http://localhost/", {
     method: "POST",
     headers: {
       "content-type": "application/json",

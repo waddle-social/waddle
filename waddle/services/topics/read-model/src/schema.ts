@@ -4,7 +4,7 @@ import drizzlePlugin from "@pothos/plugin-drizzle";
 import federationPlugin from "@pothos/plugin-federation";
 import { drizzle } from "drizzle-orm/d1";
 import type { GraphQLSchema } from "graphql";
-import * as dataSchema from "@waddlesocial/waddle-service-topics-data-model/schema";
+import * as dataSchema from "../../data-model/schema";
 import type { Env } from "./index";
 import type { GraphQLContext } from "./context";
 import {

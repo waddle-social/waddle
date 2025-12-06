@@ -15,7 +15,7 @@ let env: Env;
 
 const execute = async (query: string, variables?: Record<string, unknown>) => {
   const response = await worker.fetch(
-    new Request("http://localhost/graphql", {
+    new Request("http://localhost/", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query, variables }),
