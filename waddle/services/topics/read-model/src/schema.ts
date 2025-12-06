@@ -121,6 +121,9 @@ const buildSchema = (env: Env) => {
   builder.queryType({
     fields: (t) => ({
       health: t.boolean({
+        directives: {
+          shareable: true,
+        },
         resolve: () => true,
       }),
       getTopics: t.field({
