@@ -6,10 +6,12 @@ on:
     paths:
       - "gateway/**"
       - "waddle/services/**/read-model/schema.gql"
+      - "generators/projen-data-service/**"
   pull_request:
     paths:
       - "gateway/**"
       - "waddle/services/**/read-model/schema.gql"
+      - "generators/projen-data-service/**"
   workflow_dispatch:
 
 concurrency:

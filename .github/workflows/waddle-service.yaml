@@ -5,9 +5,13 @@ on:
     branches: [main]
     paths:
       - "waddle/services/waddle/**"
+      - ".github/workflows/service-deploy.yaml"
+      - "generators/projen-data-service/**"
   pull_request:
     paths:
       - "waddle/services/waddle/**"
+      - ".github/workflows/service-deploy.yaml"
+      - "generators/projen-data-service/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
