@@ -163,7 +163,7 @@ export class WaddleDataService extends Project {
 				scripts: {
 					lint: "biome check .",
 					tsc: "tsc --noEmit",
-					test: "vitest run",
+					test: "cd read-model && vitest run",
 				},
 				dependencies: sortedDeps,
 				devDependencies: sortedDevDeps,
@@ -175,21 +175,6 @@ export class WaddleDataService extends Project {
 		new TypeScriptConfig(this, {});
 		new Biome(this);
 		new Bun(this);
-		this.createVitestConfig();
-	}
-
-	private createVitestConfig() {
-		const templatesDir = path.join(__dirname, "../templates");
-
-		const liquid = new Liquid({
-			root: templatesDir,
-		});
-
-		const content = liquid.renderFileSync("vitest.config.ts", {});
-
-		new SampleFile(this, "vitest.config.ts", {
-			contents: content,
-		});
 	}
 
 	private createReadme() {
