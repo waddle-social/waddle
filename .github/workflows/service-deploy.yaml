@@ -111,10 +111,9 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
         run: |
-          eval $(op run --env-file=./env.cue -- env | grep -E '^CLOUDFLARE')
           DB_NAME=$(jq -r '.d1_databases[0].database_name // empty' ./read-model/wrangler.jsonc 2>/dev/null || echo "")
           if [ -n "$DB_NAME" ]; then
-            npx wrangler d1 migrations apply --config ./read-model/wrangler.jsonc --remote "$DB_NAME" || true
+            cuenv -e production exec -- wrangler d1 migrations apply --config ./read-model/wrangler.jsonc --remote "$DB_NAME" || true
           fi
 
       - name: Deploy Read Model
@@ -122,8 +121,7 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
         run: |
-          eval $(op run --env-file=./env.cue -- env | grep -E '^CLOUDFLARE')
-          cuenv task deploy
+          cuenv -e production task deploy
 
       - name: Deploy Write Model
         if: inputs.has-write-model
@@ -131,5 +129,4 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
         run: |
-          eval $(op run --env-file=./env.cue -- env | grep -E '^CLOUDFLARE')
-          npx wrangler deploy --config ./write-model/wrangler.jsonc
+          cuenv -e production exec -- wrangler deploy --config ./write-model/wrangler.jsonc
