@@ -32,17 +32,8 @@ jobs:
       - name: Install 1Password CLI
         uses: 1password/install-cli-action@v2
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cuenv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cuenv
-          key: cuenv-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Install cuenv
-        run: command -v cuenv || cargo install cuenv
+      - name: Setup cuenv
+        uses: setup-cuenv@v1
 
       - name: Cache dependencies (node_modules and bun cache)
         uses: actions/cache@v4
