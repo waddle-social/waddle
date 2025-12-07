@@ -33,7 +33,7 @@ jobs:
         uses: 1password/install-cli-action@v2
 
       - name: Setup cuenv
-        uses: setup-cuenv@v1
+        uses: cuenv/setup-cuenv@v1
 
       - name: Cache dependencies (node_modules and bun cache)
         uses: actions/cache@v4

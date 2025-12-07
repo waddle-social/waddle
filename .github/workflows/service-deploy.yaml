@@ -33,7 +33,7 @@ jobs:
           bun-version: latest
 
       - name: Setup cuenv
-        uses: setup-cuenv@v1
+        uses: cuenv/setup-cuenv@v1
 
       - name: Install generator dependencies
         working-directory: generators/projen-data-service
@@ -72,7 +72,7 @@ jobs:
         uses: 1password/install-cli-action@v2
 
       - name: Setup cuenv
-        uses: setup-cuenv@v1
+        uses: cuenv/setup-cuenv@v1
 
       - name: Install generator dependencies
         working-directory: generators/projen-data-service
