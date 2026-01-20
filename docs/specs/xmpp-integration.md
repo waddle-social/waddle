@@ -2,22 +2,44 @@
 
 ## Overview
 
-This document specifies how Waddle Social integrates with XMPP for real-time messaging, using Prosody as the server implementation.
+This document specifies how Waddle Social implements XMPP for real-time messaging, using a native Rust XMPP server (`waddle-xmpp` crate) embedded in `waddle-server`.
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   ATProto       │────▶│  Waddle Backend  │────▶│  Prosody        │
-│   (Identity)    │     │  (Rust/Axum)     │     │  (XMPP Server)  │
-└─────────────────┘     └──────────────────┘     └────────┬────────┘
-                                │                         │
-                                │ REST API                │ XMPP
-                                │ (management)            │ (messaging)
-                                ▼                         ▼
-                        ┌──────────────────────────────────┐
-                        │            Clients               │
-                        └──────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       waddle-server binary                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐     ┌──────────────────────────────────┐  │
+│  │   Axum HTTP      │     │      waddle-xmpp                 │  │
+│  │   (REST API)     │     │      (XMPP Server)               │  │
+│  │                  │     │                                  │  │
+│  │  /auth/*         │     │  TCP 5222 (C2S)                  │  │
+│  │  /waddles/*      │     │  TCP 5269 (S2S, Phase 5)         │  │
+│  │  /channels/*     │     │                                  │  │
+│  └────────┬─────────┘     │  Connection Actors (Kameo)       │  │
+│           │               │  MUC Room Actors (Kameo)         │  │
+│           │               └────────────┬─────────────────────┘  │
+│           │                            │                        │
+│           └──────────┬─────────────────┘                        │
+│                      ▼                                          │
+│           ┌──────────────────────┐                              │
+│           │     Shared AppState  │                              │
+│           ├──────────────────────┤                              │
+│           │  Sessions            │                              │
+│           │  Permissions (Zanzibar)                             │
+│           │  Databases (per-Waddle libSQL)                      │
+│           └──────────────────────┘                              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                  ┌──────────────────────┐
+                  │       Clients        │
+                  │  - CLI TUI (Ratatui) │
+                  │  - Web (future)      │
+                  │  - Mobile (future)   │
+                  └──────────────────────┘
 ```
 
 ## Identity Mapping
@@ -49,7 +71,7 @@ localpart@domain/resource
 
 localpart: DID identifier (sanitized)
 domain: waddle.social (or self-hosted domain)
-resource: device identifier (e.g., "mobile", "desktop", "web-abc123")
+resource: device identifier (e.g., "mobile", "desktop", "cli-abc123")
 ```
 
 ## Authentication Flow
@@ -62,22 +84,25 @@ User authenticates via ATProto OAuth (see [atproto-integration.md](./atproto-int
 2. OAuth flow with user's PDS
 3. Backend receives access token + DID
 
-### 2. XMPP Account Provisioning
+### 2. Session Creation
 
-On first login, backend creates XMPP account:
+On successful ATProto auth, backend creates unified session:
 
-```lua
--- Prosody mod_auth_waddle
-function provider.create_user(username, password)
-    -- Called by backend via admin API
-    -- username = DID identifier
-    -- password = generated token
-end
+```rust
+// In waddle-server
+struct Session {
+    did: String,
+    jid: Jid,
+    atproto_token: String,
+    xmpp_token: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
 ```
 
-### 3. Session Token Issuance
+### 3. XMPP Token Endpoint
 
-Backend issues short-lived XMPP session token:
+Backend issues XMPP session token (same session, different view):
 
 ```json
 POST /auth/xmpp-token
@@ -88,16 +113,15 @@ Response:
   "jid": "abc123xyz@waddle.social",
   "token": "xmpp-session-token",
   "expires_at": "2024-01-15T11:30:00Z",
-  "xmpp_host": "xmpp.waddle.social",
+  "xmpp_host": "waddle.social",
   "xmpp_port": 5222,
-  "bosh_url": "https://xmpp.waddle.social/http-bind",
-  "websocket_url": "wss://xmpp.waddle.social/xmpp-websocket"
+  "websocket_url": "wss://waddle.social/xmpp-websocket"
 }
 ```
 
 ### 4. Client XMPP Connection
 
-Client connects to XMPP server with token:
+Client connects to the embedded XMPP server with token:
 
 ```xml
 <auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>
@@ -105,111 +129,39 @@ Client connects to XMPP server with token:
 </auth>
 ```
 
-## Prosody Configuration
+### 5. Token Validation (In-Process)
 
-### Required Modules
+Unlike external Prosody, token validation is a direct function call:
 
-```lua
--- prosody.cfg.lua
-modules_enabled = {
-    -- Core
-    "roster";
-    "saslauth";
-    "tls";
-    "dialback";
-    "disco";
-    "posix";
-
-    -- MUC
-    "muc";
-    "muc_mam";
-
-    -- Modern messaging
-    "carbons";       -- XEP-0280: Message Carbons
-    "mam";           -- XEP-0313: Message Archive Management
-    "csi";           -- XEP-0352: Client State Indication
-    "smacks";        -- XEP-0198: Stream Management
-
-    -- Rich features
-    "http_upload";   -- XEP-0363: HTTP File Upload
-    "bookmarks";     -- XEP-0402: PEP Bookmarks
-    "vcard4";        -- XEP-0292: vCard4
-
-    -- Waddle custom
-    "auth_waddle";   -- Custom auth against Waddle backend
-    "waddle_expiry"; -- Message TTL enforcement
-    "waddle_dm_filter"; -- DM request filtering
+```rust
+// In waddle-xmpp auth handler
+async fn validate_sasl_plain(
+    &self,
+    jid: &Jid,
+    token: &str,
+    app_state: &AppState,
+) -> Result<Session, AuthError> {
+    // Direct lookup in shared session store
+    app_state.sessions.validate(jid, token).await
 }
-```
-
-### Virtual Hosts
-
-```lua
--- Main domain
-VirtualHost "waddle.social"
-    authentication = "waddle"  -- Custom auth module
-
--- MUC component for channels
-Component "muc.waddle.social" "muc"
-    modules_enabled = { "muc_mam" }
-    muc_room_default_persistent = true
-    muc_room_default_members_only = true
-
--- HTTP upload component
-Component "upload.waddle.social" "http_upload"
-    http_upload_path = "/uploads"
-    http_upload_file_size_limit = 104857600  -- 100MB
-```
-
-### Custom Auth Module
-
-```lua
--- mod_auth_waddle.lua
-local http = require "net.http";
-local json = require "util.json";
-
-local provider = {};
-
-function provider.test_password(username, password)
-    -- Verify token with Waddle backend
-    local response = http.request(
-        "POST",
-        "http://localhost:3000/internal/verify-xmpp-token",
-        { ["Content-Type"] = "application/json" },
-        json.encode({ jid = username, token = password })
-    );
-    return response.code == 200;
-end
-
-function provider.user_exists(username)
-    -- Check with Waddle backend
-    local response = http.request(
-        "GET",
-        "http://localhost:3000/internal/user-exists/" .. username
-    );
-    return response.code == 200;
-end
-
-module:provides("auth", provider);
 ```
 
 ## Waddle to XMPP Mapping
 
 ### Waddle Creation
 
-When a Waddle is created, backend provisions MUC infrastructure:
+When a Waddle is created:
 
-1. Create MUC subdomain (optional, for isolation)
-2. Create default rooms (`general`, `announcements`)
-3. Set room configurations
-4. Add creator as owner
+1. Create Waddle record in database
+2. Spawn MUC room actors for default channels (`general`, `announcements`)
+3. Add creator as owner via Zanzibar permissions
 
 ```
 Waddle: penguin-club
   ↓
-MUC Domain: muc.waddle.social (shared) or muc.penguin-club.waddle.social (isolated)
-  ↓
-Rooms: general@muc..., announcements@muc...
+MUC Rooms:
+  - general@waddle.social (room_id: penguin-club/general)
+  - announcements@waddle.social (room_id: penguin-club/announcements)
 ```
 
 ### Channel Creation
@@ -224,98 +176,116 @@ POST /waddles/:wid/channels
 
 Backend:
 
-1. Creates channel record in database
-2. Provisions MUC room via Prosody admin API
-3. Configures room settings
-4. Returns channel metadata
+1. Creates channel record in per-Waddle database
+2. Spawns MUC room actor via Kameo
+3. Configures room settings (persistent, members-only)
+4. Updates Zanzibar permissions
+5. Returns channel metadata
 
 ### Member Management
 
 When user joins Waddle:
 
-1. Backend adds user to Waddle membership
-2. Backend grants MUC affiliation to all Waddle rooms
-3. Client receives room list and joins
+1. Backend adds Zanzibar tuple: `waddle:{wid}#member@user:{did}`
+2. Permission propagates to all channels via Zanzibar relations
+3. MUC room actors check permissions on join
 
-```xml
-<!-- Backend grants affiliation via admin -->
-<iq to='general@muc.waddle.social' type='set'>
-  <query xmlns='http://jabber.org/protocol/muc#admin'>
-    <item affiliation='member' jid='newuser@waddle.social'/>
-  </query>
-</iq>
+```rust
+// In MUC room actor
+async fn handle_join(&mut self, jid: &Jid, app_state: &AppState) -> Result<(), MucError> {
+    // Direct Zanzibar check
+    let allowed = app_state.permissions.check(
+        &format!("channel:{}", self.room_id),
+        "join",
+        &format!("user:{}", jid.to_did()),
+    ).await?;
+
+    if !allowed {
+        return Err(MucError::Forbidden);
+    }
+
+    // Add occupant and broadcast presence
+    self.add_occupant(jid).await
+}
 ```
 
 ## Transport Options
 
-### BOSH (HTTP Binding)
+### Native TCP
 
-For web clients without WebSocket support:
+For desktop/mobile/CLI clients:
 
 ```
-Endpoint: https://xmpp.waddle.social/http-bind
+Host: waddle.social
+Port: 5222 (STARTTLS)
 ```
 
 ### WebSocket
 
-Preferred for web clients:
+For web clients (future):
 
 ```
-Endpoint: wss://xmpp.waddle.social/xmpp-websocket
+Endpoint: wss://waddle.social/xmpp-websocket
 ```
 
-### Native TCP
-
-For desktop/mobile clients:
-
-```
-Host: xmpp.waddle.social
-Port: 5222 (STARTTLS) or 5223 (Direct TLS)
-```
+The WebSocket transport is handled by Axum's WebSocket support, bridging to the same connection actor infrastructure.
 
 ## Client Library Recommendations
 
 | Platform | Library | Notes |
 |----------|---------|-------|
-| Web | Strophe.js | Mature, BOSH + WebSocket |
+| CLI (Rust) | `xmpp` crate | Native Rust, used by waddle-cli |
+| Web | Strophe.js | Mature, WebSocket support |
 | Web | XMPP.js | Modern, Promise-based |
 | iOS | XMPPFramework | Objective-C, Swift wrapper |
 | Android | Smack | Java/Kotlin |
-| Rust | xmpp-rs | Native Rust |
 | Desktop | libstrophe | C library, bindings available |
 
 ## XEP Implementation Status
 
-### Required (MVP)
+### Phase 0: Foundation
+
+| XEP/RFC | Name | Status |
+|---------|------|--------|
+| RFC 6120 | XMPP Core | Required |
+| RFC 6121 | XMPP IM | Required |
+| XEP-0030 | Service Discovery | Required |
+
+### Phase 1: Core Messaging (MVP)
 
 | XEP | Name | Status |
 |-----|------|--------|
-| XEP-0045 | Multi-User Chat | Required |
+| XEP-0045 | Multi-User Chat (MUC) | Required |
 | XEP-0313 | Message Archive Management | Required |
 | XEP-0280 | Message Carbons | Required |
 | XEP-0198 | Stream Management | Required |
-| XEP-0363 | HTTP File Upload | Required |
 | XEP-0085 | Chat State Notifications | Required |
 
-### Required (Rich Features)
+### Phase 2: Rich Features
 
 | XEP | Name | Status |
 |-----|------|--------|
-| XEP-0369 | MIX | Recommended |
-| XEP-0372 | References | Required |
+| XEP-0363 | HTTP File Upload | Required |
+| XEP-0372 | References (Mentions) | Required |
 | XEP-0444 | Message Reactions | Required |
 | XEP-0461 | Message Replies | Required |
 | XEP-0308 | Last Message Correction | Required |
 | XEP-0424 | Message Retraction | Required |
-| XEP-0384 | OMEMO | Required |
 
-### Optional (Future)
+### Phase 3: Security/Admin
 
 | XEP | Name | Status |
 |-----|------|--------|
-| XEP-0166 | Jingle | Voice/video |
-| XEP-0167 | Jingle RTP | Voice/video |
-| XEP-0234 | Jingle File Transfer | P2P files |
+| XEP-0384 | OMEMO | Optional |
+| XEP-0077 | In-Band Registration | Required |
+| XEP-0133 | Service Administration | Required |
+
+### Phase 5: Federation
+
+| XEP/RFC | Name | Status |
+|---------|------|--------|
+| RFC 6120 | Server Dialback | Required |
+| XEP-0220 | Server Dialback | Required |
 
 ## Error Handling
 
@@ -337,36 +307,76 @@ Port: 5222 (STARTTLS) or 5223 (Direct TLS)
 
 ## Rate Limits
 
-Enforced by Prosody:
+Enforced in-process by connection actors:
 
 | Action | Limit | Window |
 |--------|-------|--------|
 | Messages (per room) | 10 | 10 seconds |
 | Presence updates | 5 | 60 seconds |
 | Room joins | 10 | 60 seconds |
-| File uploads | 5 | 60 seconds |
+| IQ requests | 20 | 10 seconds |
 
-## Monitoring
+## Observability
 
-### Prosody Metrics
+All XMPP operations are instrumented with OpenTelemetry (see [ADR-0014](../adrs/0014-opentelemetry.md)).
 
-```lua
--- mod_prometheus.lua
-modules_enabled = { "prometheus" }
+### Key Spans
+
+| Span | Attributes |
+|------|------------|
+| `xmpp.connection.lifecycle` | `jid`, `client_ip`, `transport` |
+| `xmpp.stanza.process` | `stanza_type`, `from`, `to` |
+| `xmpp.muc.message` | `room_jid`, `from`, `message_id` |
+
+### Key Metrics
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `xmpp.connections.active` | Gauge | `transport` |
+| `xmpp.stanzas.processed` | Counter | `type`, `direction` |
+| `xmpp.stanza.latency` | Histogram | `type` |
+
+## Connection Actor Model
+
+Each XMPP connection is managed by a Kameo actor:
+
+```rust
+struct ConnectionActor {
+    jid: Jid,
+    stream: XmppStream,
+    session: Session,
+    state: ConnectionState,
+}
+
+impl Actor for ConnectionActor {
+    type Mailbox = UnboundedMailbox<Self>;
+}
+
+#[derive(Clone)]
+enum ConnectionMessage {
+    Stanza(Stanza),
+    Ping,
+    Close,
+}
 ```
 
-Metrics endpoint: `http://localhost:5280/metrics`
+MUC rooms are also actors, enabling concurrent message handling:
 
-Key metrics:
-
-- `prosody_c2s_connections`: Connected clients
-- `prosody_muc_occupants`: Room occupants
-- `prosody_messages_sent`: Message throughput
-- `prosody_stanza_latency`: Processing latency
+```rust
+struct MucRoomActor {
+    room_jid: Jid,
+    waddle_id: String,
+    channel_id: String,
+    occupants: HashMap<Jid, Occupant>,
+    config: RoomConfig,
+}
+```
 
 ## Related
 
-- [ADR-0006: XMPP Protocol](../adrs/0006-xmpp-protocol.md)
+- [ADR-0006: Native Rust XMPP Server](../adrs/0006-xmpp-protocol.md)
+- [ADR-0008: Kameo Actors](../adrs/0008-kameo-actors.md)
+- [ADR-0014: OpenTelemetry](../adrs/0014-opentelemetry.md)
 - [Spec: ATProto Integration](./atproto-integration.md)
 - [Spec: File Upload](./file-upload.md)
 - [RFC-0002: Channels](../rfcs/0002-channels.md)

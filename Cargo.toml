@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/waddle-server",
     "crates/waddle-cli",
+    "crates/waddle-xmpp",
 ]
 
 [workspace.package]
@@ -35,9 +36,14 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 # Actor Framework
 kameo = "0.15"
 
+# XMPP Server
+tokio-xmpp = "4.0"
+jid = "0.10"
+xmpp-parsers = "0.21"
+dashmap = "6.0"
+
 # XMPP Client
 xmpp = "0.5"
-xmpp-parsers = "0.21"
 
 # Object Storage
 object_store = { version = "0.11", features = ["aws"] }
@@ -62,6 +68,10 @@ directories = "5.0"
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.28", features = ["tonic", "metrics"] }
+tracing-opentelemetry = "0.28"
 
 # Security/Crypto
 rustls = "0.23"

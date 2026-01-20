@@ -1,0 +1,164 @@
+name: XMPP Compliance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/waddle-server/**'
+      - 'crates/waddle-xmpp/**'
+      - '.github/workflows/xmpp-compliance.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/waddle-server/**'
+      - 'crates/waddle-xmpp/**'
+      - '.github/workflows/xmpp-compliance.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --package waddle-server
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: waddle-server
+          path: target/release/waddle-server
+          retention-days: 1
+
+  xmpp-interop:
+    name: XMPP Interop Tests
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      # Jaeger for trace collection during tests
+      jaeger:
+        image: jaegertracing/all-in-one:1.54
+        ports:
+          - 16686:16686
+          - 4317:4317
+        env:
+          COLLECTOR_OTLP_ENABLED: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: waddle-server
+          path: ./bin
+
+      - name: Make binary executable
+        run: chmod +x ./bin/waddle-server
+
+      - name: Generate test certificates
+        run: |
+          mkdir -p certs
+          openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt \
+            -days 365 -nodes -subj "/CN=localhost"
+
+      - name: Start Waddle server
+        run: |
+          ./bin/waddle-server &
+          echo "Waiting for server to start..."
+          sleep 5
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
+          OTEL_SERVICE_NAME: waddle-server-ci
+          RUST_LOG: debug
+
+      - name: Check server is running
+        run: |
+          curl -f http://localhost:3000/health || echo "Health endpoint not yet implemented"
+
+      # XMPP Interop Testing Suite
+      # See: https://github.com/xmpp-interop-testing/xmpp-interop-tests
+      - name: Run XMPP Interop Tests
+        run: |
+          echo "XMPP interop tests will be enabled once server implements RFC 6120 core"
+          # TODO: Enable once server is ready
+          # docker run --network=host \
+          #   ghcr.io/xmpp-interop-testing/xmpp_interop_tests:latest \
+          #   --domain=localhost \
+          #   --adminAccountUsername=admin \
+          #   --adminAccountPassword=testpass \
+          #   --disabledTests="s2s.*"
+        continue-on-error: true
+
+      - name: Stop server
+        if: always()
+        run: pkill waddle-server || true
+
+      - name: Collect traces
+        if: always()
+        run: |
+          echo "Traces available at http://localhost:16686 during job execution"
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run XMPP crate tests
+        run: cargo test --package waddle-xmpp --verbose
+
+      - name: Run server tests
+        run: cargo test --package waddle-server --verbose
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings

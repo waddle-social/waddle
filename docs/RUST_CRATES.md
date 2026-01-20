@@ -51,12 +51,20 @@ This document lists the recommended Rust crates for Waddle Social, organized by 
 
 ---
 
-## XMPP Client
+## XMPP Server
+
+| Crate | Purpose | ADR Reference |
+|-------|---------|---------------|
+| `tokio-xmpp` | Async XMPP primitives | [ADR-0006](adrs/0006-xmpp-protocol.md) |
+| `xmpp-parsers` | XMPP stanza parsing | [ADR-0006](adrs/0006-xmpp-protocol.md) |
+| `jid` | JID (Jabber ID) handling | [ADR-0006](adrs/0006-xmpp-protocol.md) |
+| `dashmap` | Concurrent session storage | [ADR-0006](adrs/0006-xmpp-protocol.md) |
+
+## XMPP Client (CLI)
 
 | Crate | Purpose | ADR Reference |
 |-------|---------|---------------|
 | `xmpp` | XMPP protocol client | [ADR-0006](adrs/0006-xmpp-protocol.md) |
-| `xmpp-parsers` | XMPP stanza parsing | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 
 ---
 
@@ -107,11 +115,14 @@ This document lists the recommended Rust crates for Waddle Social, organized by 
 
 ## Observability
 
-| Crate | Purpose |
-|-------|---------|
-| `tracing` | Structured logging |
-| `tracing-subscriber` | Log formatting/output |
-| `metrics` | Metrics collection (optional) |
+| Crate | Purpose | ADR Reference |
+|-------|---------|---------------|
+| `tracing` | Structured logging | - |
+| `tracing-subscriber` | Log formatting/output | - |
+| `opentelemetry` | OpenTelemetry API | [ADR-0014](adrs/0014-opentelemetry.md) |
+| `opentelemetry_sdk` | OpenTelemetry SDK | [ADR-0014](adrs/0014-opentelemetry.md) |
+| `opentelemetry-otlp` | OTLP exporter | [ADR-0014](adrs/0014-opentelemetry.md) |
+| `tracing-opentelemetry` | Tracing → OTel bridge | [ADR-0014](adrs/0014-opentelemetry.md) |
 
 ---
 

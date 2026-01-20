@@ -20,7 +20,9 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | **Backend Infrastructure** |
 | Rust project setup | ✅ Complete | P0 | [ADR-0001](adrs/0001-rust-backend.md) |
 | Axum HTTP server | ✅ Complete | P0 | [ADR-0002](adrs/0002-axum-web-framework.md), [Spec: API](specs/api-contracts.md) |
-| Prosody XMPP server | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| Native XMPP server (waddle-xmpp crate) | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| OpenTelemetry setup | ⬜ Not Started | P0 | [ADR-0014](adrs/0014-opentelemetry.md) |
+| XMPP interop CI | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | Turso/libSQL setup | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | Database-per-Waddle sharding | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | CQRS event system | ⬜ Not Started | P1 | [ADR-0007](adrs/0007-cqrs-architecture.md), [Spec: Events](specs/event-schema.md) |
@@ -173,13 +175,14 @@ External integrations and bot platform.
 | [0003](adrs/0003-ratatui-cli.md) | Use Ratatui for CLI TUI | ✅ Accepted |
 | [0004](adrs/0004-turso-libsql-database.md) | Use Turso/libSQL for Storage | ✅ Accepted |
 | [0005](adrs/0005-atproto-identity.md) | ATProto OAuth for Identity | ✅ Accepted |
-| [0006](adrs/0006-xmpp-protocol.md) | XMPP for Real-time | ✅ Accepted |
+| [0006](adrs/0006-xmpp-protocol.md) | Native Rust XMPP Server | ✅ Accepted |
 | [0007](adrs/0007-cqrs-architecture.md) | CQRS Pattern for Data | ✅ Accepted |
 | [0008](adrs/0008-kameo-actors.md) | Kameo Actor Framework | ✅ Accepted |
 | [0009](adrs/0009-zanzibar-permissions.md) | Zanzibar-Inspired Authorization | ✅ Accepted |
 | [0010](adrs/0010-agpl-licensing.md) | AGPL-3.0 License | ✅ Accepted |
 | [0011](adrs/0011-self-hosted-storage.md) | S3-Compatible File Storage | ✅ Accepted |
 | [0012](adrs/0012-transport-encryption.md) | Transport-Only Encryption | ✅ Accepted |
+| [0014](adrs/0014-opentelemetry.md) | OpenTelemetry Instrumentation | ✅ Accepted |
 
 ### RFCs (Feature Proposals)
 
@@ -239,6 +242,15 @@ External integrations and bot platform.
 
 ## Milestones
 
+### M0: XMPP Foundation
+- [ ] waddle-xmpp crate created
+- [ ] TCP connections accepted on 5222
+- [ ] STARTTLS working
+- [ ] Stream negotiation completes
+- [ ] SASL authentication working
+- [ ] OpenTelemetry traces visible
+- [ ] RFC 6120 core interop tests passing
+
 ### M1: Hello Waddle (MVP)
 - [ ] User can authenticate via Bluesky
 - [ ] XMPP account provisioned from DID
@@ -265,6 +277,12 @@ External integrations and bot platform.
 - [ ] Watch Together
 - [ ] Screen sharing (Jingle)
 - [ ] Bot framework
+
+### M5: Federation
+- [ ] S2S listener on 5269
+- [ ] Server dialback (XEP-0220)
+- [ ] Remote user presence
+- [ ] Cross-instance MUC participation
 
 ---
 
