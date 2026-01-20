@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/rawkode/Code/src/github.com/waddle-social/waddle log --oneline -20)",
+      "Bash(git -C /Users/rawkode/Code/src/github.com/waddle-social/wa log --oneline -20)",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "Bash(npm run build:*)"
+    ]
+  }
+}

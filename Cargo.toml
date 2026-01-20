@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/waddle-server",
+    "crates/waddle-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+authors = ["Waddle Contributors"]
+repository = "https://github.com/waddle-social/waddle"
+
+[workspace.dependencies]
+# Core Runtime & Async
+tokio = { version = "1.43", features = ["full"] }
+tower = "0.5"
+futures = "0.3"
+
+# Web Framework (Server)
+axum = { version = "0.7", features = ["ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+
+# CLI TUI (Client)
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+
+# Database
+libsql = "0.9"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+
+# Actor Framework
+kameo = "0.15"
+
+# XMPP Client
+xmpp = "0.5"
+xmpp-parsers = "0.21"
+
+# Object Storage
+object_store = { version = "0.11", features = ["aws"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error Handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# HTTP Client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# CLI Arguments & Config
+clap = { version = "4.5", features = ["derive"] }
+config = "0.14"
+directories = "5.0"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Security/Crypto
+rustls = "0.23"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.5"
+base64 = "0.22"
+
+# Markdown/Syntax (CLI)
+pulldown-cmark = "0.12"
+syntect = "5.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+
+[profile.dev]
+opt-level = 0
+debug = true
