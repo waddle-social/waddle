@@ -1,0 +1,15 @@
+{
+  "name": "ralph-loop",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "ralph": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
