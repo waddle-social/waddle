@@ -18,8 +18,8 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | **Backend Infrastructure** |
-| Rust project setup | ⬜ Not Started | P0 | [ADR-0001](adrs/0001-rust-backend.md) |
-| Axum HTTP server | ⬜ Not Started | P0 | [ADR-0002](adrs/0002-axum-web-framework.md), [Spec: API](specs/api-contracts.md) |
+| Rust project setup | ✅ Complete | P0 | [ADR-0001](adrs/0001-rust-backend.md) |
+| Axum HTTP server | ✅ Complete | P0 | [ADR-0002](adrs/0002-axum-web-framework.md), [Spec: API](specs/api-contracts.md) |
 | Prosody XMPP server | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | Turso/libSQL setup | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | Database-per-Waddle sharding | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
