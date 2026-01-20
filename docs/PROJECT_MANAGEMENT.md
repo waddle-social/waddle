@@ -273,3 +273,4 @@ External integrations and bot platform.
 - **Architecture**: [ADRs](adrs/)
 - **Features**: [RFCs](rfcs/)
 - **Technical Details**: [Specs](specs/)
+- **Dependencies**: [Rust Crates](RUST_CRATES.md)
