@@ -19,20 +19,22 @@ export async function runIteration(
       prompt,
       options: {
         model: "claude-sonnet-4-5",
-        workingDirectory: getGitRoot(),
+        cwd: getGitRoot(),
         permissionMode: "bypassPermissions",
         maxTurns: 20,
+        includePartialMessages: true,
+        stderr: (data: string) => {
+          process.stderr.write(data);
+        },
       },
     });
 
     for await (const message of response) {
       switch (message.type) {
         case "assistant":
-          if (typeof message.content === "string") {
-            lastContent = message.content;
-            process.stdout.write(message.content);
-          } else if (Array.isArray(message.content)) {
-            for (const block of message.content) {
+          // assistant messages have a BetaMessage in message.message
+          if (Array.isArray(message.message.content)) {
+            for (const block of message.message.content) {
               if (block.type === "text") {
                 lastContent = block.text;
                 process.stdout.write(block.text);
@@ -40,11 +42,29 @@ export async function runIteration(
             }
           }
           break;
-        case "tool_call":
+        case "stream_event":
+          // Partial streaming events from includePartialMessages
+          if (
+            message.event.type === "content_block_delta" &&
+            message.event.delta.type === "text_delta"
+          ) {
+            process.stdout.write(message.event.delta.text);
+          }
+          break;
+        case "tool_progress":
           console.log(`\n[Tool: ${message.tool_name}]`);
           break;
-        case "error":
-          console.error("\n[Error]:", message.error);
+        case "system":
+          if (message.subtype === "init") {
+            console.log(`[Session: ${message.session_id}]`);
+          }
+          break;
+        case "result":
+          if (message.subtype === "success") {
+            console.log("\n[Session Complete]");
+          } else {
+            console.error("\n[Error]:", message.errors?.join(", ") ?? "Unknown error");
+          }
           break;
       }
     }
