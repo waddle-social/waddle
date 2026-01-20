@@ -4,7 +4,11 @@
       "Bash(git -C /Users/rawkode/Code/src/github.com/waddle-social/waddle log --oneline -20)",
       "Bash(git -C /Users/rawkode/Code/src/github.com/waddle-social/wa log --oneline -20)",
       "mcp__plugin_context7_context7__resolve-library-id",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "WebFetch(domain:xmpp-interop-testing.github.io)",
+      "Bash(bun add:*)",
+      "Bash(bun test:*)",
+      "Bash(bun run tsc:*)"
     ]
   }
 }

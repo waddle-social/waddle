@@ -35,3 +35,6 @@ local.toml
 # Build artifacts
 dist/
 build/
+
+# Ralph state (local session state)
+.ralph/

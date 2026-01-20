@@ -1,21 +1,49 @@
+export type Phase = "PLAN" | "BUILD" | "REVIEW" | "END";
+
 export interface Config {
-  iterations: number;
+  maxRetries: number;
+  maxTurns: number;
   targetDoc: string;
   dryRun: boolean;
+  startPhase?: Phase;
 }
 
-export interface IterationResult {
-  iteration: number;
-  success: boolean;
-  commitSummary: string | null;
-  error?: string;
-  duration: number;
+export interface Plan {
+  task: string;
+  files: string[];
+  steps: string[];
+  acceptanceCriteria: string[];
 }
 
-export interface IterationLog {
-  iteration: number;
+export interface BuildState {
+  stepsCompleted: string[];
+  blockers: string[];
+}
+
+export interface ReviewState {
+  lastFeedback: string | null;
+  issues: string[];
+}
+
+export interface HistoryEntry {
+  phase: Phase;
+  transition: Phase;
+  reason: string;
   timestamp: string;
-  config: Config;
-  diff: string;
-  result: IterationResult;
+}
+
+export interface State {
+  iteration: number;
+  phase: Phase;
+  timestamp: string;
+  plan: Plan | null;
+  build: BuildState;
+  review: ReviewState;
+  history: HistoryEntry[];
+}
+
+export interface PhaseResult {
+  nextPhase: Phase;
+  reason: string;
+  stateUpdates: Partial<State>;
 }

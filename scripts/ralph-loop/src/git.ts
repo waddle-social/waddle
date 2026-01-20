@@ -1,4 +1,5 @@
 import { execSync } from "child_process";
+import type { Phase } from "./types.js";
 
 export function getGitRoot(): string {
   return execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
@@ -15,10 +16,21 @@ export function getDiff(baseRef = "HEAD~1"): string {
   }
 }
 
+export function getRecentCommits(count = 10): string {
+  try {
+    return execSync(
+      `git log --oneline -${count} --format="%h %s"`,
+      execOpts
+    ).trim();
+  } catch {
+    return "";
+  }
+}
+
 export function getLastRalphCommit(): string | null {
   try {
     const result = execSync(
-      `git log --oneline --grep="ralph-loop: iteration" -1 --format="%H"`,
+      `git log --oneline --grep="^ralph:" -1 --format="%H"`,
       execOpts
     ).trim();
     return result || null;
@@ -27,31 +39,12 @@ export function getLastRalphCommit(): string | null {
   }
 }
 
-export function getDiffFromLastRalph(): string {
+export function getDiffFromLastPhase(): string {
   const lastCommit = getLastRalphCommit();
   if (lastCommit) {
     return getDiff(lastCommit);
   }
-  return "";
-}
-
-export function getLastIterationNumber(): number {
-  try {
-    const result = execSync(
-      `git log --oneline --grep="ralph-loop: iteration" -1 --format="%s"`,
-      execOpts
-    ).trim();
-    const match = result.match(/ralph-loop: iteration (\d+)/);
-    return match ? parseInt(match[1], 10) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-export function commitChanges(iteration: number, summary: string): void {
-  execSync(`git add -A`, execOpts);
-  const message = `ralph-loop: iteration ${iteration}\n\n${summary}`;
-  execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, execOpts);
+  return getDiff("HEAD~1");
 }
 
 export function hasUncommittedChanges(): boolean {
@@ -60,5 +53,25 @@ export function hasUncommittedChanges(): boolean {
     return status.trim().length > 0;
   } catch {
     return false;
+  }
+}
+
+export function commitPhaseTransition(
+  fromPhase: Phase,
+  toPhase: Phase,
+  reason: string
+): void {
+  execSync(`git add -A`, execOpts);
+
+  const message = `ralph: ${fromPhase} → ${toPhase}\n\n${reason}`;
+  const escapedMessage = message.replace(/"/g, '\\"');
+  execSync(`git commit -m "${escapedMessage}"`, execOpts);
+}
+
+export function getCurrentBranch(): string {
+  try {
+    return execSync("git branch --show-current", execOpts).trim();
+  } catch {
+    return "unknown";
   }
 }
