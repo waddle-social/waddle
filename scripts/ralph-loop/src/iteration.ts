@@ -37,7 +37,6 @@ export async function runIteration(
             for (const block of message.message.content) {
               if (block.type === "text") {
                 lastContent = block.text;
-                process.stdout.write(block.text);
               }
             }
           }
