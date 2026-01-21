@@ -7,7 +7,6 @@ use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::muc::user::{Affiliation as MucAffiliation, Item, MucUser, Role as MucRole, Status};
-use xmpp_parsers::muc::Muc;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 use crate::types::{Affiliation, Role};
@@ -218,7 +217,7 @@ pub fn build_occupant_presence(
     let item = Item {
         affiliation: affiliation_to_muc(affiliation),
         role: role_to_muc(role),
-        jid: occupant_real_jid.map(|j| Jid::from(j.clone())),
+        jid: occupant_real_jid.cloned(),
         nick: None,
         actor: None,
         continue_: None,
@@ -228,10 +227,6 @@ pub fn build_occupant_presence(
     let muc_user = MucUser {
         status: statuses,
         items: vec![item],
-        invites: vec![],
-        declines: vec![],
-        destroy: None,
-        password: None,
     };
 
     // Convert MucUser to Element and add to payloads
@@ -273,10 +268,6 @@ pub fn build_leave_presence(
     let muc_user = MucUser {
         status: statuses,
         items: vec![item],
-        invites: vec![],
-        declines: vec![],
-        destroy: None,
-        password: None,
     };
 
     let muc_element: Element = muc_user.into();

@@ -17,9 +17,10 @@ use crate::mam::{
 };
 use crate::metrics::{record_muc_occupant_count, record_muc_presence};
 use crate::muc::{
-    build_leave_presence, build_occupant_presence, parse_muc_presence, MucMessage,
-    MucPresenceAction, MucRoomRegistry,
+    build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
+    MucLeaveRequest, MucMessage, MucPresenceAction, MucRoomRegistry,
 };
+use crate::types::{Affiliation, Role};
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
@@ -449,12 +450,279 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
+    /// Handle a presence stanza.
+    ///
+    /// Routes presence based on destination:
+    /// - MUC presence (to room@muc.domain/nick): Join/leave room operations
+    /// - Other presence: Currently logged and ignored
+    #[instrument(skip(self, pres), fields(presence_type = ?pres.type_, to = ?pres.to))]
     async fn handle_presence(
         &mut self,
-        _pres: xmpp_parsers::presence::Presence,
+        pres: xmpp_parsers::presence::Presence,
     ) -> Result<(), XmppError> {
-        // TODO: Implement presence handling
-        debug!("Received presence stanza");
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Presence received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Parse the presence to see if it's a MUC action
+        let muc_domain = self.room_registry.muc_domain();
+        match parse_muc_presence(&pres, &sender_jid, muc_domain)? {
+            MucPresenceAction::Join(join_req) => {
+                self.handle_muc_join(join_req).await
+            }
+            MucPresenceAction::Leave(leave_req) => {
+                self.handle_muc_leave(leave_req).await
+            }
+            MucPresenceAction::NotMuc => {
+                // Regular presence, not MUC-related
+                debug!("Received non-MUC presence stanza");
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle a MUC join request.
+    ///
+    /// Per XEP-0045:
+    /// - Adds the user to the room as an occupant
+    /// - Sends existing occupants' presence to the joining user
+    /// - Sends the joining user's presence to all existing occupants
+    /// - Sends self-presence with status code 110 to the joining user
+    #[instrument(skip(self, join_req), fields(room = %join_req.room_jid, nick = %join_req.nick))]
+    async fn handle_muc_join(&mut self, join_req: MucJoinRequest) -> Result<(), XmppError> {
+        debug!(
+            sender = %join_req.sender_jid,
+            "Processing MUC join request"
+        );
+
+        // Check if this is a MUC room we manage
+        if !self.room_registry.is_muc_jid(&join_req.room_jid) {
+            return Err(XmppError::item_not_found(Some(format!(
+                "Room {} not found",
+                join_req.room_jid
+            ))));
+        }
+
+        // Get or create the room data
+        let room_data = self.room_registry.get_room_data(&join_req.room_jid).ok_or_else(|| {
+            XmppError::item_not_found(Some(format!("Room {} not found", join_req.room_jid)))
+        })?;
+
+        // Lock the room for modification
+        let mut room = room_data.write().await;
+
+        // Check if user is allowed to join
+        if !room.can_user_join(&join_req.sender_jid.to_bare()) {
+            return Err(XmppError::forbidden(Some(format!(
+                "You are not allowed to join {}",
+                join_req.room_jid
+            ))));
+        }
+
+        // Check if room is full
+        if room.is_full() {
+            return Err(XmppError::service_unavailable(Some(
+                "Room is full".to_string(),
+            )));
+        }
+
+        // Check if nick is already taken by another user
+        if let Some(existing) = room.get_occupant(&join_req.nick) {
+            if existing.real_jid != join_req.sender_jid {
+                return Err(XmppError::conflict(Some(format!(
+                    "Nickname {} is already in use",
+                    join_req.nick
+                ))));
+            }
+            // User is already in the room with this nick - treat as presence refresh
+            debug!("User already in room, refreshing presence");
+        }
+
+        // Get existing occupants before adding the new one (for presence broadcast)
+        let existing_occupants: Vec<(FullJid, String, Affiliation, Role)> = room
+            .occupants
+            .values()
+            .map(|o| (o.real_jid.clone(), o.nick.clone(), o.affiliation, o.role))
+            .collect();
+
+        // Add the occupant to the room
+        let new_occupant = room.add_occupant_with_affiliation(join_req.sender_jid.clone(), join_req.nick.clone());
+        let new_occupant_affiliation = new_occupant.affiliation;
+        let new_occupant_role = new_occupant.role;
+
+        let occupant_count = room.occupant_count();
+
+        // Build the new occupant's room JID
+        let new_occupant_room_jid = room
+            .room_jid
+            .clone()
+            .with_resource_str(&join_req.nick)
+            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+
+        drop(room); // Release the write lock
+
+        // Record metrics
+        record_muc_presence("join", &join_req.room_jid.to_string());
+        record_muc_occupant_count(occupant_count as i64, &join_req.room_jid.to_string());
+
+        // Send existing occupants' presence to the joining user
+        for (existing_jid, existing_nick, existing_affiliation, existing_role) in &existing_occupants {
+            let existing_room_jid = join_req
+                .room_jid
+                .clone()
+                .with_resource_str(existing_nick)
+                .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+
+            let presence = build_occupant_presence(
+                &existing_room_jid,
+                &join_req.sender_jid,
+                *existing_affiliation,
+                *existing_role,
+                false, // not self
+                Some(existing_jid), // real JID for semi-anonymous rooms
+            );
+
+            self.stream.write_stanza(&Stanza::Presence(presence)).await?;
+        }
+
+        // Send the new occupant's presence to all existing occupants
+        for (existing_jid, _, _, _) in &existing_occupants {
+            let presence = build_occupant_presence(
+                &new_occupant_room_jid,
+                existing_jid,
+                new_occupant_affiliation,
+                new_occupant_role,
+                false, // not self
+                Some(&join_req.sender_jid),
+            );
+
+            let stanza = Stanza::Presence(presence);
+            let _ = self.connection_registry.send_to(existing_jid, stanza).await;
+        }
+
+        // Send self-presence to the joining user (with status code 110)
+        let self_presence = build_occupant_presence(
+            &new_occupant_room_jid,
+            &join_req.sender_jid,
+            new_occupant_affiliation,
+            new_occupant_role,
+            true, // is_self - includes status code 110
+            Some(&join_req.sender_jid),
+        );
+
+        self.stream.write_stanza(&Stanza::Presence(self_presence)).await?;
+
+        info!(
+            room = %join_req.room_jid,
+            nick = %join_req.nick,
+            occupant_count = occupant_count,
+            "User joined MUC room"
+        );
+
+        Ok(())
+    }
+
+    /// Handle a MUC leave request.
+    ///
+    /// Per XEP-0045:
+    /// - Removes the user from the room
+    /// - Sends unavailable presence to all remaining occupants
+    /// - Sends self-presence unavailable with status code 110 to the leaving user
+    #[instrument(skip(self, leave_req), fields(room = %leave_req.room_jid, nick = %leave_req.nick))]
+    async fn handle_muc_leave(&mut self, leave_req: MucLeaveRequest) -> Result<(), XmppError> {
+        debug!(
+            sender = %leave_req.sender_jid,
+            "Processing MUC leave request"
+        );
+
+        // Get the room data
+        let room_data = self.room_registry.get_room_data(&leave_req.room_jid).ok_or_else(|| {
+            XmppError::item_not_found(Some(format!("Room {} not found", leave_req.room_jid)))
+        })?;
+
+        // Lock the room for modification
+        let mut room = room_data.write().await;
+
+        // Find the occupant by their real JID (not by nick from the presence, as that could be manipulated)
+        let occupant_nick = room
+            .find_nick_by_real_jid(&leave_req.sender_jid)
+            .map(|s| s.to_owned());
+
+        let nick = match occupant_nick {
+            Some(n) => n,
+            None => {
+                debug!("User not in room, ignoring leave");
+                return Ok(());
+            }
+        };
+
+        // Get the occupant's info before removal
+        let occupant = room.get_occupant(&nick).ok_or_else(|| {
+            XmppError::internal("Occupant disappeared during leave".to_string())
+        })?;
+        let affiliation = occupant.affiliation;
+
+        // Build the leaving user's room JID
+        let leaving_room_jid = room
+            .room_jid
+            .clone()
+            .with_resource_str(&nick)
+            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+
+        // Get remaining occupants (excluding the one leaving)
+        let remaining_occupants: Vec<FullJid> = room
+            .occupants
+            .values()
+            .filter(|o| o.real_jid != leave_req.sender_jid)
+            .map(|o| o.real_jid.clone())
+            .collect();
+
+        // Remove the occupant
+        room.remove_occupant(&nick);
+        let occupant_count = room.occupant_count();
+
+        drop(room); // Release the write lock
+
+        // Record metrics
+        record_muc_presence("leave", &leave_req.room_jid.to_string());
+        record_muc_occupant_count(occupant_count as i64, &leave_req.room_jid.to_string());
+
+        // Send unavailable presence to all remaining occupants
+        for occupant_jid in &remaining_occupants {
+            let presence = build_leave_presence(
+                &leaving_room_jid,
+                occupant_jid,
+                affiliation,
+                false, // not self
+            );
+
+            let stanza = Stanza::Presence(presence);
+            let _ = self.connection_registry.send_to(occupant_jid, stanza).await;
+        }
+
+        // Send self-presence unavailable to the leaving user
+        let self_presence = build_leave_presence(
+            &leaving_room_jid,
+            &leave_req.sender_jid,
+            affiliation,
+            true, // is_self - includes status code 110
+        );
+
+        self.stream.write_stanza(&Stanza::Presence(self_presence)).await?;
+
+        info!(
+            room = %leave_req.room_jid,
+            nick = %nick,
+            occupant_count = occupant_count,
+            "User left MUC room"
+        );
+
         Ok(())
     }
 
