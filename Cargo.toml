@@ -81,7 +81,7 @@ hmac = "0.12"
 sha2 = "0.10"
 
 # Utilities
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
 base64 = "0.22"

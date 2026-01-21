@@ -28,8 +28,9 @@
 mod repository;
 mod types;
 
-pub use repository::MessageRepository;
-pub use types::{Message, MessageCreate, MessageFlags, MessageUpdate};
+// Note: These are re-exported for the public API surface once the module is made public
+pub(crate) use repository::MessageRepository;
+pub(crate) use types::{Message, MessageCreate, MessageFlags, MessageUpdate};
 
 use thiserror::Error;
 

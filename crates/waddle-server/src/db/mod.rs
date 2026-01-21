@@ -26,7 +26,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument};
 
-pub use migrations::{Migration, MigrationRunner};
+pub use migrations::MigrationRunner;
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 
 /// Database-specific errors

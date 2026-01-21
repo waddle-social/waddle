@@ -40,7 +40,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Permission check API | ✅ Complete | P0 | [Spec: Permissions](specs/permission-model.md) |
 | MUC affiliation sync | 🔄 In Progress | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | **Core Messaging** |
-| Message schema | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
+| Message schema | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
 | Send message (XMPP) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Message history (MAM) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Real-time delivery (XMPP) | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |

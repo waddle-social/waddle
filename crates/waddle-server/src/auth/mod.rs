@@ -28,9 +28,8 @@ pub mod session;
 
 use thiserror::Error;
 
-pub use atproto::{AtprotoOAuth, AuthorizationRequest, TokenResponse};
-pub use did::{DidDocument, DidResolver};
-pub use jid::{did_to_jid, did_to_jid_localpart, jid_to_did, jid_localpart_to_did};
+pub use atproto::AtprotoOAuth;
+pub use jid::did_to_jid;
 pub use session::{Session, SessionManager};
 
 /// Authentication-related errors
