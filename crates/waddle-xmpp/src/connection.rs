@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use chrono::Utc;
 use jid::FullJid;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -10,6 +11,10 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::message::MessageType;
 
+use crate::mam::{
+    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
+    ArchivedMessage, MamStorage,
+};
 use crate::muc::{MucMessage, MucRoomRegistry};
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::stream::XmppStream;
@@ -23,7 +28,7 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 type OutboundReceiver = mpsc::Receiver<OutboundStanza>;
 
 /// Actor managing a single XMPP client connection.
-pub struct ConnectionActor<S: AppState> {
+pub struct ConnectionActor<S: AppState, M: MamStorage> {
     /// Peer address
     _peer_addr: SocketAddr,
     /// XMPP stream handler
@@ -42,15 +47,17 @@ pub struct ConnectionActor<S: AppState> {
     room_registry: Arc<MucRoomRegistry>,
     /// Connection registry for message routing between connections
     connection_registry: Arc<ConnectionRegistry>,
+    /// MAM storage for message archival
+    mam_storage: Arc<M>,
     /// Receiver for outbound stanzas (messages routed to this connection)
     outbound_rx: Option<OutboundReceiver>,
 }
 
-impl<S: AppState> ConnectionActor<S> {
+impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage),
         fields(peer = %peer_addr)
     )]
     pub async fn handle_connection(
@@ -61,6 +68,7 @@ impl<S: AppState> ConnectionActor<S> {
         app_state: Arc<S>,
         room_registry: Arc<MucRoomRegistry>,
         connection_registry: Arc<ConnectionRegistry>,
+        mam_storage: Arc<M>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -74,6 +82,7 @@ impl<S: AppState> ConnectionActor<S> {
             app_state,
             room_registry,
             connection_registry,
+            mam_storage,
             outbound_rx: None,
         };
 
@@ -272,7 +281,7 @@ impl<S: AppState> ConnectionActor<S> {
     ///
     /// Routes the message to the appropriate MUC room, which broadcasts
     /// it to all occupants (including sending an echo back to the sender
-    /// per XEP-0045).
+    /// per XEP-0045). Also archives the message to MAM storage.
     #[instrument(skip(self, msg), fields(room = ?msg.to))]
     async fn handle_groupchat_message(
         &mut self,
@@ -326,9 +335,62 @@ impl<S: AppState> ConnectionActor<S> {
         })?;
 
         // Broadcast the message to all occupants
-        let outbound_messages = room.broadcast_message(sender_nick, &muc_msg.message)?;
+        let mut outbound_messages = room.broadcast_message(sender_nick.clone(), &muc_msg.message)?;
 
-        drop(room); // Release the read lock before sending
+        drop(room); // Release the read lock before archival and sending
+
+        // Archive the message to MAM storage (only if it has a body)
+        let archive_id = if muc_msg.has_body() {
+            // Build the sender's MUC JID (room JID + nick resource)
+            let muc_sender_jid = format!("{}/{}", room_jid, sender_nick);
+
+            // Extract the body text for archival
+            let body = muc_msg
+                .message
+                .bodies
+                .get("")
+                .or_else(|| muc_msg.message.bodies.values().next())
+                .map(|b| b.0.clone())
+                .unwrap_or_default();
+
+            let archived_msg = ArchivedMessage {
+                id: String::new(), // Let storage generate ID
+                timestamp: Utc::now(),
+                from: muc_sender_jid,
+                to: room_jid.to_string(),
+                body,
+                stanza_id: muc_msg.message.id.clone(),
+            };
+
+            match self.mam_storage.store_message(&archived_msg).await {
+                Ok(id) => {
+                    debug!(
+                        archive_id = %id,
+                        room = %room_jid,
+                        "Message archived to MAM storage"
+                    );
+                    Some(id)
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        room = %room_jid,
+                        "Failed to archive message to MAM storage"
+                    );
+                    // Don't fail the message delivery if archival fails
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Add stanza-id to outbound messages if we archived successfully
+        if let Some(ref archive_id) = archive_id {
+            for outbound in &mut outbound_messages {
+                add_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
+            }
+        }
 
         // Send the messages to all occupants via the connection registry
         for outbound in &outbound_messages {
@@ -373,6 +435,7 @@ impl<S: AppState> ConnectionActor<S> {
         debug!(
             room = %room_jid,
             recipient_count = outbound_messages.len(),
+            archived = archive_id.is_some(),
             "Groupchat message processed"
         );
 
@@ -388,9 +451,97 @@ impl<S: AppState> ConnectionActor<S> {
         Ok(())
     }
 
-    async fn handle_iq(&mut self, _iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
-        // TODO: Implement IQ handling (disco, ping, etc.)
-        debug!("Received IQ stanza");
+    /// Handle an IQ stanza.
+    ///
+    /// Currently supports:
+    /// - MAM queries (XEP-0313)
+    #[instrument(skip(self, iq), fields(iq_type = ?iq.payload, iq_id = %iq.id))]
+    async fn handle_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        // Check if this is a MAM query
+        if is_mam_query(&iq) {
+            return self.handle_mam_query(iq).await;
+        }
+
+        // TODO: Implement other IQ handling (disco, ping, etc.)
+        debug!("Received unhandled IQ stanza");
+        Ok(())
+    }
+
+    /// Handle a MAM (Message Archive Management) query.
+    ///
+    /// Processes the query, retrieves archived messages from storage,
+    /// and sends result messages followed by a fin IQ per XEP-0313.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_mam_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("MAM query received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Extract the room JID from the 'to' attribute of the IQ
+        let room_jid = match &iq.to {
+            Some(jid) => jid.to_string(),
+            None => {
+                warn!("MAM query missing 'to' attribute");
+                return Err(XmppError::bad_request(Some(
+                    "MAM query must specify target archive (to attribute)".to_string(),
+                )));
+            }
+        };
+
+        debug!(
+            sender = %sender_jid,
+            room = %room_jid,
+            "Processing MAM query"
+        );
+
+        // Parse the MAM query
+        let (query_id, mam_query) = parse_mam_query(&iq)?;
+
+        debug!(
+            query_id = %query_id,
+            query = ?mam_query,
+            "Parsed MAM query parameters"
+        );
+
+        // Execute the query against MAM storage
+        let result = self
+            .mam_storage
+            .query_messages(&room_jid, &mam_query)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "MAM query failed");
+                XmppError::internal_server_error(Some(format!("MAM query failed: {}", e)))
+            })?;
+
+        debug!(
+            message_count = result.messages.len(),
+            complete = result.complete,
+            "MAM query returned results"
+        );
+
+        // Build and send result messages for each archived message
+        let result_messages = build_result_messages(&query_id, &sender_jid.to_string(), &result.messages);
+
+        for msg in result_messages {
+            self.stream.write_stanza(&Stanza::Message(msg)).await?;
+        }
+
+        // Send the fin IQ response
+        let fin_iq = build_fin_iq(&iq, &result);
+        self.stream.write_stanza(&Stanza::Iq(fin_iq)).await?;
+
+        debug!(
+            query_id = %query_id,
+            messages_sent = result.messages.len(),
+            "MAM query completed"
+        );
+
         Ok(())
     }
 }

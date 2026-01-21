@@ -3,6 +3,7 @@
 //! The server listens on TCP port 5222 for client-to-server (C2S) connections.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -10,6 +11,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, Instrument};
 
 use crate::connection::ConnectionActor;
+use crate::mam::LibSqlMamStorage;
 use crate::muc::MucRoomRegistry;
 use crate::registry::ConnectionRegistry;
 use crate::{AppState, XmppError};
@@ -27,6 +29,8 @@ pub struct XmppServerConfig {
     pub tls_key_path: String,
     /// Server domain (e.g., "waddle.social")
     pub domain: String,
+    /// MAM database path (None for in-memory, Some(path) for file-based)
+    pub mam_db_path: Option<PathBuf>,
 }
 
 impl Default for XmppServerConfig {
@@ -37,6 +41,7 @@ impl Default for XmppServerConfig {
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
             domain: "localhost".to_string(),
+            mam_db_path: None, // In-memory by default
         }
     }
 }
@@ -48,6 +53,7 @@ pub struct XmppServer<S: AppState> {
     tls_acceptor: TlsAcceptor,
     room_registry: Arc<MucRoomRegistry>,
     connection_registry: Arc<ConnectionRegistry>,
+    mam_storage: Arc<LibSqlMamStorage>,
 }
 
 impl<S: AppState> XmppServer<S> {
@@ -62,13 +68,47 @@ impl<S: AppState> XmppServer<S> {
         // Create the connection registry for message routing
         let connection_registry = Arc::new(ConnectionRegistry::new());
 
+        // Create the MAM storage
+        let mam_storage = Self::create_mam_storage(&config).await?;
+
         Ok(Self {
             config,
             app_state,
             tls_acceptor,
             room_registry,
             connection_registry,
+            mam_storage,
         })
+    }
+
+    /// Create MAM storage from configuration.
+    async fn create_mam_storage(config: &XmppServerConfig) -> Result<Arc<LibSqlMamStorage>, XmppError> {
+        let db_path = config
+            .mam_db_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ":memory:".to_string());
+
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|e| XmppError::config(format!("Failed to create MAM database: {}", e)))?;
+
+        let conn = db
+            .connect()
+            .map_err(|e| XmppError::config(format!("Failed to connect to MAM database: {}", e)))?;
+
+        let storage = LibSqlMamStorage::new(conn);
+
+        // Initialize the schema
+        storage
+            .initialize()
+            .await
+            .map_err(|e| XmppError::config(format!("Failed to initialize MAM schema: {}", e)))?;
+
+        info!(db_path = %db_path, "MAM storage initialized");
+
+        Ok(Arc::new(storage))
     }
 
     /// Load TLS configuration from certificate and key files.
@@ -119,6 +159,7 @@ impl<S: AppState> XmppServer<S> {
             let domain = self.config.domain.clone();
             let room_registry = Arc::clone(&self.room_registry);
             let connection_registry = Arc::clone(&self.connection_registry);
+            let mam_storage = Arc::clone(&self.mam_storage);
 
             tokio::spawn(
                 async move {
@@ -131,6 +172,7 @@ impl<S: AppState> XmppServer<S> {
                             app_state,
                             room_registry,
                             connection_registry,
+                            mam_storage,
                         )
                         .await
                     {
@@ -160,5 +202,10 @@ impl<S: AppState> XmppServer<S> {
     /// Get the connection registry.
     pub fn connection_registry(&self) -> &Arc<ConnectionRegistry> {
         &self.connection_registry
+    }
+
+    /// Get the MAM storage.
+    pub fn mam_storage(&self) -> &Arc<LibSqlMamStorage> {
+        &self.mam_storage
     }
 }
