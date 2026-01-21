@@ -66,8 +66,8 @@ fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(detailed_health_handler))
-        // Auth routes
-        .merge(routes::auth::router(auth_state))
+        // Auth routes - nested because they use a different state type
+        .nest("/", routes::auth::router(auth_state))
         // Future routes will be mounted here
         // .merge(routes::waddles::router())
         // .merge(routes::channels::router())

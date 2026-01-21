@@ -213,11 +213,11 @@ impl SessionManager {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
                 libsql::params![
-                    session.id,
+                    session.id.clone(),
                     user_id,
-                    encrypted_access,
-                    encrypted_refresh,
-                    expires_at,
+                    encrypted_access.clone(),
+                    encrypted_refresh.clone(),
+                    expires_at.clone(),
                     session.created_at.to_rfc3339(),
                     session.last_used_at.to_rfc3339()
                 ],
@@ -237,7 +237,7 @@ impl SessionManager {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
                 libsql::params![
-                    session.id,
+                    session.id.clone(),
                     user_id,
                     encrypted_access,
                     encrypted_refresh,

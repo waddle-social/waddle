@@ -298,17 +298,21 @@ pub async fn session_info_handler(
     };
 
     match state.session_manager.get_session(&session_id).await {
-        Ok(Some(session)) => (
-            StatusCode::OK,
-            Json(SessionInfoResponse {
-                session_id: session.id,
-                did: session.did,
-                handle: session.handle,
-                is_expired: session.is_expired(),
-                expires_at: session.expires_at.map(|dt| dt.to_rfc3339()),
-            }),
-        )
-            .into_response(),
+        Ok(Some(session)) => {
+            let is_expired = session.is_expired();
+            let expires_at = session.expires_at.map(|dt| dt.to_rfc3339());
+            (
+                StatusCode::OK,
+                Json(SessionInfoResponse {
+                    session_id: session.id,
+                    did: session.did,
+                    handle: session.handle,
+                    is_expired,
+                    expires_at,
+                }),
+            )
+                .into_response()
+        }
         Ok(None) => auth_error_to_response(AuthError::SessionNotFound(session_id)).into_response(),
         Err(err) => auth_error_to_response(err).into_response(),
     }

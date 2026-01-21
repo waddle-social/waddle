@@ -115,12 +115,13 @@ impl DidResolver {
     ///
     /// Looks for a TXT record at `_atproto.{handle}` with format `did={did}`
     async fn resolve_handle_via_dns(&self, handle: &str) -> Result<String, AuthError> {
-        use hickory_resolver::TokioAsyncResolver;
+        use hickory_resolver::Resolver;
 
         let dns_name = format!("_atproto.{}", handle);
 
-        let resolver = TokioAsyncResolver::tokio_from_system_conf()
-            .map_err(|e| AuthError::DnsError(format!("Failed to create DNS resolver: {}", e)))?;
+        let resolver = Resolver::builder_tokio()
+            .map_err(|e| AuthError::DnsError(format!("Failed to create DNS resolver: {}", e)))?
+            .build();
 
         let response = resolver
             .txt_lookup(&dns_name)
