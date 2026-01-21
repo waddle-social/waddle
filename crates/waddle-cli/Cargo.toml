@@ -19,7 +19,6 @@ tui-textarea = { workspace = true }
 
 # XMPP Client
 xmpp = { workspace = true }
-xmpp-parsers = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

@@ -13,9 +13,8 @@ use anyhow::{Context, Result};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use xmpp::{Agent, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent};
-use xmpp_parsers::jid::{BareJid, FullJid, Jid};
-use xmpp_parsers::message::MessageType;
+use xmpp::{Agent, BareJid, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent, Jid};
+use xmpp::parsers::message::MessageType;
 
 use crate::config::XmppConfig;
 
@@ -176,36 +175,36 @@ impl XmppClient {
                 debug!(
                     "Room message in {}: {}: {}",
                     room_jid,
-                    sender_nick.0,
-                    body.0
+                    sender_nick,
+                    body
                 );
                 let _ = self.event_tx.send(XmppClientEvent::RoomMessage {
                     room_jid,
-                    sender_nick: sender_nick.0,
-                    body: body.0,
-                    id: id.map(|i| i.0),
+                    sender_nick,
+                    body,
+                    id,
                 });
             }
             XmppEvent::ChatMessage(id, from, body) => {
-                debug!("Chat message from {}: {}", from, body.0);
+                debug!("Chat message from {}: {}", from, body);
                 let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
                     from,
-                    body: body.0,
-                    id: id.map(|i| i.0),
+                    body,
+                    id,
                 });
             }
             XmppEvent::RoomPrivateMessage(id, room_jid, sender_nick, body) => {
                 debug!(
                     "Private message in {} from {}: {}",
                     room_jid,
-                    sender_nick.0,
-                    body.0
+                    sender_nick,
+                    body
                 );
                 // Treat room private messages as regular chat messages
                 let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
                     from: room_jid,
-                    body: body.0,
-                    id: id.map(|i| i.0),
+                    body,
+                    id,
                 });
             }
             XmppEvent::ContactAdded(item) => {
@@ -220,8 +219,8 @@ impl XmppClient {
             XmppEvent::AvatarRetrieved(jid, _hash) => {
                 debug!("Avatar retrieved for: {}", jid);
             }
-            XmppEvent::ServiceMessage(id, from, body) => {
-                debug!("Service message from {}: {}", from, body.0);
+            XmppEvent::ServiceMessage(_id, from, body) => {
+                debug!("Service message from {}: {}", from, body);
             }
             XmppEvent::HttpUploadedFile(url) => {
                 debug!("File uploaded: {}", url);
