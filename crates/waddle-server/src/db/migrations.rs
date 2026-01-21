@@ -314,8 +314,18 @@ impl MigrationRunner {
     /// Get the current schema version
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn current_version(&self, db: &Database) -> Result<Option<i64>, DatabaseError> {
-        let conn = db.connect()?;
+        // Use persistent connection for in-memory databases to ensure we see the same data
+        if let Some(persistent) = db.persistent_connection() {
+            let conn = persistent.lock().await;
+            self.current_version_with_connection(&conn).await
+        } else {
+            let conn = db.connect()?;
+            self.current_version_with_connection(&conn).await
+        }
+    }
 
+    /// Internal method to get current version with a given connection
+    async fn current_version_with_connection(&self, conn: &libsql::Connection) -> Result<Option<i64>, DatabaseError> {
         // Check if migrations table exists
         let mut rows = conn
             .query(
@@ -388,8 +398,9 @@ mod tests {
         let applied = runner.run(&db).await.unwrap();
         assert!(!applied.is_empty());
 
-        // Verify tables exist
-        let conn = db.connect().unwrap();
+        // Verify tables exist - use persistent connection for in-memory database
+        let conn = db.persistent_connection().unwrap();
+        let conn = conn.lock().await;
         let mut rows = conn
             .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", ())
             .await
