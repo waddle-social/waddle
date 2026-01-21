@@ -161,6 +161,15 @@ impl XmppError {
             text,
         }
     }
+
+    /// Create a stanza error for 'conflict'.
+    pub fn conflict(text: Option<String>) -> Self {
+        Self::Stanza {
+            condition: StanzaErrorCondition::Conflict,
+            error_type: StanzaErrorType::Cancel,
+            text,
+        }
+    }
 }
 
 /// XMPP stanza error conditions (RFC 6120 Section 8.3.3).
