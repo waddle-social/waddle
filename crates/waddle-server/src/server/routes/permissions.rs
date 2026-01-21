@@ -7,8 +7,8 @@
 //! - DELETE /v1/permissions/tuples - Delete a permission tuple
 
 use crate::permissions::{
-    CheckRequest as PermCheckRequest, CheckResponse as PermCheckResponse, Object, ObjectType,
-    PermissionError, PermissionService, Relation, Subject, SubjectType, Tuple,
+    CheckResponse as PermCheckResponse, Object, PermissionError, PermissionService, Relation,
+    Subject, Tuple,
 };
 use crate::server::AppState;
 use axum::{

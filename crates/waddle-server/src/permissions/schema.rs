@@ -17,6 +17,7 @@ pub enum ComputedPermission {
     Union(Vec<ComputedPermission>),
 
     /// Permission is granted if ALL of the specified permissions/relations are satisfied
+    #[allow(dead_code)]
     Intersection(Vec<ComputedPermission>),
 
     /// Permission is granted by following a relation to a parent object and checking a permission there
@@ -115,6 +116,7 @@ impl PermissionSchema {
     }
 
     /// Check if a relation is valid for an object type
+    #[allow(dead_code)]
     pub fn is_valid_relation(&self, object_type: ObjectType, relation: &str) -> bool {
         self.schemas
             .get(&object_type)

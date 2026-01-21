@@ -362,6 +362,15 @@ impl TupleStore {
     pub async fn write(&self, tuple: Tuple) -> Result<(), PermissionError> {
         debug!("Writing tuple: {}", tuple);
 
+        // First check if this tuple already exists
+        // (SQLite's UNIQUE constraint doesn't work properly with NULL values)
+        if self
+            .exists(&tuple.object, &tuple.relation.name, &tuple.subject)
+            .await?
+        {
+            return Err(PermissionError::TupleAlreadyExists);
+        }
+
         let conn = self.get_connection().await?;
 
         let subject_relation = tuple.subject.relation.as_deref();
@@ -548,6 +557,7 @@ impl TupleStore {
     }
 
     /// Get all tuples where the subject matches (for expanding usersets)
+    #[allow(dead_code)]
     #[instrument(skip(self))]
     pub async fn get_tuples_for_subject(
         &self,

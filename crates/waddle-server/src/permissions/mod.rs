@@ -26,6 +26,7 @@ mod schema;
 mod tuple;
 
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
+#[allow(unused_imports)]
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
 pub use tuple::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
 
@@ -37,6 +38,7 @@ use crate::db::Database;
 /// Permission-specific errors
 #[derive(Error, Debug)]
 pub enum PermissionError {
+    #[allow(dead_code)]
     #[error("Permission denied: {0}")]
     Denied(String),
 
@@ -61,6 +63,7 @@ pub enum PermissionError {
     #[error("Database error: {0}")]
     DatabaseError(String),
 
+    #[allow(dead_code)]
     #[error("Schema error: {0}")]
     SchemaError(String),
 
@@ -128,6 +131,7 @@ impl PermissionService {
     }
 
     /// List all subjects with a specific relation on an object
+    #[allow(dead_code)]
     pub async fn list_subjects(
         &self,
         object: &Object,

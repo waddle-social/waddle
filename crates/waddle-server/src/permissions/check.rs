@@ -89,6 +89,7 @@ impl PermissionChecker {
     }
 
     /// Create a new permission checker with custom cache size
+    #[allow(dead_code)]
     pub fn with_cache_size(db: Arc<Database>, schema: PermissionSchema, cache_size: usize) -> Self {
         Self {
             tuple_store: TupleStore::new(db),
@@ -332,6 +333,7 @@ impl PermissionChecker {
     }
 
     /// Invalidate cache entries for a specific object
+    #[allow(dead_code)]
     pub async fn invalidate_object(&self, object: &Object) {
         let mut cache = self.cache.lock().await;
         // Note: LruCache doesn't support partial key matching, so we clear all
@@ -341,6 +343,7 @@ impl PermissionChecker {
     }
 
     /// Clear the entire cache
+    #[allow(dead_code)]
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.lock().await;
         cache.clear();
