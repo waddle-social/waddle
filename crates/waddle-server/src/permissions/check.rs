@@ -35,6 +35,7 @@ pub struct CheckRequest {
 
 impl CheckRequest {
     /// Create a new check request
+    #[allow(dead_code)]
     pub fn new(subject: Subject, permission: impl Into<String>, object: Object) -> Self {
         Self {
             subject,

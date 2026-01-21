@@ -111,6 +111,7 @@ impl PermissionSchema {
     }
 
     /// Get the schema for an object type
+    #[allow(dead_code)]
     pub fn get_schema(&self, object_type: ObjectType) -> Option<&ObjectTypeSchema> {
         self.schemas.get(&object_type)
     }

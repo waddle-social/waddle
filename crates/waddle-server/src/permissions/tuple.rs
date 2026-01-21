@@ -186,6 +186,7 @@ pub struct Subject {
 
 impl Subject {
     /// Create a new direct user subject
+    #[allow(dead_code)]
     pub fn user(did: impl Into<String>) -> Self {
         Self {
             subject_type: SubjectType::User,
@@ -195,6 +196,7 @@ impl Subject {
     }
 
     /// Create a userset subject (e.g., all members of a waddle)
+    #[allow(dead_code)]
     pub fn userset(subject_type: SubjectType, id: impl Into<String>, relation: impl Into<String>) -> Self {
         Self {
             subject_type,

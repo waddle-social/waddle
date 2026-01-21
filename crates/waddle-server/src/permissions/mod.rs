@@ -28,6 +28,7 @@ mod tuple;
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
 #[allow(unused_imports)]
 pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
+#[allow(unused_imports)]
 pub use tuple::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
 
 use std::sync::Arc;

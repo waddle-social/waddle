@@ -8,6 +8,7 @@ use axum::{
     Router,
 };
 use routes::auth::AuthState;
+use routes::permissions::PermissionState;
 use serde::Serialize;
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc};
@@ -67,6 +68,10 @@ fn create_router(state: Arc<AppState>) -> Router {
     // This converts Router<Arc<AuthState>> to Router<()>, which can then be merged
     let auth_router = routes::auth::router(auth_state);
 
+    // Permission router with Zanzibar-inspired permission service
+    let permission_state = Arc::new(PermissionState::new(state.clone()));
+    let permission_router = routes::permissions::router(permission_state);
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(detailed_health_handler))
@@ -77,6 +82,8 @@ fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
         // Merge auth routes after the main router has its state applied
         .merge(auth_router)
+        // Merge permission routes
+        .merge(permission_router)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
