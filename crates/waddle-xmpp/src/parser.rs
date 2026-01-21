@@ -27,6 +27,8 @@ pub mod ns {
     pub const SESSION: &str = "urn:ietf:params:xml:ns:xmpp-session";
     /// Stanza error namespace
     pub const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+    /// Stream Management namespace (XEP-0198, version 3)
+    pub const SM: &str = "urn:xmpp:sm:3";
 }
 
 /// Parsed stream header information.
@@ -178,6 +180,14 @@ impl XmlParser {
             "auth",
             "success",
             "stream:features",
+            // XEP-0198 Stream Management elements
+            "enable",
+            "enabled",
+            "resume",
+            "resumed",
+            "failed",
+            "r",
+            "a",
         ];
 
         for tag in stanza_tags {
@@ -221,12 +231,17 @@ impl XmlParser {
             ("<iq", parse_iq_stanza),
             ("<message", parse_message_stanza),
             ("<presence", parse_presence_stanza),
+            // XEP-0198 Stream Management stanzas
+            ("<enable", parse_sm_enable),
+            ("<r", parse_sm_request),
+            ("<a ", parse_sm_ack),  // Note: space to avoid matching <auth
+            ("<resume", parse_sm_resume),
         ];
 
         for (pattern, parser) in stanza_patterns {
             if let Some(start) = data.find(pattern) {
                 // Find the end of this stanza
-                let tag_name = &pattern[1..]; // Strip leading <
+                let tag_name = &pattern[1..].trim(); // Strip leading < and any trailing space
                 if let Some(end) = find_stanza_end(&data, start, tag_name) {
                     let stanza_xml = &data[start..end];
                     let result = parser(stanza_xml)?;
@@ -302,6 +317,14 @@ pub enum ParsedStanza {
     Iq(Element),
     /// Unknown/raw element
     Unknown(Element),
+    /// XEP-0198: Stream Management enable request
+    SmEnable { resume: bool, max: Option<u32> },
+    /// XEP-0198: Stream Management request ack
+    SmRequest,
+    /// XEP-0198: Stream Management ack response
+    SmAck { h: u32 },
+    /// XEP-0198: Stream Management resume request
+    SmResume { previd: String, h: u32 },
 }
 
 fn parse_starttls(data: &str) -> Result<ParsedStanza, XmppError> {
@@ -343,6 +366,54 @@ fn parse_message_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
 fn parse_presence_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
     let element = parse_element(data)?;
     Ok(ParsedStanza::Presence(element))
+}
+
+/// Parse XEP-0198 Stream Management enable request.
+fn parse_sm_enable(data: &str) -> Result<ParsedStanza, XmppError> {
+    // Check for SM namespace
+    if !data.contains(ns::SM) {
+        return Err(XmppError::xml_parse("Invalid SM enable: wrong namespace"));
+    }
+
+    let resume = data.contains("resume='true'") || data.contains("resume=\"true\"");
+    let max = extract_attribute(data, "max").and_then(|s| s.parse().ok());
+
+    Ok(ParsedStanza::SmEnable { resume, max })
+}
+
+/// Parse XEP-0198 Stream Management request (<r/>).
+fn parse_sm_request(data: &str) -> Result<ParsedStanza, XmppError> {
+    // Accept both with namespace and bare <r/>
+    if data.contains("<r") && (data.contains(ns::SM) || data.trim() == "<r/>" || data.contains("<r/>")) {
+        Ok(ParsedStanza::SmRequest)
+    } else {
+        Err(XmppError::xml_parse("Invalid SM request"))
+    }
+}
+
+/// Parse XEP-0198 Stream Management ack (<a h='N'/>).
+fn parse_sm_ack(data: &str) -> Result<ParsedStanza, XmppError> {
+    // Must have h attribute
+    let h = extract_attribute(data, "h")
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| XmppError::xml_parse("SM ack missing 'h' attribute"))?;
+
+    Ok(ParsedStanza::SmAck { h })
+}
+
+/// Parse XEP-0198 Stream Management resume request.
+fn parse_sm_resume(data: &str) -> Result<ParsedStanza, XmppError> {
+    if !data.contains(ns::SM) {
+        return Err(XmppError::xml_parse("Invalid SM resume: wrong namespace"));
+    }
+
+    let previd = extract_attribute(data, "previd")
+        .ok_or_else(|| XmppError::xml_parse("SM resume missing 'previd' attribute"))?;
+    let h = extract_attribute(data, "h")
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| XmppError::xml_parse("SM resume missing 'h' attribute"))?;
+
+    Ok(ParsedStanza::SmResume { previd, h })
 }
 
 /// Parse a string into a minidom Element.
@@ -463,5 +534,81 @@ mod tests {
         let element2 = parse_element(&output).unwrap();
         assert_eq!(element.name(), element2.name());
         assert_eq!(element.attr("to"), element2.attr("to"));
+    }
+
+    // XEP-0198 Stream Management parsing tests
+
+    #[test]
+    fn test_parser_sm_enable() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<enable xmlns='urn:xmpp:sm:3'/>");
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        if let Some(ParsedStanza::SmEnable { resume, max }) = stanza {
+            assert!(!resume);
+            assert!(max.is_none());
+        } else {
+            panic!("Expected SmEnable");
+        }
+    }
+
+    #[test]
+    fn test_parser_sm_enable_with_resume() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<enable xmlns='urn:xmpp:sm:3' resume='true' max='300'/>");
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        if let Some(ParsedStanza::SmEnable { resume, max }) = stanza {
+            assert!(resume);
+            assert_eq!(max, Some(300));
+        } else {
+            panic!("Expected SmEnable with resume");
+        }
+    }
+
+    #[test]
+    fn test_parser_sm_request() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<r xmlns='urn:xmpp:sm:3'/>");
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        assert!(matches!(stanza, Some(ParsedStanza::SmRequest)));
+    }
+
+    #[test]
+    fn test_parser_sm_ack() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<a xmlns='urn:xmpp:sm:3' h='5'/>");
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        if let Some(ParsedStanza::SmAck { h }) = stanza {
+            assert_eq!(h, 5);
+        } else {
+            panic!("Expected SmAck");
+        }
+    }
+
+    #[test]
+    fn test_parser_sm_resume() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<resume xmlns='urn:xmpp:sm:3' previd='stream-123' h='10'/>");
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        if let Some(ParsedStanza::SmResume { previd, h }) = stanza {
+            assert_eq!(previd, "stream-123");
+            assert_eq!(h, 10);
+        } else {
+            panic!("Expected SmResume");
+        }
     }
 }

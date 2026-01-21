@@ -336,20 +336,97 @@ impl XmppStream {
     /// Send stream features for resource binding.
     #[instrument(skip(self), name = "xmpp.stream.send_features_bind")]
     pub async fn send_features_bind(&mut self) -> Result<(), XmppError> {
+        // XEP-0198: Stream Management is advertised alongside bind
         let features = format!(
             "<stream:features>\
                 <bind xmlns='{}'/>\
                 <session xmlns='{}'>\
                     <optional/>\
                 </session>\
+                <sm xmlns='{}'/>\
             </stream:features>",
-            ns::BIND, ns::SESSION
+            ns::BIND, ns::SESSION, ns::SM
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent bind features");
+        debug!("Sent bind features (with Stream Management)");
+        Ok(())
+    }
+
+    /// Send stream features with only Stream Management (after bind, if SM was enabled).
+    #[instrument(skip(self), name = "xmpp.stream.send_features_sm_only")]
+    pub async fn send_features_sm(&mut self) -> Result<(), XmppError> {
+        let features = format!(
+            "<stream:features>\
+                <sm xmlns='{}'/>\
+            </stream:features>",
+            ns::SM
+        );
+
+        self.write_all(features.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!("Sent Stream Management features");
+        Ok(())
+    }
+
+    /// Send XEP-0198 Stream Management enabled response.
+    pub async fn send_sm_enabled(&mut self, stream_id: &str, resume: bool, max_seconds: Option<u32>) -> Result<(), XmppError> {
+        let mut attrs = format!("id='{}'", stream_id);
+        if resume {
+            attrs.push_str(" resume='true'");
+        }
+        if let Some(max) = max_seconds {
+            attrs.push_str(&format!(" max='{}'", max));
+        }
+
+        let response = format!("<enabled xmlns='{}' {}/>", ns::SM, attrs);
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!(stream_id = %stream_id, resume = resume, "Sent SM enabled");
+        Ok(())
+    }
+
+    /// Send XEP-0198 Stream Management acknowledgment.
+    pub async fn send_sm_ack(&mut self, h: u32) -> Result<(), XmppError> {
+        let response = format!("<a xmlns='{}' h='{}'/>", ns::SM, h);
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!(h = h, "Sent SM ack");
+        Ok(())
+    }
+
+    /// Send XEP-0198 Stream Management request.
+    pub async fn send_sm_request(&mut self) -> Result<(), XmppError> {
+        let request = format!("<r xmlns='{}'/>", ns::SM);
+        self.write_all(request.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!("Sent SM request");
+        Ok(())
+    }
+
+    /// Send XEP-0198 Stream Management failed response.
+    pub async fn send_sm_failed(&mut self, condition: Option<&str>, h: Option<u32>) -> Result<(), XmppError> {
+        let h_attr = h.map(|h| format!(" h='{}'", h)).unwrap_or_default();
+
+        let response = if let Some(cond) = condition {
+            format!(
+                "<failed xmlns='{}'{}><{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></failed>",
+                ns::SM, h_attr, cond
+            )
+        } else {
+            format!("<failed xmlns='{}'{}/>", ns::SM, h_attr)
+        };
+
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!(condition = ?condition, h = ?h, "Sent SM failed");
         Ok(())
     }
 
