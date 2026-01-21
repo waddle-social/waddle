@@ -26,8 +26,8 @@ rxml = { workspace = true }
 dashmap = { workspace = true }
 
 # TLS
-rustls = { workspace = true }
-tokio-rustls = "0.26"
+rustls = { workspace = true, features = ["ring"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
 rustls-pemfile = "2.2"
 
 # Serialization

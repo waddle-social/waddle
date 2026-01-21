@@ -20,6 +20,18 @@ use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{ClientConfig, RootCertStore, ServerConfig}};
 use waddle_xmpp::{AppState, Session, XmppError};
 
+/// Install the ring crypto provider for rustls.
+/// Must be called once before any TLS operations.
+pub fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("Failed to install crypto provider");
+    });
+}
+
 /// Default timeout for test operations.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 

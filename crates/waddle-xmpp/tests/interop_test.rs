@@ -15,11 +15,14 @@ use common::{
     MockAppState, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
-/// Initialize tracing for tests (only once).
+/// Initialize tracing and crypto provider for tests (only once).
 fn init_tracing() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // Install the crypto provider first (required for rustls 0.23+)
+        common::install_crypto_provider();
+
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
             .with_test_writer()
