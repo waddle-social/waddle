@@ -170,6 +170,18 @@ impl XmppError {
             text,
         }
     }
+
+    /// Create a stanza error for 'registration-required'.
+    ///
+    /// Per XEP-0045, this is used when a user attempts to join a
+    /// members-only room without being on the member list.
+    pub fn registration_required(text: Option<String>) -> Self {
+        Self::Stanza {
+            condition: StanzaErrorCondition::RegistrationRequired,
+            error_type: StanzaErrorType::Auth,
+            text,
+        }
+    }
 }
 
 /// XMPP stanza error conditions (RFC 6120 Section 8.3.3).

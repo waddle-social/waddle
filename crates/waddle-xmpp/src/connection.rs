@@ -17,6 +17,7 @@ use crate::mam::{
 };
 use crate::metrics::{record_muc_occupant_count, record_muc_presence};
 use crate::muc::{
+    affiliation::{AffiliationResolver, AppStateAffiliationResolver},
     build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
     MucLeaveRequest, MucMessage, MucPresenceAction, MucRoomRegistry,
 };
@@ -494,6 +495,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// - Sends existing occupants' presence to the joining user
     /// - Sends the joining user's presence to all existing occupants
     /// - Sends self-presence with status code 110 to the joining user
+    ///
+    /// Affiliation is resolved from Zanzibar permissions:
+    /// - "owner" permission -> Owner affiliation
+    /// - "admin"/"moderator"/"manager" permission -> Admin affiliation
+    /// - "member"/"writer"/"viewer" permission -> Member affiliation
+    /// - No permission -> None affiliation (denied for members-only rooms)
     #[instrument(skip(self, join_req), fields(room = %join_req.room_jid, nick = %join_req.nick))]
     async fn handle_muc_join(&mut self, join_req: MucJoinRequest) -> Result<(), XmppError> {
         debug!(
@@ -514,11 +521,77 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             XmppError::item_not_found(Some(format!("Room {} not found", join_req.room_jid)))
         })?;
 
+        // Get the user's DID from the session for permission checking
+        let user_did = self
+            .session
+            .as_ref()
+            .map(|s| s.did.clone())
+            .unwrap_or_else(|| {
+                // Fallback: extract DID-like identifier from JID if no session
+                // This handles edge cases in testing scenarios
+                join_req.sender_jid.to_bare().to_string()
+            });
+
         // Lock the room for modification
         let mut room = room_data.write().await;
 
-        // Check if user is allowed to join
-        if !room.can_user_join(&join_req.sender_jid.to_bare()) {
+        // Get room metadata needed for permission resolution
+        let waddle_id = room.waddle_id.clone();
+        let channel_id = room.channel_id.clone();
+        let is_members_only = room.config.members_only;
+
+        // Resolve affiliation from Zanzibar permissions before checking join permissions
+        let resolver = AppStateAffiliationResolver::new(
+            Arc::clone(&self.app_state),
+            self.domain.clone(),
+        );
+
+        let resolved_affiliation = match resolver
+            .resolve_affiliation(&user_did, &waddle_id, &channel_id)
+            .await
+        {
+            Ok(affiliation) => {
+                debug!(
+                    user = %user_did,
+                    affiliation = %affiliation,
+                    "Resolved affiliation from Zanzibar permissions"
+                );
+                affiliation
+            }
+            Err(e) => {
+                // Permission check failed - handle gracefully
+                warn!(
+                    user = %user_did,
+                    error = %e,
+                    "Failed to resolve affiliation from Zanzibar, using default"
+                );
+                // For open rooms, default to None affiliation (can still join)
+                // For members-only rooms, this will be denied below
+                Affiliation::None
+            }
+        };
+
+        // Update the room's affiliation list with the resolved affiliation
+        // This ensures the affiliation is persisted for subsequent queries
+        let bare_jid = join_req.sender_jid.to_bare();
+        if resolved_affiliation != Affiliation::None {
+            room.update_affiliation_from_resolver(bare_jid.clone(), resolved_affiliation);
+            debug!(
+                jid = %bare_jid,
+                affiliation = %resolved_affiliation,
+                "Updated room affiliation list from Zanzibar"
+            );
+        }
+
+        // Check if user is allowed to join (now uses the updated affiliation list)
+        if !room.can_user_join(&bare_jid) {
+            // For members-only rooms, users without membership are denied
+            if is_members_only {
+                return Err(XmppError::registration_required(Some(format!(
+                    "Room {} is members-only and you do not have membership",
+                    join_req.room_jid
+                ))));
+            }
             return Err(XmppError::forbidden(Some(format!(
                 "You are not allowed to join {}",
                 join_req.room_jid
@@ -551,7 +624,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .map(|o| (o.real_jid.clone(), o.nick.clone(), o.affiliation, o.role))
             .collect();
 
-        // Add the occupant to the room
+        // Add the occupant to the room (uses affiliation from the updated list)
         let new_occupant = room.add_occupant_with_affiliation(join_req.sender_jid.clone(), join_req.nick.clone());
         let new_occupant_affiliation = new_occupant.affiliation;
         let new_occupant_role = new_occupant.role;
