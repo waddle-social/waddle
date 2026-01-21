@@ -48,3 +48,7 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+tokio = { workspace = true }
+rcgen = "0.13"
+tempfile = "3.14"
+tracing-subscriber = { workspace = true }
