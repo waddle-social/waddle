@@ -11,6 +11,7 @@ use tracing::{info, info_span, Instrument};
 
 use crate::connection::ConnectionActor;
 use crate::muc::MucRoomRegistry;
+use crate::registry::ConnectionRegistry;
 use crate::{AppState, XmppError};
 
 /// XMPP server configuration.
@@ -46,6 +47,7 @@ pub struct XmppServer<S: AppState> {
     app_state: Arc<S>,
     tls_acceptor: TlsAcceptor,
     room_registry: Arc<MucRoomRegistry>,
+    connection_registry: Arc<ConnectionRegistry>,
 }
 
 impl<S: AppState> XmppServer<S> {
@@ -57,11 +59,15 @@ impl<S: AppState> XmppServer<S> {
         let muc_domain = format!("muc.{}", config.domain);
         let room_registry = Arc::new(MucRoomRegistry::new(muc_domain));
 
+        // Create the connection registry for message routing
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+
         Ok(Self {
             config,
             app_state,
             tls_acceptor,
             room_registry,
+            connection_registry,
         })
     }
 
@@ -112,12 +118,21 @@ impl<S: AppState> XmppServer<S> {
             let tls_acceptor = self.tls_acceptor.clone();
             let domain = self.config.domain.clone();
             let room_registry = Arc::clone(&self.room_registry);
+            let connection_registry = Arc::clone(&self.connection_registry);
 
             tokio::spawn(
                 async move {
                     if let Err(e) =
-                        ConnectionActor::handle_connection(stream, peer_addr, tls_acceptor, domain.clone(), app_state, room_registry)
-                            .await
+                        ConnectionActor::handle_connection(
+                            stream,
+                            peer_addr,
+                            tls_acceptor,
+                            domain.clone(),
+                            app_state,
+                            room_registry,
+                            connection_registry,
+                        )
+                        .await
                     {
                         tracing::warn!(error = %e, "Connection error");
                     }
@@ -140,5 +155,10 @@ impl<S: AppState> XmppServer<S> {
     /// Get the room registry.
     pub fn room_registry(&self) -> &Arc<MucRoomRegistry> {
         &self.room_registry
+    }
+
+    /// Get the connection registry.
+    pub fn connection_registry(&self) -> &Arc<ConnectionRegistry> {
+        &self.connection_registry
     }
 }

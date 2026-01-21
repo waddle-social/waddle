@@ -5,14 +5,19 @@ use std::sync::Arc;
 
 use jid::FullJid;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::message::MessageType;
 
 use crate::muc::{MucMessage, MucRoomRegistry};
+use crate::registry::{ConnectionRegistry, OutboundStanza};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};
+
+/// Size of the outbound message channel buffer.
+const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// Actor managing a single XMPP client connection.
 pub struct ConnectionActor<S: AppState> {
@@ -32,13 +37,15 @@ pub struct ConnectionActor<S: AppState> {
     app_state: Arc<S>,
     /// MUC room registry for groupchat message routing
     room_registry: Arc<MucRoomRegistry>,
+    /// Connection registry for message routing between connections
+    connection_registry: Arc<ConnectionRegistry>,
 }
 
 impl<S: AppState> ConnectionActor<S> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry),
         fields(peer = %peer_addr)
     )]
     pub async fn handle_connection(
@@ -48,6 +55,7 @@ impl<S: AppState> ConnectionActor<S> {
         domain: String,
         app_state: Arc<S>,
         room_registry: Arc<MucRoomRegistry>,
+        connection_registry: Arc<ConnectionRegistry>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -60,6 +68,7 @@ impl<S: AppState> ConnectionActor<S> {
             domain,
             app_state,
             room_registry,
+            connection_registry,
         };
 
         actor.run(tls_acceptor).await

@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod muc;
 pub mod parser;
 pub mod presence;
+pub mod registry;
 pub mod s2s;
 pub mod server;
 pub mod stream;
