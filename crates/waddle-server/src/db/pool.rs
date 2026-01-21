@@ -158,8 +158,8 @@ impl DatabasePool {
             &self.config.turso_url,
             &self.config.turso_auth_token,
         ) {
-            // Turso sync enabled
-            (Some(base_path), Some(url), Some(token)) => {
+            // Turso sync enabled (url and token will be used in future when implementing Turso sync)
+            (Some(base_path), Some(_url), Some(_token)) => {
                 let db_path = PathBuf::from(base_path).join(format!("{}.db", waddle_id));
                 // For per-waddle databases, we'd use a different Turso database
                 // For now, use local-only

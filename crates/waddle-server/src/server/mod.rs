@@ -63,16 +63,20 @@ fn create_router(state: Arc<AppState>) -> Router {
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
 
+    // Auth router uses its own state type, so we apply .with_state() before merging
+    // This converts Router<Arc<AuthState>> to Router<()>, which can then be merged
+    let auth_router = routes::auth::router(auth_state);
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(detailed_health_handler))
-        // Auth routes - nested because they use a different state type
-        .nest("/", routes::auth::router(auth_state))
         // Future routes will be mounted here
         // .merge(routes::waddles::router())
         // .merge(routes::channels::router())
         // .merge(routes::messages::router())
         .with_state(state)
+        // Merge auth routes after the main router has its state applied
+        .merge(auth_router)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

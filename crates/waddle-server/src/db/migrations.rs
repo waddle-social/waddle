@@ -27,7 +27,10 @@ pub struct Migration {
 
 impl Migration {
     /// Create a new migration
-    pub const fn new(version: i64, description: &'static str, sql: &'static str) -> Self {
+    /// Note: description parameter is unused in const fn as String::new() is const but
+    /// String::from() is not. The description is set at runtime in the all() functions.
+    #[allow(dead_code)]
+    pub const fn new(version: i64, _description: &'static str, sql: &'static str) -> Self {
         Self {
             version,
             description: String::new(), // Will be set at runtime

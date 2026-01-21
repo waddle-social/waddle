@@ -12,7 +12,7 @@ use crate::server::AppState;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json, Redirect},
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
@@ -27,7 +27,8 @@ pub type PendingAuthStore = Arc<DashMap<String, PendingAuthorization>>;
 
 /// Extended application state for auth routes
 pub struct AuthState {
-    /// Core app state
+    /// Core app state (kept for future use accessing database directly)
+    #[allow(dead_code)]
     pub app_state: Arc<AppState>,
     /// ATProto OAuth client
     pub oauth_client: AtprotoOAuth,
@@ -93,8 +94,9 @@ pub struct CallbackQuery {
     pub code: String,
     /// State parameter (must match original request)
     pub state: String,
-    /// Issuer (optional, for verification)
-    pub iss: Option<String>,
+    /// Issuer (optional, for verification) - prefixed with underscore as we don't use it yet
+    #[serde(rename = "iss")]
+    pub _iss: Option<String>,
 }
 
 /// Response for callback endpoint (on success)

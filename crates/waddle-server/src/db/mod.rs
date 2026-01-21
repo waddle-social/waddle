@@ -31,6 +31,7 @@ pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 
 /// Database-specific errors
 #[derive(Error, Debug)]
+#[allow(dead_code)] // API variants for future use
 pub enum DatabaseError {
     #[error("Failed to connect to database: {0}")]
     ConnectionFailed(String),
@@ -77,6 +78,7 @@ impl Default for DatabaseConfig {
 
 impl DatabaseConfig {
     /// Create a development configuration with file-based storage
+    #[allow(dead_code)] // API function for production use
     pub fn development(base_path: &str) -> Self {
         Self {
             global_db_path: Some(format!("{}/global.db", base_path)),
@@ -87,6 +89,7 @@ impl DatabaseConfig {
     }
 
     /// Create a production configuration with Turso sync
+    #[allow(dead_code)] // API function for production use
     pub fn production(
         base_path: &str,
         turso_url: String,
@@ -214,6 +217,7 @@ impl Database {
     ///
     /// This method ensures that for in-memory databases, all operations use the same
     /// connection to maintain data consistency.
+    #[allow(dead_code)] // API method for future use
     pub async fn with_connection<F, Fut, T>(&self, f: F) -> Result<T, DatabaseError>
     where
         F: FnOnce(&Connection) -> Fut,
