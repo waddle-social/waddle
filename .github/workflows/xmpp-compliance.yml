@@ -88,28 +88,66 @@ jobs:
           ./bin/waddle-server &
           echo "Waiting for server to start..."
           sleep 5
+          # Verify server is accepting TCP connections on XMPP port
+          for i in {1..10}; do
+            if nc -z localhost 5222; then
+              echo "XMPP server is ready on port 5222"
+              break
+            fi
+            echo "Waiting for XMPP server... attempt $i"
+            sleep 2
+          done
         env:
           OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
           OTEL_SERVICE_NAME: waddle-server-ci
           RUST_LOG: debug
+          WADDLE_DOMAIN: localhost
+          WADDLE_TLS_CERT: ./certs/server.crt
+          WADDLE_TLS_KEY: ./certs/server.key
 
       - name: Check server is running
         run: |
           curl -f http://localhost:3000/health || echo "Health endpoint not yet implemented"
+          # Verify XMPP port is listening
+          nc -z localhost 5222 && echo "XMPP port 5222 is open" || echo "Warning: XMPP port 5222 not open"
+
+      # Create admin account for XMPP interop tests
+      # The test suite needs an admin account to provision test users via XEP-0133
+      - name: Provision admin account for tests
+        run: |
+          # TODO: Replace with proper admin provisioning once account management is implemented
+          # For now, we'll configure environment variables that the server can use
+          # to bootstrap an admin account on startup
+          echo "Admin account will be provisioned via WADDLE_ADMIN_* environment variables"
+        env:
+          WADDLE_ADMIN_JID: admin@localhost
+          WADDLE_ADMIN_PASSWORD: interop-test-password
 
       # XMPP Interop Testing Suite
-      # See: https://github.com/xmpp-interop-testing/xmpp-interop-tests
+      # See: https://xmpp-interop-testing.github.io/
+      # Using the official GitHub Action for cleaner integration
       - name: Run XMPP Interop Tests
-        run: |
-          echo "XMPP interop tests will be enabled once server implements RFC 6120 core"
-          # TODO: Enable once server is ready
-          # docker run --network=host \
-          #   ghcr.io/xmpp-interop-testing/xmpp_interop_tests:latest \
-          #   --domain=localhost \
-          #   --adminAccountUsername=admin \
-          #   --adminAccountPassword=testpass \
-          #   --disabledTests="s2s.*"
-        continue-on-error: true
+        uses: XMPP-Interop-Testing/xmpp-interop-tests-action@v1.7.2
+        with:
+          domain: 'localhost'
+          host: '127.0.0.1'
+          timeout: 10000
+          adminAccountUsername: 'admin'
+          adminAccountPassword: 'interop-test-password'
+          # Disable S2S tests since we don't have federation setup in CI
+          # Disable MUC tests until we implement XEP-0045
+          # Disable PubSub tests until we implement XEP-0060
+          disabledSpecifications: 'XEP-0220,XEP-0045,XEP-0060,XEP-0163'
+          logDir: './xmpp-interop-logs'
+        continue-on-error: true  # Tests may fail initially - that's expected
+
+      - name: Upload XMPP Interop Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xmpp-interop-test-results
+          path: ./xmpp-interop-logs/
+          retention-days: 7
 
       - name: Stop server
         if: always()
