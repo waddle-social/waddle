@@ -372,12 +372,12 @@ impl TupleStore {
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
             (
-                &tuple.id,
+                tuple.id.as_str(),
                 tuple.object.object_type.to_string(),
-                &tuple.object.id,
-                &tuple.relation.name,
+                tuple.object.id.as_str(),
+                tuple.relation.name.as_str(),
                 tuple.subject.subject_type.to_string(),
-                &tuple.subject.id,
+                tuple.subject.id.as_str(),
                 subject_relation,
             ),
         )
@@ -412,10 +412,10 @@ impl TupleStore {
                 "#,
                 (
                     tuple.object.object_type.to_string(),
-                    &tuple.object.id,
-                    &tuple.relation.name,
+                    tuple.object.id.as_str(),
+                    tuple.relation.name.as_str(),
                     tuple.subject.subject_type.to_string(),
-                    &tuple.subject.id,
+                    tuple.subject.id.as_str(),
                     subject_relation,
                     subject_relation,
                 ),
@@ -453,10 +453,10 @@ impl TupleStore {
                 "#,
                 (
                     object.object_type.to_string(),
-                    &object.id,
+                    object.id.as_str(),
                     relation,
                     subject.subject_type.to_string(),
-                    &subject.id,
+                    subject.id.as_str(),
                     subject_relation,
                     subject_relation,
                 ),
@@ -488,9 +488,9 @@ impl TupleStore {
                 "#,
                 (
                     object.object_type.to_string(),
-                    &object.id,
+                    object.id.as_str(),
                     subject.subject_type.to_string(),
-                    &subject.id,
+                    subject.id.as_str(),
                     subject_relation,
                     subject_relation,
                 ),
@@ -522,7 +522,7 @@ impl TupleStore {
                 SELECT subject_type, subject_id, subject_relation FROM permission_tuples
                 WHERE object_type = ? AND object_id = ? AND relation = ?
                 "#,
-                (object.object_type.to_string(), &object.id, relation),
+                (object.object_type.to_string(), object.id.as_str(), relation),
             )
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
@@ -594,7 +594,7 @@ impl TupleStore {
                 FROM permission_tuples
                 WHERE object_type = ? AND object_id = ? AND relation = ?
                 "#,
-                (object.object_type.to_string(), &object.id, rel),
+                (object.object_type.to_string(), object.id.as_str(), rel),
             )
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
@@ -605,7 +605,7 @@ impl TupleStore {
                 FROM permission_tuples
                 WHERE object_type = ? AND object_id = ?
                 "#,
-                (object.object_type.to_string(), &object.id),
+                (object.object_type.to_string(), object.id.as_str()),
             )
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?

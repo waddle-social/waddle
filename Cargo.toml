@@ -87,6 +87,7 @@ url = "2.5"
 base64 = "0.22"
 rand = "0.9"
 hickory-resolver = "0.25"
+lru = "0.12"
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"

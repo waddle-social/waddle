@@ -216,117 +216,119 @@ impl PermissionChecker {
     }
 
     /// Check a computed permission
-    async fn check_computed(
-        &self,
-        subject: &Subject,
-        computation: &ComputedPermission,
-        object: &Object,
+    fn check_computed<'a>(
+        &'a self,
+        subject: &'a Subject,
+        computation: &'a ComputedPermission,
+        object: &'a Object,
         depth: usize,
-        visited: &mut HashSet<String>,
-    ) -> Result<CheckResponse, PermissionError> {
-        match computation {
-            ComputedPermission::DirectRelation(relation) => {
-                // Check for direct tuple with this relation
-                if self.tuple_store.exists(object, relation, subject).await? {
-                    return Ok(CheckResponse::allowed(format!("relation:{}", relation)));
-                }
+        visited: &'a mut HashSet<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CheckResponse, PermissionError>> + Send + 'a>> {
+        Box::pin(async move {
+            match computation {
+                ComputedPermission::DirectRelation(relation) => {
+                    // Check for direct tuple with this relation
+                    if self.tuple_store.exists(object, relation, subject).await? {
+                        return Ok(CheckResponse::allowed(format!("relation:{}", relation)));
+                    }
 
-                // Also check userset expansion for this relation
-                if subject.subject_type == SubjectType::User {
-                    let subjects = self.tuple_store.list_subjects(object, relation).await?;
-                    for tuple_subject in subjects {
-                        if tuple_subject.is_userset() {
-                            let userset_object = Object::new(
-                                match tuple_subject.subject_type {
-                                    SubjectType::User => continue,
-                                    SubjectType::Waddle => ObjectType::Waddle,
-                                    SubjectType::Role => ObjectType::Role,
-                                },
-                                &tuple_subject.id,
-                            );
-                            let userset_relation = tuple_subject.relation.as_ref().unwrap();
+                    // Also check userset expansion for this relation
+                    if subject.subject_type == SubjectType::User {
+                        let subjects = self.tuple_store.list_subjects(object, relation).await?;
+                        for tuple_subject in subjects {
+                            if tuple_subject.is_userset() {
+                                let userset_object = Object::new(
+                                    match tuple_subject.subject_type {
+                                        SubjectType::User => continue,
+                                        SubjectType::Waddle => ObjectType::Waddle,
+                                        SubjectType::Role => ObjectType::Role,
+                                    },
+                                    &tuple_subject.id,
+                                );
+                                let userset_relation = tuple_subject.relation.as_ref().unwrap();
 
-                            if self
-                                .tuple_store
-                                .exists(&userset_object, userset_relation, subject)
-                                .await?
-                            {
-                                return Ok(CheckResponse::allowed(format!(
-                                    "userset:{}#{}",
-                                    userset_object, userset_relation
-                                )));
+                                if self
+                                    .tuple_store
+                                    .exists(&userset_object, userset_relation, subject)
+                                    .await?
+                                {
+                                    return Ok(CheckResponse::allowed(format!(
+                                        "userset:{}#{}",
+                                        userset_object, userset_relation
+                                    )));
+                                }
                             }
                         }
                     }
+
+                    Ok(CheckResponse::denied())
                 }
 
-                Ok(CheckResponse::denied())
-            }
-
-            ComputedPermission::Union(permissions) => {
-                // Any permission in the union grants access
-                for perm in permissions {
-                    let result = self
-                        .check_computed(subject, perm, object, depth + 1, visited)
-                        .await?;
-                    if result.allowed {
-                        return Ok(result);
+                ComputedPermission::Union(permissions) => {
+                    // Any permission in the union grants access
+                    for perm in permissions {
+                        let result = self
+                            .check_computed(subject, perm, object, depth + 1, visited)
+                            .await?;
+                        if result.allowed {
+                            return Ok(result);
+                        }
                     }
+                    Ok(CheckResponse::denied())
                 }
-                Ok(CheckResponse::denied())
-            }
 
-            ComputedPermission::Intersection(permissions) => {
-                // All permissions must be satisfied
-                for perm in permissions {
-                    let result = self
-                        .check_computed(subject, perm, object, depth + 1, visited)
-                        .await?;
-                    if !result.allowed {
-                        return Ok(CheckResponse::denied());
+                ComputedPermission::Intersection(permissions) => {
+                    // All permissions must be satisfied
+                    for perm in permissions {
+                        let result = self
+                            .check_computed(subject, perm, object, depth + 1, visited)
+                            .await?;
+                        if !result.allowed {
+                            return Ok(CheckResponse::denied());
+                        }
                     }
+                    Ok(CheckResponse::allowed("intersection"))
                 }
-                Ok(CheckResponse::allowed("intersection"))
-            }
 
-            ComputedPermission::Arrow(relation, target_permission) => {
-                // Follow the relation to find parent objects and check permission there
-                let parent_tuples = self
-                    .tuple_store
-                    .get_tuples_for_object(object, Some(relation))
-                    .await?;
-
-                for tuple in parent_tuples {
-                    // The subject of the tuple is the parent object
-                    let parent_object = Object::new(
-                        match tuple.subject.subject_type {
-                            SubjectType::User => continue, // Users can't be parent objects
-                            SubjectType::Waddle => ObjectType::Waddle,
-                            SubjectType::Role => ObjectType::Role,
-                        },
-                        &tuple.subject.id,
-                    );
-
-                    debug!(
-                        "Following arrow: {} -> {} on {}",
-                        relation, target_permission, parent_object
-                    );
-
-                    let result = self
-                        .check_internal(subject, target_permission, &parent_object, depth + 1, visited)
+                ComputedPermission::Arrow(relation, target_permission) => {
+                    // Follow the relation to find parent objects and check permission there
+                    let parent_tuples = self
+                        .tuple_store
+                        .get_tuples_for_object(object, Some(relation))
                         .await?;
 
-                    if result.allowed {
-                        return Ok(CheckResponse::allowed(format!(
-                            "arrow:{}->{}",
-                            relation, target_permission
-                        )));
-                    }
-                }
+                    for tuple in parent_tuples {
+                        // The subject of the tuple is the parent object
+                        let parent_object = Object::new(
+                            match tuple.subject.subject_type {
+                                SubjectType::User => continue, // Users can't be parent objects
+                                SubjectType::Waddle => ObjectType::Waddle,
+                                SubjectType::Role => ObjectType::Role,
+                            },
+                            &tuple.subject.id,
+                        );
 
-                Ok(CheckResponse::denied())
+                        debug!(
+                            "Following arrow: {} -> {} on {}",
+                            relation, target_permission, parent_object
+                        );
+
+                        let result = self
+                            .check_internal(subject, target_permission, &parent_object, depth + 1, visited)
+                            .await?;
+
+                        if result.allowed {
+                            return Ok(CheckResponse::allowed(format!(
+                                "arrow:{}->{}",
+                                relation, target_permission
+                            )));
+                        }
+                    }
+
+                    Ok(CheckResponse::denied())
+                }
             }
-        }
+        })
     }
 
     /// Invalidate cache entries for a specific object
