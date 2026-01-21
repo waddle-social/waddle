@@ -39,9 +39,9 @@ impl MucMessage {
             .clone();
 
         // Convert to bare JID (strip resource if present)
-        let room_bare_jid = match room_jid {
-            Jid::Bare(bare) => bare,
-            Jid::Full(full) => full.to_bare(),
+        let room_bare_jid = match room_jid.try_into_full() {
+            Ok(full) => full.to_bare(),
+            Err(bare) => bare,
         };
 
         debug!(
@@ -64,7 +64,7 @@ impl MucMessage {
 
     /// Get the message body text (first body if multiple languages).
     pub fn body_text(&self) -> Option<&str> {
-        self.message.bodies.first().map(|b| b.0.as_str())
+        self.message.bodies.iter().next().map(|b| b.0.as_str())
     }
 
     /// Get the message ID.
@@ -147,8 +147,8 @@ pub fn create_broadcast_message(
 ) -> Message {
     let mut broadcast = original.clone();
     broadcast.type_ = MessageType::Groupchat;
-    broadcast.from = Some(Jid::Full(from_room_jid));
-    broadcast.to = Some(Jid::Full(to_occupant));
+    broadcast.from = Some(Jid::from(from_room_jid));
+    broadcast.to = Some(Jid::from(to_occupant));
     broadcast
 }
 
@@ -158,7 +158,8 @@ mod tests {
     use xmpp_parsers::message::Body;
 
     fn make_groupchat_message(to: &str, body: &str) -> Message {
-        let mut msg = Message::new(Some(Jid::Bare(to.parse().unwrap())));
+        let bare_jid: BareJid = to.parse().unwrap();
+        let mut msg = Message::new(Some(Jid::from(bare_jid)));
         msg.type_ = MessageType::Groupchat;
         msg.id = Some("msg-1".to_string());
         msg.bodies.insert(Body(body.to_string()));
@@ -205,7 +206,8 @@ mod tests {
         let groupchat = make_groupchat_message("room@muc.example.com", "Hello!");
         assert!(is_muc_groupchat(&groupchat));
 
-        let mut chat = Message::new(Some(Jid::Bare("user@example.com".parse().unwrap())));
+        let bare_jid: BareJid = "user@example.com".parse().unwrap();
+        let mut chat = Message::new(Some(Jid::from(bare_jid)));
         chat.type_ = MessageType::Chat;
         assert!(!is_muc_groupchat(&chat));
     }
@@ -230,8 +232,8 @@ mod tests {
         let broadcast = create_broadcast_message(&original, from.clone(), to.clone());
 
         assert_eq!(broadcast.type_, MessageType::Groupchat);
-        assert_eq!(broadcast.from, Some(Jid::Full(from)));
-        assert_eq!(broadcast.to, Some(Jid::Full(to)));
+        assert_eq!(broadcast.from, Some(Jid::from(from)));
+        assert_eq!(broadcast.to, Some(Jid::from(to)));
         assert_eq!(broadcast.id, Some("msg-1".to_string()));
     }
 

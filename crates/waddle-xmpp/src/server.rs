@@ -10,6 +10,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, Instrument};
 
 use crate::connection::ConnectionActor;
+use crate::muc::MucRoomRegistry;
 use crate::{AppState, XmppError};
 
 /// XMPP server configuration.
@@ -44,6 +45,7 @@ pub struct XmppServer<S: AppState> {
     config: XmppServerConfig,
     app_state: Arc<S>,
     tls_acceptor: TlsAcceptor,
+    room_registry: Arc<MucRoomRegistry>,
 }
 
 impl<S: AppState> XmppServer<S> {
@@ -51,10 +53,15 @@ impl<S: AppState> XmppServer<S> {
     pub async fn new(config: XmppServerConfig, app_state: Arc<S>) -> Result<Self, XmppError> {
         let tls_acceptor = Self::load_tls_config(&config)?;
 
+        // Create the MUC room registry with the MUC domain
+        let muc_domain = format!("muc.{}", config.domain);
+        let room_registry = Arc::new(MucRoomRegistry::new(muc_domain));
+
         Ok(Self {
             config,
             app_state,
             tls_acceptor,
+            room_registry,
         })
     }
 
@@ -104,11 +111,12 @@ impl<S: AppState> XmppServer<S> {
             let app_state = Arc::clone(&self.app_state);
             let tls_acceptor = self.tls_acceptor.clone();
             let domain = self.config.domain.clone();
+            let room_registry = Arc::clone(&self.room_registry);
 
             tokio::spawn(
                 async move {
                     if let Err(e) =
-                        ConnectionActor::handle_connection(stream, peer_addr, tls_acceptor, domain.clone(), app_state)
+                        ConnectionActor::handle_connection(stream, peer_addr, tls_acceptor, domain.clone(), app_state, room_registry)
                             .await
                     {
                         tracing::warn!(error = %e, "Connection error");
@@ -127,5 +135,10 @@ impl<S: AppState> XmppServer<S> {
     /// Get the server configuration.
     pub fn config(&self) -> &XmppServerConfig {
         &self.config
+    }
+
+    /// Get the room registry.
+    pub fn room_registry(&self) -> &Arc<MucRoomRegistry> {
+        &self.room_registry
     }
 }
