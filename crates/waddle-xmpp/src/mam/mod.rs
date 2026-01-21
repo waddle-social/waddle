@@ -1,9 +1,28 @@
 //! Message Archive Management (MAM) implementation.
 //!
 //! Implements XEP-0313 for message history storage and retrieval.
+//!
+//! ## Storage
+//!
+//! The [`storage`] module provides persistent storage backends for archived
+//! messages. The primary implementation uses libSQL for database storage.
+//!
+//! ## IQ Handling
+//!
+//! MAM queries are received as IQ stanzas with the `urn:xmpp:mam:2` namespace.
+//! The [`query`] module handles parsing and responding to these queries.
+
+pub mod query;
+pub mod storage;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub use query::{
+    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
+    MAM_NS, RSM_NS, STANZA_ID_NS,
+};
+pub use storage::{LibSqlMamStorage, MamStorage, MamStorageError};
 
 /// Archived message metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
