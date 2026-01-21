@@ -732,6 +732,257 @@ async fn test_concurrent_connections() {
 }
 
 // =============================================================================
+// XEP-0030 Service Discovery Tests
+// =============================================================================
+
+/// Test: disco#info query to server returns identity and features.
+///
+/// XEP-0030 Section 3.1 - disco#info query to server domain.
+#[tokio::test]
+async fn test_disco_info_server() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // Complete full session establishment
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
+    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    let connector = server.tls_connector();
+    client.upgrade_tls(connector, "localhost").await.unwrap();
+
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    client.send(&format!(
+        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+        auth_data
+    )).await.unwrap();
+    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+        <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
+    </iq>").await.unwrap();
+    client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    // Now send disco#info query to server
+    client.send("<iq type='get' id='disco-info-1' to='localhost' xmlns='jabber:client'>\
+        <query xmlns='http://jabber.org/protocol/disco#info'/>\
+    </iq>").await.unwrap();
+
+    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+
+    // Verify response is a result IQ
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "disco#info response should be result, got: {}",
+        response
+    );
+
+    // Verify identity is present
+    assert!(
+        response.contains("<identity") && (response.contains("category='server'") || response.contains("category=\"server\"")),
+        "Response should contain server identity, got: {}",
+        response
+    );
+
+    // Verify disco#info feature is advertised
+    assert!(
+        response.contains("var='http://jabber.org/protocol/disco#info'") ||
+        response.contains("var=\"http://jabber.org/protocol/disco#info\""),
+        "Response should contain disco#info feature, got: {}",
+        response
+    );
+
+    // Verify disco#items feature is advertised
+    assert!(
+        response.contains("var='http://jabber.org/protocol/disco#items'") ||
+        response.contains("var=\"http://jabber.org/protocol/disco#items\""),
+        "Response should contain disco#items feature, got: {}",
+        response
+    );
+
+    // Verify MAM feature is advertised
+    assert!(
+        response.contains("var='urn:xmpp:mam:2'") || response.contains("var=\"urn:xmpp:mam:2\""),
+        "Response should contain MAM feature, got: {}",
+        response
+    );
+}
+
+/// Test: disco#items query to server returns MUC service.
+///
+/// XEP-0030 Section 3.2 - disco#items query to server domain.
+#[tokio::test]
+async fn test_disco_items_server() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // Complete full session establishment (abbreviated)
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
+    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    let connector = server.tls_connector();
+    client.upgrade_tls(connector, "localhost").await.unwrap();
+
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    client.send(&format!(
+        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+        auth_data
+    )).await.unwrap();
+    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+        <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
+    </iq>").await.unwrap();
+    client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    // Now send disco#items query to server
+    client.send("<iq type='get' id='disco-items-1' to='localhost' xmlns='jabber:client'>\
+        <query xmlns='http://jabber.org/protocol/disco#items'/>\
+    </iq>").await.unwrap();
+
+    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+
+    // Verify response is a result IQ
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "disco#items response should be result, got: {}",
+        response
+    );
+
+    // Verify MUC service item is present
+    assert!(
+        response.contains("jid='muc.localhost'") || response.contains("jid=\"muc.localhost\""),
+        "Response should contain MUC service JID, got: {}",
+        response
+    );
+}
+
+/// Test: disco#info query to MUC domain returns MUC features.
+///
+/// XEP-0030/XEP-0045 - disco#info query to MUC service.
+#[tokio::test]
+async fn test_disco_info_muc_service() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // Complete full session establishment
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
+    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    let connector = server.tls_connector();
+    client.upgrade_tls(connector, "localhost").await.unwrap();
+
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    client.send(&format!(
+        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+        auth_data
+    )).await.unwrap();
+    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.unwrap();
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+        <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
+    </iq>").await.unwrap();
+    client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+    client.clear();
+
+    // Now send disco#info query to MUC service
+    client.send("<iq type='get' id='disco-info-muc' to='muc.localhost' xmlns='jabber:client'>\
+        <query xmlns='http://jabber.org/protocol/disco#info'/>\
+    </iq>").await.unwrap();
+
+    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
+
+    // Verify response is a result IQ
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "disco#info response should be result, got: {}",
+        response
+    );
+
+    // Verify MUC identity is present
+    assert!(
+        response.contains("category='conference'") || response.contains("category=\"conference\""),
+        "Response should contain conference identity, got: {}",
+        response
+    );
+
+    // Verify MUC feature is advertised
+    assert!(
+        response.contains("var='http://jabber.org/protocol/muc'") ||
+        response.contains("var=\"http://jabber.org/protocol/muc\""),
+        "Response should contain MUC feature, got: {}",
+        response
+    );
+}
+
+// =============================================================================
 // Complete Flow Integration Test
 // =============================================================================
 

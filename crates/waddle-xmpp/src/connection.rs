@@ -11,6 +11,11 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::message::MessageType;
 
+use crate::disco::{
+    build_disco_info_response, build_disco_items_response, is_disco_info_query,
+    is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
+    parse_disco_items_query, server_features, DiscoItem, Feature, Identity,
+};
 use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
@@ -929,16 +934,146 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle an IQ stanza.
     ///
     /// Currently supports:
+    /// - disco#info queries (XEP-0030)
+    /// - disco#items queries (XEP-0030)
     /// - MAM queries (XEP-0313)
     #[instrument(skip(self, iq), fields(iq_type = ?iq.payload, iq_id = %iq.id))]
     async fn handle_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        // Check if this is a disco#info query
+        if is_disco_info_query(&iq) {
+            return self.handle_disco_info_query(iq).await;
+        }
+
+        // Check if this is a disco#items query
+        if is_disco_items_query(&iq) {
+            return self.handle_disco_items_query(iq).await;
+        }
+
         // Check if this is a MAM query
         if is_mam_query(&iq) {
             return self.handle_mam_query(iq).await;
         }
 
-        // TODO: Implement other IQ handling (disco, ping, etc.)
+        // Unhandled IQ - log and continue
         debug!("Received unhandled IQ stanza");
+        Ok(())
+    }
+
+    /// Handle a disco#info query.
+    ///
+    /// Returns identity and supported features for:
+    /// - Server domain: Server identity + server features
+    /// - MUC domain: Conference service identity + MUC features
+    /// - MUC room: Conference room identity + room features
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_disco_info_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let query = parse_disco_info_query(&iq)?;
+
+        let muc_domain = self.room_registry.muc_domain();
+
+        // Determine what entity is being queried
+        let (identities, features) = match query.target.as_deref() {
+            // Query to server domain
+            Some(target) if target == self.domain => {
+                debug!(domain = %self.domain, "disco#info query to server domain");
+                (
+                    vec![Identity::server(Some("Waddle XMPP Server"))],
+                    server_features(),
+                )
+            }
+            // Query to MUC domain
+            Some(target) if target == muc_domain => {
+                debug!(domain = %muc_domain, "disco#info query to MUC domain");
+                (
+                    vec![Identity::muc_service(Some("Multi-User Chat"))],
+                    muc_service_features(),
+                )
+            }
+            // Query to MUC room
+            Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
+                let room_jid: jid::BareJid = target
+                    .parse()
+                    .map_err(|e| XmppError::bad_request(Some(format!("Invalid JID: {}", e))))?;
+
+                if let Some(room_data) = self.room_registry.get_room_data(&room_jid) {
+                    let room = room_data.read().await;
+                    debug!(room = %room_jid, "disco#info query to MUC room");
+                    (
+                        vec![Identity::muc_room(Some(&room.config.name))],
+                        muc_room_features(
+                            room.config.persistent,
+                            room.config.members_only,
+                            room.config.moderated,
+                        ),
+                    )
+                } else {
+                    // Room doesn't exist
+                    return Err(XmppError::item_not_found(Some(format!(
+                        "Room {} not found",
+                        room_jid
+                    ))));
+                }
+            }
+            // No target or unknown target - default to server
+            None | Some(_) => {
+                debug!(target = ?query.target, "disco#info query (defaulting to server)");
+                (
+                    vec![Identity::server(Some("Waddle XMPP Server"))],
+                    server_features(),
+                )
+            }
+        };
+
+        let response = build_disco_info_response(&iq, &identities, &features, query.node.as_deref());
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        debug!("Sent disco#info response");
+        Ok(())
+    }
+
+    /// Handle a disco#items query.
+    ///
+    /// Returns available items/services:
+    /// - Server domain: Returns MUC service component
+    /// - MUC domain: Returns list of available rooms
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_disco_items_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let query = parse_disco_items_query(&iq)?;
+
+        let muc_domain = self.room_registry.muc_domain();
+
+        // Determine what entity is being queried
+        let items = match query.target.as_deref() {
+            // Query to server domain - return MUC service
+            Some(target) if target == self.domain => {
+                debug!(domain = %self.domain, "disco#items query to server domain");
+                vec![DiscoItem::muc_service(muc_domain, Some("Multi-User Chat"))]
+            }
+            // Query to MUC domain - return room list
+            Some(target) if target == muc_domain => {
+                debug!(domain = %muc_domain, "disco#items query to MUC domain");
+                let room_infos = self.room_registry.list_room_info().await;
+                room_infos
+                    .iter()
+                    .map(|info| DiscoItem::muc_room(&info.room_jid.to_string(), &info.name))
+                    .collect()
+            }
+            // Query to MUC room - return empty list (no sub-items)
+            Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
+                debug!(room = %target, "disco#items query to MUC room");
+                vec![] // Rooms don't have sub-items
+            }
+            // No target or unknown target - default to server services
+            None | Some(_) => {
+                debug!(target = ?query.target, "disco#items query (defaulting to server)");
+                vec![DiscoItem::muc_service(muc_domain, Some("Multi-User Chat"))]
+            }
+        };
+
+        let response = build_disco_items_response(&iq, &items, query.node.as_deref());
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        debug!(item_count = items.len(), "Sent disco#items response");
         Ok(())
     }
 
