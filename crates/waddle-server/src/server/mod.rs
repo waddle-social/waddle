@@ -7,6 +7,7 @@ use axum::{
     routing::get,
     Router,
 };
+use routes::auth::AuthState;
 use serde::Serialize;
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc};
@@ -48,11 +49,26 @@ pub async fn start(db_pool: DatabasePool) -> Result<()> {
 
 /// Create the Axum router with all routes and middleware
 fn create_router(state: Arc<AppState>) -> Router {
+    // Create auth state with configuration from environment or defaults
+    let client_id = std::env::var("WADDLE_OAUTH_CLIENT_ID")
+        .unwrap_or_else(|_| "https://waddle.social/oauth/client".to_string());
+    let redirect_uri = std::env::var("WADDLE_OAUTH_REDIRECT_URI")
+        .unwrap_or_else(|_| "https://waddle.social/v1/auth/atproto/callback".to_string());
+    let encryption_key = std::env::var("WADDLE_SESSION_KEY").ok();
+
+    let auth_state = Arc::new(AuthState::new(
+        state.clone(),
+        &client_id,
+        &redirect_uri,
+        encryption_key.as_ref().map(|s| s.as_bytes()),
+    ));
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(detailed_health_handler))
+        // Auth routes
+        .merge(routes::auth::router(auth_state))
         // Future routes will be mounted here
-        // .merge(routes::auth::router())
         // .merge(routes::waddles::router())
         // .merge(routes::channels::router())
         // .merge(routes::messages::router())

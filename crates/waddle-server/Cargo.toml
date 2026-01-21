@@ -71,6 +71,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
+hickory-resolver = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

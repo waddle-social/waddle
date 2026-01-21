@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tracing::info;
 
+mod auth;
 mod db;
 mod server;
 mod telemetry;
