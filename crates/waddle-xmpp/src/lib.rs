@@ -24,6 +24,7 @@
 
 pub mod auth;
 pub mod c2s;
+pub mod carbons;
 pub mod connection;
 pub mod disco;
 pub mod mam;
