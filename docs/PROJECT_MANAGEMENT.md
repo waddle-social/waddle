@@ -5,13 +5,144 @@
 This document tracks implementation progress for Waddle Social, an open-source consumer chat/communication platform with ATProto integration.
 
 **License**: AGPL-3.0
-**MVP Target**: CLI TUI client with core messaging
+**MVP Target**: Federated XMPP ecosystem with optional ATProto identity
+
+---
+
+## Current Priority: Federation Architecture
+
+The immediate focus is building a **federated XMPP ecosystem** where:
+
+1. **waddle.social** acts as the identity home-server for ATProto users
+2. Anyone can run self-hosted waddles (independent XMPP servers)
+3. Users can federate across waddles using standard XMPP S2S
+4. Traditional JID users can participate without ATProto
+
+See [RFC-0015: Federation Architecture](rfcs/0015-federation-architecture.md) for full details.
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: Foundation (MVP)
+### Phase F1: Native JID Authentication (P0 - CRITICAL)
+
+**Goal:** Allow users to register and authenticate without ATProto
+
+| Task | Status | Priority | Documentation |
+|------|--------|----------|---------------|
+| SCRAM-SHA-256 SASL mechanism | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| XEP-0077 In-Band Registration | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Native JID credential storage | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| `native_users` database table | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Argon2id password hashing | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Config: `native_auth_enabled` | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+
+**Verification:**
+- [ ] Register native JID via XMPP client (Gajim/Conversations)
+- [ ] Login with SCRAM-SHA-256
+- [ ] Join local MUC channel
+
+**Files to create/modify:**
+```
+crates/waddle-xmpp/src/auth/scram.rs          (new)
+crates/waddle-xmpp/src/xep/xep0077.rs         (new)
+crates/waddle-server/src/auth/native.rs       (new)
+crates/waddle-server/src/db/global.rs         (modify)
+crates/waddle-server/src/config.rs            (modify)
+```
+
+### Phase F2: Server Mode Configuration (P0 - CRITICAL)
+
+**Goal:** Support running as either home-server or standalone waddle
+
+| Task | Status | Priority | Documentation |
+|------|--------|----------|---------------|
+| `ServerMode` enum (HomeServer/Standalone) | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Conditional ATProto initialization | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| `WADDLE_MODE` environment variable | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Mode-specific route registration | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+
+**Verification:**
+- [ ] Start server with `WADDLE_MODE=standalone`
+- [ ] Confirm ATProto routes are disabled
+- [ ] Confirm native registration works
+
+**Files to create/modify:**
+```
+crates/waddle-server/src/config.rs            (modify)
+crates/waddle-server/src/main.rs              (modify)
+```
+
+### Phase F3: S2S Federation Core (P0 - CRITICAL)
+
+**Goal:** Enable XMPP server-to-server communication
+
+| Task | Status | Priority | Documentation |
+|------|--------|----------|---------------|
+| S2S listener on port 5269 | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| TLS 1.3 for S2S connections | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| Stream negotiation (S2S) | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| XEP-0220 Server Dialback | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| DNS SRV record resolution | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| S2S connection pool | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| Remote JID routing | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+
+**Verification:**
+- [ ] Two waddle instances communicate (waddle.social:5269, test.local:5269)
+- [ ] User on test.local sends message to user@waddle.social
+- [ ] Message delivered via S2S
+
+**Files to create:**
+```
+crates/waddle-xmpp/src/s2s/mod.rs             (new)
+crates/waddle-xmpp/src/s2s/connection.rs      (new)
+crates/waddle-xmpp/src/s2s/dialback.rs        (new)
+crates/waddle-xmpp/src/s2s/pool.rs            (new)
+crates/waddle-xmpp/src/s2s/dns.rs             (new)
+crates/waddle-xmpp/src/routing.rs             (modify)
+```
+
+### Phase F4: Federated MUC Participation (P0 - CRITICAL)
+
+**Goal:** Users from remote servers can join local MUC rooms
+
+| Task | Status | Priority | Documentation |
+|------|--------|----------|---------------|
+| Accept remote JIDs as MUC occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Route presence to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Route messages to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Permission model for federated users | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+
+**Verification:**
+- [ ] Native JID user on alice.dev joins channel on waddle.social
+- [ ] ATProto user on waddle.social joins channel on alice.dev
+- [ ] Both see each other's messages in real-time
+
+**Files to create/modify:**
+```
+crates/waddle-xmpp/src/muc/mod.rs             (modify)
+crates/waddle-xmpp/src/muc/federation.rs      (new)
+```
+
+### Phase F5: Hosted Waddle Subdomains (P1)
+
+**Goal:** MUC namespacing for hosted waddles on waddle.social
+
+| Task | Status | Priority | Documentation |
+|------|--------|----------|---------------|
+| Subdomain provisioning API | ⬜ Not Started | P1 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Subdomain-aware MUC routing | ⬜ Not Started | P1 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Per-waddle SQLite selection | ⬜ Not Started | P1 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| DNS wildcard setup docs | ⬜ Not Started | P1 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+
+**Verification:**
+- [ ] Create hosted waddle "penguin"
+- [ ] Room `general@penguin.waddle.social` is accessible
+- [ ] Messages stored in penguin's SQLite database
+
+---
+
+### Phase 1: Foundation (Current MVP Items)
 
 Core infrastructure and basic messaging for the CLI TUI client.
 
@@ -25,8 +156,8 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | XMPP interop CI | ✅ Complete | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | Turso/libSQL setup | ✅ Complete | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | Database-per-Waddle sharding | ✅ Complete | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
-| CQRS event system | ⬜ Not Started | P1 | [ADR-0007](adrs/0007-cqrs-architecture.md), [Spec: Events](specs/event-schema.md) |
-| Kameo actor setup | ⬜ Not Started | P1 | [ADR-0008](adrs/0008-kameo-actors.md) |
+| CQRS event system | ⬜ Not Started | P2 | [ADR-0007](adrs/0007-cqrs-architecture.md), [Spec: Events](specs/event-schema.md) |
+| Kameo actor setup | ⬜ Not Started | P2 | [ADR-0008](adrs/0008-kameo-actors.md) |
 | **Authentication** |
 | ATProto OAuth flow | ✅ Complete | P0 | [ADR-0005](adrs/0005-atproto-identity.md), [Spec: ATProto](specs/atproto-integration.md) |
 | DID resolution | ✅ Complete | P0 | [ADR-0005](adrs/0005-atproto-identity.md), [Spec: ATProto](specs/atproto-integration.md) |
@@ -44,23 +175,23 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Send message (XMPP) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Message history (MAM) | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Real-time delivery (XMPP) | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
-| Edit message (XEP-0308) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
-| Delete message (XEP-0424) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
+| Edit message (XEP-0308) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| Delete message (XEP-0424) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
 | **Waddles (Communities)** |
 | Waddle CRUD | ✅ Complete | P0 | [RFC-0001](rfcs/0001-waddles.md) |
 | Member management | ✅ Complete | P0 | [RFC-0001](rfcs/0001-waddles.md) |
-| Invite system | ⬜ Not Started | P1 | [RFC-0001](rfcs/0001-waddles.md) |
-| Role management | ⬜ Not Started | P1 | [RFC-0001](rfcs/0001-waddles.md), [Spec: Permissions](specs/permission-model.md) |
+| Invite system | ⬜ Not Started | P2 | [RFC-0001](rfcs/0001-waddles.md) |
+| Role management | ⬜ Not Started | P2 | [RFC-0001](rfcs/0001-waddles.md), [Spec: Permissions](specs/permission-model.md) |
 | **Channels** |
 | Channel CRUD (MUC provisioning) | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md) |
 | Channel permissions | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: Permissions](specs/permission-model.md) |
-| Categories | ⬜ Not Started | P2 | [RFC-0002](rfcs/0002-channels.md) |
+| Categories | ⬜ Not Started | P3 | [RFC-0002](rfcs/0002-channels.md) |
 | **CLI TUI Client** |
 | Ratatui setup | ✅ Complete | P0 | [ADR-0003](adrs/0003-ratatui-cli.md), [Spec: CLI](specs/cli-commands.md) |
 | XMPP client integration | 🔄 In Progress | P0 | [Spec: CLI](specs/cli-commands.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | Layout (sidebar, messages, input) | ✅ Complete | P0 | [Spec: CLI](specs/cli-commands.md) |
 | Keybindings (Vim-style) | ✅ Complete | P0 | [Spec: CLI](specs/cli-commands.md) |
-| Markdown rendering | ⬜ Not Started | P1 | [Spec: CLI](specs/cli-commands.md) |
+| Markdown rendering | ⬜ Not Started | P2 | [Spec: CLI](specs/cli-commands.md) |
 | Configuration file | 🔄 In Progress | P1 | [Spec: CLI](specs/cli-commands.md) |
 
 ### Phase 2: Rich Features
@@ -70,36 +201,36 @@ Enhanced messaging and collaboration features.
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | **Rich Messages** |
-| XHTML-IM formatting | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
-| Mentions (XEP-0372) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
-| Reactions (XEP-0444) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
-| Replies (XEP-0461) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
-| Threads | ⬜ Not Started | P2 | [RFC-0002](rfcs/0002-channels.md), [RFC-0004](rfcs/0004-message-format.md) |
+| XHTML-IM formatting | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| Mentions (XEP-0372) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| Reactions (XEP-0444) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| Replies (XEP-0461) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| Threads | ⬜ Not Started | P3 | [RFC-0002](rfcs/0002-channels.md), [RFC-0004](rfcs/0004-message-format.md) |
 | **File Uploads** |
-| S3 storage setup | ⬜ Not Started | P1 | [ADR-0011](adrs/0011-self-hosted-storage.md), [Spec: Uploads](specs/file-upload.md) |
-| HTTP File Upload (XEP-0363) | ⬜ Not Started | P1 | [Spec: Uploads](specs/file-upload.md), [Spec: XMPP](specs/xmpp-integration.md) |
-| Image processing (thumbnails) | ⬜ Not Started | P2 | [Spec: Uploads](specs/file-upload.md) |
-| Link embeds | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| S3 storage setup | ⬜ Not Started | P2 | [ADR-0011](adrs/0011-self-hosted-storage.md), [Spec: Uploads](specs/file-upload.md) |
+| HTTP File Upload (XEP-0363) | ⬜ Not Started | P2 | [Spec: Uploads](specs/file-upload.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| Image processing (thumbnails) | ⬜ Not Started | P3 | [Spec: Uploads](specs/file-upload.md) |
+| Link embeds | ⬜ Not Started | P3 | [RFC-0004](rfcs/0004-message-format.md) |
 | **Direct Messages** |
-| 1:1 DM (XMPP chat) | ⬜ Not Started | P1 | [RFC-0003](rfcs/0003-direct-messages.md) |
-| Group DMs (private MUC) | ⬜ Not Started | P2 | [RFC-0003](rfcs/0003-direct-messages.md) |
-| DM requests/approval | ⬜ Not Started | P2 | [RFC-0003](rfcs/0003-direct-messages.md) |
-| Privacy controls | ⬜ Not Started | P2 | [RFC-0003](rfcs/0003-direct-messages.md) |
+| 1:1 DM (XMPP chat) | ⬜ Not Started | P2 | [RFC-0003](rfcs/0003-direct-messages.md) |
+| Group DMs (private MUC) | ⬜ Not Started | P3 | [RFC-0003](rfcs/0003-direct-messages.md) |
+| DM requests/approval | ⬜ Not Started | P3 | [RFC-0003](rfcs/0003-direct-messages.md) |
+| Privacy controls | ⬜ Not Started | P3 | [RFC-0003](rfcs/0003-direct-messages.md) |
 | **Presence** |
-| Online/offline status (XMPP presence) | ⬜ Not Started | P1 | [RFC-0006](rfcs/0006-presence-system.md) |
-| Custom status | ⬜ Not Started | P2 | [RFC-0006](rfcs/0006-presence-system.md) |
-| Per-Waddle presence | ⬜ Not Started | P2 | [RFC-0006](rfcs/0006-presence-system.md) |
-| Typing indicators (XEP-0085) | ⬜ Not Started | P1 | [RFC-0006](rfcs/0006-presence-system.md) |
+| Online/offline status (XMPP presence) | ⬜ Not Started | P2 | [RFC-0006](rfcs/0006-presence-system.md) |
+| Custom status | ⬜ Not Started | P3 | [RFC-0006](rfcs/0006-presence-system.md) |
+| Per-Waddle presence | ⬜ Not Started | P3 | [RFC-0006](rfcs/0006-presence-system.md) |
+| Typing indicators (XEP-0085) | ⬜ Not Started | P2 | [RFC-0006](rfcs/0006-presence-system.md) |
 | **Ephemeral Content** |
-| Message TTL configuration | ⬜ Not Started | P2 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
-| Prosody expiry module | ⬜ Not Started | P2 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
-| Channel-level TTL | ⬜ Not Started | P2 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
+| Message TTL configuration | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
+| Prosody expiry module | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
+| Channel-level TTL | ⬜ Not Started | P3 | [RFC-0005](rfcs/0005-ephemeral-content.md) |
 | **Search** |
-| Full-text search (FTS5) | ⬜ Not Started | P2 | [RFC-0012](rfcs/0012-search.md) |
-| Search API | ⬜ Not Started | P2 | [RFC-0012](rfcs/0012-search.md), [Spec: API](specs/api-contracts.md) |
-| Search filters | ⬜ Not Started | P3 | [RFC-0012](rfcs/0012-search.md) |
+| Full-text search (FTS5) | ⬜ Not Started | P3 | [RFC-0012](rfcs/0012-search.md) |
+| Search API | ⬜ Not Started | P3 | [RFC-0012](rfcs/0012-search.md), [Spec: API](specs/api-contracts.md) |
+| Search filters | ⬜ Not Started | P4 | [RFC-0012](rfcs/0012-search.md) |
 | **End-to-End Encryption** |
-| OMEMO (XEP-0384) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| OMEMO (XEP-0384) | ⬜ Not Started | P3 | [RFC-0004](rfcs/0004-message-format.md) |
 
 ### Phase 3: Moderation & AI
 
@@ -108,18 +239,18 @@ Trust and safety features plus AI-powered enhancements.
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | **Moderation** |
-| Timeout/kick/ban | ⬜ Not Started | P2 | [RFC-0013](rfcs/0013-moderation.md) |
-| User reports | ⬜ Not Started | P2 | [RFC-0013](rfcs/0013-moderation.md) |
-| Moderation queue | ⬜ Not Started | P2 | [RFC-0013](rfcs/0013-moderation.md) |
-| Audit log | ⬜ Not Started | P2 | [RFC-0013](rfcs/0013-moderation.md) |
-| Automod rules | ⬜ Not Started | P3 | [RFC-0013](rfcs/0013-moderation.md) |
-| Ban appeals | ⬜ Not Started | P3 | [RFC-0013](rfcs/0013-moderation.md) |
+| Timeout/kick/ban | ⬜ Not Started | P3 | [RFC-0013](rfcs/0013-moderation.md) |
+| User reports | ⬜ Not Started | P3 | [RFC-0013](rfcs/0013-moderation.md) |
+| Moderation queue | ⬜ Not Started | P3 | [RFC-0013](rfcs/0013-moderation.md) |
+| Audit log | ⬜ Not Started | P3 | [RFC-0013](rfcs/0013-moderation.md) |
+| Automod rules | ⬜ Not Started | P4 | [RFC-0013](rfcs/0013-moderation.md) |
+| Ban appeals | ⬜ Not Started | P4 | [RFC-0013](rfcs/0013-moderation.md) |
 | **AI Features** |
-| AI provider abstraction | ⬜ Not Started | P3 | [RFC-0007](rfcs/0007-ai-integrations.md) |
-| Message summarization | ⬜ Not Started | P3 | [RFC-0007](rfcs/0007-ai-integrations.md) |
-| AI content moderation | ⬜ Not Started | P3 | [RFC-0007](rfcs/0007-ai-integrations.md), [RFC-0013](rfcs/0013-moderation.md) |
-| Translation | ⬜ Not Started | P3 | [RFC-0007](rfcs/0007-ai-integrations.md) |
-| Semantic search | ⬜ Not Started | P3 | [RFC-0007](rfcs/0007-ai-integrations.md), [RFC-0012](rfcs/0012-search.md) |
+| AI provider abstraction | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md) |
+| Message summarization | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md) |
+| AI content moderation | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md), [RFC-0013](rfcs/0013-moderation.md) |
+| Translation | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md) |
+| Semantic search | ⬜ Not Started | P4 | [RFC-0007](rfcs/0007-ai-integrations.md), [RFC-0012](rfcs/0012-search.md) |
 
 ### Phase 4: Interactive Features
 
@@ -128,13 +259,13 @@ Real-time collaborative features.
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | **Watch Together** |
-| Watch session management | ⬜ Not Started | P3 | [RFC-0008](rfcs/0008-watch-together.md) |
-| Playback synchronization | ⬜ Not Started | P3 | [RFC-0008](rfcs/0008-watch-together.md) |
-| Media source support | ⬜ Not Started | P3 | [RFC-0008](rfcs/0008-watch-together.md) |
+| Watch session management | ⬜ Not Started | P4 | [RFC-0008](rfcs/0008-watch-together.md) |
+| Playback synchronization | ⬜ Not Started | P4 | [RFC-0008](rfcs/0008-watch-together.md) |
+| Media source support | ⬜ Not Started | P4 | [RFC-0008](rfcs/0008-watch-together.md) |
 | Queue system | ⬜ Not Started | P4 | [RFC-0008](rfcs/0008-watch-together.md) |
 | **Screen Sharing** |
-| Jingle signaling (XEP-0166) | ⬜ Not Started | P3 | [RFC-0009](rfcs/0009-screen-sharing.md) |
-| SFU integration | ⬜ Not Started | P3 | [RFC-0009](rfcs/0009-screen-sharing.md) |
+| Jingle signaling (XEP-0166) | ⬜ Not Started | P4 | [RFC-0009](rfcs/0009-screen-sharing.md) |
+| SFU integration | ⬜ Not Started | P4 | [RFC-0009](rfcs/0009-screen-sharing.md) |
 | Quality settings | ⬜ Not Started | P4 | [RFC-0009](rfcs/0009-screen-sharing.md) |
 | Remote control | ⬜ Not Started | P4 | [RFC-0009](rfcs/0009-screen-sharing.md) |
 | **Live Streaming** |
@@ -150,14 +281,14 @@ External integrations and bot platform.
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | **Bluesky Integration** |
-| Announcement posting | ⬜ Not Started | P2 | [RFC-0011](rfcs/0011-bluesky-broadcast.md), [Spec: ATProto](specs/atproto-integration.md) |
-| Rich text conversion | ⬜ Not Started | P2 | [RFC-0011](rfcs/0011-bluesky-broadcast.md) |
-| Image upload to PDS | ⬜ Not Started | P3 | [RFC-0011](rfcs/0011-bluesky-broadcast.md) |
-| Broadcast permissions | ⬜ Not Started | P2 | [RFC-0011](rfcs/0011-bluesky-broadcast.md) |
+| Announcement posting | ⬜ Not Started | P3 | [RFC-0011](rfcs/0011-bluesky-broadcast.md), [Spec: ATProto](specs/atproto-integration.md) |
+| Rich text conversion | ⬜ Not Started | P3 | [RFC-0011](rfcs/0011-bluesky-broadcast.md) |
+| Image upload to PDS | ⬜ Not Started | P4 | [RFC-0011](rfcs/0011-bluesky-broadcast.md) |
+| Broadcast permissions | ⬜ Not Started | P3 | [RFC-0011](rfcs/0011-bluesky-broadcast.md) |
 | **Bot Framework** |
-| Bot authentication | ⬜ Not Started | P3 | [RFC-0014](rfcs/0014-bot-framework.md) |
-| XMPP bot accounts | ⬜ Not Started | P3 | [RFC-0014](rfcs/0014-bot-framework.md) |
-| Slash commands | ⬜ Not Started | P3 | [RFC-0014](rfcs/0014-bot-framework.md) |
+| Bot authentication | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md) |
+| XMPP bot accounts | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md) |
+| Slash commands | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md) |
 | Bot SDK | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md) |
 | AI assistants | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md), [RFC-0007](rfcs/0007-ai-integrations.md) |
 | Bot marketplace | ⬜ Not Started | P4 | [RFC-0014](rfcs/0014-bot-framework.md) |
@@ -183,6 +314,7 @@ External integrations and bot platform.
 | [0011](adrs/0011-self-hosted-storage.md) | S3-Compatible File Storage | ✅ Accepted |
 | [0012](adrs/0012-transport-encryption.md) | Transport-Only Encryption | ✅ Accepted |
 | [0014](adrs/0014-opentelemetry.md) | OpenTelemetry Instrumentation | ✅ Accepted |
+| [0015](adrs/0015-dual-authentication.md) | Dual Authentication Modes | ✅ Accepted |
 
 ### RFCs (Feature Proposals)
 
@@ -202,6 +334,7 @@ External integrations and bot platform.
 | [0012](rfcs/0012-search.md) | Full-Text Search | 📝 Draft |
 | [0013](rfcs/0013-moderation.md) | Moderation System | 📝 Draft |
 | [0014](rfcs/0014-bot-framework.md) | Bot/Assistant Framework | 📝 Draft |
+| [0015](rfcs/0015-federation-architecture.md) | Federation Architecture | 📝 Draft |
 
 ### Technical Specifications
 
@@ -215,6 +348,7 @@ External integrations and bot platform.
 | [cli-commands](specs/cli-commands.md) | CLI TUI Specification | 📝 Draft |
 | [atproto-integration](specs/atproto-integration.md) | ATProto Integration | 📝 Draft |
 | [file-upload](specs/file-upload.md) | File Upload Protocol | 📝 Draft |
+| [s2s-federation](specs/s2s-federation.md) | S2S Federation | 📝 Draft |
 
 ---
 
@@ -222,11 +356,11 @@ External integrations and bot platform.
 
 | Priority | Meaning | Target |
 |----------|---------|--------|
-| **P0** | Critical for MVP | Phase 1 |
-| **P1** | Important for usability | Phase 1-2 |
-| **P2** | Enhances experience | Phase 2-3 |
-| **P3** | Nice to have | Phase 3-4 |
-| **P4** | Future consideration | Phase 4-5 |
+| **P0** | Critical for federation MVP | Phase F1-F4 |
+| **P1** | Important for full federation | Phase F5, Phase 1 |
+| **P2** | Enhances experience | Phase 1-2 |
+| **P3** | Nice to have | Phase 2-3 |
+| **P4** | Future consideration | Phase 3-5 |
 
 ## Status Legend
 
@@ -241,6 +375,34 @@ External integrations and bot platform.
 ---
 
 ## Milestones
+
+### MF1: Native JID Authentication
+- [ ] SCRAM-SHA-256 mechanism implemented
+- [ ] XEP-0077 registration working
+- [ ] Native user can login via standard XMPP client
+- [ ] Password hashing with Argon2id
+
+### MF2: Server Modes
+- [ ] `WADDLE_MODE=standalone` disables ATProto
+- [ ] `WADDLE_MODE=homeserver` runs full stack
+- [ ] Mode-specific feature flags working
+
+### MF3: S2S Federation
+- [ ] S2S listener on 5269
+- [ ] Server dialback (XEP-0220) working
+- [ ] Two waddle instances can exchange messages
+- [ ] DNS SRV resolution working
+
+### MF4: Federated MUC
+- [ ] Remote user can join local MUC
+- [ ] Presence broadcasts to remote occupants
+- [ ] Messages route to remote occupants
+- [ ] Mixed local/remote channel working
+
+### MF5: Hosted Waddles
+- [ ] Subdomain provisioning API
+- [ ] `general@penguin.waddle.social` routes correctly
+- [ ] Per-waddle database isolation
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created
@@ -280,12 +442,6 @@ External integrations and bot platform.
 - [ ] Screen sharing (Jingle)
 - [ ] Bot framework
 
-### M5: Federation
-- [ ] S2S listener on 5269
-- [ ] Server dialback (XEP-0220)
-- [ ] Remote user presence
-- [ ] Cross-instance MUC participation
-
 ---
 
 ## Quick Links
@@ -294,3 +450,4 @@ External integrations and bot platform.
 - **Features**: [RFCs](rfcs/)
 - **Technical Details**: [Specs](specs/)
 - **Dependencies**: [Rust Crates](RUST_CRATES.md)
+- **Federation**: [RFC-0015](rfcs/0015-federation-architecture.md)
