@@ -29,6 +29,8 @@ pub mod ns {
     pub const STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
     /// Stream Management namespace (XEP-0198, version 3)
     pub const SM: &str = "urn:xmpp:sm:3";
+    /// Instant Stream Resumption namespace (XEP-0397)
+    pub const ISR: &str = "urn:xmpp:isr:0";
 }
 
 /// Parsed stream header information.

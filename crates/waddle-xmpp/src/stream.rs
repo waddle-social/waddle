@@ -1,5 +1,6 @@
 //! XML stream handling for XMPP connections.
 
+use base64::prelude::*;
 use jid::{BareJid, FullJid};
 use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,9 +12,27 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
+use crate::auth::{parse_oauthbearer, OAuthBearerResult, SaslMechanism};
 use crate::connection::Stanza;
 use crate::parser::{element_to_string, ns, ParsedStanza, StreamHeader, XmlParser};
 use crate::XmppError;
+
+/// Result of SASL authentication.
+#[derive(Debug)]
+pub enum SaslAuthResult {
+    /// PLAIN mechanism: JID and token extracted from credentials
+    Plain {
+        jid: BareJid,
+        token: String,
+    },
+    /// OAUTHBEARER mechanism: token extracted from bearer credentials
+    OAuthBearer {
+        token: String,
+        authzid: Option<String>,
+    },
+    /// OAUTHBEARER discovery request: client needs OAuth metadata
+    OAuthBearerDiscovery,
+}
 
 /// XMPP stream handler.
 ///
@@ -227,29 +246,46 @@ impl XmppStream {
     }
 
     /// Send stream features advertising SASL mechanisms.
+    ///
+    /// Advertises both PLAIN and OAUTHBEARER mechanisms per XEP-0493.
+    /// OAUTHBEARER enables standard XMPP clients to use OAuth authentication.
+    /// Also advertises ISR (XEP-0397) for instant stream resumption.
     #[instrument(skip(self), name = "xmpp.stream.send_features_sasl")]
     pub async fn send_features_sasl(&mut self) -> Result<(), XmppError> {
         let features = format!(
             "<stream:features>\
                 <mechanisms xmlns='{}'>\
                     <mechanism>PLAIN</mechanism>\
+                    <mechanism>OAUTHBEARER</mechanism>\
                 </mechanisms>\
+                <isr xmlns='{}'/>\
             </stream:features>",
-            ns::SASL
+            ns::SASL, ns::ISR
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent SASL features");
+        debug!("Sent SASL features (PLAIN, OAUTHBEARER) with ISR");
         Ok(())
     }
 
     /// Handle SASL authentication.
     ///
-    /// Returns the authenticated JID and token.
+    /// Returns the authentication result which can be:
+    /// - PLAIN credentials (JID + token)
+    /// - OAUTHBEARER credentials (token + optional authzid)
+    /// - OAUTHBEARER discovery request (client needs OAuth metadata)
+    ///
+    /// Note: This method does NOT send the SASL success response.
+    /// The caller should validate credentials and then call either:
+    /// - `send_sasl_success()` for a basic success response
+    /// - `send_sasl_success_with_isr()` to include an ISR resumption token (XEP-0397)
+    ///
+    /// For OAUTHBEARER discovery, the caller should use send_oauthbearer_discovery()
+    /// and then call this method again after the client completes OAuth.
     #[instrument(skip(self), name = "xmpp.stream.authenticate")]
-    pub async fn handle_sasl_auth(&mut self) -> Result<(BareJid, String), XmppError> {
+    pub async fn handle_sasl_auth(&mut self) -> Result<SaslAuthResult, XmppError> {
         let mut buf = [0u8; 4096];
 
         loop {
@@ -267,24 +303,69 @@ impl XmppStream {
                 {
                     debug!(mechanism = %mechanism, "Received SASL auth");
 
-                    if mechanism != "PLAIN" {
-                        return Err(XmppError::auth_failed(format!(
-                            "Unsupported mechanism: {}",
-                            mechanism
-                        )));
+                    let mech = SaslMechanism::from_str(&mechanism).ok_or_else(|| {
+                        XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
+                    })?;
+
+                    match mech {
+                        SaslMechanism::Plain => {
+                            let (jid, token) = self.parse_sasl_plain(&data)?;
+                            return Ok(SaslAuthResult::Plain { jid, token });
+                        }
+                        SaslMechanism::OAuthBearer => {
+                            let result = self.parse_sasl_oauthbearer(&data)?;
+
+                            match result {
+                                OAuthBearerResult::DiscoveryRequest => {
+                                    // Don't send success - caller should send discovery response
+                                    debug!("OAUTHBEARER discovery request received");
+                                    return Ok(SaslAuthResult::OAuthBearerDiscovery);
+                                }
+                                OAuthBearerResult::Credentials(creds) => {
+                                    return Ok(SaslAuthResult::OAuthBearer {
+                                        token: creds.token,
+                                        authzid: creds.authzid,
+                                    });
+                                }
+                            }
+                        }
                     }
-
-                    let (jid, token) = self.parse_sasl_plain(&data)?;
-
-                    // Send success (actual validation happens in the connection actor)
-                    let success = format!("<success xmlns='{}'/>", ns::SASL);
-                    self.write_all(success.as_bytes()).await?;
-                    self.flush().await?;
-
-                    return Ok((jid, token));
                 }
             }
         }
+    }
+
+    /// Send SASL success response.
+    ///
+    /// Call this after validating credentials from `handle_sasl_auth()`.
+    pub async fn send_sasl_success(&mut self) -> Result<(), XmppError> {
+        let success = format!("<success xmlns='{}'/>", ns::SASL);
+        self.write_all(success.as_bytes()).await?;
+        self.flush().await?;
+        debug!("Sent SASL success");
+        Ok(())
+    }
+
+    /// Send SASL success response with ISR resumption token (XEP-0397).
+    ///
+    /// Call this after validating credentials from `handle_sasl_auth()`.
+    /// The ISR token allows the client to resume the stream without re-authenticating.
+    ///
+    /// Response format per XEP-0397:
+    /// ```xml
+    /// <success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>
+    ///   <token xmlns='urn:xmpp:isr:0' expiry='ISO8601'>TOKEN</token>
+    /// </success>
+    /// ```
+    pub async fn send_sasl_success_with_isr(&mut self, isr_token_xml: &str) -> Result<(), XmppError> {
+        let success = format!(
+            "<success xmlns='{}'>{}</success>",
+            ns::SASL, isr_token_xml
+        );
+        self.write_all(success.as_bytes()).await?;
+        self.flush().await?;
+        debug!("Sent SASL success with ISR token");
+        Ok(())
     }
 
     /// Send SASL failure response.
@@ -298,10 +379,37 @@ impl XmppStream {
         Ok(())
     }
 
+    /// Send OAUTHBEARER discovery response per XEP-0493 §3.2.
+    ///
+    /// When a client sends an empty OAUTHBEARER request, we respond with
+    /// the OAuth authorization server discovery URL so the client can
+    /// complete the OAuth flow.
+    ///
+    /// Response format per XEP-0493:
+    /// ```xml
+    /// <failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>
+    ///   <not-authorized/>
+    ///   <openid-configuration>https://example.com/.well-known/oauth-authorization-server</openid-configuration>
+    /// </failure>
+    /// ```
+    pub async fn send_oauthbearer_discovery(&mut self, discovery_url: &str) -> Result<(), XmppError> {
+        let response = format!(
+            "<failure xmlns='{}'>\
+                <not-authorized/>\
+                <openid-configuration>{}</openid-configuration>\
+            </failure>",
+            ns::SASL, discovery_url
+        );
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery response");
+        Ok(())
+    }
+
     /// Parse SASL PLAIN authentication data.
     fn parse_sasl_plain(&self, data: &str) -> Result<(BareJid, String), XmppError> {
         // Decode base64
-        use base64::prelude::*;
         let decoded = BASE64_STANDARD
             .decode(data.trim())
             .map_err(|e| XmppError::auth_failed(format!("Invalid base64: {}", e)))?;
@@ -333,10 +441,22 @@ impl XmppStream {
         Ok((jid, token))
     }
 
+    /// Parse SASL OAUTHBEARER authentication data (RFC 7628).
+    fn parse_sasl_oauthbearer(&self, data: &str) -> Result<OAuthBearerResult, XmppError> {
+        // Decode base64
+        let decoded = BASE64_STANDARD
+            .decode(data.trim())
+            .map_err(|e| XmppError::auth_failed(format!("Invalid base64: {}", e)))?;
+
+        // Use the auth module parser
+        parse_oauthbearer(&decoded)
+    }
+
     /// Send stream features for resource binding.
     #[instrument(skip(self), name = "xmpp.stream.send_features_bind")]
     pub async fn send_features_bind(&mut self) -> Result<(), XmppError> {
         // XEP-0198: Stream Management is advertised alongside bind
+        // XEP-0397: ISR is also advertised for instant stream resumption
         let features = format!(
             "<stream:features>\
                 <bind xmlns='{}'/>\
@@ -344,14 +464,15 @@ impl XmppStream {
                     <optional/>\
                 </session>\
                 <sm xmlns='{}'/>\
+                <isr xmlns='{}'/>\
             </stream:features>",
-            ns::BIND, ns::SESSION, ns::SM
+            ns::BIND, ns::SESSION, ns::SM, ns::ISR
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent bind features (with Stream Management)");
+        debug!("Sent bind features (with Stream Management and ISR)");
         Ok(())
     }
 
@@ -427,6 +548,46 @@ impl XmppStream {
         self.flush().await?;
 
         debug!(condition = ?condition, h = ?h, "Sent SM failed");
+        Ok(())
+    }
+
+    /// Send XEP-0198 Stream Management resumed response.
+    ///
+    /// Called when a stream is successfully resumed using a previous stream ID.
+    pub async fn send_sm_resumed(&mut self, previd: &str, h: u32) -> Result<(), XmppError> {
+        let response = format!(
+            "<resumed xmlns='{}' previd='{}' h='{}'/>",
+            ns::SM, previd, h
+        );
+
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!(previd = %previd, h = h, "Sent SM resumed");
+        Ok(())
+    }
+
+    /// Send XEP-0198 Stream Management resumed response with ISR token (XEP-0397).
+    ///
+    /// Called when a stream is successfully resumed using an ISR token.
+    /// The response includes a new ISR token for future resumption.
+    ///
+    /// Response format per XEP-0397:
+    /// ```xml
+    /// <resumed xmlns='urn:xmpp:sm:3' previd='...' h='N'>
+    ///   <token xmlns='urn:xmpp:isr:0' expiry='ISO8601'>NEW_TOKEN</token>
+    /// </resumed>
+    /// ```
+    pub async fn send_sm_resumed_with_isr(&mut self, previd: &str, h: u32, isr_token_xml: &str) -> Result<(), XmppError> {
+        let response = format!(
+            "<resumed xmlns='{}' previd='{}' h='{}'>{}</resumed>",
+            ns::SM, previd, h, isr_token_xml
+        );
+
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+
+        debug!(previd = %previd, h = h, "Sent SM resumed with ISR token");
         Ok(())
     }
 

@@ -11,6 +11,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, Instrument};
 
 use crate::connection::ConnectionActor;
+use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
 use crate::muc::MucRoomRegistry;
 use crate::registry::ConnectionRegistry;
@@ -54,6 +55,8 @@ pub struct XmppServer<S: AppState> {
     room_registry: Arc<MucRoomRegistry>,
     connection_registry: Arc<ConnectionRegistry>,
     mam_storage: Arc<LibSqlMamStorage>,
+    /// XEP-0397 ISR token store shared across all connections
+    isr_token_store: SharedIsrTokenStore,
 }
 
 impl<S: AppState> XmppServer<S> {
@@ -71,6 +74,10 @@ impl<S: AppState> XmppServer<S> {
         // Create the MAM storage
         let mam_storage = Self::create_mam_storage(&config).await?;
 
+        // Create the ISR token store for instant stream resumption (XEP-0397)
+        let isr_token_store = create_shared_store();
+        info!("ISR token store initialized");
+
         Ok(Self {
             config,
             app_state,
@@ -78,6 +85,7 @@ impl<S: AppState> XmppServer<S> {
             room_registry,
             connection_registry,
             mam_storage,
+            isr_token_store,
         })
     }
 
@@ -160,6 +168,7 @@ impl<S: AppState> XmppServer<S> {
             let room_registry = Arc::clone(&self.room_registry);
             let connection_registry = Arc::clone(&self.connection_registry);
             let mam_storage = Arc::clone(&self.mam_storage);
+            let isr_token_store = Arc::clone(&self.isr_token_store);
 
             tokio::spawn(
                 async move {
@@ -173,6 +182,7 @@ impl<S: AppState> XmppServer<S> {
                             room_registry,
                             connection_registry,
                             mam_storage,
+                            isr_token_store,
                         )
                         .await
                     {

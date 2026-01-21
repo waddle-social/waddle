@@ -20,6 +20,7 @@ use crate::disco::{
     is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
     parse_disco_items_query, server_features, DiscoItem, Identity,
 };
+use crate::isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore};
 use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
@@ -34,7 +35,7 @@ use crate::muc::{
 use crate::types::{Affiliation, Role};
 use crate::parser::ParsedStanza;
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
-use crate::stream::XmppStream;
+use crate::stream::{SaslAuthResult, XmppStream};
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};
 
@@ -72,13 +73,17 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     sm_state: StreamManagementState,
     /// XEP-0280 Message Carbons enabled state
     carbons_enabled: bool,
+    /// XEP-0397 ISR token store for instant stream resumption
+    isr_token_store: SharedIsrTokenStore,
+    /// Current ISR token for this connection (if any)
+    current_isr_token: Option<String>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store),
         fields(peer = %peer_addr)
     )]
     pub async fn handle_connection(
@@ -90,6 +95,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         room_registry: Arc<MucRoomRegistry>,
         connection_registry: Arc<ConnectionRegistry>,
         mam_storage: Arc<M>,
+        isr_token_store: SharedIsrTokenStore,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -107,6 +113,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             outbound_rx: None,
             sm_state: StreamManagementState::new(),
             carbons_enabled: false,
+            isr_token_store,
+            current_isr_token: None,
         };
 
         actor.run(tls_acceptor).await
@@ -138,15 +146,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let _header = self.stream.read_stream_header().await?;
         self.stream.send_features_sasl().await?;
 
-        // Handle SASL authentication
+        // Handle SASL authentication (may require multiple rounds for OAUTHBEARER discovery)
         self.state = ConnectionState::Authenticating;
-        let (jid, token) = self.stream.handle_sasl_auth().await?;
-
-        // Validate session with app state
-        let session = self
-            .app_state
-            .validate_session(&jid.clone().into(), &token)
-            .await?;
+        let (jid, session) = self.handle_sasl_authentication().await?;
         self.session = Some(session);
         self.state = ConnectionState::Authenticated;
 
@@ -184,6 +186,107 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         info!("Connection closed");
 
         result
+    }
+
+    /// Handle SASL authentication, supporting both PLAIN and OAUTHBEARER.
+    ///
+    /// For OAUTHBEARER, this may involve multiple rounds:
+    /// 1. Client sends empty OAUTHBEARER → Server sends discovery URL
+    /// 2. Client completes OAuth flow externally
+    /// 3. Client sends OAUTHBEARER with token → Server validates and succeeds
+    ///
+    /// After successful authentication, sends SASL success with an ISR token
+    /// per XEP-0397 for instant stream resumption support.
+    /// On validation failure, sends SASL failure with not-authorized condition.
+    #[instrument(skip(self), name = "xmpp.connection.sasl_auth")]
+    async fn handle_sasl_authentication(&mut self) -> Result<(jid::BareJid, Session), XmppError> {
+        loop {
+            let auth_result = self.stream.handle_sasl_auth().await?;
+
+            match auth_result {
+                SaslAuthResult::Plain { jid, token } => {
+                    // PLAIN: Validate session with JID and token
+                    match self
+                        .app_state
+                        .validate_session(&jid.clone().into(), &token)
+                        .await
+                    {
+                        Ok(session) => {
+                            // Send SASL success with ISR token
+                            self.send_sasl_success_with_isr(&session, &jid).await?;
+                            return Ok((jid, session));
+                        }
+                        Err(e) => {
+                            // Send SASL failure before returning error
+                            warn!(error = %e, jid = %jid, "PLAIN authentication failed");
+                            self.stream.send_sasl_failure("not-authorized").await?;
+                            return Err(e);
+                        }
+                    }
+                }
+                SaslAuthResult::OAuthBearer { token, authzid: _ } => {
+                    // OAUTHBEARER: Validate session using just the token
+                    // The token is the session ID which we can look up directly
+                    match self.app_state.validate_session_token(&token).await {
+                        Ok(session) => {
+                            // Derive JID from session
+                            let jid = session.jid.clone();
+
+                            // Send SASL success with ISR token
+                            self.send_sasl_success_with_isr(&session, &jid).await?;
+                            return Ok((jid, session));
+                        }
+                        Err(e) => {
+                            // Send SASL failure before returning error
+                            warn!(error = %e, "OAUTHBEARER authentication failed");
+                            self.stream.send_sasl_failure("not-authorized").await?;
+                            return Err(e);
+                        }
+                    }
+                }
+                SaslAuthResult::OAuthBearerDiscovery => {
+                    // Client requested OAuth discovery - send discovery URL
+                    let discovery_url = self.app_state.oauth_discovery_url();
+                    self.stream.send_oauthbearer_discovery(&discovery_url).await?;
+
+                    debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery, waiting for client to complete OAuth");
+
+                    // Client will disconnect and reconnect with token after OAuth
+                    // Or some clients may send the token in the same session
+                    // Continue the loop to wait for the next auth attempt
+                }
+            }
+        }
+    }
+
+    /// Send SASL success response with an ISR resumption token.
+    ///
+    /// Creates a new ISR token for the session and sends it in the SASL success response.
+    async fn send_sasl_success_with_isr(
+        &mut self,
+        session: &Session,
+        jid: &jid::BareJid,
+    ) -> Result<(), XmppError> {
+        // Create an ISR token for this session
+        let isr_token = self.isr_token_store.create_token(
+            session.did.clone(),
+            jid.clone(),
+        );
+
+        // Store the token ID for this connection
+        self.current_isr_token = Some(isr_token.token.clone());
+
+        // Send success with ISR token
+        self.stream.send_sasl_success_with_isr(&isr_token.to_xml()).await?;
+
+        debug!(
+            did = %session.did,
+            jid = %jid,
+            token_expiry = %isr_token.expiry,
+            "Created ISR token for session"
+        );
+
+        Ok(())
     }
 
     /// Process stanzas until the connection is closed.
@@ -316,6 +419,32 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         self.sm_state.enable(stream_id.clone(), resume, max_seconds);
 
+        // Update the ISR token with SM stream ID for instant resumption
+        if let Some(ref token) = self.current_isr_token {
+            if let Some(session) = &self.session {
+                if let Some(jid) = &self.jid {
+                    // Create a new ISR token with SM state
+                    let new_isr_token = self.isr_token_store.create_token_with_sm(
+                        session.did.clone(),
+                        jid.to_bare(),
+                        stream_id.clone(),
+                        self.sm_state.inbound_count,
+                        self.sm_state.outbound_count,
+                    );
+
+                    // Remove old token and store new one
+                    self.isr_token_store.consume_token(token);
+                    self.current_isr_token = Some(new_isr_token.token.clone());
+
+                    debug!(
+                        stream_id = %stream_id,
+                        isr_token = %&new_isr_token.token[..new_isr_token.token.len().min(8)],
+                        "Updated ISR token with SM state"
+                    );
+                }
+            }
+        }
+
         // Send enabled response
         self.stream.send_sm_enabled(&stream_id, resume, max_seconds).await?;
 
@@ -354,15 +483,90 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
     /// Handle XEP-0198 Stream Management resume request.
     ///
-    /// Note: Full resumption requires storing session state across disconnections,
-    /// which is not yet implemented. For now, we reject resume requests.
+    /// Supports two modes of resumption:
+    /// 1. ISR token-based (XEP-0397): The previd is an ISR token from SASL success
+    /// 2. Standard SM (XEP-0198): The previd is the SM stream ID
+    ///
+    /// ISR resumption is tried first since it includes full session state.
     async fn handle_sm_resume(&mut self, previd: &str, h: u32) -> Result<(), XmppError> {
         debug!(previd = %previd, h = h, "Received SM resume request");
 
-        // For now, always reject resume requests since we don't persist session state
+        // First, try ISR token-based resumption (XEP-0397)
+        if let Some(isr_token) = self.isr_token_store.validate_token(previd) {
+            info!(
+                did = %isr_token.did,
+                jid = %isr_token.jid,
+                sm_stream_id = ?isr_token.sm_stream_id,
+                "ISR token validated for instant resumption"
+            );
+
+            // Consume the token to prevent reuse
+            self.isr_token_store.consume_token(previd);
+
+            // Restore session state from the ISR token
+            self.session = Some(Session {
+                did: isr_token.did.clone(),
+                jid: isr_token.jid.clone(),
+                // Use session expiry from somewhere - for now use a long-lived session
+                // In production, this should be looked up from the session store
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::hours(24),
+            });
+
+            // Restore SM state
+            if let Some(sm_stream_id) = &isr_token.sm_stream_id {
+                self.sm_state.enable(sm_stream_id.clone(), true, Some(300));
+                // Restore counters - client's h tells us what they've received
+                // Token's outbound count tells us what we sent before disconnect
+                debug!(
+                    client_h = h,
+                    server_outbound = isr_token.sm_outbound_count,
+                    server_inbound = isr_token.sm_inbound_count,
+                    "Restoring SM counters"
+                );
+            }
+
+            // Create a new ISR token for the resumed session
+            let new_isr_token = if let Some(ref sm_id) = isr_token.sm_stream_id {
+                self.isr_token_store.create_token_with_sm(
+                    isr_token.did.clone(),
+                    isr_token.jid.clone(),
+                    sm_id.clone(),
+                    isr_token.sm_inbound_count,
+                    isr_token.sm_outbound_count,
+                )
+            } else {
+                self.isr_token_store.create_token(
+                    isr_token.did.clone(),
+                    isr_token.jid.clone(),
+                )
+            };
+
+            self.current_isr_token = Some(new_isr_token.token.clone());
+
+            // Send resumed response with new ISR token
+            self.stream
+                .send_sm_resumed_with_isr(
+                    isr_token.sm_stream_id.as_deref().unwrap_or(previd),
+                    isr_token.sm_inbound_count,
+                    &new_isr_token.to_xml(),
+                )
+                .await?;
+
+            info!(
+                jid = %isr_token.jid,
+                sm_stream_id = ?isr_token.sm_stream_id,
+                "Stream resumed via ISR token"
+            );
+
+            return Ok(());
+        }
+
+        // Standard SM resumption is not yet implemented (requires persistent session state)
+        // For now, reject resume requests that aren't ISR tokens
         self.stream.send_sm_failed(Some("item-not-found"), None).await?;
 
-        warn!(previd = %previd, "SM resume rejected - session not found (resumption not yet implemented)");
+        warn!(previd = %previd, "SM resume rejected - session not found (non-ISR resumption not yet implemented)");
         Ok(())
     }
 
@@ -971,6 +1175,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_carbons_disable(iq).await;
         }
 
+        // Check if this is an ISR token refresh request (XEP-0397)
+        if is_isr_token_request(&iq) {
+            return self.handle_isr_token_request(iq).await;
+        }
+
         // Unhandled IQ - log and continue
         debug!("Received unhandled IQ stanza");
         Ok(())
@@ -1205,6 +1414,88 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
         info!("Message carbons disabled");
+        Ok(())
+    }
+
+    /// Handle XEP-0397 ISR token refresh request.
+    ///
+    /// Clients can request a new ISR token during an active session using:
+    /// ```xml
+    /// <iq type='get' id='...'>
+    ///   <token-request xmlns='urn:xmpp:isr:0'/>
+    /// </iq>
+    /// ```
+    ///
+    /// The server responds with a new token, invalidating the old one:
+    /// ```xml
+    /// <iq type='result' id='...'>
+    ///   <token xmlns='urn:xmpp:isr:0' expiry='ISO8601'>NEW_TOKEN</token>
+    /// </iq>
+    /// ```
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_isr_token_request(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        debug!("Received ISR token refresh request");
+
+        // Require an established session
+        let session = match &self.session {
+            Some(s) => s,
+            None => {
+                warn!("ISR token refresh requested before session established");
+                let error = build_isr_token_error(&iq, "not-authorized");
+                self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                return Ok(());
+            }
+        };
+
+        // Require a JID to be bound
+        let jid = match &self.jid {
+            Some(j) => j.to_bare(),
+            None => {
+                warn!("ISR token refresh requested before JID bound");
+                let error = build_isr_token_error(&iq, "not-authorized");
+                self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                return Ok(());
+            }
+        };
+
+        // If there's a current token, invalidate it
+        if let Some(ref old_token) = self.current_isr_token {
+            self.isr_token_store.consume_token(old_token);
+            debug!(
+                old_token = %&old_token[..old_token.len().min(8)],
+                "Invalidated old ISR token"
+            );
+        }
+
+        // Create a new ISR token
+        let new_token = if self.sm_state.enabled {
+            // Include SM state if Stream Management is enabled
+            let sm_stream_id = self.sm_state.stream_id.clone().unwrap_or_default();
+            self.isr_token_store.create_token_with_sm(
+                session.did.clone(),
+                jid.clone(),
+                sm_stream_id,
+                self.sm_state.inbound_count,
+                self.sm_state.outbound_count,
+            )
+        } else {
+            self.isr_token_store.create_token(session.did.clone(), jid.clone())
+        };
+
+        // Store the new token ID
+        self.current_isr_token = Some(new_token.token.clone());
+
+        // Build and send the response
+        let response = build_isr_token_result(&iq, &new_token);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        info!(
+            jid = %jid,
+            token_expiry = %new_token.expiry,
+            sm_enabled = self.sm_state.enabled,
+            "ISR token refreshed"
+        );
+
         Ok(())
     }
 

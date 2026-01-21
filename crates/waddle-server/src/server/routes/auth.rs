@@ -220,12 +220,13 @@ pub async fn client_metadata_handler(
     let client_id = format!("{}/oauth/client-metadata.json", state.base_url);
     let auth_redirect_uri = format!("{}/v1/auth/atproto/callback", state.base_url);
     let device_redirect_uri = format!("{}/v1/auth/device/callback", state.base_url);
+    let web_auth_redirect_uri = format!("{}/auth/callback", state.base_url);
 
     let metadata = OAuthClientMetadata {
         client_id,
         client_name: "Waddle".to_string(),
         client_uri: state.base_url.clone(),
-        redirect_uris: vec![auth_redirect_uri, device_redirect_uri],
+        redirect_uris: vec![auth_redirect_uri, device_redirect_uri, web_auth_redirect_uri],
         grant_types: vec![
             "authorization_code".to_string(),
             "refresh_token".to_string(),
@@ -565,9 +566,20 @@ pub async fn xmpp_token_handler(
     };
 
     // Convert DID to JID
-    // Default domain - in production this should come from configuration
-    let xmpp_domain = "waddle.social";
-    let jid = match did_to_jid(&session.did, xmpp_domain) {
+    // Use WADDLE_XMPP_DOMAIN env var, or extract domain from base_url
+    let xmpp_domain = std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| {
+        // Extract domain from base_url (e.g., "https://rawkode.tools" -> "rawkode.tools")
+        url::Url::parse(&state.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "localhost".to_string())
+    });
+    let xmpp_port = std::env::var("WADDLE_XMPP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(5222u16);
+
+    let jid = match did_to_jid(&session.did, &xmpp_domain) {
         Ok(jid) => jid,
         Err(err) => {
             error!("Failed to convert DID to JID: {}", err);
@@ -589,8 +601,8 @@ pub async fn xmpp_token_handler(
         Json(XmppTokenResponse {
             jid,
             token,
-            xmpp_host: xmpp_domain.to_string(),
-            xmpp_port: 5222,
+            xmpp_host: xmpp_domain.clone(),
+            xmpp_port,
             websocket_url: Some(format!("wss://{}/xmpp-websocket", xmpp_domain)),
             expires_at,
         }),

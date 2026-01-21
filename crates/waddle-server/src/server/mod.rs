@@ -243,7 +243,19 @@ fn create_router(state: Arc<AppState>) -> Router {
 
     // Device flow router for CLI authentication
     let device_store = Arc::new(dashmap::DashMap::new());
-    let device_router = routes::device::router(auth_state, device_store);
+    let device_router = routes::device::router(auth_state.clone(), device_store);
+
+    // XMPP OAuth router (XEP-0493) for standard XMPP client authentication
+    let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
+
+    // Auth page router for web-based XMPP credential retrieval
+    let auth_page_router = routes::auth_page::router(auth_state.clone());
+
+    // Well-known endpoints for service discovery (XEP-0156)
+    let well_known_router = routes::well_known::router(auth_state.clone());
+
+    // XMPP over WebSocket (RFC 7395)
+    let websocket_router = routes::websocket::router(auth_state);
 
     // Permission router with Zanzibar-inspired permission service
     let permission_state = Arc::new(PermissionState::new(state.clone()));
@@ -273,6 +285,14 @@ fn create_router(state: Arc<AppState>) -> Router {
         .merge(auth_router)
         // Merge device flow routes for CLI authentication
         .merge(device_router)
+        // Merge XMPP OAuth routes for standard XMPP client authentication (XEP-0493)
+        .merge(xmpp_oauth_router)
+        // Merge auth page routes for web-based XMPP credential retrieval
+        .merge(auth_page_router)
+        // Merge well-known endpoints for XMPP service discovery
+        .merge(well_known_router)
+        // Merge XMPP over WebSocket endpoint
+        .merge(websocket_router)
         // Merge permission routes
         .merge(permission_router)
         // Merge waddles routes

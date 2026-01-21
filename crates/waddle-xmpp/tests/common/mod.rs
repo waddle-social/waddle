@@ -89,8 +89,35 @@ impl AppState for MockAppState {
         async { Ok(true) }
     }
 
+    fn validate_session_token(
+        &self,
+        token: &str,
+    ) -> impl Future<Output = Result<Session, XmppError>> + Send {
+        let accept = self.accept_auth;
+        let domain = self.domain.clone();
+        let token = token.to_string();
+        async move {
+            if accept {
+                // Mock: derive a JID from the token
+                let mock_jid = format!("user_{}@{}", &token[..token.len().min(8)], domain);
+                Ok(Session {
+                    did: format!("did:plc:mock{}", &token[..token.len().min(8)]),
+                    jid: mock_jid.parse().unwrap_or_else(|_| "fallback@test.local".parse().unwrap()),
+                    created_at: chrono::Utc::now(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+                })
+            } else {
+                Err(XmppError::auth_failed("Mock auth rejection"))
+            }
+        }
+    }
+
     fn domain(&self) -> &str {
         &self.domain
+    }
+
+    fn oauth_discovery_url(&self) -> String {
+        format!("https://{}/.well-known/oauth-authorization-server", self.domain)
     }
 
     fn list_relations(
@@ -272,8 +299,10 @@ async fn run_test_server<S: AppState>(
                             let mam_storage = std::sync::Arc::new(
                                 waddle_xmpp::mam::LibSqlMamStorage::new(conn)
                             );
+                            // Create an ISR token store for the test
+                            let isr_token_store = waddle_xmpp::isr::create_shared_store();
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, room_registry, connection_registry, mam_storage
+                                stream, peer_addr, tls, dom, state, room_registry, connection_registry, mam_storage, isr_token_store
                             ).await;
                         });
                     }

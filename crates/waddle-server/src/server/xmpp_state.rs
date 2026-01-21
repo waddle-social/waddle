@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
-use crate::auth::{jid_to_did, SessionManager};
+use crate::auth::{did_to_jid, jid_to_did, SessionManager};
 use crate::db::Database;
 use crate::permissions::{Object, PermissionService, Subject};
 
@@ -166,9 +166,67 @@ impl waddle_xmpp::AppState for XmppAppState {
         Ok(response.allowed)
     }
 
+    /// Validate an XMPP session token without a JID (for OAUTHBEARER).
+    ///
+    /// The token is expected to be a session ID. The JID is derived from the
+    /// session's DID after validation.
+    async fn validate_session_token(&self, token: &str) -> Result<XmppSession, XmppError> {
+        debug!(token_prefix = %&token[..token.len().min(8)], "Validating XMPP session token (OAUTHBEARER)");
+
+        // Validate the session token (which is the session ID)
+        let session = self
+            .session_manager
+            .validate_session(token)
+            .await
+            .map_err(|e| {
+                warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
+                match e {
+                    crate::auth::AuthError::SessionNotFound(_) => XmppError::SessionNotFound,
+                    crate::auth::AuthError::SessionExpired => XmppError::SessionNotFound,
+                    _ => XmppError::auth_failed(format!("Session validation failed: {}", e)),
+                }
+            })?;
+
+        // Convert DID to JID
+        let jid_str = did_to_jid(&session.did, &self.domain).map_err(|e| {
+            warn!(did = %session.did, error = %e, "Failed to convert DID to JID");
+            XmppError::auth_failed(format!("Invalid DID format: {}", e))
+        })?;
+
+        let bare_jid: jid::BareJid = jid_str.parse().map_err(|e| {
+            warn!(jid = %jid_str, error = ?e, "Failed to parse generated JID");
+            XmppError::auth_failed(format!("Invalid JID: {:?}", e))
+        })?;
+
+        // Calculate expires_at - use session expiry or default to 24 hours from now
+        let expires_at = session
+            .expires_at
+            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
+
+        debug!(jid = %bare_jid, did = %session.did, "OAUTHBEARER session validated");
+
+        Ok(XmppSession {
+            did: session.did,
+            jid: bare_jid,
+            created_at: session.created_at,
+            expires_at,
+        })
+    }
+
     /// Get the XMPP server domain.
     fn domain(&self) -> &str {
         &self.domain
+    }
+
+    /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).
+    ///
+    /// Returns the RFC 8414 OAuth authorization server metadata endpoint URL.
+    fn oauth_discovery_url(&self) -> String {
+        // Construct the discovery URL based on the domain
+        // In production, this should be configurable via environment variable
+        let base_url = std::env::var("WADDLE_BASE_URL")
+            .unwrap_or_else(|_| format!("https://{}", self.domain));
+        format!("{}/.well-known/oauth-authorization-server", base_url.trim_end_matches('/'))
     }
 
     /// List all relations a subject has on an object.

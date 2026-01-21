@@ -12,7 +12,15 @@
       "Bash(chmod:*)",
       "Bash(cargo check:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "WebSearch",
+      "WebFetch(domain:xmpp.org)",
+      "WebFetch(domain:datatracker.ietf.org)",
+      "Bash(xargs ls:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cat:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(websocat:*)"
     ]
   }
 }

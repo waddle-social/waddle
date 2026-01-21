@@ -78,6 +78,8 @@ hex = { workspace = true }
 hickory-resolver = { workspace = true }
 lru = { workspace = true }
 percent-encoding = "2.3"
+urlencoding = "2.1"
+html-escape = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"

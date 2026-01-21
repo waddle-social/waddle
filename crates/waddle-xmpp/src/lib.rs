@@ -27,6 +27,7 @@ pub mod c2s;
 pub mod carbons;
 pub mod connection;
 pub mod disco;
+pub mod isr;
 pub mod mam;
 pub mod metrics;
 pub mod muc;
@@ -47,6 +48,7 @@ pub use error::{
 };
 pub use parser::{ns, StreamHeader};
 pub use server::{XmppServer, XmppServerConfig};
+pub use stream::SaslAuthResult;
 pub use types::*;
 
 use std::sync::Arc;
@@ -56,10 +58,21 @@ use std::sync::Arc;
 /// This trait allows `waddle-server` to provide access to sessions,
 /// permissions, and databases without circular dependencies.
 pub trait AppState: Send + Sync + 'static {
-    /// Validate an XMPP session token and return the associated session.
+    /// Validate an XMPP session token with a JID and return the associated session.
+    ///
+    /// Used for PLAIN authentication where both JID and token are provided.
     fn validate_session(
         &self,
         jid: &jid::Jid,
+        token: &str,
+    ) -> impl std::future::Future<Output = Result<Session, XmppError>> + Send;
+
+    /// Validate an XMPP session token without a JID and return the associated session.
+    ///
+    /// Used for OAUTHBEARER authentication where only the token is provided.
+    /// The session lookup derives the JID from the token/session.
+    fn validate_session_token(
+        &self,
         token: &str,
     ) -> impl std::future::Future<Output = Result<Session, XmppError>> + Send;
 
@@ -73,6 +86,12 @@ pub trait AppState: Send + Sync + 'static {
 
     /// Get the domain for this XMPP server.
     fn domain(&self) -> &str;
+
+    /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).
+    ///
+    /// This URL is sent to clients that request OAuth discovery.
+    /// Should point to the RFC 8414 OAuth authorization server metadata endpoint.
+    fn oauth_discovery_url(&self) -> String;
 
     /// List all relations a subject has on an object.
     ///
