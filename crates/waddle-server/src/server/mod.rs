@@ -13,15 +13,19 @@ use routes::permissions::PermissionState;
 use routes::waddles::WaddleState;
 use serde::Serialize;
 use serde_json::json;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::{info, warn, Level};
+use waddle_xmpp::XmppServerConfig;
 
 mod routes;
+pub mod xmpp_state;
+
+pub use xmpp_state::XmppAppState;
 
 /// Server application state
 pub struct AppState {
@@ -35,10 +39,156 @@ impl AppState {
     }
 }
 
-/// Start the HTTP server
+/// XMPP server configuration loaded from environment variables.
+#[derive(Debug, Clone)]
+pub struct XmppConfig {
+    /// Whether XMPP server is enabled (default: true)
+    pub enabled: bool,
+    /// XMPP server domain (default: "localhost")
+    pub domain: String,
+    /// Client-to-server bind address (default: "0.0.0.0:5222")
+    pub c2s_addr: SocketAddr,
+    /// TLS certificate path (default: "certs/server.crt")
+    pub tls_cert_path: String,
+    /// TLS key path (default: "certs/server.key")
+    pub tls_key_path: String,
+    /// MAM database path (None for in-memory)
+    pub mam_db_path: Option<PathBuf>,
+}
+
+impl Default for XmppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            domain: "localhost".to_string(),
+            c2s_addr: "0.0.0.0:5222".parse().expect("Valid default address"),
+            tls_cert_path: "certs/server.crt".to_string(),
+            tls_key_path: "certs/server.key".to_string(),
+            mam_db_path: None,
+        }
+    }
+}
+
+impl XmppConfig {
+    /// Load XMPP configuration from environment variables.
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("WADDLE_XMPP_ENABLED")
+            .map(|v| v.to_lowercase() != "false" && v != "0")
+            .unwrap_or(true);
+
+        let domain = std::env::var("WADDLE_XMPP_DOMAIN")
+            .unwrap_or_else(|_| "localhost".to_string());
+
+        let c2s_addr = std::env::var("WADDLE_XMPP_C2S_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:5222".to_string())
+            .parse()
+            .unwrap_or_else(|_| "0.0.0.0:5222".parse().expect("Valid fallback address"));
+
+        let tls_cert_path = std::env::var("WADDLE_XMPP_TLS_CERT")
+            .unwrap_or_else(|_| "certs/server.crt".to_string());
+
+        let tls_key_path = std::env::var("WADDLE_XMPP_TLS_KEY")
+            .unwrap_or_else(|_| "certs/server.key".to_string());
+
+        let mam_db_path = std::env::var("WADDLE_XMPP_MAM_DB")
+            .ok()
+            .map(PathBuf::from);
+
+        Self {
+            enabled,
+            domain,
+            c2s_addr,
+            tls_cert_path,
+            tls_key_path,
+            mam_db_path,
+        }
+    }
+
+    /// Convert to waddle_xmpp::XmppServerConfig.
+    pub fn to_xmpp_server_config(&self) -> XmppServerConfig {
+        XmppServerConfig {
+            c2s_addr: self.c2s_addr,
+            s2s_addr: None,
+            tls_cert_path: self.tls_cert_path.clone(),
+            tls_key_path: self.tls_key_path.clone(),
+            domain: self.domain.clone(),
+            mam_db_path: self.mam_db_path.clone(),
+        }
+    }
+}
+
+/// Start both HTTP and XMPP servers.
+///
+/// This function spawns both servers concurrently and returns when either fails.
 pub async fn start(db_pool: DatabasePool) -> Result<()> {
+    let xmpp_config = XmppConfig::from_env();
+
+    start_with_config(db_pool, xmpp_config).await
+}
+
+/// Start both HTTP and XMPP servers with explicit configuration.
+pub async fn start_with_config(db_pool: DatabasePool, xmpp_config: XmppConfig) -> Result<()> {
+    let encryption_key = std::env::var("WADDLE_SESSION_KEY").ok();
+
+    // Create XMPP app state first (before db_pool is moved)
+    // Clone the global database for XMPP state
+    let xmpp_app_state = if xmpp_config.enabled {
+        Some(Arc::new(XmppAppState::new(
+            xmpp_config.domain.clone(),
+            Arc::new(db_pool.global().clone()),
+            encryption_key.as_ref().map(|s| s.as_bytes()),
+        )))
+    } else {
+        None
+    };
+
+    // Now create HTTP state (takes ownership of db_pool)
     let state = Arc::new(AppState::new(db_pool));
 
+    // Start HTTP server
+    let http_state = state.clone();
+    let http_handle = tokio::spawn(async move {
+        start_http_server(http_state).await
+    });
+
+    // Optionally start XMPP server
+    let xmpp_handle = if let Some(xmpp_app_state) = xmpp_app_state {
+        let xmpp_server_config = xmpp_config.to_xmpp_server_config();
+
+        Some(tokio::spawn(async move {
+            start_xmpp_server(xmpp_server_config, xmpp_app_state).await
+        }))
+    } else {
+        info!("XMPP server disabled via WADDLE_XMPP_ENABLED=false");
+        None
+    };
+
+    // Wait for either server to complete (usually due to an error)
+    tokio::select! {
+        result = http_handle => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
+            }
+        }
+        result = async {
+            match xmpp_handle {
+                Some(handle) => handle.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(anyhow::anyhow!("XMPP server task failed: {}", e)),
+            }
+        }
+    }
+}
+
+/// Start the HTTP server.
+async fn start_http_server(state: Arc<AppState>) -> Result<()> {
     let app = create_router(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -50,25 +200,50 @@ pub async fn start(db_pool: DatabasePool) -> Result<()> {
     Ok(())
 }
 
+/// Start the XMPP server.
+async fn start_xmpp_server(
+    config: XmppServerConfig,
+    app_state: Arc<XmppAppState>,
+) -> Result<()> {
+    info!(
+        addr = %config.c2s_addr,
+        domain = %config.domain,
+        "Starting XMPP server"
+    );
+
+    let server = waddle_xmpp::start(config, app_state)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
+
+    server
+        .run()
+        .await
+        .map_err(|e| anyhow::anyhow!("XMPP server error: {}", e))?;
+
+    Ok(())
+}
+
 /// Create the Axum router with all routes and middleware
 fn create_router(state: Arc<AppState>) -> Router {
     // Create auth state with configuration from environment or defaults
-    let client_id = std::env::var("WADDLE_OAUTH_CLIENT_ID")
-        .unwrap_or_else(|_| "https://waddle.social/oauth/client".to_string());
-    let redirect_uri = std::env::var("WADDLE_OAUTH_REDIRECT_URI")
-        .unwrap_or_else(|_| "https://waddle.social/v1/auth/atproto/callback".to_string());
+    // The base URL is used to construct client_id and redirect_uri for OAuth
+    let base_url = std::env::var("WADDLE_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
     let encryption_key = std::env::var("WADDLE_SESSION_KEY").ok();
 
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
-        &client_id,
-        &redirect_uri,
+        &base_url,
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
 
     // Auth router uses its own state type, so we apply .with_state() before merging
     // This converts Router<Arc<AuthState>> to Router<()>, which can then be merged
-    let auth_router = routes::auth::router(auth_state);
+    let auth_router = routes::auth::router(auth_state.clone());
+
+    // Device flow router for CLI authentication
+    let device_store = Arc::new(dashmap::DashMap::new());
+    let device_router = routes::device::router(auth_state, device_store);
 
     // Permission router with Zanzibar-inspired permission service
     let permission_state = Arc::new(PermissionState::new(state.clone()));
@@ -96,6 +271,8 @@ fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
         // Merge auth routes after the main router has its state applied
         .merge(auth_router)
+        // Merge device flow routes for CLI authentication
+        .merge(device_router)
         // Merge permission routes
         .merge(permission_router)
         // Merge waddles routes

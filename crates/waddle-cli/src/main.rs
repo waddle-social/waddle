@@ -6,6 +6,7 @@
 //! A decentralized social platform built on XMPP federation.
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -19,9 +20,11 @@ use tracing::{info, warn, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod api;
 mod app;
 mod config;
 mod event;
+mod login;
 mod ui;
 mod xmpp;
 
@@ -30,6 +33,47 @@ use config::Config;
 use event::{key_to_action, Event, EventHandler, KeyAction};
 use ui::render_layout;
 use xmpp::{XmppClient, XmppClientEvent};
+
+/// Waddle CLI - Terminal client for Waddle Social
+#[derive(Parser)]
+#[command(name = "waddle")]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Login to Waddle using your Bluesky account
+    Login {
+        /// Your Bluesky handle (e.g., user.bsky.social)
+        #[arg(short = 'u', long)]
+        handle: String,
+
+        /// Waddle server URL (default: http://localhost:3000)
+        #[arg(short, long, default_value = "http://localhost:3000")]
+        server: String,
+    },
+    /// Show current login status
+    Status,
+    /// Logout and clear saved credentials
+    Logout,
+    /// Create a new waddle
+    Create {
+        /// Name of the waddle
+        #[arg(short, long)]
+        name: String,
+
+        /// Description of the waddle (optional)
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Make the waddle private (default is public)
+        #[arg(long)]
+        private: bool,
+    },
+}
 
 /// Initialize the terminal for TUI mode
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -96,14 +140,21 @@ async fn run_app(
     };
 
     loop {
+        // Check quit flag first, before any blocking operations
+        if app.should_quit {
+            break;
+        }
+
         // Render the UI
         terminal.draw(|frame| {
             render_layout(frame, &app, &config);
         })?;
 
-        // Use tokio::select! to handle both terminal events and XMPP events concurrently
+        // Use tokio::select! with biased to prioritize terminal events
         tokio::select! {
-            // Handle terminal events
+            biased;
+
+            // Handle terminal events (highest priority)
             event = events.next() => {
                 if let Some(event) = event {
                     handle_terminal_event(&mut app, &mut xmpp_client, event, &config).await;
@@ -117,27 +168,36 @@ async fn run_app(
                 }
             }
 
-            // Poll XMPP client for new events (if connected)
+            // Poll XMPP client for new events (if connected) - with timeout
             _ = async {
                 if let Some(ref mut client) = xmpp_client {
                     if app.connection_state == ConnectionState::Connected
                         || app.connection_state == ConnectionState::Connecting
                     {
-                        client.poll_events().await;
+                        // Use timeout to ensure we don't block forever
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            client.poll_events()
+                        ).await;
                     }
+                } else {
+                    // No XMPP client, just yield briefly
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             } => {}
         }
-
-        if app.should_quit {
-            break;
-        }
     }
 
-    // Clean shutdown of XMPP client
+    // Clean shutdown of XMPP client (with timeout to avoid hanging)
     if let Some(ref mut client) = xmpp_client {
         info!("Disconnecting XMPP client...");
-        client.disconnect().await;
+        let disconnect_timeout = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.disconnect()
+        );
+        if disconnect_timeout.await.is_err() {
+            warn!("XMPP disconnect timed out, forcing exit");
+        }
     }
 
     Ok(())
@@ -377,8 +437,29 @@ async fn send_message(app: &mut App, xmpp_client: &mut Option<XmppClient>, messa
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Handle subcommands first (before TUI mode)
+    match cli.command {
+        Some(Commands::Login { handle, server }) => {
+            return login::run_login(&handle, &server).await;
+        }
+        Some(Commands::Status) => {
+            return run_status().await;
+        }
+        Some(Commands::Logout) => {
+            return run_logout().await;
+        }
+        Some(Commands::Create { name, description, private }) => {
+            return run_create(&name, description.as_deref(), !private).await;
+        }
+        None => {
+            // No subcommand - run TUI
+        }
+    }
+
     // Load configuration
-    let config = Config::load().unwrap_or_default();
+    let mut config = Config::load().unwrap_or_default();
 
     // Set up logging to a file (since we're in TUI mode)
     let log_dir = Config::data_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -401,11 +482,43 @@ async fn main() -> Result<()> {
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     info!("License: AGPL-3.0");
 
+    // Create app state
+    let mut app = App::new();
+
+    // Load saved credentials if available
+    if let Ok(creds) = login::load_credentials() {
+        config.xmpp.jid = Some(creds.jid);
+        config.xmpp.token = Some(creds.token.clone());
+        config.xmpp.server = Some(creds.xmpp_host);
+        config.xmpp.port = creds.xmpp_port;
+        info!("Loaded saved credentials for: {}", creds.handle);
+
+        // Fetch waddles and channels from the API
+        info!("Fetching waddles and channels from server...");
+        let api_client = api::ApiClient::new(&creds.server_url, &creds.token);
+        match api_client.fetch_all().await {
+            Ok((waddles, channels)) => {
+                info!("Fetched {} waddles and {} channels", waddles.len(), channels.len());
+                let waddle_data: Vec<(String, String)> = waddles
+                    .into_iter()
+                    .map(|w| (w.id, w.name))
+                    .collect();
+                let channel_data: Vec<(String, String)> = channels
+                    .into_iter()
+                    .map(|c| (c.id, c.name))
+                    .collect();
+                app.set_waddles_and_channels(waddle_data, channel_data);
+            }
+            Err(e) => {
+                warn!("Failed to fetch data from server: {}. Running in offline mode.", e);
+            }
+        }
+    } else {
+        info!("No saved credentials - run 'waddle login' to authenticate");
+    }
+
     // Initialize terminal
     let mut terminal = setup_terminal()?;
-
-    // Create app state
-    let app = App::new();
 
     // Run the application
     let result = run_app(&mut terminal, app, config).await;
@@ -420,5 +533,79 @@ async fn main() -> Result<()> {
     }
 
     info!("Waddle CLI exiting normally");
+    Ok(())
+}
+
+/// Show current login status
+async fn run_status() -> Result<()> {
+    match login::load_credentials() {
+        Ok(creds) => {
+            println!("Logged in as: @{}", creds.handle);
+            println!("DID: {}", creds.did);
+            println!("JID: {}", creds.jid);
+            println!("XMPP: {}:{}", creds.xmpp_host, creds.xmpp_port);
+            println!("API: {}", creds.server_url);
+        }
+        Err(_) => {
+            println!("Not logged in.");
+            println!();
+            println!("Run 'waddle login -u <handle>' to login with your Bluesky account.");
+        }
+    }
+    Ok(())
+}
+
+/// Logout and clear saved credentials
+async fn run_logout() -> Result<()> {
+    match login::clear_credentials() {
+        Ok(()) => {
+            println!("Logged out successfully.");
+        }
+        Err(e) => {
+            eprintln!("Failed to logout: {}", e);
+        }
+    }
+    Ok(())
+}
+
+/// Create a new waddle
+async fn run_create(name: &str, description: Option<&str>, is_public: bool) -> Result<()> {
+    // Load credentials
+    let creds = login::load_credentials().map_err(|_| {
+        anyhow::anyhow!("Not logged in. Run 'waddle login -u <handle>' first.")
+    })?;
+
+    println!("Creating waddle \"{}\"...", name);
+
+    // Build the request
+    let mut request = api::CreateWaddleRequest::new(name);
+    if let Some(desc) = description {
+        request = request.with_description(desc);
+    }
+    request = request.with_public(is_public);
+
+    // Create API client and make the request
+    let api_client = api::ApiClient::new(&creds.server_url, &creds.token);
+    match api_client.create_waddle(request).await {
+        Ok(waddle) => {
+            println!();
+            println!("✓ Waddle created successfully!");
+            println!();
+            println!("  Name: {}", waddle.name);
+            println!("  ID: {}", waddle.id);
+            if let Some(desc) = &waddle.description {
+                println!("  Description: {}", desc);
+            }
+            println!("  Public: {}", if waddle.is_public { "yes" } else { "no" });
+            println!();
+            println!("A #general channel has been created automatically.");
+            println!("Run 'waddle' to open the TUI and start chatting!");
+        }
+        Err(e) => {
+            eprintln!("Failed to create waddle: {}", e);
+            return Err(e);
+        }
+    }
+
     Ok(())
 }

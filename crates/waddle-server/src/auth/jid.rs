@@ -105,7 +105,6 @@ pub fn did_to_jid_localpart(did: &str) -> Result<String, AuthError> {
 /// # Errors
 ///
 /// Returns `AuthError::InvalidDid` if the JID format cannot be converted back to a DID
-#[allow(dead_code)]
 pub fn jid_to_did(jid: &str) -> Result<String, AuthError> {
     // Extract localpart from JID (handle both bare@domain and just localpart)
     let localpart = jid

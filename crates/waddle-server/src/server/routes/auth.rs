@@ -37,17 +37,22 @@ pub struct AuthState {
     pub session_manager: SessionManager,
     /// Pending authorizations (state -> PendingAuthorization)
     pub pending_auths: PendingAuthStore,
+    /// Server base URL for OAuth client metadata
+    pub base_url: String,
 }
 
 impl AuthState {
     /// Create new auth state
     pub fn new(
         app_state: Arc<AppState>,
-        client_id: &str,
-        redirect_uri: &str,
+        base_url: &str,
         encryption_key: Option<&[u8]>,
     ) -> Self {
-        let oauth_client = AtprotoOAuth::new(client_id, redirect_uri);
+        // client_id is the URL to our OAuth client metadata endpoint
+        let client_id = format!("{}/oauth/client-metadata.json", base_url.trim_end_matches('/'));
+        let redirect_uri = format!("{}/v1/auth/atproto/callback", base_url.trim_end_matches('/'));
+
+        let oauth_client = AtprotoOAuth::new(&client_id, &redirect_uri);
         // Create session manager with OAuth client for automatic token refresh
         let session_manager = SessionManager::with_oauth_client(
             Arc::new(app_state.db_pool.global().clone()),
@@ -60,6 +65,7 @@ impl AuthState {
             oauth_client,
             session_manager,
             pending_auths: Arc::new(DashMap::new()),
+            base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 }
@@ -67,6 +73,7 @@ impl AuthState {
 /// Create the auth router
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
+        .route("/oauth/client-metadata.json", get(client_metadata_handler))
         .route("/v1/auth/atproto/authorize", post(authorize_handler))
         .route("/v1/auth/atproto/callback", get(callback_handler))
         .route("/v1/auth/session", get(session_info_handler))
@@ -157,7 +164,7 @@ pub struct ErrorResponse {
 }
 
 impl ErrorResponse {
-    fn new(error: &str, message: &str) -> Self {
+    pub fn new(error: &str, message: &str) -> Self {
         Self {
             error: error.to_string(),
             message: message.to_string(),
@@ -184,6 +191,53 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
     };
 
     (status, Json(ErrorResponse::new(error_code, &err.to_string())))
+}
+
+/// OAuth client metadata document for ATProto OAuth
+#[derive(Debug, Serialize)]
+struct OAuthClientMetadata {
+    client_id: String,
+    client_name: String,
+    client_uri: String,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    scope: String,
+    token_endpoint_auth_method: String,
+    application_type: String,
+    dpop_bound_access_tokens: bool,
+}
+
+/// GET /oauth/client-metadata.json
+///
+/// Serve the OAuth client metadata document.
+/// This endpoint is required by ATProto OAuth - the authorization server
+/// fetches this document to verify the client.
+#[instrument(skip(state))]
+pub async fn client_metadata_handler(
+    State(state): State<Arc<AuthState>>,
+) -> impl IntoResponse {
+    let client_id = format!("{}/oauth/client-metadata.json", state.base_url);
+    let auth_redirect_uri = format!("{}/v1/auth/atproto/callback", state.base_url);
+    let device_redirect_uri = format!("{}/v1/auth/device/callback", state.base_url);
+
+    let metadata = OAuthClientMetadata {
+        client_id,
+        client_name: "Waddle".to_string(),
+        client_uri: state.base_url.clone(),
+        redirect_uris: vec![auth_redirect_uri, device_redirect_uri],
+        grant_types: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
+        response_types: vec!["code".to_string()],
+        scope: "atproto transition:generic".to_string(),
+        token_endpoint_auth_method: "none".to_string(),
+        application_type: "native".to_string(),
+        dpop_bound_access_tokens: true,
+    };
+
+    (StatusCode::OK, Json(metadata))
 }
 
 /// POST /v1/auth/atproto/authorize
@@ -251,10 +305,10 @@ pub async fn callback_handler(
         }
     };
 
-    // Exchange code for tokens
+    // Exchange code for tokens (with DPoP)
     match state
         .oauth_client
-        .exchange_code(&pending.token_endpoint, &query.code, &pending.code_verifier)
+        .exchange_code(&pending.token_endpoint, &query.code, &pending.code_verifier, &pending.dpop_keypair, &pending.redirect_uri)
         .await
     {
         Ok(tokens) => {
@@ -565,8 +619,7 @@ mod tests {
         let app_state = Arc::new(AppState::new(db_pool));
         Arc::new(AuthState::new(
             app_state,
-            "https://waddle.social/oauth/client",
-            "https://waddle.social/v1/auth/atproto/callback",
+            "https://waddle.social",
             Some(b"test-encryption-key-32-bytes!!!"),
         ))
     }

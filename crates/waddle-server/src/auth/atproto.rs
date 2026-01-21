@@ -17,6 +17,7 @@
 //! - Tokens are stored encrypted in the database
 
 use super::did::DidResolver;
+use super::dpop::DpopKeyPair;
 use super::AuthError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
@@ -25,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument, warn};
 use url::Url;
 
 /// ATProto OAuth client
@@ -89,12 +90,30 @@ impl AtprotoOAuth {
     /// Start the OAuth authorization flow for a given handle
     ///
     /// Returns an `AuthorizationRequest` containing the authorization URL
-    /// and PKCE parameters that must be stored for the callback.
+    /// and all parameters needed to complete the flow.
+    ///
+    /// Bluesky OAuth requires:
+    /// - PKCE (Proof Key for Code Exchange)
+    /// - PAR (Pushed Authorization Requests)
+    /// - DPoP (Demonstrating Proof of Possession)
     #[instrument(skip(self), fields(handle = %handle))]
     pub async fn start_authorization(
         &self,
         handle: &str,
     ) -> Result<AuthorizationRequest, AuthError> {
+        self.start_authorization_with_redirect(handle, None).await
+    }
+
+    /// Start OAuth authorization flow with optional redirect_uri override
+    ///
+    /// This is used by the device flow which needs a different callback URL.
+    pub async fn start_authorization_with_redirect(
+        &self,
+        handle: &str,
+        redirect_uri_override: Option<&str>,
+    ) -> Result<AuthorizationRequest, AuthError> {
+        let redirect_uri = redirect_uri_override.unwrap_or(&self.redirect_uri);
+
         // Step 1: Resolve handle to DID
         debug!("Resolving handle to DID: {}", handle);
         let did = self.did_resolver.resolve_handle(handle).await?;
@@ -120,13 +139,28 @@ impl AtprotoOAuth {
         // Step 5: Generate state parameter
         let state = generate_state();
 
-        // Step 6: Build authorization URL
-        let authorization_url = self.build_authorization_url(
+        // Step 6: Generate DPoP keypair
+        let dpop_keypair = DpopKeyPair::generate();
+        debug!("Generated DPoP keypair");
+
+        // Step 7: Get PAR endpoint (required for Bluesky)
+        let par_endpoint = auth_server.pushed_authorization_request_endpoint.as_ref()
+            .ok_or_else(|| {
+                AuthError::OAuthDiscoveryFailed(
+                    "Authorization server does not support PAR (required for Bluesky)".to_string()
+                )
+            })?;
+
+        // Step 8: Make PAR request with DPoP
+        let authorization_url = self.make_par_request(
+            par_endpoint,
             &auth_server.authorization_endpoint,
             &code_challenge,
             &state,
             &did,
-        )?;
+            &dpop_keypair,
+            redirect_uri,
+        ).await?;
 
         Ok(AuthorizationRequest {
             authorization_url,
@@ -136,95 +170,239 @@ impl AtprotoOAuth {
             handle: handle.to_string(),
             pds_url,
             token_endpoint: auth_server.token_endpoint,
+            dpop_keypair,
+            issuer: auth_server.issuer,
+            redirect_uri: redirect_uri.to_string(),
         })
+    }
+
+    /// Make a Pushed Authorization Request (PAR)
+    ///
+    /// Returns the authorization URL to redirect the user to.
+    async fn make_par_request(
+        &self,
+        par_endpoint: &str,
+        authorization_endpoint: &str,
+        code_challenge: &str,
+        state: &str,
+        did: &str,
+        dpop_keypair: &DpopKeyPair,
+        redirect_uri: &str,
+    ) -> Result<String, AuthError> {
+        debug!("Making PAR request to: {}", par_endpoint);
+
+        // Build PAR request body
+        let params = [
+            ("response_type", "code"),
+            ("client_id", &self.client_id),
+            ("redirect_uri", redirect_uri),
+            ("scope", "atproto transition:generic"),
+            ("state", state),
+            ("code_challenge", code_challenge),
+            ("code_challenge_method", "S256"),
+            ("login_hint", did),
+        ];
+
+        // First attempt without nonce (we'll get one back in the error)
+        let dpop_proof = dpop_keypair.create_proof("POST", par_endpoint, None, None);
+
+        let response = self
+            .http_client
+            .post(par_endpoint)
+            .header("DPoP", &dpop_proof)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| {
+                AuthError::OAuthAuthorizationFailed(format!("PAR request failed: {}", e))
+            })?;
+
+        // Check for DPoP nonce error (expected on first request)
+        if response.status().as_u16() == 400 || response.status().as_u16() == 401 {
+            if let Some(nonce) = response.headers().get("DPoP-Nonce") {
+                let nonce_str = nonce.to_str().unwrap_or("");
+                debug!("Got DPoP nonce: {}", nonce_str);
+
+                // Retry with nonce
+                let dpop_proof_with_nonce = dpop_keypair.create_proof("POST", par_endpoint, Some(nonce_str), None);
+
+                let retry_response = self
+                    .http_client
+                    .post(par_endpoint)
+                    .header("DPoP", &dpop_proof_with_nonce)
+                    .form(&params)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        AuthError::OAuthAuthorizationFailed(format!("PAR retry request failed: {}", e))
+                    })?;
+
+                return self.handle_par_response(retry_response, authorization_endpoint).await;
+            }
+        }
+
+        self.handle_par_response(response, authorization_endpoint).await
+    }
+
+    /// Handle PAR response and build authorization URL
+    async fn handle_par_response(
+        &self,
+        response: reqwest::Response,
+        authorization_endpoint: &str,
+    ) -> Result<String, AuthError> {
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            warn!("PAR request failed: {} - {}", status, error_body);
+            return Err(AuthError::OAuthAuthorizationFailed(format!(
+                "PAR request failed with status {}: {}",
+                status, error_body
+            )));
+        }
+
+        let par_response: ParResponse = response.json().await.map_err(|e| {
+            AuthError::OAuthAuthorizationFailed(format!("Failed to parse PAR response: {}", e))
+        })?;
+
+        info!("PAR successful, got request_uri: {}", par_response.request_uri);
+
+        // Build authorization URL with request_uri
+        let mut auth_url = Url::parse(authorization_endpoint).map_err(|e| {
+            AuthError::OAuthAuthorizationFailed(format!("Invalid authorization endpoint: {}", e))
+        })?;
+
+        auth_url.query_pairs_mut()
+            .append_pair("client_id", &self.client_id)
+            .append_pair("request_uri", &par_response.request_uri);
+
+        Ok(auth_url.to_string())
     }
 
     /// Discover the OAuth authorization server from a PDS
     ///
-    /// Fetches the `.well-known/oauth-authorization-server` metadata
+    /// Bluesky uses a two-step discovery process:
+    /// 1. Fetch `/.well-known/oauth-protected-resource` from the PDS (Resource Server)
+    /// 2. Extract the Authorization Server URL from `authorization_servers` array
+    /// 3. Fetch `/.well-known/oauth-authorization-server` from the Authorization Server
     #[instrument(skip(self), fields(pds_url = %pds_url))]
     pub async fn discover_authorization_server(
         &self,
         pds_url: &str,
     ) -> Result<AuthorizationServerMetadata, AuthError> {
-        let well_known_url = format!(
-            "{}/.well-known/oauth-authorization-server",
-            pds_url.trim_end_matches('/')
-        );
+        let pds_base = pds_url.trim_end_matches('/');
 
-        debug!("Fetching authorization server metadata from: {}", well_known_url);
+        // Step 1: Fetch Protected Resource metadata from the PDS
+        let resource_url = format!("{}/.well-known/oauth-protected-resource", pds_base);
+        debug!("Fetching protected resource metadata from: {}", resource_url);
 
         let response = self
             .http_client
-            .get(&well_known_url)
+            .get(&resource_url)
             .send()
             .await
             .map_err(|e| {
-                AuthError::OAuthDiscoveryFailed(format!("Failed to fetch OAuth metadata: {}", e))
+                AuthError::OAuthDiscoveryFailed(format!(
+                    "Failed to fetch protected resource metadata: {}",
+                    e
+                ))
             })?;
 
         if !response.status().is_success() {
             return Err(AuthError::OAuthDiscoveryFailed(format!(
-                "OAuth metadata endpoint returned status {}",
+                "Protected resource metadata endpoint returned status {}",
                 response.status()
             )));
         }
 
-        let metadata: AuthorizationServerMetadata =
-            response.json().await.map_err(|e| {
-                AuthError::OAuthDiscoveryFailed(format!("Failed to parse OAuth metadata: {}", e))
-            })?;
-
-        Ok(metadata)
-    }
-
-    /// Build the authorization URL with all required parameters
-    fn build_authorization_url(
-        &self,
-        authorization_endpoint: &str,
-        code_challenge: &str,
-        state: &str,
-        did: &str,
-    ) -> Result<String, AuthError> {
-        let mut url = Url::parse(authorization_endpoint).map_err(|e| {
-            AuthError::OAuthAuthorizationFailed(format!("Invalid authorization endpoint: {}", e))
+        let resource_meta: ProtectedResourceMetadata = response.json().await.map_err(|e| {
+            AuthError::OAuthDiscoveryFailed(format!(
+                "Failed to parse protected resource metadata: {}",
+                e
+            ))
         })?;
 
-        url.query_pairs_mut()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &self.client_id)
-            .append_pair("redirect_uri", &self.redirect_uri)
-            .append_pair("scope", "atproto transition:generic")
-            .append_pair("state", state)
-            .append_pair("code_challenge", code_challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("login_hint", did);
+        // Step 2: Get the Authorization Server URL
+        let auth_server_url = resource_meta
+            .authorization_servers
+            .first()
+            .ok_or_else(|| {
+                AuthError::OAuthDiscoveryFailed(
+                    "No authorization servers found in protected resource metadata".to_string(),
+                )
+            })?;
 
-        Ok(url.to_string())
+        debug!("Found authorization server: {}", auth_server_url);
+
+        // Step 3: Fetch Authorization Server metadata
+        let auth_meta_url = format!(
+            "{}/.well-known/oauth-authorization-server",
+            auth_server_url.trim_end_matches('/')
+        );
+        debug!(
+            "Fetching authorization server metadata from: {}",
+            auth_meta_url
+        );
+
+        let response = self
+            .http_client
+            .get(&auth_meta_url)
+            .send()
+            .await
+            .map_err(|e| {
+                AuthError::OAuthDiscoveryFailed(format!(
+                    "Failed to fetch authorization server metadata: {}",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            return Err(AuthError::OAuthDiscoveryFailed(format!(
+                "Authorization server metadata endpoint returned status {}",
+                response.status()
+            )));
+        }
+
+        let metadata: AuthorizationServerMetadata = response.json().await.map_err(|e| {
+            AuthError::OAuthDiscoveryFailed(format!(
+                "Failed to parse authorization server metadata: {}",
+                e
+            ))
+        })?;
+
+        Ok(metadata)
     }
 
     /// Exchange an authorization code for tokens
     ///
     /// This is called after the user is redirected back with an authorization code.
-    #[instrument(skip(self, code_verifier))]
+    /// DPoP proof is required for Bluesky OAuth.
+    /// The redirect_uri must match the one used in the authorization request.
+    #[instrument(skip(self, code_verifier, dpop_keypair))]
     pub async fn exchange_code(
         &self,
         token_endpoint: &str,
         code: &str,
         code_verifier: &str,
+        dpop_keypair: &DpopKeyPair,
+        redirect_uri: &str,
     ) -> Result<TokenResponse, AuthError> {
         debug!("Exchanging authorization code for tokens");
 
-        let mut params = HashMap::new();
-        params.insert("grant_type", "authorization_code");
-        params.insert("code", code);
-        params.insert("redirect_uri", &self.redirect_uri);
-        params.insert("client_id", &self.client_id);
-        params.insert("code_verifier", code_verifier);
+        let params = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", &self.client_id),
+            ("code_verifier", code_verifier),
+        ];
+
+        // First attempt without nonce
+        let dpop_proof = dpop_keypair.create_proof("POST", token_endpoint, None, None);
 
         let response = self
             .http_client
             .post(token_endpoint)
+            .header("DPoP", &dpop_proof)
             .form(&params)
             .send()
             .await
@@ -232,9 +410,42 @@ impl AtprotoOAuth {
                 AuthError::TokenExchangeFailed(format!("Token request failed: {}", e))
             })?;
 
+        // Check for DPoP nonce error
+        if response.status().as_u16() == 400 || response.status().as_u16() == 401 {
+            if let Some(nonce) = response.headers().get("DPoP-Nonce") {
+                let nonce_str = nonce.to_str().unwrap_or("");
+                debug!("Got DPoP nonce for token exchange: {}", nonce_str);
+
+                // Retry with nonce
+                let dpop_proof_with_nonce = dpop_keypair.create_proof("POST", token_endpoint, Some(nonce_str), None);
+
+                let retry_response = self
+                    .http_client
+                    .post(token_endpoint)
+                    .header("DPoP", &dpop_proof_with_nonce)
+                    .form(&params)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        AuthError::TokenExchangeFailed(format!("Token retry request failed: {}", e))
+                    })?;
+
+                return self.handle_token_response(retry_response).await;
+            }
+        }
+
+        self.handle_token_response(response).await
+    }
+
+    /// Handle token response
+    async fn handle_token_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<TokenResponse, AuthError> {
         if !response.status().is_success() {
             let status = response.status();
             let error_body = response.text().await.unwrap_or_default();
+            warn!("Token request failed: {} - {}", status, error_body);
             return Err(AuthError::TokenExchangeFailed(format!(
                 "Token endpoint returned status {}: {}",
                 status, error_body
@@ -291,6 +502,27 @@ impl AtprotoOAuth {
     }
 }
 
+/// Protected Resource metadata (from PDS)
+///
+/// Fetched from `/.well-known/oauth-protected-resource` on the PDS.
+/// This tells us where to find the Authorization Server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectedResourceMetadata {
+    /// The resource identifier (usually the PDS URL)
+    pub resource: String,
+
+    /// List of authorization server URLs
+    pub authorization_servers: Vec<String>,
+
+    /// Bearer token methods supported
+    #[serde(default)]
+    pub bearer_methods_supported: Vec<String>,
+
+    /// Scopes supported by this resource server
+    #[serde(default)]
+    pub scopes_supported: Vec<String>,
+}
+
 /// Authorization server metadata (OAuth 2.0 / OpenID Connect discovery)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizationServerMetadata {
@@ -332,11 +564,21 @@ pub struct AuthorizationServerMetadata {
     pub dpop_signing_alg_values_supported: Vec<String>,
 }
 
+/// PAR (Pushed Authorization Request) response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParResponse {
+    /// The request URI to use in the authorization URL
+    pub request_uri: String,
+    /// How long until the request expires (seconds)
+    #[serde(default)]
+    pub expires_in: Option<u64>,
+}
+
 /// Request to start OAuth authorization
 ///
 /// Contains all the information needed to redirect the user
 /// and later complete the authorization flow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AuthorizationRequest {
     /// The URL to redirect the user to for authorization
     pub authorization_url: String,
@@ -358,6 +600,15 @@ pub struct AuthorizationRequest {
 
     /// Token endpoint URL
     pub token_endpoint: String,
+
+    /// DPoP keypair for this session (used in token exchange)
+    pub dpop_keypair: DpopKeyPair,
+
+    /// Authorization server issuer
+    pub issuer: String,
+
+    /// Redirect URI used for this request (needed for token exchange)
+    pub redirect_uri: String,
 }
 
 /// OAuth token response

@@ -758,7 +758,7 @@ impl SessionManager {
 }
 
 /// Pending authorization request stored temporarily during OAuth flow
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PendingAuthorization {
     /// State parameter (key for lookup)
     pub state: String,
@@ -778,6 +778,12 @@ pub struct PendingAuthorization {
     /// PDS URL
     pub pds_url: String,
 
+    /// DPoP keypair for token exchange (required for Bluesky)
+    pub dpop_keypair: super::dpop::DpopKeyPair,
+
+    /// Redirect URI used for this request (must match in token exchange)
+    pub redirect_uri: String,
+
     /// When this request was created
     pub created_at: DateTime<Utc>,
 }
@@ -794,6 +800,8 @@ impl PendingAuthorization {
             handle: request.handle.clone(),
             token_endpoint: request.token_endpoint.clone(),
             pds_url: request.pds_url.clone(),
+            dpop_keypair: request.dpop_keypair.clone(),
+            redirect_uri: request.redirect_uri.clone(),
             created_at: Utc::now(),
         }
     }
@@ -917,6 +925,8 @@ mod tests {
 
     #[test]
     fn test_pending_authorization_expiration() {
+        use super::super::dpop::DpopKeyPair;
+
         let pending = PendingAuthorization {
             state: "test-state".to_string(),
             code_verifier: "test-verifier".to_string(),
@@ -924,6 +934,8 @@ mod tests {
             handle: "test.bsky.social".to_string(),
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             pds_url: "https://bsky.social".to_string(),
+            dpop_keypair: DpopKeyPair::generate(),
+            redirect_uri: "https://example.com/callback".to_string(),
             created_at: Utc::now(),
         };
 

@@ -65,7 +65,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # CLI Arguments & Config
 clap = { version = "4.5", features = ["derive"] }
 config = "0.14"
-directories = "5.0"
+dirs = "5.0"
 
 # Observability
 tracing = "0.1"
@@ -79,6 +79,8 @@ tracing-opentelemetry = "0.29"
 rustls = "0.23"
 hmac = "0.12"
 sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
+elliptic-curve = { version = "0.13", features = ["jwk"] }
 
 # Utilities
 uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
@@ -86,6 +88,7 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
 base64 = "0.22"
 rand = "0.9"
+hex = "0.4"
 hickory-resolver = "0.25"
 lru = "0.12"
 

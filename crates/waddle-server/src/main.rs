@@ -10,6 +10,11 @@ mod telemetry;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the ring crypto provider for rustls (required for XMPP TLS)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Initialize telemetry (OpenTelemetry + tracing)
     // Use OTEL_EXPORTER_OTLP_ENDPOINT env var to configure OTLP endpoint
     // Falls back to local-only logging if OTLP is not available

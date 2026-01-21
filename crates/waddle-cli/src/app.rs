@@ -117,6 +117,15 @@ pub struct Message {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Modal dialog types
+#[derive(Debug, Clone, PartialEq)]
+pub enum Modal {
+    /// No modal open
+    None,
+    /// Create waddle dialog
+    CreateWaddle,
+}
+
 /// Main application state
 #[derive(Debug)]
 pub struct App {
@@ -161,6 +170,15 @@ pub struct App {
 
     /// Our nickname in rooms
     pub nickname: String,
+
+    /// Currently open modal dialog
+    pub modal: Modal,
+
+    /// Input buffer for create waddle modal
+    pub modal_input: String,
+
+    /// Cursor position in modal input
+    pub modal_cursor: usize,
 }
 
 impl Default for App {
@@ -170,80 +188,107 @@ impl Default for App {
 }
 
 impl App {
-    /// Create a new App with default state
+    /// Create a new App with default (empty) state
     pub fn new() -> Self {
-        // Initialize with some placeholder data for now
+        // Initialize with empty sidebar - data will be populated from API
         let sidebar_items = vec![
             SidebarItem::WaddleHeader,
-            SidebarItem::Waddle {
-                id: "waddle-1".into(),
-                name: "Rust Developers".into(),
-            },
-            SidebarItem::Waddle {
-                id: "waddle-2".into(),
-                name: "Open Source".into(),
-            },
             SidebarItem::ChannelHeader,
-            SidebarItem::Channel {
-                id: "channel-1".into(),
-                name: "#general".into(),
-            },
-            SidebarItem::Channel {
-                id: "channel-2".into(),
-                name: "#random".into(),
-            },
-            SidebarItem::Channel {
-                id: "channel-3".into(),
-                name: "#help".into(),
-            },
             SidebarItem::DmHeader,
-            SidebarItem::DirectMessage {
-                id: "dm-1".into(),
-                name: "alice".into(),
-            },
-            SidebarItem::DirectMessage {
-                id: "dm-2".into(),
-                name: "bob".into(),
-            },
-        ];
-
-        let messages = vec![
-            Message {
-                id: "msg-1".into(),
-                author: "alice".into(),
-                content: "Welcome to Waddle! 🐧".into(),
-                timestamp: chrono::Utc::now() - chrono::Duration::hours(2),
-            },
-            Message {
-                id: "msg-2".into(),
-                author: "bob".into(),
-                content: "This is a decentralized chat built on XMPP.".into(),
-                timestamp: chrono::Utc::now() - chrono::Duration::hours(1),
-            },
-            Message {
-                id: "msg-3".into(),
-                author: "charlie".into(),
-                content: "The TUI is built with Ratatui - check out the vim-style keybindings!".into(),
-                timestamp: chrono::Utc::now() - chrono::Duration::minutes(30),
-            },
         ];
 
         Self {
             should_quit: false,
             focus: Focus::Sidebar,
             sidebar_items,
-            sidebar_selected: 1, // Start on first waddle, not header
-            messages,
+            sidebar_selected: 0,
+            messages: Vec::new(),
             message_scroll: 0,
             input_buffer: String::new(),
             input_cursor: 0,
-            current_view_name: "#general".into(),
+            current_view_name: "Welcome".into(),
             connection_state: ConnectionState::Disconnected,
             current_room_jid: None,
             joined_rooms: std::collections::HashSet::new(),
             own_jid: None,
             nickname: "user".into(),
+            modal: Modal::None,
+            modal_input: String::new(),
+            modal_cursor: 0,
         }
+    }
+
+    /// Open the create waddle modal
+    pub fn open_create_waddle_modal(&mut self) {
+        self.modal = Modal::CreateWaddle;
+        self.modal_input.clear();
+        self.modal_cursor = 0;
+    }
+
+    /// Close any open modal
+    pub fn close_modal(&mut self) {
+        self.modal = Modal::None;
+        self.modal_input.clear();
+        self.modal_cursor = 0;
+    }
+
+    /// Check if a modal is open
+    pub fn has_modal(&self) -> bool {
+        self.modal != Modal::None
+    }
+
+    /// Insert a character into the modal input at the cursor position
+    pub fn modal_insert_char(&mut self, c: char) {
+        self.modal_input.insert(self.modal_cursor, c);
+        self.modal_cursor += 1;
+    }
+
+    /// Delete the character before the cursor in modal input
+    pub fn modal_delete_char(&mut self) {
+        if self.modal_cursor > 0 {
+            self.modal_cursor -= 1;
+            self.modal_input.remove(self.modal_cursor);
+        }
+    }
+
+    /// Get the modal input value (for submitting)
+    pub fn get_modal_input(&self) -> &str {
+        &self.modal_input
+    }
+
+    /// Populate sidebar with waddles and channels from the API
+    pub fn set_waddles_and_channels(
+        &mut self,
+        waddles: Vec<(String, String)>,     // (id, name)
+        channels: Vec<(String, String)>,    // (id, name)
+    ) {
+        let mut items = vec![SidebarItem::WaddleHeader];
+
+        // Add waddles
+        for (id, name) in waddles {
+            items.push(SidebarItem::Waddle { id, name });
+        }
+
+        items.push(SidebarItem::ChannelHeader);
+
+        // Add channels
+        for (id, name) in channels {
+            items.push(SidebarItem::Channel {
+                id,
+                name: format!("#{}", name),
+            });
+        }
+
+        items.push(SidebarItem::DmHeader);
+        // DMs would be added here when we have that data
+
+        self.sidebar_items = items;
+
+        // Select first non-header item if available
+        self.sidebar_selected = self.sidebar_items
+            .iter()
+            .position(|item| !item.is_header())
+            .unwrap_or(0);
     }
 
     /// Request the application to quit

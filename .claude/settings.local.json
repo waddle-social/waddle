@@ -8,7 +8,11 @@
       "WebFetch(domain:xmpp-interop-testing.github.io)",
       "Bash(bun add:*)",
       "Bash(bun test:*)",
-      "Bash(bun run tsc:*)"
+      "Bash(bun run tsc:*)",
+      "Bash(chmod:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)"
     ]
   }
 }

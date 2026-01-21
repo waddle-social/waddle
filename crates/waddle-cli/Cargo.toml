@@ -35,7 +35,7 @@ reqwest = { workspace = true }
 # CLI Arguments & Config
 clap = { workspace = true }
 config = { workspace = true }
-directories = { workspace = true }
+dirs = { workspace = true }
 
 # Observability
 tracing = { workspace = true }

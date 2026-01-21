@@ -3,13 +3,12 @@
 
 //! Configuration management for the Waddle TUI.
 //!
-//! Configuration is loaded from XDG directories:
+//! Configuration is loaded from standard directories:
 //! - `~/.config/waddle/config.toml` - Main configuration
-//! - `~/.local/share/waddle/` - Data storage
+//! - `~/.local/share/waddle/` - Data storage (credentials, etc.)
 //! - `~/.cache/waddle/` - Cache files
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -169,32 +168,38 @@ impl Config {
 
     /// Get the path to the config file
     pub fn config_file_path() -> Result<PathBuf> {
-        let dirs = Self::project_dirs()?;
-        Ok(dirs.config_dir().join("config.toml"))
+        let config_dir = Self::config_dir()?;
+        Ok(config_dir.join("config.toml"))
     }
 
-    /// Get the data directory path
+    /// Get the config directory path (~/.config/waddle/)
+    pub fn config_dir() -> Result<PathBuf> {
+        let base = dirs::config_dir()
+            .context("Failed to determine config directory")?;
+        let path = base.join("waddle");
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create config directory: {:?}", path))?;
+        Ok(path)
+    }
+
+    /// Get the data directory path (~/.local/share/waddle/)
     pub fn data_dir() -> Result<PathBuf> {
-        let dirs = Self::project_dirs()?;
-        let path = dirs.data_dir().to_path_buf();
+        let base = dirs::data_dir()
+            .context("Failed to determine data directory")?;
+        let path = base.join("waddle");
         std::fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create data directory: {:?}", path))?;
         Ok(path)
     }
 
-    /// Get the cache directory path
+    /// Get the cache directory path (~/.cache/waddle/)
     pub fn cache_dir() -> Result<PathBuf> {
-        let dirs = Self::project_dirs()?;
-        let path = dirs.cache_dir().to_path_buf();
+        let base = dirs::cache_dir()
+            .context("Failed to determine cache directory")?;
+        let path = base.join("waddle");
         std::fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create cache directory: {:?}", path))?;
         Ok(path)
-    }
-
-    /// Get XDG project directories
-    fn project_dirs() -> Result<ProjectDirs> {
-        ProjectDirs::from("social", "waddle", "waddle")
-            .context("Failed to determine XDG directories")
     }
 
     /// Create a default config file if it doesn't exist

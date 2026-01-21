@@ -23,13 +23,14 @@
 
 pub mod atproto;
 pub mod did;
+pub mod dpop;
 pub mod jid;
 pub mod session;
 
 use thiserror::Error;
 
 pub use atproto::AtprotoOAuth;
-pub use jid::did_to_jid;
+pub use jid::{did_to_jid, jid_to_did};
 pub use session::{Session, SessionManager};
 
 /// Authentication-related errors

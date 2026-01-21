@@ -131,9 +131,14 @@ pub enum KeyAction {
 /// Convert a key event to an action based on the current focus
 pub fn key_to_action(key: KeyEvent, in_input_mode: bool) -> KeyAction {
     // Global keybindings (always active)
+    // Ctrl+C always quits - check both cases since some terminals report differently
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char('c') | KeyCode::Char('C') = key.code {
+            return KeyAction::Quit;
+        }
+    }
+
     match (key.modifiers, key.code) {
-        // Ctrl+C always quits
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return KeyAction::Quit,
         // Tab cycles focus
         (KeyModifiers::NONE, KeyCode::Tab) => return KeyAction::FocusNext,
         (KeyModifiers::SHIFT, KeyCode::BackTab) => return KeyAction::FocusPrev,
