@@ -941,10 +941,10 @@ pub async fn remove_member_handler(
     Query(params): Query<SessionQuery>,
 ) -> impl IntoResponse {
     // URL-decode the member DID
-    let member_did = match urlencoding::decode(&path.member_did) {
-        Ok(decoded) => decoded.into_owned(),
-        Err(_) => path.member_did.clone(),
-    };
+    let member_did = percent_encoding::percent_decode_str(&path.member_did)
+        .decode_utf8()
+        .map(|s| s.into_owned())
+        .unwrap_or_else(|_| path.member_did.clone());
 
     info!("Removing member {} from waddle {}", member_did, path.id);
 

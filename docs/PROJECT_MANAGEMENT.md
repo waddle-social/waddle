@@ -48,7 +48,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Delete message (XEP-0424) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
 | **Waddles (Communities)** |
 | Waddle CRUD | ✅ Complete | P0 | [RFC-0001](rfcs/0001-waddles.md) |
-| Member management | ⬜ Not Started | P0 | [RFC-0001](rfcs/0001-waddles.md) |
+| Member management | ✅ Complete | P0 | [RFC-0001](rfcs/0001-waddles.md) |
 | Invite system | ⬜ Not Started | P1 | [RFC-0001](rfcs/0001-waddles.md) |
 | Role management | ⬜ Not Started | P1 | [RFC-0001](rfcs/0001-waddles.md), [Spec: Permissions](specs/permission-model.md) |
 | **Channels** |

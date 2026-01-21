@@ -74,6 +74,7 @@ base64 = { workspace = true }
 rand = { workspace = true }
 hickory-resolver = { workspace = true }
 lru = { workspace = true }
+percent-encoding = "2.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
