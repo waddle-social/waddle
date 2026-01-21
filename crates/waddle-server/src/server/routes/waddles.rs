@@ -261,7 +261,7 @@ pub async fn create_waddle_handler(
     let waddle_id = Uuid::new_v4().to_string();
 
     // Get user ID from database
-    let user_id = match get_user_id(&state.app_state.db_pool.global(), &session.did).await {
+    let user_id = match get_user_id(state.app_state.db_pool.global(), &session.did).await {
         Ok(id) => id,
         Err(err) => {
             error!("Failed to get user ID: {}", err);
@@ -272,7 +272,7 @@ pub async fn create_waddle_handler(
     // Insert waddle into database
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = insert_waddle(
-        &state.app_state.db_pool.global(),
+        state.app_state.db_pool.global(),
         &waddle_id,
         &request.name,
         request.description.as_deref(),
@@ -289,11 +289,11 @@ pub async fn create_waddle_handler(
 
     // Add owner as waddle member with owner role
     if let Err(err) =
-        add_waddle_member(&state.app_state.db_pool.global(), &waddle_id, user_id, "owner").await
+        add_waddle_member(state.app_state.db_pool.global(), &waddle_id, user_id, "owner").await
     {
         error!("Failed to add owner as member: {}", err);
         // Clean up: delete the waddle
-        let _ = delete_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await;
+        let _ = delete_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await;
         return waddle_error_to_response(WaddleError::Database(err)).into_response();
     }
 
@@ -307,7 +307,7 @@ pub async fn create_waddle_handler(
     if let Err(err) = state.permission_service.write_tuple(owner_tuple).await {
         error!("Failed to write owner permission tuple: {}", err);
         // Clean up: delete the waddle
-        let _ = delete_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await;
+        let _ = delete_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await;
         return waddle_error_to_response(WaddleError::Permission(err)).into_response();
     }
 
@@ -373,7 +373,7 @@ pub async fn get_waddle_handler(
     };
 
     // Get waddle from database
-    let waddle = match get_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await {
+    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
         Ok(Some(waddle)) => waddle,
         Ok(None) => {
             return waddle_error_to_response(WaddleError::NotFound(format!(
@@ -409,7 +409,7 @@ pub async fn get_waddle_handler(
     }
 
     // Get user's role in this waddle
-    let role = get_user_role(&state.app_state.db_pool.global(), &waddle_id, &session.did)
+    let role = get_user_role(state.app_state.db_pool.global(), &waddle_id, &session.did)
         .await
         .ok()
         .flatten();
@@ -439,7 +439,7 @@ pub async fn update_waddle_handler(
     };
 
     // Check if waddle exists
-    let _waddle = match get_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await {
+    let _waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
         Ok(Some(waddle)) => waddle,
         Ok(None) => {
             return waddle_error_to_response(WaddleError::NotFound(format!(
@@ -475,7 +475,7 @@ pub async fn update_waddle_handler(
     // Update waddle in database
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(err) = update_waddle_in_db(
-        &state.app_state.db_pool.global(),
+        state.app_state.db_pool.global(),
         &waddle_id,
         request.name.as_deref(),
         request.description.as_deref(),
@@ -491,7 +491,7 @@ pub async fn update_waddle_handler(
 
     // Get updated waddle
     let updated_waddle =
-        match get_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await {
+        match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
             Ok(Some(waddle)) => waddle,
             Ok(None) => {
                 return waddle_error_to_response(WaddleError::NotFound(format!(
@@ -507,7 +507,7 @@ pub async fn update_waddle_handler(
         };
 
     // Get user's role
-    let role = get_user_role(&state.app_state.db_pool.global(), &waddle_id, &session.did)
+    let role = get_user_role(state.app_state.db_pool.global(), &waddle_id, &session.did)
         .await
         .ok()
         .flatten();
@@ -545,7 +545,7 @@ pub async fn delete_waddle_handler(
     };
 
     // Check if waddle exists
-    if let Ok(None) = get_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await {
+    if let Ok(None) = get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
         return waddle_error_to_response(WaddleError::NotFound(format!(
             "Waddle '{}' not found",
             waddle_id
@@ -585,7 +585,7 @@ pub async fn delete_waddle_handler(
     }
 
     // Delete waddle from database (this also cascades to waddle_members)
-    if let Err(err) = delete_waddle_from_db(&state.app_state.db_pool.global(), &waddle_id).await {
+    if let Err(err) = delete_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
         error!("Failed to delete waddle: {}", err);
         return waddle_error_to_response(WaddleError::Database(err)).into_response();
     }
@@ -619,7 +619,7 @@ pub async fn list_waddles_handler(
 
     // Get user's waddles from database
     let waddles = match list_user_waddles(
-        &state.app_state.db_pool.global(),
+        state.app_state.db_pool.global(),
         &session.did,
         params.limit,
         params.offset,
