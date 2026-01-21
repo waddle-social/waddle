@@ -401,9 +401,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version
+        // Check version (2 migrations: initial schema + token endpoint columns)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(1));
+        assert_eq!(version, Some(2));
     }
 
     #[tokio::test]

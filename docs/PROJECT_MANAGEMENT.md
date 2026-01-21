@@ -33,7 +33,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | DID → JID mapping | ✅ Complete | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
 | XMPP account provisioning | ✅ Complete | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
 | Session management | ✅ Complete | P0 | [Spec: API](specs/api-contracts.md) |
-| Token refresh | ⬜ Not Started | P0 | [Spec: ATProto](specs/atproto-integration.md) |
+| Token refresh | ✅ Complete | P0 | [Spec: ATProto](specs/atproto-integration.md) |
 | **Authorization** |
 | Zanzibar permission model | ⬜ Not Started | P0 | [ADR-0009](adrs/0009-zanzibar-permissions.md), [Spec: Permissions](specs/permission-model.md) |
 | Permission tuple storage | ⬜ Not Started | P0 | [Spec: Permissions](specs/permission-model.md) |
