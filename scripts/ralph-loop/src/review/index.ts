@@ -24,8 +24,9 @@ ${diff || "No changes detected."}
 
 1. Review the diff against the acceptance criteria
 2. Check that ${targetDoc} is updated appropriately
-3. Run tests/builds to verify everything works
-4. Identify any issues or improvements needed
+3. Check ${targetDoc} for any remaining incomplete tasks
+4. Run tests/builds to verify everything works
+5. Identify any issues or improvements needed
 
 ## Output Format
 
@@ -42,9 +43,9 @@ Provide your review assessment:
 Then output your transition:
 <transition to="PLAN|BUILD|END|REVIEW" reason="Your reasoning">
 
-- Use END if the task is complete and meets all criteria
-- Use BUILD if there are fixes needed
-- Use PLAN if the approach needs to change or next iteration should start
+- Use PLAN if this task passes AND there are more incomplete tasks in ${targetDoc}
+- Use END only if this task passes AND all tasks in ${targetDoc} are complete
+- Use BUILD if there are fixes needed for the current task
 - Use REVIEW if you need more review cycles
 `;
 }

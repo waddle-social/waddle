@@ -56,6 +56,19 @@ async function main() {
 
   let state = await readState();
 
+  // Auto-reset if state is END - PLAN phase will determine if there's more work
+  if (state.phase === "END") {
+    console.log("Previous run completed. Resetting to check for more tasks...");
+    state = await writeState({
+      ...state,
+      phase: "PLAN",
+      iteration: state.iteration + 1,
+      plan: null,
+      build: { stepsCompleted: [], blockers: [] },
+      review: { lastFeedback: null, issues: [] },
+    });
+  }
+
   // Override phase if specified
   if (config.startPhase) {
     state = await writeState({ ...state, phase: config.startPhase });
