@@ -38,7 +38,7 @@ kameo = "0.15"
 
 # XMPP Server
 tokio-xmpp = "4.0"
-jid = "0.10"
+jid = "0.11"
 xmpp-parsers = "0.21"
 minidom = "0.16"
 rxml = "0.12"
