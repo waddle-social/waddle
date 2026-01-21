@@ -172,38 +172,41 @@ impl XmppClient {
                 let _ = self.event_tx.send(XmppClientEvent::RoomLeft { room_jid });
             }
             XmppEvent::RoomMessage(id, room_jid, sender_nick, body) => {
+                let body_str = body.0.clone();
                 debug!(
                     "Room message in {}: {}: {}",
                     room_jid,
                     sender_nick,
-                    body
+                    body_str
                 );
                 let _ = self.event_tx.send(XmppClientEvent::RoomMessage {
                     room_jid,
                     sender_nick,
-                    body,
+                    body: body_str,
                     id,
                 });
             }
             XmppEvent::ChatMessage(id, from, body) => {
-                debug!("Chat message from {}: {}", from, body);
+                let body_str = body.0.clone();
+                debug!("Chat message from {}: {}", from, body_str);
                 let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
                     from,
-                    body,
+                    body: body_str,
                     id,
                 });
             }
             XmppEvent::RoomPrivateMessage(id, room_jid, sender_nick, body) => {
+                let body_str = body.0.clone();
                 debug!(
                     "Private message in {} from {}: {}",
                     room_jid,
                     sender_nick,
-                    body
+                    body_str
                 );
                 // Treat room private messages as regular chat messages
                 let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
                     from: room_jid,
-                    body,
+                    body: body_str,
                     id,
                 });
             }
@@ -220,7 +223,7 @@ impl XmppClient {
                 debug!("Avatar retrieved for: {}", jid);
             }
             XmppEvent::ServiceMessage(_id, from, body) => {
-                debug!("Service message from {}: {}", from, body);
+                debug!("Service message from {}: {}", from, body.0);
             }
             XmppEvent::HttpUploadedFile(url) => {
                 debug!("File uploaded: {}", url);
