@@ -196,6 +196,13 @@ fn waddle_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("member"),
             ]),
         )
+        .with_permission(
+            "update",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("owner"),
+                ComputedPermission::direct("admin"),
+            ]),
+        )
 }
 
 /// Schema for Channel objects

@@ -54,9 +54,9 @@ pub fn router(waddle_state: Arc<WaddleState>) -> Router {
     Router::new()
         .route("/v1/waddles", post(create_waddle_handler))
         .route("/v1/waddles", get(list_waddles_handler))
-        .route("/v1/waddles/{id}", get(get_waddle_handler))
-        .route("/v1/waddles/{id}", patch(update_waddle_handler))
-        .route("/v1/waddles/{id}", delete(delete_waddle_handler))
+        .route("/v1/waddles/:id", get(get_waddle_handler))
+        .route("/v1/waddles/:id", patch(update_waddle_handler))
+        .route("/v1/waddles/:id", delete(delete_waddle_handler))
         .with_state(waddle_state)
 }
 
