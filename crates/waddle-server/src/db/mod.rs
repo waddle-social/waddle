@@ -19,7 +19,6 @@
 mod migrations;
 mod pool;
 
-use anyhow::Result;
 use libsql::{Connection, Database as LibSqlDatabase};
 use std::path::Path;
 use std::sync::Arc;
@@ -27,7 +26,7 @@ use thiserror::Error;
 use tracing::{debug, info, instrument};
 
 pub use migrations::{Migration, MigrationRunner};
-pub use pool::{DatabasePool, PoolConfig};
+pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 
 /// Database-specific errors
 #[derive(Error, Debug)]

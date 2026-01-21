@@ -12,7 +12,7 @@
 
 use super::Database;
 use super::DatabaseError;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 /// Represents a single database migration
 #[derive(Debug, Clone)]
@@ -261,23 +261,15 @@ impl MigrationRunner {
                 migration.version, migration.description
             );
 
-            // Execute migration SQL
-            // Split by semicolons and execute each statement
-            for statement in migration.sql.split(';') {
-                let statement = statement.trim();
-                if statement.is_empty() || statement.starts_with("--") {
-                    continue;
-                }
-
-                conn.execute(statement, ())
-                    .await
-                    .map_err(|e| {
-                        DatabaseError::MigrationFailed(format!(
-                            "Migration v{} failed: {}",
-                            migration.version, e
-                        ))
-                    })?;
-            }
+            // Execute migration SQL using batch execution
+            conn.execute_batch(migration.sql)
+                .await
+                .map_err(|e| {
+                    DatabaseError::MigrationFailed(format!(
+                        "Migration v{} failed: {}",
+                        migration.version, e
+                    ))
+                })?;
 
             // Record the migration
             conn.execute(

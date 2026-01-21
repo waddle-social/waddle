@@ -1,4 +1,4 @@
-use crate::db::{DatabasePool, MigrationRunner, PoolHealth};
+use crate::db::{DatabasePool, PoolHealth};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -181,7 +181,7 @@ async fn detailed_health_handler(State(state): State<Arc<AppState>>) -> impl Int
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{DatabaseConfig, PoolConfig};
+    use crate::db::{DatabaseConfig, MigrationRunner, PoolConfig};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;

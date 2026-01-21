@@ -5,7 +5,6 @@
 use super::{Database, DatabaseConfig, DatabaseError};
 use dashmap::DashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::{debug, info, instrument};
 
 /// Configuration for the database pool
