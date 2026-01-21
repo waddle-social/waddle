@@ -53,18 +53,17 @@ pub const DELAY_NS: &str = "urn:xmpp:delay";
 /// </iq>
 /// ```
 pub fn parse_mam_query(iq: &Iq) -> Result<(String, MamQuery), XmppError> {
-    // Find the query element
-    let query_elem = iq
-        .payload
-        .as_ref()
-        .and_then(|p| {
-            if p.name() == "query" && p.ns() == MAM_NS {
-                Some(p)
+    // Find the query element from IqType
+    let query_elem = match &iq.payload {
+        xmpp_parsers::iq::IqType::Set(elem) | xmpp_parsers::iq::IqType::Get(elem) => {
+            if elem.name() == "query" && elem.ns() == MAM_NS {
+                elem
             } else {
-                None
+                return Err(XmppError::bad_request(Some("Missing MAM query element".to_string())));
             }
-        })
-        .ok_or_else(|| XmppError::bad_request(Some("Missing MAM query element".to_string())))?;
+        }
+        _ => return Err(XmppError::bad_request(Some("Invalid IQ type for MAM query".to_string()))),
+    };
 
     // Get the query ID (optional but recommended)
     let query_id = query_elem
@@ -96,24 +95,29 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> Result<(), XmppError
         }
 
         let var = field.attr("var").unwrap_or("");
+        // Element::text() returns String directly, not Option<String>
         let value = field
             .children()
             .find(|c| c.name() == "value")
-            .and_then(|v| v.text());
+            .map(|v| v.text());
 
         match var {
             "start" => {
                 if let Some(v) = value {
-                    query.start = Some(parse_datetime(&v)?);
+                    if !v.is_empty() {
+                        query.start = Some(parse_datetime(&v)?);
+                    }
                 }
             }
             "end" => {
                 if let Some(v) = value {
-                    query.end = Some(parse_datetime(&v)?);
+                    if !v.is_empty() {
+                        query.end = Some(parse_datetime(&v)?);
+                    }
                 }
             }
             "with" => {
-                query.with = value.map(|v| v.to_string());
+                query.with = value.filter(|v| !v.is_empty());
             }
             _ => {} // Ignore unknown fields
         }
@@ -125,18 +129,24 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> Result<(), XmppError
 /// Parse RSM pagination parameters.
 fn parse_rsm(rsm: &Element, query: &mut MamQuery) -> Result<(), XmppError> {
     for child in rsm.children() {
+        // Element::text() returns String directly
         match child.name() {
             "max" => {
-                if let Some(text) = child.text() {
+                let text = child.text();
+                if !text.is_empty() {
                     query.max = text.parse().ok();
                 }
             }
             "after" => {
-                query.after_id = child.text().map(|s| s.to_string());
+                let text = child.text();
+                if !text.is_empty() {
+                    query.after_id = Some(text);
+                }
             }
             "before" => {
                 // Empty <before/> means "get last page"
-                query.before_id = Some(child.text().unwrap_or("").to_string());
+                let text = child.text();
+                query.before_id = Some(text);
             }
             _ => {} // Ignore unknown elements
         }
@@ -154,10 +164,12 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, XmppError> {
 
 /// Check if an IQ is a MAM query.
 pub fn is_mam_query(iq: &Iq) -> bool {
-    iq.payload
-        .as_ref()
-        .map(|p| p.name() == "query" && p.ns() == MAM_NS)
-        .unwrap_or(false)
+    match &iq.payload {
+        xmpp_parsers::iq::IqType::Set(elem) | xmpp_parsers::iq::IqType::Get(elem) => {
+            elem.name() == "query" && elem.ns() == MAM_NS
+        }
+        _ => false,
+    }
 }
 
 /// Build MAM result messages for each archived message.
@@ -278,8 +290,7 @@ pub fn build_fin_iq(
         from: original_iq.to.clone(),
         to: original_iq.from.clone(),
         id: original_iq.id.clone(),
-        type_: xmpp_parsers::iq::IqType::Result(Some(fin)),
-        payload: None,
+        payload: xmpp_parsers::iq::IqType::Result(Some(fin)),
     }
 }
 
@@ -308,14 +319,23 @@ mod tests {
             from: None,
             to: None,
             id: "test-1".to_string(),
-            type_: xmpp_parsers::iq::IqType::Set(query_elem),
-            payload: None,
+            payload: xmpp_parsers::iq::IqType::Set(query_elem),
         };
 
-        // The payload is extracted from IqType for set/get
-        // We need to adjust our test
-        assert!(iq.payload.as_ref().map(|p| p.name() == "query" && p.ns() == MAM_NS).unwrap_or(false) ||
-                matches!(&iq.type_, xmpp_parsers::iq::IqType::Set(e) if e.name() == "query" && e.ns() == MAM_NS));
+        assert!(is_mam_query(&iq));
+    }
+
+    #[test]
+    fn test_is_not_mam_query() {
+        let other_elem = Element::builder("other", "some:other:ns").build();
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "test-2".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(other_elem),
+        };
+
+        assert!(!is_mam_query(&iq));
     }
 
     #[test]
