@@ -104,24 +104,14 @@ jobs:
           WADDLE_DOMAIN: localhost
           WADDLE_TLS_CERT: ./certs/server.crt
           WADDLE_TLS_KEY: ./certs/server.key
+          WADDLE_ADMIN_JID: admin@localhost
+          WADDLE_ADMIN_PASSWORD: interop-test-password
 
       - name: Check server is running
         run: |
           curl -f http://localhost:3000/health || echo "Health endpoint not yet implemented"
           # Verify XMPP port is listening
           nc -z localhost 5222 && echo "XMPP port 5222 is open" || echo "Warning: XMPP port 5222 not open"
-
-      # Create admin account for XMPP interop tests
-      # The test suite needs an admin account to provision test users via XEP-0133
-      - name: Provision admin account for tests
-        run: |
-          # TODO: Replace with proper admin provisioning once account management is implemented
-          # For now, we'll configure environment variables that the server can use
-          # to bootstrap an admin account on startup
-          echo "Admin account will be provisioned via WADDLE_ADMIN_* environment variables"
-        env:
-          WADDLE_ADMIN_JID: admin@localhost
-          WADDLE_ADMIN_PASSWORD: interop-test-password
 
       # XMPP Interop Testing Suite
       # See: https://xmpp-interop-testing.github.io/
