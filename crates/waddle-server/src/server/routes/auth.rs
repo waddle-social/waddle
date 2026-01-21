@@ -6,6 +6,7 @@
 
 use crate::auth::{
     AtprotoOAuth, AuthError, Session, SessionManager,
+    did_to_jid,
     session::PendingAuthorization,
 };
 use crate::server::AppState;
@@ -68,6 +69,7 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
         .route("/v1/auth/atproto/callback", get(callback_handler))
         .route("/v1/auth/session", get(session_info_handler))
         .route("/v1/auth/logout", post(logout_handler))
+        .route("/v1/auth/xmpp-token", get(xmpp_token_handler))
         .with_state(auth_state)
 }
 
@@ -122,6 +124,25 @@ pub struct SessionInfoResponse {
     /// Whether the session is expired
     pub is_expired: bool,
     /// When the session expires (if set)
+    pub expires_at: Option<String>,
+}
+
+/// XMPP token response for client connection
+#[derive(Debug, Serialize)]
+pub struct XmppTokenResponse {
+    /// Full JID for XMPP connection (localpart@domain)
+    pub jid: String,
+    /// Session token for SASL PLAIN authentication
+    pub token: String,
+    /// XMPP server hostname
+    pub xmpp_host: String,
+    /// XMPP server port (typically 5222)
+    pub xmpp_port: u16,
+    /// WebSocket URL for web clients (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket_url: Option<String>,
+    /// When the token expires
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 }
 
@@ -352,6 +373,71 @@ pub async fn logout_handler(
     }
 }
 
+/// Query parameters for XMPP token endpoint
+#[derive(Debug, Deserialize)]
+pub struct XmppTokenQuery {
+    /// Session ID from ATProto authentication
+    pub session_id: String,
+}
+
+/// GET /v1/auth/xmpp-token
+///
+/// Get XMPP connection credentials for an authenticated session.
+///
+/// Takes an ATProto session and returns XMPP connection info:
+/// - JID derived from the user's DID
+/// - Token for SASL PLAIN authentication
+/// - XMPP server host and port
+#[instrument(skip(state))]
+pub async fn xmpp_token_handler(
+    State(state): State<Arc<AuthState>>,
+    Query(params): Query<XmppTokenQuery>,
+) -> impl IntoResponse {
+    info!("XMPP token request for session: {}", params.session_id);
+
+    // Validate the session
+    let session = match state.session_manager.validate_session(&params.session_id).await {
+        Ok(session) => session,
+        Err(err) => {
+            warn!("Failed to validate session for XMPP token: {}", err);
+            return auth_error_to_response(err).into_response();
+        }
+    };
+
+    // Convert DID to JID
+    // Default domain - in production this should come from configuration
+    let xmpp_domain = "waddle.social";
+    let jid = match did_to_jid(&session.did, xmpp_domain) {
+        Ok(jid) => jid,
+        Err(err) => {
+            error!("Failed to convert DID to JID: {}", err);
+            return auth_error_to_response(err).into_response();
+        }
+    };
+
+    // Use the session ID as the XMPP token
+    // In a full implementation, this would be a separate XMPP-specific token
+    // that's validated by the XMPP server against the session store
+    let token = session.id.clone();
+
+    let expires_at = session.expires_at.map(|dt| dt.to_rfc3339());
+
+    info!("XMPP token generated for JID: {}", jid);
+
+    (
+        StatusCode::OK,
+        Json(XmppTokenResponse {
+            jid,
+            token,
+            xmpp_host: xmpp_domain.to_string(),
+            xmpp_port: 5222,
+            websocket_url: Some(format!("wss://{}/xmpp-websocket", xmpp_domain)),
+            expires_at,
+        }),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +548,79 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_xmpp_token_missing_session() {
+        let auth_state = create_test_auth_state().await;
+        let app = router(auth_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/xmpp-token?session_id=nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should return 404 for non-existent session
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_xmpp_token_response_format() {
+        use crate::auth::Session;
+        use chrono::{Duration, Utc};
+
+        let auth_state = create_test_auth_state().await;
+
+        // Create a test session directly
+        let session = Session {
+            id: "test-session-id".to_string(),
+            did: "did:plc:abc123xyz789def".to_string(),
+            handle: "test.bsky.social".to_string(),
+            access_token: "test-token".to_string(),
+            refresh_token: None,
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            pds_url: "https://bsky.social".to_string(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        };
+
+        // Store the session
+        auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+
+        let app = router(auth_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/xmpp-token?session_id=test-session-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Verify response structure
+        assert_eq!(json["jid"], "abc123xyz789def@waddle.social");
+        assert_eq!(json["token"], "test-session-id");
+        assert_eq!(json["xmpp_host"], "waddle.social");
+        assert_eq!(json["xmpp_port"], 5222);
+        assert!(json["websocket_url"].is_string());
     }
 }

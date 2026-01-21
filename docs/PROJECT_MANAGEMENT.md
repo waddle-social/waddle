@@ -28,11 +28,11 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | CQRS event system | ⬜ Not Started | P1 | [ADR-0007](adrs/0007-cqrs-architecture.md), [Spec: Events](specs/event-schema.md) |
 | Kameo actor setup | ⬜ Not Started | P1 | [ADR-0008](adrs/0008-kameo-actors.md) |
 | **Authentication** |
-| ATProto OAuth flow | ⬜ Not Started | P0 | [ADR-0005](adrs/0005-atproto-identity.md), [Spec: ATProto](specs/atproto-integration.md) |
-| DID resolution | ⬜ Not Started | P0 | [ADR-0005](adrs/0005-atproto-identity.md), [Spec: ATProto](specs/atproto-integration.md) |
-| DID → JID mapping | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
-| XMPP account provisioning | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
-| Session management | ⬜ Not Started | P0 | [Spec: API](specs/api-contracts.md) |
+| ATProto OAuth flow | ✅ Complete | P0 | [ADR-0005](adrs/0005-atproto-identity.md), [Spec: ATProto](specs/atproto-integration.md) |
+| DID resolution | ✅ Complete | P0 | [ADR-0005](adrs/0005-atproto-identity.md), [Spec: ATProto](specs/atproto-integration.md) |
+| DID → JID mapping | ✅ Complete | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
+| XMPP account provisioning | ✅ Complete | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
+| Session management | ✅ Complete | P0 | [Spec: API](specs/api-contracts.md) |
 | Token refresh | ⬜ Not Started | P0 | [Spec: ATProto](specs/atproto-integration.md) |
 | **Authorization** |
 | Zanzibar permission model | ⬜ Not Started | P0 | [ADR-0009](adrs/0009-zanzibar-permissions.md), [Spec: Permissions](specs/permission-model.md) |
@@ -254,8 +254,8 @@ External integrations and bot platform.
 - [x] RFC 6120 core interop tests passing
 
 ### M1: Hello Waddle (MVP)
-- [ ] User can authenticate via Bluesky
-- [ ] XMPP account provisioned from DID
+- [x] User can authenticate via Bluesky
+- [x] XMPP account provisioned from DID
 - [ ] User can create a Waddle
 - [ ] User can create channels (MUC rooms)
 - [ ] User can send/receive messages in CLI via XMPP

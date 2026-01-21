@@ -19,15 +19,18 @@
 //! - `did`: DID resolution (handle -> DID, DID document retrieval)
 //! - `atproto`: OAuth flow implementation (authorization, token exchange)
 //! - `session`: Session management and storage
+//! - `jid`: DID to JID conversion for XMPP authentication
 
 pub mod atproto;
 pub mod did;
+pub mod jid;
 pub mod session;
 
 use thiserror::Error;
 
 pub use atproto::{AtprotoOAuth, AuthorizationRequest, TokenResponse};
 pub use did::{DidDocument, DidResolver};
+pub use jid::{did_to_jid, did_to_jid_localpart, jid_to_did, jid_localpart_to_did};
 pub use session::{Session, SessionManager};
 
 /// Authentication-related errors
