@@ -263,8 +263,17 @@ async fn run_test_server<S: AppState>(
                             let connection_registry = std::sync::Arc::new(
                                 waddle_xmpp::registry::ConnectionRegistry::new()
                             );
+                            // Create an in-memory MAM storage for the test
+                            let db = libsql::Builder::new_local(":memory:")
+                                .build()
+                                .await
+                                .unwrap();
+                            let conn = db.connect().unwrap();
+                            let mam_storage = std::sync::Arc::new(
+                                waddle_xmpp::mam::LibSqlMamStorage::new(conn)
+                            );
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, room_registry, connection_registry
+                                stream, peer_addr, tls, dom, state, room_registry, connection_registry, mam_storage
                             ).await;
                         });
                     }

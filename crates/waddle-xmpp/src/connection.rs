@@ -322,20 +322,23 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let room = room_data.read().await;
 
         // Find the sender's nick in the room
-        let sender_nick = room.find_nick_by_real_jid(&sender_jid).ok_or_else(|| {
-            debug!(
-                sender = %sender_jid,
-                room = %room_jid,
-                "Sender is not an occupant of the room"
-            );
-            XmppError::forbidden(Some(format!(
-                "You are not an occupant of {}",
-                room_jid
-            )))
-        })?;
+        let sender_nick = room
+            .find_nick_by_real_jid(&sender_jid)
+            .ok_or_else(|| {
+                debug!(
+                    sender = %sender_jid,
+                    room = %room_jid,
+                    "Sender is not an occupant of the room"
+                );
+                XmppError::forbidden(Some(format!(
+                    "You are not an occupant of {}",
+                    room_jid
+                )))
+            })?
+            .to_owned();
 
         // Broadcast the message to all occupants
-        let mut outbound_messages = room.broadcast_message(sender_nick.clone(), &muc_msg.message)?;
+        let mut outbound_messages = room.broadcast_message(&sender_nick, &muc_msg.message)?;
 
         drop(room); // Release the read lock before archival and sending
 
