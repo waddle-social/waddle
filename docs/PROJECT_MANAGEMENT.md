@@ -22,7 +22,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Axum HTTP server | ✅ Complete | P0 | [ADR-0002](adrs/0002-axum-web-framework.md), [Spec: API](specs/api-contracts.md) |
 | Native XMPP server (waddle-xmpp crate) | 🔄 In Progress | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | OpenTelemetry setup | ✅ Complete | P0 | [ADR-0014](adrs/0014-opentelemetry.md) |
-| XMPP interop CI | 🔄 In Progress | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md) |
+| XMPP interop CI | ✅ Complete | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | Turso/libSQL setup | ✅ Complete | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | Database-per-Waddle sharding | ✅ Complete | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | CQRS event system | ⬜ Not Started | P1 | [ADR-0007](adrs/0007-cqrs-architecture.md), [Spec: Events](specs/event-schema.md) |
