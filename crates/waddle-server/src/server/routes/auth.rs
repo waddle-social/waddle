@@ -48,9 +48,11 @@ impl AuthState {
         encryption_key: Option<&[u8]>,
     ) -> Self {
         let oauth_client = AtprotoOAuth::new(client_id, redirect_uri);
-        let session_manager = SessionManager::new(
+        // Create session manager with OAuth client for automatic token refresh
+        let session_manager = SessionManager::with_oauth_client(
             Arc::new(app_state.db_pool.global().clone()),
             encryption_key,
+            oauth_client.clone(),
         );
 
         Self {
@@ -352,6 +354,25 @@ pub struct LogoutRequest {
     pub session_id: String,
 }
 
+/// Request body for refresh endpoint
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub session_id: String,
+}
+
+/// Response for refresh endpoint
+#[derive(Debug, Serialize)]
+pub struct RefreshResponse {
+    /// Session ID
+    pub session_id: String,
+    /// User's DID
+    pub did: String,
+    /// User's handle
+    pub handle: String,
+    /// New expiration time
+    pub expires_at: Option<String>,
+}
+
 /// POST /v1/auth/logout
 ///
 /// End the current session.
@@ -369,6 +390,90 @@ pub async fn logout_handler(
         }
         Err(err) => {
             error!("Failed to delete session: {}", err);
+            auth_error_to_response(err).into_response()
+        }
+    }
+}
+
+/// POST /v1/auth/refresh
+///
+/// Refresh the access token for a session.
+/// Requires a valid refresh token to be present in the session.
+#[instrument(skip(state))]
+pub async fn refresh_handler(
+    State(state): State<Arc<AuthState>>,
+    Json(request): Json<RefreshRequest>,
+) -> impl IntoResponse {
+    info!("Token refresh request for session: {}", request.session_id);
+
+    // Get the session
+    let session = match state.session_manager.get_session(&request.session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            warn!("Session not found for refresh: {}", request.session_id);
+            return auth_error_to_response(AuthError::SessionNotFound(request.session_id)).into_response();
+        }
+        Err(err) => {
+            error!("Failed to get session for refresh: {}", err);
+            return auth_error_to_response(err).into_response();
+        }
+    };
+
+    // Check if we have a refresh token
+    let refresh_token = match &session.refresh_token {
+        Some(token) => token,
+        None => {
+            warn!("No refresh token available for session: {}", request.session_id);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "no_refresh_token",
+                    "Session does not have a refresh token",
+                )),
+            ).into_response();
+        }
+    };
+
+    // Check if we have a token endpoint
+    if session.token_endpoint.is_empty() {
+        warn!("No token endpoint for session: {}", request.session_id);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "no_token_endpoint",
+                "Session does not have a token endpoint configured",
+            )),
+        ).into_response();
+    }
+
+    // Perform the token refresh
+    match state.oauth_client.refresh_token(&session.token_endpoint, refresh_token).await {
+        Ok(tokens) => {
+            info!("Token refresh successful for session: {}", request.session_id);
+
+            // Update the session in the database
+            if let Err(err) = state.session_manager.update_session_tokens(&request.session_id, &tokens).await {
+                error!("Failed to update session tokens: {}", err);
+                return auth_error_to_response(err).into_response();
+            }
+
+            // Calculate new expiration time
+            let expires_at = tokens.expires_in.map(|secs| {
+                (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
+            });
+
+            (
+                StatusCode::OK,
+                Json(RefreshResponse {
+                    session_id: session.id,
+                    did: session.did,
+                    handle: session.handle,
+                    expires_at,
+                }),
+            ).into_response()
+        }
+        Err(err) => {
+            error!("Token refresh failed for session {}: {}", request.session_id, err);
             auth_error_to_response(err).into_response()
         }
     }
@@ -623,5 +728,125 @@ mod tests {
         assert_eq!(json["xmpp_host"], "waddle.social");
         assert_eq!(json["xmpp_port"], 5222);
         assert!(json["websocket_url"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_session_not_found() {
+        let auth_state = create_test_auth_state().await;
+        let app = router(auth_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/refresh")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"session_id": "nonexistent"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "session_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_no_refresh_token() {
+        use crate::auth::Session;
+        use chrono::{Duration, Utc};
+
+        let auth_state = create_test_auth_state().await;
+
+        // Create a test session without a refresh token
+        let session = Session {
+            id: "test-refresh-no-token".to_string(),
+            did: "did:plc:abc123xyz789def".to_string(),
+            handle: "test.bsky.social".to_string(),
+            access_token: "test-token".to_string(),
+            refresh_token: None, // No refresh token
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            pds_url: "https://bsky.social".to_string(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        };
+
+        auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+
+        let app = router(auth_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/refresh")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"session_id": "test-refresh-no-token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "no_refresh_token");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_no_token_endpoint() {
+        use crate::auth::Session;
+        use chrono::{Duration, Utc};
+
+        let auth_state = create_test_auth_state().await;
+
+        // Create a test session without a token endpoint
+        let session = Session {
+            id: "test-refresh-no-endpoint".to_string(),
+            did: "did:plc:abc123xyz789def".to_string(),
+            handle: "test.bsky.social".to_string(),
+            access_token: "test-token".to_string(),
+            refresh_token: Some("test-refresh-token".to_string()),
+            token_endpoint: "".to_string(), // Empty token endpoint
+            pds_url: "https://bsky.social".to_string(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        };
+
+        auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+
+        let app = router(auth_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/refresh")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"session_id": "test-refresh-no-endpoint"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "no_token_endpoint");
     }
 }

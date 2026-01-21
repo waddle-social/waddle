@@ -115,6 +115,8 @@ impl Session {
 pub struct SessionManager {
     db: Arc<Database>,
     encryption_key: Option<Vec<u8>>,
+    /// Optional OAuth client for automatic token refresh
+    oauth_client: Option<super::AtprotoOAuth>,
 }
 
 impl SessionManager {
@@ -128,7 +130,32 @@ impl SessionManager {
         Self {
             db,
             encryption_key: encryption_key.map(|k| k.to_vec()),
+            oauth_client: None,
         }
+    }
+
+    /// Create a new session manager with an OAuth client for automatic token refresh
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - Database connection for session storage
+    /// * `encryption_key` - Optional key for encrypting tokens at rest
+    /// * `oauth_client` - OAuth client for automatic token refresh
+    pub fn with_oauth_client(
+        db: Arc<Database>,
+        encryption_key: Option<&[u8]>,
+        oauth_client: super::AtprotoOAuth,
+    ) -> Self {
+        Self {
+            db,
+            encryption_key: encryption_key.map(|k| k.to_vec()),
+            oauth_client: Some(oauth_client),
+        }
+    }
+
+    /// Set the OAuth client for automatic token refresh
+    pub fn set_oauth_client(&mut self, oauth_client: super::AtprotoOAuth) {
+        self.oauth_client = Some(oauth_client);
     }
 
     /// Encrypt a value using HMAC-based encryption
@@ -674,9 +701,11 @@ impl SessionManager {
     /// Validate a session for XMPP authentication
     ///
     /// Returns the session if it exists and is not expired.
+    /// If the session needs refresh (expires within 5 minutes) and an OAuth client
+    /// is configured, automatically refreshes the tokens.
     #[instrument(skip(self))]
     pub async fn validate_session(&self, session_id: &str) -> Result<Session, AuthError> {
-        let session = self
+        let mut session = self
             .get_session(session_id)
             .await?
             .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
@@ -684,6 +713,38 @@ impl SessionManager {
         if session.is_expired() {
             warn!("Session {} is expired", session_id);
             return Err(AuthError::SessionExpired);
+        }
+
+        // Check if session needs refresh (expires within 5 minutes)
+        if session.needs_refresh() {
+            debug!("Session {} needs refresh, attempting automatic refresh", session_id);
+
+            if let Some(ref oauth_client) = self.oauth_client {
+                // Check if we have the necessary info for refresh
+                if let Some(ref refresh_token) = session.refresh_token {
+                    if !session.token_endpoint.is_empty() {
+                        match oauth_client.refresh_token(&session.token_endpoint, refresh_token).await {
+                            Ok(tokens) => {
+                                debug!("Automatic token refresh successful for session {}", session_id);
+                                // Update session in database
+                                self.update_session_tokens(session_id, &tokens).await?;
+                                // Update local session object
+                                session.update_tokens(&tokens);
+                            }
+                            Err(err) => {
+                                // Log the error but don't fail - the session is still valid
+                                warn!("Automatic token refresh failed for session {}: {}", session_id, err);
+                            }
+                        }
+                    } else {
+                        debug!("Session {} needs refresh but has no token_endpoint configured", session_id);
+                    }
+                } else {
+                    debug!("Session {} needs refresh but has no refresh_token", session_id);
+                }
+            } else {
+                debug!("Session {} needs refresh but no OAuth client configured", session_id);
+            }
         }
 
         // Touch the session to update last_used_at
@@ -786,6 +847,7 @@ mod tests {
                 Database::in_memory("test").await.unwrap()
             })),
             encryption_key: Some(key.to_vec()),
+            oauth_client: None,
         };
 
         let original = "my-secret-token";
@@ -794,6 +856,60 @@ mod tests {
 
         assert_eq!(original, decrypted);
         assert_ne!(original, encrypted);
+    }
+
+    #[test]
+    fn test_session_update_tokens() {
+        use super::super::atproto::TokenResponse;
+
+        let mut session = Session {
+            id: "test".to_string(),
+            did: "did:plc:test".to_string(),
+            handle: "test.bsky.social".to_string(),
+            access_token: "old-token".to_string(),
+            refresh_token: Some("old-refresh".to_string()),
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            pds_url: "https://bsky.social".to_string(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        };
+
+        let tokens = TokenResponse {
+            access_token: "new-token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: Some(3600),
+            refresh_token: Some("new-refresh".to_string()),
+            scope: None,
+            sub: None,
+        };
+
+        session.update_tokens(&tokens);
+
+        assert_eq!(session.access_token, "new-token");
+        assert_eq!(session.refresh_token, Some("new-refresh".to_string()));
+        assert!(session.expires_at.is_some());
+    }
+
+    #[test]
+    fn test_session_manager_with_oauth_client() {
+        use crate::db::Database;
+
+        let key = b"test-encryption-key-32-bytes!!!";
+        let oauth_client = super::super::AtprotoOAuth::new(
+            "https://test.com/client",
+            "https://test.com/callback",
+        );
+
+        let manager = futures::executor::block_on(async {
+            SessionManager::with_oauth_client(
+                Arc::new(Database::in_memory("test-oauth").await.unwrap()),
+                Some(key),
+                oauth_client,
+            )
+        });
+
+        assert!(manager.oauth_client.is_some());
     }
 
     #[test]
