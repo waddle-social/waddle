@@ -420,7 +420,8 @@ mod tests {
     #[test]
     fn test_parser_message() {
         let mut parser = XmlParser::new();
-        parser.feed(b"<message to='bob@example.com' type='chat'><body>Hello!</body></message>");
+        // Include xmlns='jabber:client' as minidom requires namespace declarations
+        parser.feed(b"<message xmlns='jabber:client' to='bob@example.com' type='chat'><body>Hello!</body></message>");
 
         assert!(parser.has_complete_stanza());
 
@@ -431,7 +432,8 @@ mod tests {
     #[test]
     fn test_parser_iq() {
         let mut parser = XmlParser::new();
-        parser.feed(b"<iq type='get' id='bind_1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>");
+        // Include xmlns='jabber:client' as minidom requires namespace declarations
+        parser.feed(b"<iq xmlns='jabber:client' type='get' id='bind_1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>");
 
         assert!(parser.has_complete_stanza());
 

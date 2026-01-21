@@ -1,6 +1,5 @@
 //! Error types for the XMPP server.
 
-use minidom::Element;
 use thiserror::Error;
 
 use crate::parser::ns;

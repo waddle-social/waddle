@@ -20,7 +20,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | **Backend Infrastructure** |
 | Rust project setup | ✅ Complete | P0 | [ADR-0001](adrs/0001-rust-backend.md) |
 | Axum HTTP server | ✅ Complete | P0 | [ADR-0002](adrs/0002-axum-web-framework.md), [Spec: API](specs/api-contracts.md) |
-| Native XMPP server (waddle-xmpp crate) | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| Native XMPP server (waddle-xmpp crate) | 🔄 In Progress | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | OpenTelemetry setup | ✅ Complete | P0 | [ADR-0014](adrs/0014-opentelemetry.md) |
 | XMPP interop CI | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | Turso/libSQL setup | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
@@ -243,11 +243,13 @@ External integrations and bot platform.
 ## Milestones
 
 ### M0: XMPP Foundation
-- [ ] waddle-xmpp crate created
-- [ ] TCP connections accepted on 5222
-- [ ] STARTTLS working
-- [ ] Stream negotiation completes
-- [ ] SASL authentication working
+- [x] waddle-xmpp crate created
+- [x] TCP connections accepted on 5222
+- [x] STARTTLS working
+- [x] Stream negotiation completes
+- [x] SASL authentication working (PLAIN mechanism)
+- [x] XML stanza parsing with RFC 6120 compliance (minidom/rxml)
+- [x] Error stanza generation (RFC 6120 Section 8.3)
 - [ ] OpenTelemetry traces visible
 - [ ] RFC 6120 core interop tests passing
 
