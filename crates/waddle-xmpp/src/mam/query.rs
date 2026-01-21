@@ -230,7 +230,7 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
     // Build the outer message
     let msg_id = Uuid::now_v7().to_string();
     let mut msg = Message::new(Some(to_jid.parse().unwrap_or_else(|_| {
-        jid::Jid::Bare(jid::BareJid::new("unknown").unwrap())
+        jid::Jid::from(jid::BareJid::new("unknown").unwrap())
     })));
     msg.id = Some(msg_id);
     msg.type_ = MessageType::Normal;
@@ -311,6 +311,7 @@ pub fn add_stanza_id(message: &mut Message, archive_id: &str, by: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
 
     #[test]
     fn test_is_mam_query() {

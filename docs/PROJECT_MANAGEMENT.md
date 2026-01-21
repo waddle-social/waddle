@@ -42,7 +42,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | **Core Messaging** |
 | Message schema | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
 | Send message (XMPP) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
-| Message history (MAM) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
+| Message history (MAM) | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Real-time delivery (XMPP) | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
 | Edit message (XEP-0308) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
 | Delete message (XEP-0424) | ⬜ Not Started | P1 | [RFC-0004](rfcs/0004-message-format.md) |
