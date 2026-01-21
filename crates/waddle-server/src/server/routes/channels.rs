@@ -452,6 +452,36 @@ pub async fn get_channel_handler(
 
     let waddle_id = &params.waddle_id;
 
+    // Get the waddle database first to check if channel exists
+    let waddle_db = match state.app_state.db_pool.get_waddle_db(waddle_id).await {
+        Ok(db) => db,
+        Err(err) => {
+            error!("Failed to get waddle database: {}", err);
+            return channel_error_to_response(ChannelError::Database(format!(
+                "Failed to access waddle database: {}",
+                err
+            )))
+            .into_response();
+        }
+    };
+
+    // Check if channel exists BEFORE checking permissions
+    // This ensures we return 404 for non-existent channels, not 403
+    let channel = match get_channel_from_db(&waddle_db, waddle_id, &channel_id).await {
+        Ok(Some(channel)) => channel,
+        Ok(None) => {
+            return channel_error_to_response(ChannelError::NotFound(format!(
+                "Channel '{}' not found",
+                channel_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get channel: {}", err);
+            return channel_error_to_response(ChannelError::Database(err)).into_response();
+        }
+    };
+
     // Check if user has permission to view this channel (via waddle membership)
     let subject = Subject::user(&session.did);
     let channel_object = Object::new(ObjectType::Channel, &channel_id);
@@ -469,35 +499,6 @@ pub async fn get_channel_handler(
         )))
         .into_response();
     }
-
-    // Get the waddle database
-    let waddle_db = match state.app_state.db_pool.get_waddle_db(waddle_id).await {
-        Ok(db) => db,
-        Err(err) => {
-            error!("Failed to get waddle database: {}", err);
-            return channel_error_to_response(ChannelError::Database(format!(
-                "Failed to access waddle database: {}",
-                err
-            )))
-            .into_response();
-        }
-    };
-
-    // Get channel from database
-    let channel = match get_channel_from_db(&waddle_db, waddle_id, &channel_id).await {
-        Ok(Some(channel)) => channel,
-        Ok(None) => {
-            return channel_error_to_response(ChannelError::NotFound(format!(
-                "Channel '{}' not found",
-                channel_id
-            )))
-            .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get channel: {}", err);
-            return channel_error_to_response(ChannelError::Database(err)).into_response();
-        }
-    };
 
     (StatusCode::OK, Json(channel)).into_response()
 }

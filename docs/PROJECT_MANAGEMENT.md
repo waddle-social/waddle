@@ -52,8 +52,8 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Invite system | ⬜ Not Started | P1 | [RFC-0001](rfcs/0001-waddles.md) |
 | Role management | ⬜ Not Started | P1 | [RFC-0001](rfcs/0001-waddles.md), [Spec: Permissions](specs/permission-model.md) |
 | **Channels** |
-| Channel CRUD (MUC provisioning) | ⬜ Not Started | P0 | [RFC-0002](rfcs/0002-channels.md) |
-| Channel permissions | ⬜ Not Started | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: Permissions](specs/permission-model.md) |
+| Channel CRUD (MUC provisioning) | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md) |
+| Channel permissions | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: Permissions](specs/permission-model.md) |
 | Categories | ⬜ Not Started | P2 | [RFC-0002](rfcs/0002-channels.md) |
 | **CLI TUI Client** |
 | Ratatui setup | ⬜ Not Started | P0 | [ADR-0003](adrs/0003-ratatui-cli.md), [Spec: CLI](specs/cli-commands.md) |
@@ -257,7 +257,7 @@ External integrations and bot platform.
 - [x] User can authenticate via Bluesky
 - [x] XMPP account provisioned from DID
 - [x] User can create a Waddle
-- [ ] User can create channels (MUC rooms)
+- [x] User can create channels (MUC rooms)
 - [ ] User can send/receive messages in CLI via XMPP
 - [ ] Messages delivered in real-time
 
