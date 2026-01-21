@@ -34,6 +34,7 @@ pub mod registry;
 pub mod s2s;
 pub mod server;
 pub mod stream;
+pub mod stream_management;
 
 mod error;
 mod types;

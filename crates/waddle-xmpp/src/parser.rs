@@ -224,6 +224,8 @@ impl XmlParser {
         }
 
         // Try to parse each known stanza type
+        // NOTE: Pattern order matters! More specific patterns must come before less specific ones.
+        // e.g., "<resume" must come before "<r" since "<r" would otherwise match "<resume"
         type StanzaParser = fn(&str) -> Result<ParsedStanza, XmppError>;
         let stanza_patterns: &[(&str, StanzaParser)] = &[
             ("<starttls", parse_starttls),
@@ -231,11 +233,11 @@ impl XmlParser {
             ("<iq", parse_iq_stanza),
             ("<message", parse_message_stanza),
             ("<presence", parse_presence_stanza),
-            // XEP-0198 Stream Management stanzas
+            // XEP-0198 Stream Management stanzas (order matters!)
             ("<enable", parse_sm_enable),
+            ("<resume", parse_sm_resume),  // Must come before <r
             ("<r", parse_sm_request),
             ("<a ", parse_sm_ack),  // Note: space to avoid matching <auth
-            ("<resume", parse_sm_resume),
         ];
 
         for (pattern, parser) in stanza_patterns {

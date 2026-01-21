@@ -15,6 +15,7 @@ use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
 };
+use crate::stream_management::StreamManagementState;
 use crate::metrics::{record_muc_occupant_count, record_muc_presence};
 use crate::muc::{
     affiliation::{AffiliationResolver, AppStateAffiliationResolver},
@@ -22,6 +23,7 @@ use crate::muc::{
     MucLeaveRequest, MucMessage, MucPresenceAction, MucRoomRegistry,
 };
 use crate::types::{Affiliation, Role};
+use crate::parser::ParsedStanza;
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
@@ -57,6 +59,8 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     mam_storage: Arc<M>,
     /// Receiver for outbound stanzas (messages routed to this connection)
     outbound_rx: Option<OutboundReceiver>,
+    /// XEP-0198 Stream Management state
+    sm_state: StreamManagementState,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
@@ -90,6 +94,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             connection_registry,
             mam_storage,
             outbound_rx: None,
+            sm_state: StreamManagementState::new(),
         };
 
         actor.run(tls_acceptor).await
@@ -171,8 +176,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
     /// Process stanzas until the connection is closed.
     ///
-    /// This function handles both:
+    /// This function handles:
     /// - Inbound stanzas from the client (messages, presence, IQs)
+    /// - XEP-0198 Stream Management stanzas (enable, r, a)
     /// - Outbound stanzas routed from other connections via the registry
     async fn process_stanzas(&mut self) -> Result<(), XmppError> {
         // Take ownership of the outbound receiver
@@ -180,11 +186,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         loop {
             tokio::select! {
-                // Handle inbound stanzas from the client
-                inbound_result = self.stream.read_stanza() => {
+                // Handle inbound stanzas from the client (using raw parser for SM support)
+                inbound_result = self.stream.read_parsed_stanza() => {
                     match inbound_result {
-                        Ok(Some(stanza)) => {
-                            if let Err(e) = self.handle_stanza(stanza).await {
+                        Ok(Some(parsed)) => {
+                            if let Err(e) = self.handle_parsed_stanza(parsed).await {
                                 warn!(error = %e, "Error handling stanza");
                             }
                         }
@@ -214,6 +220,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                                 warn!(error = %e, "Error writing outbound stanza");
                                 // Don't break - the client might still be readable
                             }
+                            // Track outbound stanzas for SM acknowledgment
+                            if self.sm_state.enabled {
+                                self.sm_state.increment_outbound();
+                            }
                         }
                         None => {
                             // Outbound channel closed - this shouldn't happen during normal operation
@@ -224,6 +234,123 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle a raw parsed stanza, including SM stanzas.
+    async fn handle_parsed_stanza(&mut self, parsed: ParsedStanza) -> Result<(), XmppError> {
+        match parsed {
+            ParsedStanza::StreamEnd => {
+                debug!("Stream end received");
+                Ok(())
+            }
+            ParsedStanza::Message(element) => {
+                let msg = element.try_into()
+                    .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
+                // Increment inbound count for SM
+                if self.sm_state.enabled {
+                    self.sm_state.increment_inbound();
+                }
+                self.handle_stanza(Stanza::Message(msg)).await
+            }
+            ParsedStanza::Presence(element) => {
+                let pres = element.try_into()
+                    .map_err(|e| XmppError::xml_parse(format!("Invalid presence: {:?}", e)))?;
+                // Increment inbound count for SM
+                if self.sm_state.enabled {
+                    self.sm_state.increment_inbound();
+                }
+                self.handle_stanza(Stanza::Presence(pres)).await
+            }
+            ParsedStanza::Iq(element) => {
+                let iq = element.try_into()
+                    .map_err(|e| XmppError::xml_parse(format!("Invalid iq: {:?}", e)))?;
+                // Increment inbound count for SM
+                if self.sm_state.enabled {
+                    self.sm_state.increment_inbound();
+                }
+                self.handle_stanza(Stanza::Iq(iq)).await
+            }
+            // XEP-0198 Stream Management stanzas
+            ParsedStanza::SmEnable { resume, max } => {
+                self.handle_sm_enable(resume, max).await
+            }
+            ParsedStanza::SmRequest => {
+                self.handle_sm_request().await
+            }
+            ParsedStanza::SmAck { h } => {
+                self.handle_sm_ack(h).await
+            }
+            ParsedStanza::SmResume { previd, h } => {
+                self.handle_sm_resume(&previd, h).await
+            }
+            _ => {
+                debug!("Ignoring unexpected parsed stanza type");
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle XEP-0198 Stream Management enable request.
+    async fn handle_sm_enable(&mut self, resume: bool, max: Option<u32>) -> Result<(), XmppError> {
+        debug!(resume = resume, max = ?max, "Received SM enable request");
+
+        // Generate a stream ID for potential resumption
+        let stream_id = uuid::Uuid::new_v4().to_string();
+
+        // Enable SM with or without resumption
+        // For now, we support resumption if requested, with a max timeout of 5 minutes
+        let max_seconds = if resume { Some(max.unwrap_or(300).min(300)) } else { None };
+
+        self.sm_state.enable(stream_id.clone(), resume, max_seconds);
+
+        // Send enabled response
+        self.stream.send_sm_enabled(&stream_id, resume, max_seconds).await?;
+
+        info!(
+            stream_id = %stream_id,
+            resume = resume,
+            "Stream Management enabled"
+        );
+
+        Ok(())
+    }
+
+    /// Handle XEP-0198 Stream Management ack request (<r/>).
+    async fn handle_sm_request(&mut self) -> Result<(), XmppError> {
+        if !self.sm_state.enabled {
+            debug!("SM request received but SM not enabled, ignoring");
+            return Ok(());
+        }
+
+        let h = self.sm_state.get_inbound_count();
+        debug!(h = h, "Sending SM ack in response to request");
+        self.stream.send_sm_ack(h).await
+    }
+
+    /// Handle XEP-0198 Stream Management ack response (<a h='N'/>).
+    async fn handle_sm_ack(&mut self, h: u32) -> Result<(), XmppError> {
+        if !self.sm_state.enabled {
+            debug!("SM ack received but SM not enabled, ignoring");
+            return Ok(());
+        }
+
+        debug!(h = h, previous = self.sm_state.last_acked, "Received SM ack from client");
+        self.sm_state.acknowledge(h);
+        Ok(())
+    }
+
+    /// Handle XEP-0198 Stream Management resume request.
+    ///
+    /// Note: Full resumption requires storing session state across disconnections,
+    /// which is not yet implemented. For now, we reject resume requests.
+    async fn handle_sm_resume(&mut self, previd: &str, h: u32) -> Result<(), XmppError> {
+        debug!(previd = %previd, h = h, "Received SM resume request");
+
+        // For now, always reject resume requests since we don't persist session state
+        self.stream.send_sm_failed(Some("item-not-found"), None).await?;
+
+        warn!(previd = %previd, "SM resume rejected - session not found (resumption not yet implemented)");
         Ok(())
     }
 

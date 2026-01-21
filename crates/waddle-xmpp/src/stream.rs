@@ -541,6 +541,36 @@ impl XmppStream {
         }
     }
 
+    /// Read the next raw parsed stanza from the stream (includes SM stanzas).
+    ///
+    /// This is used by the connection actor to handle both regular stanzas and
+    /// XEP-0198 Stream Management stanzas.
+    #[instrument(skip(self), name = "xmpp.stanza.read_raw")]
+    pub async fn read_parsed_stanza(&mut self) -> Result<Option<ParsedStanza>, XmppError> {
+        let mut buf = [0u8; 8192];
+
+        loop {
+            // First check if we already have a complete stanza buffered
+            if self.parser.has_complete_stanza() {
+                return Ok(self.parser.next_stanza()?);
+            }
+
+            // Read more data
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Ok(None); // Connection closed
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            // Check again
+            if self.parser.has_complete_stanza() {
+                return Ok(self.parser.next_stanza()?);
+            }
+        }
+    }
+
     /// Write a stanza to the stream.
     pub async fn write_stanza(&mut self, stanza: &Stanza) -> Result<(), XmppError> {
         let xml = stanza_to_xml(stanza)?;
