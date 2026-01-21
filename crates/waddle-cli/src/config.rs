@@ -61,12 +61,18 @@ impl Default for KeybindingsConfig {
 pub struct XmppConfig {
     /// XMPP JID (e.g., user@example.com)
     pub jid: Option<String>,
-    /// XMPP server (if different from JID domain)
+    /// XMPP server host (if different from JID domain)
     pub server: Option<String>,
     /// Port (default 5222)
     pub port: u16,
-    /// Whether to use TLS
+    /// Whether to use TLS (STARTTLS)
     pub use_tls: bool,
+    /// Session token for SASL PLAIN authentication
+    /// This is obtained from the API after login
+    #[serde(skip_serializing)]
+    pub token: Option<String>,
+    /// MUC (Multi-User Chat) domain (e.g., muc.waddle.social)
+    pub muc_domain: Option<String>,
 }
 
 impl Default for XmppConfig {
@@ -76,6 +82,8 @@ impl Default for XmppConfig {
             server: None,
             port: 5222,
             use_tls: true,
+            token: None,
+            muc_domain: None,
         }
     }
 }

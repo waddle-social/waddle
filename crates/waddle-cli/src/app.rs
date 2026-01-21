@@ -3,6 +3,48 @@
 
 //! Application state and business logic for the Waddle TUI.
 
+use xmpp_parsers::jid::BareJid;
+
+/// Connection state for the XMPP client
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ConnectionState {
+    /// Not connected to the XMPP server
+    #[default]
+    Disconnected,
+    /// Currently connecting to the XMPP server
+    Connecting,
+    /// Successfully connected and authenticated
+    Connected,
+    /// Connection error occurred
+    Error(String),
+}
+
+impl ConnectionState {
+    /// Get a display string for the connection state
+    pub fn display(&self) -> &str {
+        match self {
+            ConnectionState::Disconnected => "Disconnected",
+            ConnectionState::Connecting => "Connecting...",
+            ConnectionState::Connected => "Connected",
+            ConnectionState::Error(_) => "Error",
+        }
+    }
+
+    /// Get a short status indicator
+    pub fn indicator(&self) -> &str {
+        match self {
+            ConnectionState::Disconnected => "○",
+            ConnectionState::Connecting => "◐",
+            ConnectionState::Connected => "●",
+            ConnectionState::Error(_) => "✕",
+        }
+    }
+
+    /// Check if connected
+    pub fn is_connected(&self) -> bool {
+        matches!(self, ConnectionState::Connected)
+    }
+}
 
 /// Which panel currently has focus
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,6 +146,21 @@ pub struct App {
 
     /// Currently selected channel/conversation name (for display)
     pub current_view_name: String,
+
+    /// XMPP connection state
+    pub connection_state: ConnectionState,
+
+    /// Currently active MUC room JID (if any)
+    pub current_room_jid: Option<BareJid>,
+
+    /// Set of joined MUC rooms
+    pub joined_rooms: std::collections::HashSet<BareJid>,
+
+    /// Our own JID (set after connection)
+    pub own_jid: Option<BareJid>,
+
+    /// Our nickname in rooms
+    pub nickname: String,
 }
 
 impl Default for App {
@@ -181,6 +238,11 @@ impl App {
             input_buffer: String::new(),
             input_cursor: 0,
             current_view_name: "#general".into(),
+            connection_state: ConnectionState::Disconnected,
+            current_room_jid: None,
+            joined_rooms: std::collections::HashSet::new(),
+            own_jid: None,
+            nickname: "user".into(),
         }
     }
 
@@ -321,6 +383,8 @@ impl App {
     }
 
     /// Submit the current input (send message)
+    /// Returns the message text if not empty, without adding to local messages
+    /// (The actual sending is done by the XMPP client, which will receive it back)
     pub fn input_submit(&mut self) -> Option<String> {
         if self.input_buffer.is_empty() {
             return None;
@@ -329,16 +393,67 @@ impl App {
         let message = std::mem::take(&mut self.input_buffer);
         self.input_cursor = 0;
 
-        // Add to local messages (in a real app, this would go through XMPP)
-        self.messages.push(Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            author: "you".into(),
-            content: message.clone(),
-            timestamp: chrono::Utc::now(),
-        });
-
         tracing::info!("Submitted message: {}", message);
         Some(message)
+    }
+
+    /// Add a message to the current view (called when receiving XMPP messages)
+    pub fn add_message(&mut self, author: String, content: String) {
+        self.messages.push(Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            author,
+            content,
+            timestamp: chrono::Utc::now(),
+        });
+        // Auto-scroll to newest message
+        self.message_scroll = 0;
+    }
+
+    /// Set the connection state
+    pub fn set_connection_state(&mut self, state: ConnectionState) {
+        tracing::info!("Connection state: {:?}", state);
+        self.connection_state = state;
+    }
+
+    /// Mark a room as joined
+    pub fn room_joined(&mut self, room_jid: BareJid) {
+        tracing::info!("Room joined: {}", room_jid);
+        self.joined_rooms.insert(room_jid);
+    }
+
+    /// Mark a room as left
+    pub fn room_left(&mut self, room_jid: &BareJid) {
+        tracing::info!("Room left: {}", room_jid);
+        self.joined_rooms.remove(room_jid);
+    }
+
+    /// Check if we're in a specific room
+    pub fn is_in_room(&self, room_jid: &BareJid) -> bool {
+        self.joined_rooms.contains(room_jid)
+    }
+
+    /// Set the current active room
+    pub fn set_current_room(&mut self, room_jid: Option<BareJid>) {
+        self.current_room_jid = room_jid.clone();
+        if let Some(jid) = room_jid {
+            // Update the view name to show the room
+            if let Some(node) = jid.node() {
+                self.current_view_name = format!("#{}", node);
+            } else {
+                self.current_view_name = jid.to_string();
+            }
+            // Clear messages when switching rooms
+            // (In a real app, we'd load from MAM storage)
+            self.messages.clear();
+            self.message_scroll = 0;
+        }
+    }
+
+    /// Clear all XMPP-related state (on disconnect)
+    pub fn clear_xmpp_state(&mut self) {
+        self.joined_rooms.clear();
+        self.current_room_jid = None;
+        self.connection_state = ConnectionState::Disconnected;
     }
 }
 

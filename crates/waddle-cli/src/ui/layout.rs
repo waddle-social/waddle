@@ -20,11 +20,12 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders},
     Frame,
 };
 
-use crate::app::{App, Focus};
+use crate::app::{App, ConnectionState, Focus};
 use crate::config::Config;
 use super::{InputWidget, MessagesWidget, SidebarWidget};
 
@@ -77,9 +78,22 @@ fn border_style(focused: bool) -> Style {
 pub fn render_layout(frame: &mut Frame, app: &App, config: &Config) {
     let areas = calculate_layout(frame.area(), config.ui.sidebar_width);
 
-    // Render sidebar
+    // Render sidebar with connection status in title
+    let (status_indicator, status_color) = match &app.connection_state {
+        ConnectionState::Disconnected => ("○", Color::DarkGray),
+        ConnectionState::Connecting => ("◐", Color::Yellow),
+        ConnectionState::Connected => ("●", Color::Green),
+        ConnectionState::Error(_) => ("✕", Color::Red),
+    };
+
+    let sidebar_title = Line::from(vec![
+        Span::raw(" Waddle "),
+        Span::styled(status_indicator, Style::default().fg(status_color)),
+        Span::raw(" "),
+    ]);
+
     let sidebar_block = Block::default()
-        .title(" Waddle ")
+        .title(sidebar_title)
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == Focus::Sidebar));
 
