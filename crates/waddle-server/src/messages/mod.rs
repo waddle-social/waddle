@@ -28,14 +28,21 @@
 mod repository;
 mod types;
 
-// Note: These are re-exported for the public API surface once the module is made public
+// Re-exports for public API surface - these will be used as other parts
+// of the codebase integrate with messages (e.g., routes, XMPP handlers)
+#[allow(unused_imports)]
 pub(crate) use repository::MessageRepository;
+#[allow(unused_imports)]
 pub(crate) use types::{Message, MessageCreate, MessageFlags, MessageUpdate};
 
 use thiserror::Error;
 
 /// Message-specific errors
+///
+/// These error types will be used when routes and handlers integrate with
+/// the message repository.
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum MessageError {
     #[error("Message not found: {0}")]
     NotFound(String),
@@ -68,6 +75,18 @@ mod tests {
     use crate::db::{Database, MigrationRunner};
     use std::sync::Arc;
 
+    /// Helper function to create a test channel in the database
+    async fn create_test_channel(db: &Arc<Database>, channel_id: &str) {
+        let conn = db.persistent_connection().unwrap();
+        let conn = conn.lock().await;
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
+            libsql::params![channel_id, format!("Test Channel {}", channel_id)],
+        )
+        .await
+        .expect("Failed to create test channel");
+    }
+
     #[tokio::test]
     async fn test_message_create_and_get() {
         let db = Database::in_memory("test-messages").await.unwrap();
@@ -76,6 +95,9 @@ mod tests {
         // Run per-waddle migrations
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
+
+        // Create the test channel first (required by foreign key constraint)
+        create_test_channel(&db, "channel-123").await;
 
         let repo = MessageRepository::new(Arc::clone(&db));
 
@@ -107,6 +129,9 @@ mod tests {
         // Run per-waddle migrations
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
+
+        // Create the test channel first (required by foreign key constraint)
+        create_test_channel(&db, "channel-test").await;
 
         let repo = MessageRepository::new(Arc::clone(&db));
 
@@ -146,6 +171,9 @@ mod tests {
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
 
+        // Create the test channel first (required by foreign key constraint)
+        create_test_channel(&db, "channel-123").await;
+
         let repo = MessageRepository::new(Arc::clone(&db));
 
         // Create a message
@@ -175,6 +203,9 @@ mod tests {
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
 
+        // Create the test channel first (required by foreign key constraint)
+        create_test_channel(&db, "channel-123").await;
+
         let repo = MessageRepository::new(Arc::clone(&db));
 
         // Create a message
@@ -201,6 +232,9 @@ mod tests {
         // Run per-waddle migrations
         let runner = MigrationRunner::waddle();
         runner.run(&db).await.unwrap();
+
+        // Create the test channel first (required by foreign key constraint)
+        create_test_channel(&db, "channel-123").await;
 
         let repo = MessageRepository::new(Arc::clone(&db));
 
