@@ -3,6 +3,7 @@ use tracing::info;
 
 mod auth;
 mod db;
+mod permissions;
 mod server;
 mod telemetry;
 
