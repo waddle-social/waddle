@@ -56,12 +56,12 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Channel permissions | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: Permissions](specs/permission-model.md) |
 | Categories | ⬜ Not Started | P2 | [RFC-0002](rfcs/0002-channels.md) |
 | **CLI TUI Client** |
-| Ratatui setup | ⬜ Not Started | P0 | [ADR-0003](adrs/0003-ratatui-cli.md), [Spec: CLI](specs/cli-commands.md) |
+| Ratatui setup | ✅ Complete | P0 | [ADR-0003](adrs/0003-ratatui-cli.md), [Spec: CLI](specs/cli-commands.md) |
 | XMPP client integration | ⬜ Not Started | P0 | [Spec: CLI](specs/cli-commands.md), [Spec: XMPP](specs/xmpp-integration.md) |
-| Layout (sidebar, messages, input) | ⬜ Not Started | P0 | [Spec: CLI](specs/cli-commands.md) |
-| Keybindings (Vim-style) | ⬜ Not Started | P0 | [Spec: CLI](specs/cli-commands.md) |
+| Layout (sidebar, messages, input) | ✅ Complete | P0 | [Spec: CLI](specs/cli-commands.md) |
+| Keybindings (Vim-style) | ✅ Complete | P0 | [Spec: CLI](specs/cli-commands.md) |
 | Markdown rendering | ⬜ Not Started | P1 | [Spec: CLI](specs/cli-commands.md) |
-| Configuration file | ⬜ Not Started | P1 | [Spec: CLI](specs/cli-commands.md) |
+| Configuration file | 🔄 In Progress | P1 | [Spec: CLI](specs/cli-commands.md) |
 
 ### Phase 2: Rich Features
 
