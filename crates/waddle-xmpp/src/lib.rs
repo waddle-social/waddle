@@ -79,6 +79,16 @@ pub trait AppState: Send + Sync + 'static {
         resource: &str,
         subject: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
+
+    /// List all subjects with a specific relation on an object.
+    ///
+    /// Used for MUC affiliation list queries (XEP-0045).
+    /// Returns a list of (subject_id, relation) pairs.
+    fn list_subjects(
+        &self,
+        resource: &str,
+        relation: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
 }
 
 /// User session information.

@@ -286,17 +286,83 @@ where
         }
     }
 
-    async fn list_affiliations(
+    #[instrument(skip(self), fields(waddle = %waddle_id, channel = %channel_id, affiliation = %affiliation))]
+    fn list_affiliations(
         &self,
-        _waddle_id: &str,
-        _channel_id: &str,
-        _affiliation: Affiliation,
-    ) -> Result<Vec<AffiliationEntry>, XmppError> {
-        // This requires a list_subjects query which isn't exposed through AppState
-        // For now, return an empty list - this would need to be implemented
-        // when the permission service is directly accessible
-        // TODO: Implement when we have direct access to TupleStore.list_subjects
-        Ok(Vec::new())
+        waddle_id: &str,
+        channel_id: &str,
+        affiliation: Affiliation,
+    ) -> impl Future<Output = Result<Vec<AffiliationEntry>, XmppError>> + Send {
+        let app_state = Arc::clone(&self.app_state);
+        let mapper = self.mapper.clone();
+        let domain = self.domain.clone();
+        let waddle_id = waddle_id.to_string();
+        let channel_id = channel_id.to_string();
+
+        async move {
+            // Determine which relations map to this affiliation
+            let relations_to_query: Vec<&str> = match affiliation {
+                Affiliation::Owner => vec!["owner"],
+                Affiliation::Admin => vec!["admin", "moderator", "manager"],
+                Affiliation::Member => vec!["member", "writer", "viewer"],
+                Affiliation::None => return Ok(Vec::new()), // No-affiliation users aren't stored
+                Affiliation::Outcast => vec!["banned"], // Banned users if we track them
+            };
+
+            let mut entries = Vec::new();
+
+            // Query channel-level permissions first
+            for relation in &relations_to_query {
+                let resource = format!("channel:{}", channel_id);
+                match app_state.list_subjects(&resource, relation).await {
+                    Ok(subjects) => {
+                        for subject_str in subjects {
+                            // Parse the subject (expected format: "user:did:plc:...")
+                            if let Some(did) = subject_str.strip_prefix("user:") {
+                                // Convert DID to JID
+                                if let Ok(jid) = format!("{}@{}", did.replace(':', "_"), domain).parse() {
+                                    let aff = mapper.map_relation(relation);
+                                    if aff == affiliation {
+                                        entries.push(AffiliationEntry::new(jid, affiliation));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, relation = %relation, "Error listing subjects for channel");
+                    }
+                }
+            }
+
+            // Also query waddle-level permissions (they inherit to channels)
+            for relation in &relations_to_query {
+                let resource = format!("waddle:{}", waddle_id);
+                match app_state.list_subjects(&resource, relation).await {
+                    Ok(subjects) => {
+                        for subject_str in subjects {
+                            if let Some(did) = subject_str.strip_prefix("user:") {
+                                if let Ok(jid) = format!("{}@{}", did.replace(':', "_"), domain).parse::<BareJid>() {
+                                    // Only add if not already present (channel-level takes precedence)
+                                    if !entries.iter().any(|e| e.jid == jid) {
+                                        let aff = mapper.map_relation(relation);
+                                        if aff == affiliation {
+                                            entries.push(AffiliationEntry::new(jid, affiliation));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, relation = %relation, "Error listing subjects for waddle");
+                    }
+                }
+            }
+
+            debug!(count = entries.len(), "Listed affiliations");
+            Ok(entries)
+        }
     }
 
     #[instrument(skip(self), fields(user = %user_did, channel = %channel_id, members_only = %members_only))]
