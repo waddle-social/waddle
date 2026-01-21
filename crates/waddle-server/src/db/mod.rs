@@ -22,8 +22,8 @@ mod pool;
 use libsql::{Connection, Database as LibSqlDatabase};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tracing::{debug, info, instrument};
 
 pub use migrations::{Migration, MigrationRunner};
@@ -199,9 +199,39 @@ impl Database {
         })
     }
 
-    /// Get a connection to the database
+    /// Get a connection to the database.
+    ///
+    /// For in-memory databases, this returns a new connection from the same database.
+    /// Since we use `:memory:` with libSQL, each connection shares the same in-memory
+    /// database as long as it comes from the same `LibSqlDatabase` instance.
+    ///
+    /// For file-based databases, this creates a new connection to the file.
     pub fn connect(&self) -> Result<Connection, DatabaseError> {
         Ok(self.db.connect()?)
+    }
+
+    /// Execute a callback with a connection, using the persistent connection for in-memory databases.
+    ///
+    /// This method ensures that for in-memory databases, all operations use the same
+    /// connection to maintain data consistency.
+    pub async fn with_connection<F, Fut, T>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&Connection) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        if let Some(ref persistent) = self.persistent_conn {
+            let conn = persistent.lock().await;
+            Ok(f(&conn).await)
+        } else {
+            let conn = self.db.connect()?;
+            Ok(f(&conn).await)
+        }
+    }
+
+    /// Get a reference to the persistent connection if this is an in-memory database.
+    /// This is useful for operations that need to maintain connection state.
+    pub fn persistent_connection(&self) -> Option<&Arc<Mutex<Connection>>> {
+        self.persistent_conn.as_ref()
     }
 
     /// Get the database name
@@ -220,12 +250,24 @@ impl Database {
     /// Check if the database is healthy by executing a simple query
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
-        let conn = self.connect()?;
-        match conn.query("SELECT 1", ()).await {
-            Ok(_) => Ok(true),
-            Err(e) => {
-                tracing::warn!("Database health check failed: {}", e);
-                Ok(false)
+        // Use persistent connection for in-memory databases
+        if let Some(ref persistent) = self.persistent_conn {
+            let conn = persistent.lock().await;
+            match conn.query("SELECT 1", ()).await {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    tracing::warn!("Database health check failed: {}", e);
+                    Ok(false)
+                }
+            }
+        } else {
+            let conn = self.connect()?;
+            match conn.query("SELECT 1", ()).await {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    tracing::warn!("Database health check failed: {}", e);
+                    Ok(false)
+                }
             }
         }
     }
@@ -233,9 +275,16 @@ impl Database {
     /// Execute a simple query (for testing/health checks)
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn execute(&self, sql: &str) -> Result<u64, DatabaseError> {
-        let conn = self.connect()?;
-        let rows = conn.execute(sql, ()).await?;
-        Ok(rows)
+        // Use persistent connection for in-memory databases
+        if let Some(ref persistent) = self.persistent_conn {
+            let conn = persistent.lock().await;
+            let rows = conn.execute(sql, ()).await?;
+            Ok(rows)
+        } else {
+            let conn = self.connect()?;
+            let rows = conn.execute(sql, ()).await?;
+            Ok(rows)
+        }
     }
 }
 
@@ -266,8 +315,9 @@ mod tests {
         // Insert a row
         db.execute("INSERT INTO test (name) VALUES ('hello')").await.unwrap();
 
-        // Query should succeed
-        let conn = db.connect().unwrap();
+        // Query should succeed - use persistent connection for in-memory database
+        let conn = db.persistent_connection().unwrap();
+        let conn = conn.lock().await;
         let mut rows = conn.query("SELECT * FROM test", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let name: String = row.get(1).unwrap();

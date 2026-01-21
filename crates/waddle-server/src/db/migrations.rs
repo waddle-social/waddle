@@ -214,7 +214,21 @@ impl MigrationRunner {
     /// Run all pending migrations on the database
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn run(&self, db: &Database) -> Result<Vec<i64>, DatabaseError> {
-        let conn = db.connect()?;
+        // Use persistent connection for in-memory databases to ensure data persists
+        // We need to handle both cases: in-memory (with persistent conn) and file-based
+        if let Some(persistent) = db.persistent_connection() {
+            // For in-memory databases, use the persistent connection
+            let conn = persistent.lock().await;
+            self.run_with_connection(&conn).await
+        } else {
+            // For file-based databases, create a new connection
+            let conn = db.connect()?;
+            self.run_with_connection(&conn).await
+        }
+    }
+
+    /// Internal method to run migrations with a given connection
+    async fn run_with_connection(&self, conn: &libsql::Connection) -> Result<Vec<i64>, DatabaseError> {
 
         // Ensure migrations table exists
         conn.execute(
