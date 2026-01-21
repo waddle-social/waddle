@@ -1,0 +1,30 @@
+# Docker Compose for local Waddle development
+#
+# This sets up the observability infrastructure for local development:
+# - Jaeger all-in-one for distributed tracing
+#
+# Usage:
+#   docker compose up -d              # Start services in background
+#   docker compose down               # Stop services
+#   docker compose logs -f jaeger     # View Jaeger logs
+#
+# Jaeger UI: http://localhost:16686
+# OTLP Endpoint: http://localhost:4317 (gRPC)
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    container_name: waddle-jaeger
+    restart: unless-stopped
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
