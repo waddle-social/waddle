@@ -11,11 +11,16 @@
 
 pub mod affiliation;
 pub mod messages;
+pub mod presence;
 pub mod room_registry;
 
 pub use messages::{
     create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
     OutboundMucMessage,
+};
+pub use presence::{
+    build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
+    MucLeaveRequest, MucPresenceAction, OutboundMucPresence,
 };
 pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
 

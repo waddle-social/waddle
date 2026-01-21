@@ -45,6 +45,15 @@ pub fn muc_messages() -> Counter<u64> {
         .build()
 }
 
+/// Counter for MUC presence events (joins/leaves).
+pub fn muc_presence_events() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.muc.presence")
+        .with_description("Total MUC presence events (joins and leaves)")
+        .with_unit("event")
+        .build()
+}
+
 // ============================================================================
 // Gauges (Current State)
 // ============================================================================
@@ -123,4 +132,20 @@ pub fn record_connection_count(count: i64, transport: &str) {
 /// Record stanza processing latency in milliseconds.
 pub fn record_stanza_latency(latency_ms: f64, stanza_type: &str) {
     stanza_latency().record(latency_ms, &[KeyValue::new("type", stanza_type.to_string())]);
+}
+
+/// Record a MUC presence event (join or leave).
+pub fn record_muc_presence(event_type: &str, room: &str) {
+    muc_presence_events().add(
+        1,
+        &[
+            KeyValue::new("event", event_type.to_string()),
+            KeyValue::new("room", room.to_string()),
+        ],
+    );
+}
+
+/// Update the MUC occupants gauge.
+pub fn record_muc_occupant_count(count: i64, room: &str) {
+    muc_occupants().record(count, &[KeyValue::new("room", room.to_string())]);
 }

@@ -15,7 +15,11 @@ use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
 };
-use crate::muc::{MucMessage, MucRoomRegistry};
+use crate::metrics::{record_muc_occupant_count, record_muc_presence};
+use crate::muc::{
+    build_leave_presence, build_occupant_presence, parse_muc_presence, MucMessage,
+    MucPresenceAction, MucRoomRegistry,
+};
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
