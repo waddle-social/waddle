@@ -38,7 +38,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Zanzibar permission model | ✅ Complete | P0 | [ADR-0009](adrs/0009-zanzibar-permissions.md), [Spec: Permissions](specs/permission-model.md) |
 | Permission tuple storage | ✅ Complete | P0 | [Spec: Permissions](specs/permission-model.md) |
 | Permission check API | ✅ Complete | P0 | [Spec: Permissions](specs/permission-model.md) |
-| MUC affiliation sync | 🔄 In Progress | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| MUC affiliation sync | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | **Core Messaging** |
 | Message schema | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
 | Send message (XMPP) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
