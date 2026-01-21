@@ -14,7 +14,7 @@ use xmpp_parsers::message::MessageType;
 use crate::disco::{
     build_disco_info_response, build_disco_items_response, is_disco_info_query,
     is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
-    parse_disco_items_query, server_features, DiscoItem, Feature, Identity,
+    parse_disco_items_query, server_features, DiscoItem, Identity,
 };
 use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,

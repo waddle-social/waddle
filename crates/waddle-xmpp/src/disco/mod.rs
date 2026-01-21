@@ -22,8 +22,8 @@ pub mod info;
 pub mod items;
 
 pub use info::{
-    build_disco_info_response, is_disco_info_query, parse_disco_info_query, DiscoInfoQuery,
-    Feature, Identity, DISCO_INFO_NS,
+    build_disco_info_response, is_disco_info_query, muc_room_features, muc_service_features,
+    parse_disco_info_query, server_features, DiscoInfoQuery, Feature, Identity, DISCO_INFO_NS,
 };
 pub use items::{
     build_disco_items_response, is_disco_items_query, parse_disco_items_query, DiscoItem,
