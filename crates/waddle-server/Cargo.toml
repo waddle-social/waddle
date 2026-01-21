@@ -75,6 +75,7 @@ base64 = { workspace = true }
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"
+http-body-util = "0.1"
 
 [[bin]]
 name = "waddle-server"
