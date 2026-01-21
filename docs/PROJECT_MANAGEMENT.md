@@ -21,7 +21,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Rust project setup | ✅ Complete | P0 | [ADR-0001](adrs/0001-rust-backend.md) |
 | Axum HTTP server | ✅ Complete | P0 | [ADR-0002](adrs/0002-axum-web-framework.md), [Spec: API](specs/api-contracts.md) |
 | Native XMPP server (waddle-xmpp crate) | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md), [Spec: XMPP](specs/xmpp-integration.md) |
-| OpenTelemetry setup | ⬜ Not Started | P0 | [ADR-0014](adrs/0014-opentelemetry.md) |
+| OpenTelemetry setup | ✅ Complete | P0 | [ADR-0014](adrs/0014-opentelemetry.md) |
 | XMPP interop CI | ⬜ Not Started | P0 | [ADR-0006](adrs/0006-xmpp-protocol.md) |
 | Turso/libSQL setup | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |
 | Database-per-Waddle sharding | ⬜ Not Started | P0 | [ADR-0004](adrs/0004-turso-libsql-database.md) |

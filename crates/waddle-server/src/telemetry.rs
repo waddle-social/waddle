@@ -194,6 +194,7 @@ pub fn shutdown() {
 /// XMPP metrics for observability.
 ///
 /// These metrics follow the naming conventions from ADR-0014.
+#[allow(dead_code)]
 pub mod metrics {
     use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
     use std::sync::OnceLock;

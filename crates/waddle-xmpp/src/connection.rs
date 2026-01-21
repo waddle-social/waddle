@@ -2,14 +2,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
 
 use jid::FullJid;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 
-use crate::metrics;
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};
@@ -17,7 +15,7 @@ use crate::{AppState, Session, XmppError};
 /// Actor managing a single XMPP client connection.
 pub struct ConnectionActor<S: AppState> {
     /// Peer address
-    peer_addr: SocketAddr,
+    _peer_addr: SocketAddr,
     /// XMPP stream handler
     stream: XmppStream,
     /// Current connection state
@@ -27,7 +25,7 @@ pub struct ConnectionActor<S: AppState> {
     /// Bound JID with resource
     jid: Option<FullJid>,
     /// Server domain
-    domain: String,
+    _domain: String,
     /// Shared application state
     app_state: Arc<S>,
 }
@@ -49,12 +47,12 @@ impl<S: AppState> ConnectionActor<S> {
         info!("New connection from {}", peer_addr);
 
         let mut actor = Self {
-            peer_addr,
+            _peer_addr: peer_addr,
             stream: XmppStream::new(tcp_stream),
             state: ConnectionState::Initial,
             session: None,
             jid: None,
-            domain,
+            _domain: domain,
             app_state,
         };
 
