@@ -1252,6 +1252,7 @@ mod tests {
             .await
             .unwrap();
 
+        let create_status = create_response.status();
         let body = create_response
             .into_body()
             .collect()
@@ -1259,6 +1260,9 @@ mod tests {
             .unwrap()
             .to_bytes();
         let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        eprintln!("Create response status: {:?}", create_status);
+        eprintln!("Create response body: {:?}", create_json);
+        assert_eq!(create_status, StatusCode::CREATED, "Create waddle failed: {:?}", create_json);
         let waddle_id = create_json["id"].as_str().unwrap();
 
         // Get the waddle
