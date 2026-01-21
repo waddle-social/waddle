@@ -3,11 +3,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use jid::FullJid;
+use jid::{FullJid, Jid};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
+use xmpp_parsers::message::MessageType;
 
+use crate::muc::{is_muc_groupchat, MucMessage, MucRoomRegistry};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};
@@ -28,13 +30,15 @@ pub struct ConnectionActor<S: AppState> {
     domain: String,
     /// Shared application state
     app_state: Arc<S>,
+    /// MUC room registry for groupchat message routing
+    room_registry: Arc<MucRoomRegistry>,
 }
 
 impl<S: AppState> ConnectionActor<S> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry),
         fields(peer = %peer_addr)
     )]
     pub async fn handle_connection(
@@ -43,6 +47,7 @@ impl<S: AppState> ConnectionActor<S> {
         tls_acceptor: TlsAcceptor,
         domain: String,
         app_state: Arc<S>,
+        room_registry: Arc<MucRoomRegistry>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -54,6 +59,7 @@ impl<S: AppState> ConnectionActor<S> {
             jid: None,
             domain,
             app_state,
+            room_registry,
         };
 
         actor.run(tls_acceptor).await
@@ -163,12 +169,133 @@ impl<S: AppState> ConnectionActor<S> {
         }
     }
 
+    /// Handle an incoming message stanza.
+    ///
+    /// Routes messages based on type:
+    /// - Groupchat: Route to MUC room for broadcasting to all occupants
+    /// - Chat: Direct message to another user (TODO)
+    /// - Other: Currently logged and ignored
+    #[instrument(skip(self, msg), fields(msg_type = ?msg.type_, to = ?msg.to))]
     async fn handle_message(
         &mut self,
-        _msg: xmpp_parsers::message::Message,
+        msg: xmpp_parsers::message::Message,
     ) -> Result<(), XmppError> {
-        // TODO: Implement message routing
-        debug!("Received message stanza");
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Message received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Route based on message type
+        match msg.type_ {
+            MessageType::Groupchat => {
+                self.handle_groupchat_message(msg, sender_jid).await
+            }
+            MessageType::Chat => {
+                // TODO: Implement direct chat message routing
+                debug!("Received chat message (not yet implemented)");
+                Ok(())
+            }
+            MessageType::Normal | MessageType::Headline | MessageType::Error => {
+                debug!(msg_type = ?msg.type_, "Received message of unsupported type");
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle a groupchat (MUC) message.
+    ///
+    /// Routes the message to the appropriate MUC room, which broadcasts
+    /// it to all occupants (including sending an echo back to the sender
+    /// per XEP-0045).
+    #[instrument(skip(self, msg), fields(room = ?msg.to))]
+    async fn handle_groupchat_message(
+        &mut self,
+        msg: xmpp_parsers::message::Message,
+        sender_jid: FullJid,
+    ) -> Result<(), XmppError> {
+        // Parse the MUC message
+        let muc_msg = MucMessage::from_message(msg, sender_jid.clone())?;
+        let room_jid = muc_msg.room_jid.clone();
+
+        debug!(
+            room = %room_jid,
+            sender = %sender_jid,
+            has_body = muc_msg.has_body(),
+            "Routing groupchat message"
+        );
+
+        // Check if this is a MUC room we manage
+        if !self.room_registry.is_muc_jid(&room_jid) {
+            debug!(
+                room = %room_jid,
+                muc_domain = %self.room_registry.muc_domain(),
+                "Message to non-MUC JID"
+            );
+            return Err(XmppError::item_not_found(Some(format!(
+                "Room {} not found",
+                room_jid
+            ))));
+        }
+
+        // Get the room data
+        let room_data = self.room_registry.get_room_data(&room_jid).ok_or_else(|| {
+            debug!(room = %room_jid, "Room not found in registry");
+            XmppError::item_not_found(Some(format!("Room {} not found", room_jid)))
+        })?;
+
+        // Read the room and broadcast the message
+        let room = room_data.read().await;
+
+        // Find the sender's nick in the room
+        let sender_nick = room.find_nick_by_real_jid(&sender_jid).ok_or_else(|| {
+            debug!(
+                sender = %sender_jid,
+                room = %room_jid,
+                "Sender is not an occupant of the room"
+            );
+            XmppError::forbidden(Some(format!(
+                "You are not an occupant of {}",
+                room_jid
+            )))
+        })?;
+
+        // Broadcast the message to all occupants
+        let outbound_messages = room.broadcast_message(sender_nick, &muc_msg.message)?;
+
+        drop(room); // Release the read lock before sending
+
+        // Send the messages to all occupants
+        // Note: In a full implementation, we'd route these to the appropriate
+        // ConnectionActors. For now, we write the messages that go to _this_
+        // connection (the sender's echo).
+        for outbound in &outbound_messages {
+            if outbound.to == sender_jid {
+                // This is the echo back to the sender
+                debug!(to = %outbound.to, "Sending message echo to sender");
+                self.stream
+                    .write_stanza(&Stanza::Message(outbound.message.clone()))
+                    .await?;
+            } else {
+                // Messages to other occupants would be routed via a connection
+                // registry or message broker. For now, log them.
+                debug!(
+                    to = %outbound.to,
+                    "Would send message to occupant (routing not yet implemented)"
+                );
+            }
+        }
+
+        debug!(
+            room = %room_jid,
+            recipient_count = outbound_messages.len(),
+            "Groupchat message processed"
+        );
+
         Ok(())
     }
 

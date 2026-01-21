@@ -10,13 +10,24 @@
 //! permission-to-affiliation mapping.
 
 pub mod affiliation;
+pub mod messages;
+pub mod room_registry;
+
+pub use messages::{
+    create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
+    OutboundMucMessage,
+};
+pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
 
 use std::collections::HashMap;
 
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, instrument};
+use xmpp_parsers::message::{Message, MessageType};
 
 use crate::types::{Affiliation, Role};
+use crate::XmppError;
 use affiliation::{AffiliationChange, AffiliationList};
 
 /// MUC room configuration.
@@ -259,5 +270,84 @@ impl MucRoom {
     /// Check if the room has at least one owner.
     pub fn has_owner(&self) -> bool {
         self.affiliation_list.has_owner()
+    }
+
+    // === Message Broadcasting ===
+
+    /// Broadcast a message to all occupants in the room.
+    ///
+    /// Per XEP-0045:
+    /// - The message is sent from the room JID with sender's nick as resource
+    /// - All occupants receive the message (including the sender as echo)
+    /// - Visitors in moderated rooms cannot send messages
+    ///
+    /// Returns a list of outbound messages to send to each occupant.
+    #[instrument(skip(self, message), fields(room = %self.room_jid))]
+    pub fn broadcast_message(
+        &self,
+        sender_nick: &str,
+        message: &Message,
+    ) -> Result<Vec<OutboundMucMessage>, XmppError> {
+        // Verify sender is an occupant
+        let sender = self.occupants.get(sender_nick).ok_or_else(|| {
+            XmppError::forbidden(Some(format!(
+                "You are not an occupant of {}",
+                self.room_jid
+            )))
+        })?;
+
+        // Check if sender has permission to speak
+        if self.config.moderated && sender.role == Role::Visitor {
+            return Err(XmppError::forbidden(Some(
+                "Visitors cannot speak in moderated rooms".to_string(),
+            )));
+        }
+
+        // Build the 'from' JID: room@domain/sender_nick
+        let from_room_jid = self
+            .room_jid
+            .with_resource_str(sender_nick)
+            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+
+        debug!(
+            sender = %sender_nick,
+            occupant_count = self.occupants.len(),
+            "Broadcasting message to room occupants"
+        );
+
+        // Create outbound messages for all occupants
+        let mut outbound = Vec::with_capacity(self.occupants.len());
+
+        for occupant in self.occupants.values() {
+            let mut broadcast_msg = message.clone();
+            broadcast_msg.type_ = MessageType::Groupchat;
+            broadcast_msg.from = Some(Jid::Full(from_room_jid.clone()));
+            broadcast_msg.to = Some(Jid::Full(occupant.real_jid.clone()));
+
+            outbound.push(OutboundMucMessage::new(
+                occupant.real_jid.clone(),
+                broadcast_msg,
+            ));
+        }
+
+        debug!(
+            message_count = outbound.len(),
+            "Created broadcast messages for occupants"
+        );
+
+        Ok(outbound)
+    }
+
+    /// Find the occupant by their real JID.
+    ///
+    /// Useful for routing incoming messages to find the sender's nick.
+    pub fn find_occupant_by_real_jid(&self, jid: &FullJid) -> Option<&Occupant> {
+        self.occupants.values().find(|o| &o.real_jid == jid)
+    }
+
+    /// Find the occupant's nick by their real JID.
+    pub fn find_nick_by_real_jid(&self, jid: &FullJid) -> Option<&str> {
+        self.find_occupant_by_real_jid(jid)
+            .map(|o| o.nick.as_str())
     }
 }
