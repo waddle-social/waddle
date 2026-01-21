@@ -107,6 +107,7 @@ pub fn did_to_jid_localpart(did: &str) -> Result<String, AuthError> {
 /// # Errors
 ///
 /// Returns `AuthError::InvalidDid` if the JID format cannot be converted back to a DID
+#[allow(dead_code)]
 pub fn jid_to_did(jid: &str) -> Result<String, AuthError> {
     // Extract localpart from JID (handle both bare@domain and just localpart)
     let localpart = jid
@@ -130,6 +131,7 @@ pub fn jid_to_did(jid: &str) -> Result<String, AuthError> {
 /// # Errors
 ///
 /// Returns `AuthError::InvalidDid` if the localpart format cannot be converted back to a DID
+#[allow(dead_code)]
 pub fn jid_localpart_to_did(localpart: &str) -> Result<String, AuthError> {
     if localpart.is_empty() {
         return Err(AuthError::InvalidDid("Empty JID localpart".to_string()));
@@ -164,6 +166,7 @@ pub fn jid_localpart_to_did(localpart: &str) -> Result<String, AuthError> {
 /// # Returns
 ///
 /// The localpart portion of the JID
+#[allow(dead_code)]
 pub fn extract_jid_localpart(jid: &str) -> Option<&str> {
     // Strip resource first (localpart@domain/resource → localpart@domain)
     let without_resource = jid.split('/').next()?;
@@ -180,6 +183,7 @@ pub fn extract_jid_localpart(jid: &str) -> Option<&str> {
 /// # Returns
 ///
 /// The domain portion of the JID
+#[allow(dead_code)]
 pub fn extract_jid_domain(jid: &str) -> Option<&str> {
     // Strip resource first (localpart@domain/resource → localpart@domain)
     let without_resource = jid.split('/').next()?;

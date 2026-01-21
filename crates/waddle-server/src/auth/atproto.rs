@@ -60,6 +60,7 @@ impl AtprotoOAuth {
     }
 
     /// Create an OAuth client with a custom DID resolver (for testing)
+    #[allow(dead_code)]
     pub fn with_did_resolver(
         client_id: &str,
         redirect_uri: &str,
@@ -80,6 +81,7 @@ impl AtprotoOAuth {
     }
 
     /// Get the DID resolver
+    #[allow(dead_code)]
     pub fn did_resolver(&self) -> &DidResolver {
         &self.did_resolver
     }

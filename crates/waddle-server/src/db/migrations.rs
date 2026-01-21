@@ -398,6 +398,7 @@ impl MigrationRunner {
     }
 
     /// Get the current schema version
+    #[allow(dead_code)]
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn current_version(&self, db: &Database) -> Result<Option<i64>, DatabaseError> {
         // Use persistent connection for in-memory databases to ensure we see the same data
@@ -411,6 +412,7 @@ impl MigrationRunner {
     }
 
     /// Internal method to get current version with a given connection
+    #[allow(dead_code)]
     async fn current_version_with_connection(&self, conn: &libsql::Connection) -> Result<Option<i64>, DatabaseError> {
         // Check if migrations table exists
         let mut rows = conn
@@ -446,6 +448,7 @@ impl MigrationRunner {
     }
 
     /// Check if there are pending migrations
+    #[allow(dead_code)]
     pub async fn has_pending(&self, db: &Database) -> Result<bool, DatabaseError> {
         let current = self.current_version(db).await?.unwrap_or(0);
         let latest = self.migrations.last().map(|m| m.version).unwrap_or(0);

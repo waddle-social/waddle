@@ -13,6 +13,7 @@ pub struct PoolConfig {
     /// Maximum number of per-waddle databases to keep in memory
     pub max_waddle_dbs: usize,
     /// Whether to run migrations on startup
+    #[allow(dead_code)]
     pub run_migrations: bool,
 }
 
@@ -176,6 +177,7 @@ impl DatabasePool {
     }
 
     /// Check if a waddle database exists
+    #[allow(dead_code)]
     pub fn waddle_db_exists(&self, waddle_id: &str) -> bool {
         if self.waddle_dbs.contains_key(waddle_id) {
             return true;
@@ -197,6 +199,7 @@ impl DatabasePool {
     }
 
     /// Get the number of currently loaded waddle databases
+    #[allow(dead_code)]
     pub fn loaded_waddle_count(&self) -> usize {
         self.waddle_dbs.len()
     }
@@ -223,6 +226,7 @@ impl DatabasePool {
     }
 
     /// Sync all databases with Turso (if configured)
+    #[allow(dead_code)]
     #[instrument(skip_all)]
     pub async fn sync_all(&self) -> Result<(), DatabaseError> {
         if self.config.turso_url.is_some() {

@@ -53,6 +53,7 @@ impl DidResolver {
     }
 
     /// Create a DID resolver with a custom PLC directory URL (for testing)
+    #[allow(dead_code)]
     pub fn with_plc_directory(plc_directory_url: &str) -> Self {
         let http_client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -293,6 +294,7 @@ impl DidDocument {
     }
 
     /// Get the handle from alsoKnownAs
+    #[allow(dead_code)]
     pub fn get_handle(&self) -> Option<String> {
         self.also_known_as
             .iter()

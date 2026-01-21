@@ -244,6 +244,7 @@ impl Database {
     }
 
     /// Sync the database with Turso (only for remote replica databases)
+    #[allow(dead_code)]
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn sync(&self) -> Result<(), DatabaseError> {
         debug!("Syncing database '{}'", self.name);
@@ -277,6 +278,7 @@ impl Database {
     }
 
     /// Execute a simple query (for testing/health checks)
+    #[allow(dead_code)]
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn execute(&self, sql: &str) -> Result<u64, DatabaseError> {
         // Use persistent connection for in-memory databases

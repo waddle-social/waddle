@@ -154,6 +154,7 @@ impl SessionManager {
     }
 
     /// Set the OAuth client for automatic token refresh
+    #[allow(dead_code)]
     pub fn set_oauth_client(&mut self, oauth_client: super::AtprotoOAuth) {
         self.oauth_client = Some(oauth_client);
     }
@@ -427,6 +428,7 @@ impl SessionManager {
     }
 
     /// Get a session by user DID
+    #[allow(dead_code)]
     #[instrument(skip(self))]
     pub async fn get_session_by_did(&self, did: &str) -> Result<Option<Session>, AuthError> {
         debug!("Looking up session for DID: {}", did);
@@ -666,6 +668,7 @@ impl SessionManager {
     }
 
     /// Delete all expired sessions
+    #[allow(dead_code)]
     #[instrument(skip(self))]
     pub async fn cleanup_expired_sessions(&self) -> Result<usize, AuthError> {
         let now = Utc::now().to_rfc3339();
