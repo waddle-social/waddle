@@ -82,9 +82,7 @@ pub fn did_to_jid_localpart(did: &str) -> Result<String, AuthError> {
         }
         // Replace dots and colons with hyphens for JID safety
         // Colons are used for path segments in did:web (e.g., did:web:example.com:path)
-        let sanitized = domain_part
-            .replace('.', "-")
-            .replace(':', "-");
+        let sanitized = domain_part.replace(['.', ':'], "-");
         Ok(format!("web-{}", sanitized))
     } else {
         Err(AuthError::InvalidDid(format!(

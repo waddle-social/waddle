@@ -53,7 +53,7 @@ pub enum DatabaseError {
 }
 
 /// Configuration for database connections
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatabaseConfig {
     /// Path to the global database file (None for in-memory)
     pub global_db_path: Option<String>,
@@ -63,17 +63,6 @@ pub struct DatabaseConfig {
     pub turso_url: Option<String>,
     /// Optional Turso auth token
     pub turso_auth_token: Option<String>,
-}
-
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        Self {
-            global_db_path: None, // In-memory by default
-            waddle_db_base_path: None,
-            turso_url: None,
-            turso_auth_token: None,
-        }
-    }
 }
 
 impl DatabaseConfig {

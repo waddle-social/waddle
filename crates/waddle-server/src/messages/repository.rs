@@ -2,6 +2,10 @@
 //!
 //! Provides CRUD operations for messages stored in per-Waddle databases.
 
+// Allow dead_code for this module - these types are defined for future use
+// but not yet integrated into the routes/handlers
+#![allow(dead_code)]
+
 use super::types::{Message, MessageCreate, MessageFlags, MessageUpdate};
 use super::MessageError;
 use crate::db::Database;
@@ -11,6 +15,7 @@ use tracing::{debug, instrument};
 use uuid::Uuid;
 
 /// Repository for message CRUD operations
+#[allow(dead_code)]
 pub struct MessageRepository {
     db: Arc<Database>,
 }

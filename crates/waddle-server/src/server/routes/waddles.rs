@@ -685,6 +685,7 @@ async fn get_user_id(db: &Database, did: &str) -> Result<i64, String> {
 }
 
 /// Insert a new waddle into the database
+#[allow(clippy::too_many_arguments)]
 async fn insert_waddle(
     db: &Database,
     id: &str,

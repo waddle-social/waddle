@@ -710,6 +710,7 @@ pub async fn delete_channel_handler(
 // === Database Helper Functions ===
 
 /// Insert a new channel into the per-waddle database
+#[allow(clippy::too_many_arguments)]
 async fn insert_channel(
     db: &Database,
     id: &str,

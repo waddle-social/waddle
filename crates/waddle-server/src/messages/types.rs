@@ -6,6 +6,10 @@
 //! - `MessageCreate`: DTO for creating new messages
 //! - `MessageUpdate`: DTO for updating existing messages
 
+// Allow dead_code for this module - these types are defined for future use
+// but not yet integrated into the routes/handlers
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +118,7 @@ impl From<i64> for MessageFlags {
 }
 
 /// Represents a message in a channel
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     /// Unique message identifier (UUID v7, time-sortable)
@@ -193,6 +198,7 @@ impl Message {
 }
 
 /// Data transfer object for creating a new message
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MessageCreate {
     /// Channel to post the message in
@@ -268,6 +274,7 @@ impl MessageCreate {
 }
 
 /// Data transfer object for updating an existing message
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct MessageUpdate {
     /// New content (if being updated)

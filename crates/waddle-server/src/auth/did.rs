@@ -356,10 +356,10 @@ fn is_valid_handle(handle: &str) -> bool {
         }
 
         // TLD must be at least 2 chars and not all digits
-        if i == segments.len() - 1 {
-            if segment.len() < 2 || segment.chars().all(|c| c.is_ascii_digit()) {
-                return false;
-            }
+        if i == segments.len() - 1
+            && (segment.len() < 2 || segment.chars().all(|c| c.is_ascii_digit()))
+        {
+            return false;
         }
     }
 
