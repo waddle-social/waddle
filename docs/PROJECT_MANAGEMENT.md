@@ -251,7 +251,7 @@ External integrations and bot platform.
 - [x] XML stanza parsing with RFC 6120 compliance (minidom/rxml)
 - [x] Error stanza generation (RFC 6120 Section 8.3)
 - [ ] OpenTelemetry traces visible
-- [ ] RFC 6120 core interop tests passing
+- [x] RFC 6120 core interop tests passing
 
 ### M1: Hello Waddle (MVP)
 - [ ] User can authenticate via Bluesky
