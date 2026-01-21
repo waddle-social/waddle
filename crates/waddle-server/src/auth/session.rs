@@ -209,8 +209,8 @@ impl SessionManager {
                 r#"
                 INSERT INTO sessions (
                     id, user_id, access_token, refresh_token, expires_at,
-                    created_at, last_used_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    created_at, last_used_at, token_endpoint, pds_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
                 libsql::params![
                     session.id.clone(),
@@ -219,7 +219,9 @@ impl SessionManager {
                     encrypted_refresh.clone(),
                     expires_at.clone(),
                     session.created_at.to_rfc3339(),
-                    session.last_used_at.to_rfc3339()
+                    session.last_used_at.to_rfc3339(),
+                    session.token_endpoint.clone(),
+                    session.pds_url.clone()
                 ],
             )
             .await
@@ -233,8 +235,8 @@ impl SessionManager {
                 r#"
                 INSERT INTO sessions (
                     id, user_id, access_token, refresh_token, expires_at,
-                    created_at, last_used_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    created_at, last_used_at, token_endpoint, pds_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
                 libsql::params![
                     session.id.clone(),
@@ -243,7 +245,9 @@ impl SessionManager {
                     encrypted_refresh,
                     expires_at,
                     session.created_at.to_rfc3339(),
-                    session.last_used_at.to_rfc3339()
+                    session.last_used_at.to_rfc3339(),
+                    session.token_endpoint.clone(),
+                    session.pds_url.clone()
                 ],
             )
             .await
@@ -354,7 +358,8 @@ impl SessionManager {
 
         let query = r#"
             SELECT s.id, s.access_token, s.refresh_token, s.expires_at,
-                   s.created_at, s.last_used_at, u.did, u.handle
+                   s.created_at, s.last_used_at, u.did, u.handle,
+                   s.token_endpoint, s.pds_url
             FROM sessions s
             JOIN users u ON s.user_id = u.id
             WHERE s.id = ?
@@ -401,7 +406,8 @@ impl SessionManager {
 
         let query = r#"
             SELECT s.id, s.access_token, s.refresh_token, s.expires_at,
-                   s.created_at, s.last_used_at, u.did, u.handle
+                   s.created_at, s.last_used_at, u.did, u.handle,
+                   s.token_endpoint, s.pds_url
             FROM sessions s
             JOIN users u ON s.user_id = u.id
             WHERE u.did = ?
@@ -470,6 +476,10 @@ impl SessionManager {
             AuthError::DatabaseError(format!("Failed to get handle: {}", e))
         })?;
 
+        // Get token_endpoint and pds_url (may be NULL for older sessions)
+        let token_endpoint: String = row.get(8).unwrap_or_default();
+        let pds_url: String = row.get(9).unwrap_or_default();
+
         // Decrypt tokens
         let access_token = self.decrypt(&encrypted_access)?;
         let refresh_token = match encrypted_refresh {
@@ -497,8 +507,8 @@ impl SessionManager {
             handle,
             access_token,
             refresh_token,
-            token_endpoint: String::new(), // Would need to store this in DB
-            pds_url: String::new(),        // Would need to store this in DB
+            token_endpoint,
+            pds_url,
             expires_at,
             created_at,
             last_used_at,
@@ -531,6 +541,71 @@ impl SessionManager {
             .map_err(|e| AuthError::DatabaseError(format!("Failed to update session: {}", e)))?;
         }
 
+        Ok(())
+    }
+
+    /// Update session tokens after a token refresh
+    ///
+    /// Updates the access_token, refresh_token, and expires_at in the database.
+    #[instrument(skip(self, tokens))]
+    pub async fn update_session_tokens(
+        &self,
+        session_id: &str,
+        tokens: &TokenResponse,
+    ) -> Result<(), AuthError> {
+        debug!("Updating tokens for session: {}", session_id);
+
+        let encrypted_access = self.encrypt(&tokens.access_token);
+        let encrypted_refresh = tokens.refresh_token.as_ref().map(|t| self.encrypt(t));
+        let expires_at = tokens
+            .expires_in
+            .map(|secs| (Utc::now() + Duration::seconds(secs as i64)).to_rfc3339());
+        let now = Utc::now().to_rfc3339();
+
+        if let Some(persistent) = self.db.persistent_connection() {
+            let conn = persistent.lock().await;
+            conn.execute(
+                r#"
+                UPDATE sessions
+                SET access_token = ?, refresh_token = COALESCE(?, refresh_token),
+                    expires_at = ?, last_used_at = ?
+                WHERE id = ?
+                "#,
+                libsql::params![
+                    encrypted_access,
+                    encrypted_refresh,
+                    expires_at,
+                    now,
+                    session_id
+                ],
+            )
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to update session tokens: {}", e)))?;
+        } else {
+            let conn = self.db.connect().map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to connect to database: {}", e))
+            })?;
+
+            conn.execute(
+                r#"
+                UPDATE sessions
+                SET access_token = ?, refresh_token = COALESCE(?, refresh_token),
+                    expires_at = ?, last_used_at = ?
+                WHERE id = ?
+                "#,
+                libsql::params![
+                    encrypted_access,
+                    encrypted_refresh,
+                    expires_at,
+                    now,
+                    session_id
+                ],
+            )
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to update session tokens: {}", e)))?;
+        }
+
+        debug!("Updated tokens for session: {}", session_id);
         Ok(())
     }
 

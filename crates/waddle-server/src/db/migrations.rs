@@ -105,13 +105,27 @@ CREATE TABLE IF NOT EXISTS waddle_members (
 CREATE INDEX IF NOT EXISTS idx_waddle_members_user_id ON waddle_members(user_id);
 "#;
 
+    /// Migration to add token_endpoint and pds_url columns to sessions table
+    pub const V0002_ADD_TOKEN_ENDPOINT: &str = r#"
+-- Add token_endpoint and pds_url columns for token refresh support
+ALTER TABLE sessions ADD COLUMN token_endpoint TEXT;
+ALTER TABLE sessions ADD COLUMN pds_url TEXT;
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
-        vec![Migration {
-            version: 1,
-            description: "Initial global schema".to_string(),
-            sql: V0001_INITIAL_SCHEMA,
-        }]
+        vec![
+            Migration {
+                version: 1,
+                description: "Initial global schema".to_string(),
+                sql: V0001_INITIAL_SCHEMA,
+            },
+            Migration {
+                version: 2,
+                description: "Add token_endpoint and pds_url to sessions".to_string(),
+                sql: V0002_ADD_TOKEN_ENDPOINT,
+            },
+        ]
     }
 }
 

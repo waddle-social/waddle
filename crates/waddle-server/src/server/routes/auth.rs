@@ -69,6 +69,7 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
         .route("/v1/auth/atproto/callback", get(callback_handler))
         .route("/v1/auth/session", get(session_info_handler))
         .route("/v1/auth/logout", post(logout_handler))
+        .route("/v1/auth/refresh", post(refresh_handler))
         .route("/v1/auth/xmpp-token", get(xmpp_token_handler))
         .with_state(auth_state)
 }
