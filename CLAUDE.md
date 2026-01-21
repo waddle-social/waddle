@@ -1,5 +1,11 @@
 # Claude Code Guidelines
 
+## Rust
+
+- Never allow unwrap
+- Never add clippy allows in general, fix the code
+- If something can be a trait, use a trait and plan for extension
+
 ## Runtime
 
 This project uses **Bun** as its JavaScript/TypeScript runtime. Prefer Bun APIs over Node.js equivalents:
