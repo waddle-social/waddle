@@ -162,7 +162,7 @@ mod tests {
         let mut msg = Message::new(Some(Jid::from(bare_jid)));
         msg.type_ = MessageType::Groupchat;
         msg.id = Some("msg-1".to_string());
-        msg.bodies.insert(Body(body.to_string()));
+        msg.bodies.insert(String::new(), Body(body.to_string()));
         msg
     }
 

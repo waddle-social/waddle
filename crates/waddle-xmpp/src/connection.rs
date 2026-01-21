@@ -3,13 +3,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use jid::{FullJid, Jid};
+use jid::FullJid;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::message::MessageType;
 
-use crate::muc::{is_muc_groupchat, MucMessage, MucRoomRegistry};
+use crate::muc::{MucMessage, MucRoomRegistry};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};

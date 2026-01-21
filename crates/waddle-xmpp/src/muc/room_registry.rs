@@ -23,7 +23,7 @@ pub struct RoomHandle {
 }
 
 /// Messages that can be sent to a MUC room.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum RoomMessage {
     /// A groupchat message to broadcast
     Broadcast(BroadcastMessage),

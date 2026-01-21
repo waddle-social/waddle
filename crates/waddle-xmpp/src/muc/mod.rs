@@ -321,8 +321,8 @@ impl MucRoom {
         for occupant in self.occupants.values() {
             let mut broadcast_msg = message.clone();
             broadcast_msg.type_ = MessageType::Groupchat;
-            broadcast_msg.from = Some(Jid::Full(from_room_jid.clone()));
-            broadcast_msg.to = Some(Jid::Full(occupant.real_jid.clone()));
+            broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
+            broadcast_msg.to = Some(Jid::from(occupant.real_jid.clone()));
 
             outbound.push(OutboundMucMessage::new(
                 occupant.real_jid.clone(),
