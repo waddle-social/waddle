@@ -77,7 +77,7 @@ impl std::fmt::Display for StanzaType {
 }
 
 /// MUC room affiliation levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Affiliation {
     /// Banned from the room
     Outcast,

@@ -180,6 +180,8 @@ impl AffiliationEntry {
 pub struct AppStateAffiliationResolver<S> {
     app_state: Arc<S>,
     mapper: PermissionMapper,
+    /// Domain for JID construction (for future use)
+    #[allow(dead_code)]
     domain: String,
 }
 
@@ -284,19 +286,17 @@ where
         }
     }
 
-    fn list_affiliations(
+    async fn list_affiliations(
         &self,
         _waddle_id: &str,
         _channel_id: &str,
         _affiliation: Affiliation,
-    ) -> impl Future<Output = Result<Vec<AffiliationEntry>, XmppError>> + Send {
+    ) -> Result<Vec<AffiliationEntry>, XmppError> {
         // This requires a list_subjects query which isn't exposed through AppState
         // For now, return an empty list - this would need to be implemented
         // when the permission service is directly accessible
-        async move {
-            // TODO: Implement when we have direct access to TupleStore.list_subjects
-            Ok(Vec::new())
-        }
+        // TODO: Implement when we have direct access to TupleStore.list_subjects
+        Ok(Vec::new())
     }
 
     #[instrument(skip(self), fields(user = %user_did, channel = %channel_id, members_only = %members_only))]
@@ -423,11 +423,9 @@ impl AffiliationList {
 
     /// Remove a JID from the affiliation list.
     pub fn remove(&mut self, jid: &BareJid) -> Option<AffiliationChange> {
-        if let Some(old) = self.affiliations.remove(jid) {
-            Some(AffiliationChange::new(jid.clone(), old, Affiliation::None))
-        } else {
-            None
-        }
+        self.affiliations
+            .remove(jid)
+            .map(|old| AffiliationChange::new(jid.clone(), old, Affiliation::None))
     }
 
     /// Get all JIDs with a specific affiliation.

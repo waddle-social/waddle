@@ -214,12 +214,13 @@ impl XmlParser {
         }
 
         // Try to parse each known stanza type
-        let stanza_patterns: &[(&str, fn(&str) -> Result<ParsedStanza, XmppError>)] = &[
-            ("<starttls", |d| parse_starttls(d)),
-            ("<auth", |d| parse_auth(d)),
-            ("<iq", |d| parse_iq_stanza(d)),
-            ("<message", |d| parse_message_stanza(d)),
-            ("<presence", |d| parse_presence_stanza(d)),
+        type StanzaParser = fn(&str) -> Result<ParsedStanza, XmppError>;
+        let stanza_patterns: &[(&str, StanzaParser)] = &[
+            ("<starttls", parse_starttls),
+            ("<auth", parse_auth),
+            ("<iq", parse_iq_stanza),
+            ("<message", parse_message_stanza),
+            ("<presence", parse_presence_stanza),
         ];
 
         for (pattern, parser) in stanza_patterns {
@@ -231,7 +232,7 @@ impl XmlParser {
                     let result = parser(stanza_xml)?;
 
                     // Remove parsed data from buffer
-                    self.buffer = data[end..].as_bytes().to_vec();
+                    self.buffer = data.as_bytes()[end..].to_vec();
                     return Ok(Some(result));
                 }
             }

@@ -212,13 +212,7 @@ impl MucRoom {
     pub fn derive_role_from_affiliation(&self, affiliation: Affiliation) -> Role {
         match affiliation {
             Affiliation::Owner | Affiliation::Admin => Role::Moderator,
-            Affiliation::Member => {
-                if self.config.moderated {
-                    Role::Participant
-                } else {
-                    Role::Participant
-                }
-            }
+            Affiliation::Member => Role::Participant,
             Affiliation::None => {
                 if self.config.moderated {
                     Role::Visitor
