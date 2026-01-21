@@ -230,13 +230,47 @@ CREATE TABLE IF NOT EXISTS attachments (
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 "#;
 
+    /// Migration to add message schema fields per message-schema.md spec
+    pub const V0002_MESSAGE_SCHEMA_UPDATES: &str = r#"
+-- Add thread_id for threading support
+ALTER TABLE messages ADD COLUMN thread_id TEXT;
+
+-- Add flags bitfield for message properties
+ALTER TABLE messages ADD COLUMN flags INTEGER DEFAULT 0;
+
+-- Add edited_at timestamp (replacing is_edited boolean)
+ALTER TABLE messages ADD COLUMN edited_at TEXT;
+
+-- Add expires_at for message TTL support
+ALTER TABLE messages ADD COLUMN expires_at TEXT;
+
+-- Make content nullable (for system messages with only embeds)
+-- Note: SQLite doesn't support ALTER COLUMN, content is already TEXT which allows NULL
+
+-- Add index for thread queries
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, created_at);
+
+-- Add index for channel + created_at (the most common query pattern)
+CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel_id, created_at DESC);
+
+-- Add index for expires_at to support TTL cleanup
+CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL;
+"#;
+
     /// Get all per-waddle migrations in order
     pub fn all() -> Vec<Migration> {
-        vec![Migration {
-            version: 1,
-            description: "Initial per-waddle schema".to_string(),
-            sql: V0001_INITIAL_SCHEMA,
-        }]
+        vec![
+            Migration {
+                version: 1,
+                description: "Initial per-waddle schema".to_string(),
+                sql: V0001_INITIAL_SCHEMA,
+            },
+            Migration {
+                version: 2,
+                description: "Add message schema fields per spec".to_string(),
+                sql: V0002_MESSAGE_SCHEMA_UPDATES,
+            },
+        ]
     }
 }
 

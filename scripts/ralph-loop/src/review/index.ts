@@ -10,10 +10,14 @@ function buildPrompt(state: State, targetDoc: string, diff: string): string {
 You are reviewing the implementation against the plan.
 
 ## The Plan
-${plan ? `**Task:** ${plan.task}
+${
+  plan
+    ? `**Task:** ${plan.task}
 
 **Acceptance Criteria:**
-${plan.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}` : "No plan available - reviewing existing changes."}
+${plan.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`
+    : "No plan available - reviewing existing changes."
+}
 
 ## Changes Made
 \`\`\`diff
@@ -27,6 +31,14 @@ ${diff || "No changes detected."}
 3. Check ${targetDoc} for any remaining incomplete tasks
 4. Run tests/builds to verify everything works
 5. Identify any issues or improvements needed
+6. Remove all AI generated slop introduced in this branch.
+
+This includes:
+- Extra comments that a human wouldn't add or is inconsistent with the rest of the file
+- Extra defensive checks or try/catch blocks that are abnormal for that area of the codebase (especially if called by trusted / validated codepaths)
+- Casts to any to get around type issues
+- Any other style that is inconsistent with the file
+
 
 ## Output Format
 
@@ -73,12 +85,20 @@ function parseReview(content: string): { feedback: string; issues: string[] } {
   };
 }
 
-function parseTransition(content: string): { nextPhase: Phase; reason: string } {
-  const match = content.match(/<transition to="(PLAN|BUILD|END|REVIEW)" reason="([^"]*)">/);
+function parseTransition(content: string): {
+  nextPhase: Phase;
+  reason: string;
+} {
+  const match = content.match(
+    /<transition to="(PLAN|BUILD|END|REVIEW)" reason="([^"]*)">/,
+  );
   if (match) {
     return { nextPhase: match[1] as Phase, reason: match[2] };
   }
-  return { nextPhase: "PLAN", reason: "No explicit transition found, starting next iteration" };
+  return {
+    nextPhase: "PLAN",
+    reason: "No explicit transition found, starting next iteration",
+  };
 }
 
 export async function run(state: State, config: Config): Promise<PhaseResult> {
@@ -127,7 +147,10 @@ export async function run(state: State, config: Config): Promise<PhaseResult> {
         if (message.subtype === "success") {
           console.log("\n[REVIEW Complete]");
         } else {
-          console.error("\n[REVIEW Error]:", message.errors?.join(", ") ?? "Unknown error");
+          console.error(
+            "\n[REVIEW Error]:",
+            message.errors?.join(", ") ?? "Unknown error",
+          );
         }
         break;
     }
