@@ -64,7 +64,7 @@ impl MucMessage {
 
     /// Get the message body text (first body if multiple languages).
     pub fn body_text(&self) -> Option<&str> {
-        self.message.bodies.iter().next().map(|b| b.0.as_str())
+        self.message.bodies.iter().next().map(|b| b.1.0.as_str())
     }
 
     /// Get the message ID.
