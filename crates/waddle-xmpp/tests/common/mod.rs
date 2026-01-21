@@ -92,6 +92,15 @@ impl AppState for MockAppState {
     fn domain(&self) -> &str {
         &self.domain
     }
+
+    fn list_relations(
+        &self,
+        _resource: &str,
+        _subject: &str,
+    ) -> impl Future<Output = Result<Vec<String>, XmppError>> + Send {
+        // Mock returns member relation by default
+        async { Ok(vec!["member".to_string()]) }
+    }
 }
 
 /// Generated TLS credentials for testing.

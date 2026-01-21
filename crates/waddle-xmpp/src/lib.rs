@@ -69,6 +69,16 @@ pub trait AppState: Send + Sync + 'static {
 
     /// Get the domain for this XMPP server.
     fn domain(&self) -> &str;
+
+    /// List all relations a subject has on an object.
+    ///
+    /// Used for deriving MUC affiliations from multiple permission relations.
+    /// Returns a list of relation names (e.g., ["owner", "member"]).
+    fn list_relations(
+        &self,
+        resource: &str,
+        subject: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
 }
 
 /// User session information.
