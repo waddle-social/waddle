@@ -32,16 +32,12 @@ pub struct XmppStream {
     client_header: Option<StreamHeader>,
 }
 
+#[derive(Default)]
 enum StreamInner {
+    #[default]
     None,
     Tcp(TcpStream),
-    Tls(TlsStream<TcpStream>),
-}
-
-impl Default for StreamInner {
-    fn default() -> Self {
-        StreamInner::None
-    }
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl XmppStream {
@@ -222,7 +218,7 @@ impl XmppStream {
             .await
             .map_err(|e| XmppError::internal(format!("TLS accept error: {}", e)))?;
 
-        self.inner = StreamInner::Tls(tls_stream);
+        self.inner = StreamInner::Tls(Box::new(tls_stream));
         self.parser.reset();
 
         debug!("TLS upgrade complete");

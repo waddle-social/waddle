@@ -25,8 +25,8 @@ pub struct RoomHandle {
 /// Messages that can be sent to a MUC room.
 #[derive(Debug)]
 pub enum RoomMessage {
-    /// A groupchat message to broadcast
-    Broadcast(BroadcastMessage),
+    /// A groupchat message to broadcast (boxed to reduce enum size)
+    Broadcast(Box<BroadcastMessage>),
     /// Request to get room info
     GetInfo(tokio::sync::oneshot::Sender<RoomInfo>),
 }
