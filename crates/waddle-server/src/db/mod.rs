@@ -22,6 +22,7 @@ mod pool;
 use libsql::{Connection, Database as LibSqlDatabase};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
@@ -101,14 +102,27 @@ impl DatabaseConfig {
 }
 
 /// Wrapper around a libsql database connection
+///
+/// For in-memory databases, we store a persistent connection to ensure data
+/// persists across multiple `connect()` calls. libSQL's `:memory:` creates
+/// a new isolated database for each connection, so we need to reuse the same
+/// connection to maintain data.
 #[derive(Clone)]
 pub struct Database {
     db: Arc<LibSqlDatabase>,
     name: String,
+    /// Persistent connection for in-memory databases.
+    /// We use a Mutex to allow shared mutable access since Connection is not Clone.
+    /// For file-based databases, this is None and we create new connections.
+    persistent_conn: Option<Arc<Mutex<Connection>>>,
 }
 
 impl Database {
     /// Create a new in-memory database
+    ///
+    /// For in-memory databases, we store a single persistent connection that is reused
+    /// for all operations. This ensures data persists across multiple `connect()` calls,
+    /// since libSQL's `:memory:` creates a new isolated database for each connection.
     #[instrument(skip_all)]
     pub async fn in_memory(name: &str) -> Result<Self, DatabaseError> {
         debug!("Creating in-memory database: {}", name);
@@ -116,9 +130,13 @@ impl Database {
             .build()
             .await?;
 
+        // Create a persistent connection for in-memory databases
+        let conn = db.connect()?;
+
         Ok(Self {
             db: Arc::new(db),
             name: name.to_string(),
+            persistent_conn: Some(Arc::new(Mutex::new(conn))),
         })
     }
 
@@ -143,6 +161,7 @@ impl Database {
         Ok(Self {
             db: Arc::new(db),
             name: name.to_string(),
+            persistent_conn: None,
         })
     }
 
@@ -176,6 +195,7 @@ impl Database {
         Ok(Self {
             db: Arc::new(db),
             name: name.to_string(),
+            persistent_conn: None,
         })
     }
 
