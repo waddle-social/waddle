@@ -26,6 +26,7 @@ pub mod auth;
 pub mod c2s;
 pub mod connection;
 pub mod mam;
+pub mod metrics;
 pub mod muc;
 pub mod presence;
 pub mod s2s;

@@ -108,13 +108,18 @@ impl<S: AppState> XmppServer<S> {
             tokio::spawn(
                 async move {
                     if let Err(e) =
-                        ConnectionActor::handle_connection(stream, peer_addr, tls_acceptor, domain, app_state)
+                        ConnectionActor::handle_connection(stream, peer_addr, tls_acceptor, domain.clone(), app_state)
                             .await
                     {
                         tracing::warn!(error = %e, "Connection error");
                     }
                 }
-                .instrument(info_span!("xmpp.connection.lifecycle", peer = %peer_addr)),
+                .instrument(info_span!(
+                    "xmpp.connection.lifecycle",
+                    client_ip = %peer_addr,
+                    transport = "tcp+tls",
+                    jid = tracing::field::Empty,  // Set later during authentication
+                )),
             );
         }
     }

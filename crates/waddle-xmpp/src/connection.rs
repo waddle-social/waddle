@@ -2,12 +2,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use jid::FullJid;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 
+use crate::metrics;
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};
@@ -88,6 +90,9 @@ impl<S: AppState> ConnectionActor<S> {
 
         debug!(jid = %jid, "Authentication successful");
 
+        // Record the JID in the parent span (xmpp.connection.lifecycle)
+        tracing::Span::current().record("jid", jid.to_string());
+
         // Stream restart after SASL
         self.stream.read_stream_header().await?;
         self.stream.send_features_bind().await?;
@@ -132,7 +137,15 @@ impl<S: AppState> ConnectionActor<S> {
     }
 
     /// Handle a single stanza.
-    #[instrument(skip(self, stanza), fields(stanza_type = %stanza.name()))]
+    #[instrument(
+        name = "xmpp.stanza.process",
+        skip(self, stanza),
+        fields(
+            stanza_type = %stanza.name(),
+            from = %self.jid.as_ref().map(|j| j.to_string()).unwrap_or_default(),
+            to = tracing::field::Empty,  // Set per-stanza when available
+        )
+    )]
     async fn handle_stanza(&mut self, stanza: Stanza) -> Result<(), XmppError> {
         match stanza {
             Stanza::Message(msg) => self.handle_message(msg).await,

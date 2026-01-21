@@ -1,0 +1,126 @@
+//! XMPP metrics for observability.
+//!
+//! These metrics follow the naming conventions from ADR-0014.
+//! Uses the global OpenTelemetry meter provider which must be initialized
+//! by the host application (waddle-server).
+
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use opentelemetry::KeyValue;
+use std::sync::OnceLock;
+
+static METER: OnceLock<Meter> = OnceLock::new();
+
+fn meter() -> &'static Meter {
+    METER.get_or_init(|| opentelemetry::global::meter("waddle-xmpp"))
+}
+
+// ============================================================================
+// Counters (Cumulative)
+// ============================================================================
+
+/// Counter for XMPP stanzas processed.
+pub fn stanzas_processed() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.stanzas.processed")
+        .with_description("Total XMPP stanzas processed")
+        .with_unit("stanza")
+        .build()
+}
+
+/// Counter for authentication attempts.
+pub fn auth_attempts() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.auth.attempts")
+        .with_description("Total authentication attempts")
+        .with_unit("attempt")
+        .build()
+}
+
+/// Counter for MUC messages.
+pub fn muc_messages() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.muc.messages")
+        .with_description("Total MUC messages sent")
+        .with_unit("message")
+        .build()
+}
+
+// ============================================================================
+// Gauges (Current State)
+// ============================================================================
+
+/// Gauge for active XMPP connections.
+pub fn connections_active() -> Gauge<i64> {
+    meter()
+        .i64_gauge("xmpp.connections.active")
+        .with_description("Current number of active XMPP connections")
+        .with_unit("connection")
+        .build()
+}
+
+/// Gauge for active MUC rooms.
+pub fn muc_rooms_active() -> Gauge<i64> {
+    meter()
+        .i64_gauge("xmpp.muc.rooms.active")
+        .with_description("Current number of active MUC rooms")
+        .with_unit("room")
+        .build()
+}
+
+/// Gauge for MUC occupants.
+pub fn muc_occupants() -> Gauge<i64> {
+    meter()
+        .i64_gauge("xmpp.muc.occupants")
+        .with_description("Current number of MUC occupants")
+        .with_unit("user")
+        .build()
+}
+
+// ============================================================================
+// Histograms (Latency)
+// ============================================================================
+
+/// Histogram for stanza processing latency.
+pub fn stanza_latency() -> Histogram<f64> {
+    meter()
+        .f64_histogram("xmpp.stanza.latency")
+        .with_description("XMPP stanza processing latency")
+        .with_unit("ms")
+        .build()
+}
+
+// ============================================================================
+// Metric Recording Helpers
+// ============================================================================
+
+/// Record a stanza being processed.
+pub fn record_stanza(stanza_type: &str, direction: &str) {
+    stanzas_processed().add(
+        1,
+        &[
+            KeyValue::new("type", stanza_type.to_string()),
+            KeyValue::new("direction", direction.to_string()),
+        ],
+    );
+}
+
+/// Record an authentication attempt.
+pub fn record_auth_attempt(mechanism: &str, success: bool) {
+    auth_attempts().add(
+        1,
+        &[
+            KeyValue::new("mechanism", mechanism.to_string()),
+            KeyValue::new("result", if success { "success" } else { "failure" }),
+        ],
+    );
+}
+
+/// Record connection count change.
+pub fn record_connection_count(count: i64, transport: &str) {
+    connections_active().record(count, &[KeyValue::new("transport", transport.to_string())]);
+}
+
+/// Record stanza processing latency in milliseconds.
+pub fn record_stanza_latency(latency_ms: f64, stanza_type: &str) {
+    stanza_latency().record(latency_ms, &[KeyValue::new("type", stanza_type.to_string())]);
+}
