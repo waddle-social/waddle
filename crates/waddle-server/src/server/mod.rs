@@ -8,6 +8,7 @@ use axum::{
     Router,
 };
 use routes::auth::AuthState;
+use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
 use routes::waddles::WaddleState;
 use serde::Serialize;
@@ -80,11 +81,17 @@ fn create_router(state: Arc<AppState>) -> Router {
     ));
     let waddles_router = routes::waddles::router(waddle_state);
 
+    // Channels router for channel CRUD operations
+    let channel_state = Arc::new(ChannelState::new(
+        state.clone(),
+        encryption_key.as_ref().map(|s| s.as_bytes()),
+    ));
+    let channels_router = routes::channels::router(channel_state);
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(detailed_health_handler))
         // Future routes will be mounted here
-        // .merge(routes::channels::router())
         // .merge(routes::messages::router())
         .with_state(state)
         // Merge auth routes after the main router has its state applied
@@ -93,6 +100,8 @@ fn create_router(state: Arc<AppState>) -> Router {
         .merge(permission_router)
         // Merge waddles routes
         .merge(waddles_router)
+        // Merge channels routes
+        .merge(channels_router)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
