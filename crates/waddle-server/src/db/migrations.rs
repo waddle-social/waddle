@@ -112,6 +112,36 @@ ALTER TABLE sessions ADD COLUMN token_endpoint TEXT;
 ALTER TABLE sessions ADD COLUMN pds_url TEXT;
 "#;
 
+    /// Migration to add permission_tuples table for Zanzibar-style permissions
+    pub const V0003_PERMISSION_TUPLES: &str = r#"
+-- Permission tuples table for Zanzibar-inspired ReBAC
+-- Stores relationships in format: object#relation@subject
+CREATE TABLE IF NOT EXISTS permission_tuples (
+    id TEXT PRIMARY KEY,
+    object_type TEXT NOT NULL,      -- waddle, channel, message, dm, role
+    object_id TEXT NOT NULL,
+    relation TEXT NOT NULL,         -- owner, admin, member, viewer, etc.
+    subject_type TEXT NOT NULL,     -- user, waddle, role
+    subject_id TEXT NOT NULL,
+    subject_relation TEXT,          -- for set-based subjects (e.g., waddle:abc#member)
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    UNIQUE(object_type, object_id, relation, subject_type, subject_id, subject_relation)
+);
+
+-- Index for looking up all relations on an object (e.g., "who has access to channel:general?")
+CREATE INDEX IF NOT EXISTS idx_tuples_object ON permission_tuples(object_type, object_id);
+
+-- Index for looking up all objects a subject has access to (e.g., "what can user:alice access?")
+CREATE INDEX IF NOT EXISTS idx_tuples_subject ON permission_tuples(subject_type, subject_id);
+
+-- Index for looking up specific relation types (e.g., "all owners of waddles")
+CREATE INDEX IF NOT EXISTS idx_tuples_relation ON permission_tuples(object_type, relation);
+
+-- Composite index for permission checks (most common query pattern)
+CREATE INDEX IF NOT EXISTS idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -124,6 +154,11 @@ ALTER TABLE sessions ADD COLUMN pds_url TEXT;
                 version: 2,
                 description: "Add token_endpoint and pds_url to sessions".to_string(),
                 sql: V0002_ADD_TOKEN_ENDPOINT,
+            },
+            Migration {
+                version: 3,
+                description: "Add permission_tuples table for Zanzibar-style ReBAC".to_string(),
+                sql: V0003_PERMISSION_TUPLES,
             },
         ]
     }
@@ -401,9 +436,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (2 migrations: initial schema + token endpoint columns)
+        // Check version (3 migrations: initial schema + token endpoint + permission tuples)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(2));
+        assert_eq!(version, Some(3));
     }
 
     #[tokio::test]
