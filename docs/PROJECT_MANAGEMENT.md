@@ -57,7 +57,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Categories | ⬜ Not Started | P2 | [RFC-0002](rfcs/0002-channels.md) |
 | **CLI TUI Client** |
 | Ratatui setup | ✅ Complete | P0 | [ADR-0003](adrs/0003-ratatui-cli.md), [Spec: CLI](specs/cli-commands.md) |
-| XMPP client integration | ⬜ Not Started | P0 | [Spec: CLI](specs/cli-commands.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| XMPP client integration | 🔄 In Progress | P0 | [Spec: CLI](specs/cli-commands.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | Layout (sidebar, messages, input) | ✅ Complete | P0 | [Spec: CLI](specs/cli-commands.md) |
 | Keybindings (Vim-style) | ✅ Complete | P0 | [Spec: CLI](specs/cli-commands.md) |
 | Markdown rendering | ⬜ Not Started | P1 | [Spec: CLI](specs/cli-commands.md) |

@@ -87,7 +87,7 @@ async fn run_app(
     }
 
     // Spawn XMPP event polling task if client was created
-    let xmpp_poll_handle = if let Some(ref mut client) = xmpp_client {
+    let _xmpp_poll_handle: Option<tokio::task::JoinHandle<()>> = if let Some(ref mut _client) = xmpp_client {
         // We need to move the client into a task, but we also need to send commands to it
         // For simplicity, we'll poll in the main loop using tokio::select!
         None
@@ -148,7 +148,7 @@ async fn handle_terminal_event(
     app: &mut App,
     xmpp_client: &mut Option<XmppClient>,
     event: Event,
-    config: &Config,
+    _config: &Config,
 ) {
     match event {
         Event::Key(key) => {
@@ -188,8 +188,10 @@ async fn handle_terminal_event(
                 KeyAction::Select => {
                     if app.focus == Focus::Sidebar {
                         // Handle channel selection and potentially join MUC room
-                        if let Some(item) = app.sidebar_select() {
-                            handle_sidebar_selection(app, xmpp_client, item.clone()).await;
+                        // Clone the item to avoid holding a borrow on app
+                        let selected_item = app.sidebar_select().cloned();
+                        if let Some(item) = selected_item {
+                            handle_sidebar_selection(app, xmpp_client, item).await;
                         }
                     }
                 }
@@ -321,7 +323,7 @@ async fn handle_sidebar_selection(
     use app::SidebarItem;
 
     match item {
-        SidebarItem::Channel { id, name } => {
+        SidebarItem::Channel { id: _, name } => {
             // Try to construct room JID and join if connected
             if let Some(ref mut client) = xmpp_client {
                 if app.connection_state.is_connected() {
@@ -338,7 +340,7 @@ async fn handle_sidebar_selection(
                 }
             }
         }
-        SidebarItem::DirectMessage { id, name } => {
+        SidebarItem::DirectMessage { id: _, name } => {
             // For DMs, we'd switch to that conversation
             app.current_view_name = name;
             app.current_room_jid = None; // DMs aren't MUC rooms
