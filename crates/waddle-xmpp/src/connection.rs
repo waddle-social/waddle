@@ -11,6 +11,10 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::message::MessageType;
 
+use crate::carbons::{
+    build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
+    is_carbons_enable, should_copy_message,
+};
 use crate::disco::{
     build_disco_info_response, build_disco_items_response, is_disco_info_query,
     is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
@@ -66,6 +70,8 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     outbound_rx: Option<OutboundReceiver>,
     /// XEP-0198 Stream Management state
     sm_state: StreamManagementState,
+    /// XEP-0280 Message Carbons enabled state
+    carbons_enabled: bool,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
@@ -100,6 +106,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             mam_storage,
             outbound_rx: None,
             sm_state: StreamManagementState::new(),
+            carbons_enabled: false,
         };
 
         actor.run(tls_acceptor).await
@@ -954,6 +961,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_mam_query(iq).await;
         }
 
+        // Check if this is a carbons enable request
+        if is_carbons_enable(&iq) {
+            return self.handle_carbons_enable(iq).await;
+        }
+
+        // Check if this is a carbons disable request
+        if is_carbons_disable(&iq) {
+            return self.handle_carbons_disable(iq).await;
+        }
+
         // Unhandled IQ - log and continue
         debug!("Received unhandled IQ stanza");
         Ok(())
@@ -1153,6 +1170,120 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         Ok(())
+    }
+
+    /// Handle XEP-0280 carbons enable request.
+    ///
+    /// Enables message carbons for this connection. When enabled, messages
+    /// sent or received by the user on any device are copied to all other
+    /// connected devices.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_carbons_enable(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        debug!("Enabling message carbons for connection");
+
+        self.carbons_enabled = true;
+
+        // Send success response
+        let response = build_carbons_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        info!("Message carbons enabled");
+        Ok(())
+    }
+
+    /// Handle XEP-0280 carbons disable request.
+    ///
+    /// Disables message carbons for this connection.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_carbons_disable(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        debug!("Disabling message carbons for connection");
+
+        self.carbons_enabled = false;
+
+        // Send success response
+        let response = build_carbons_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        info!("Message carbons disabled");
+        Ok(())
+    }
+
+    /// Send carbon copies of a sent message to other connected resources.
+    ///
+    /// When the user sends a message from this client, we forward it as a
+    /// "sent" carbon to all other connected clients that have carbons enabled.
+    async fn send_sent_carbons(&self, msg: &xmpp_parsers::message::Message) {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid,
+            None => return,
+        };
+
+        // Get the bare JID to find all resources
+        let bare_jid = sender_jid.to_bare();
+
+        // Get all other resources for this user with carbons enabled
+        let other_resources = self
+            .connection_registry
+            .get_other_resources_for_user(&bare_jid, sender_jid);
+
+        if other_resources.is_empty() {
+            return;
+        }
+
+        debug!(
+            resource_count = other_resources.len(),
+            "Sending sent carbons to other resources"
+        );
+
+        for resource_jid in other_resources {
+            let carbon = build_sent_carbon(
+                msg,
+                &bare_jid.to_string(),
+                &resource_jid.to_string(),
+            );
+
+            let stanza = Stanza::Message(carbon);
+            let _ = self.connection_registry.send_to(&resource_jid, stanza).await;
+        }
+    }
+
+    /// Send carbon copies of a received message to other connected resources.
+    ///
+    /// When the user receives a message, we forward it as a "received" carbon
+    /// to all other connected clients that have carbons enabled.
+    async fn send_received_carbons(&self, msg: &xmpp_parsers::message::Message) {
+        let recipient_jid = match &self.jid {
+            Some(jid) => jid,
+            None => return,
+        };
+
+        // Get the bare JID to find all resources
+        let bare_jid = recipient_jid.to_bare();
+
+        // Get all other resources for this user
+        let other_resources = self
+            .connection_registry
+            .get_other_resources_for_user(&bare_jid, recipient_jid);
+
+        if other_resources.is_empty() {
+            return;
+        }
+
+        debug!(
+            resource_count = other_resources.len(),
+            "Sending received carbons to other resources"
+        );
+
+        for resource_jid in other_resources {
+            let carbon = build_received_carbon(
+                msg,
+                &bare_jid.to_string(),
+                &resource_jid.to_string(),
+            );
+
+            let stanza = Stanza::Message(carbon);
+            let _ = self.connection_registry.send_to(&resource_jid, stanza).await;
+        }
     }
 }
 

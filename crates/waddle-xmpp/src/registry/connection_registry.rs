@@ -5,7 +5,7 @@
 use std::fmt;
 
 use dashmap::DashMap;
-use jid::FullJid;
+use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
@@ -169,6 +169,38 @@ impl ConnectionRegistry {
     /// Useful for debugging and monitoring.
     pub fn list_connections(&self) -> Vec<FullJid> {
         self.connections.iter().map(|r| r.key().clone()).collect()
+    }
+
+    /// Get all connected resources for a bare JID, excluding a specific full JID.
+    ///
+    /// Used by message carbons to find other connected clients for the same user.
+    /// Returns all full JIDs that match the bare JID except the excluded one.
+    pub fn get_other_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+        exclude_jid: &FullJid,
+    ) -> Vec<FullJid> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                let jid = entry.key();
+                // Match bare JID but exclude the specific full JID
+                jid.to_bare() == *bare_jid && jid != exclude_jid
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Get all connected resources for a bare JID.
+    ///
+    /// Returns all full JIDs that match the given bare JID.
+    /// Used for routing messages to all connected clients of a user.
+    pub fn get_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+        self.connections
+            .iter()
+            .filter(|entry| entry.key().to_bare() == *bare_jid)
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// Remove all stale connections (those with closed channels).
