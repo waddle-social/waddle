@@ -11,13 +11,16 @@ use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::message::MessageType;
 
 use crate::muc::{MucMessage, MucRoomRegistry};
-use crate::registry::{ConnectionRegistry, OutboundStanza};
+use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::stream::XmppStream;
 use crate::types::ConnectionState;
 use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
+
+/// Receiver for outbound stanzas to be sent to this connection.
+type OutboundReceiver = mpsc::Receiver<OutboundStanza>;
 
 /// Actor managing a single XMPP client connection.
 pub struct ConnectionActor<S: AppState> {
@@ -39,6 +42,8 @@ pub struct ConnectionActor<S: AppState> {
     room_registry: Arc<MucRoomRegistry>,
     /// Connection registry for message routing between connections
     connection_registry: Arc<ConnectionRegistry>,
+    /// Receiver for outbound stanzas (messages routed to this connection)
+    outbound_rx: Option<OutboundReceiver>,
 }
 
 impl<S: AppState> ConnectionActor<S> {
@@ -69,6 +74,7 @@ impl<S: AppState> ConnectionActor<S> {
             app_state,
             room_registry,
             connection_registry,
+            outbound_rx: None,
         };
 
         actor.run(tls_acceptor).await
@@ -126,33 +132,79 @@ impl<S: AppState> ConnectionActor<S> {
         self.jid = Some(full_jid.clone());
         self.state = ConnectionState::Established;
 
-        info!(jid = %full_jid, "Session established");
+        // Register this connection with the connection registry for message routing
+        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
+        self.connection_registry.register(full_jid.clone(), outbound_tx);
+        self.outbound_rx = Some(outbound_rx);
+
+        info!(jid = %full_jid, "Session established and registered");
 
         // Main stanza processing loop
-        self.process_stanzas().await?;
+        let result = self.process_stanzas().await;
+
+        // Unregister this connection on disconnect
+        if let Some(ref jid) = self.jid {
+            self.connection_registry.unregister(jid);
+            debug!(jid = %jid, "Unregistered connection");
+        }
 
         self.state = ConnectionState::Closed;
         info!("Connection closed");
 
-        Ok(())
+        result
     }
 
     /// Process stanzas until the connection is closed.
+    ///
+    /// This function handles both:
+    /// - Inbound stanzas from the client (messages, presence, IQs)
+    /// - Outbound stanzas routed from other connections via the registry
     async fn process_stanzas(&mut self) -> Result<(), XmppError> {
+        // Take ownership of the outbound receiver
+        let mut outbound_rx = self.outbound_rx.take();
+
         loop {
-            match self.stream.read_stanza().await {
-                Ok(Some(stanza)) => {
-                    if let Err(e) = self.handle_stanza(stanza).await {
-                        warn!(error = %e, "Error handling stanza");
+            tokio::select! {
+                // Handle inbound stanzas from the client
+                inbound_result = self.stream.read_stanza() => {
+                    match inbound_result {
+                        Ok(Some(stanza)) => {
+                            if let Err(e) = self.handle_stanza(stanza).await {
+                                warn!(error = %e, "Error handling stanza");
+                            }
+                        }
+                        Ok(None) => {
+                            // Stream closed gracefully
+                            debug!("Client closed stream");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Error reading stanza");
+                            break;
+                        }
                     }
                 }
-                Ok(None) => {
-                    // Stream closed gracefully
-                    break;
-                }
-                Err(e) => {
-                    warn!(error = %e, "Error reading stanza");
-                    break;
+
+                // Handle outbound stanzas routed from other connections
+                outbound = async {
+                    match outbound_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match outbound {
+                        Some(outbound_stanza) => {
+                            debug!("Received outbound stanza from registry");
+                            if let Err(e) = self.stream.write_stanza(&outbound_stanza.stanza).await {
+                                warn!(error = %e, "Error writing outbound stanza");
+                                // Don't break - the client might still be readable
+                            }
+                        }
+                        None => {
+                            // Outbound channel closed - this shouldn't happen during normal operation
+                            debug!("Outbound channel closed");
+                        }
+                    }
                 }
             }
         }
@@ -278,24 +330,43 @@ impl<S: AppState> ConnectionActor<S> {
 
         drop(room); // Release the read lock before sending
 
-        // Send the messages to all occupants
-        // Note: In a full implementation, we'd route these to the appropriate
-        // ConnectionActors. For now, we write the messages that go to _this_
-        // connection (the sender's echo).
+        // Send the messages to all occupants via the connection registry
         for outbound in &outbound_messages {
             if outbound.to == sender_jid {
-                // This is the echo back to the sender
+                // This is the echo back to the sender - write directly to our stream
                 debug!(to = %outbound.to, "Sending message echo to sender");
                 self.stream
                     .write_stanza(&Stanza::Message(outbound.message.clone()))
                     .await?;
             } else {
-                // Messages to other occupants would be routed via a connection
-                // registry or message broker. For now, log them.
-                debug!(
-                    to = %outbound.to,
-                    "Would send message to occupant (routing not yet implemented)"
-                );
+                // Route to other occupants via the connection registry
+                let stanza = Stanza::Message(outbound.message.clone());
+                let result = self.connection_registry.send_to(&outbound.to, stanza).await;
+
+                match result {
+                    SendResult::Sent => {
+                        debug!(to = %outbound.to, "Message routed to occupant");
+                    }
+                    SendResult::NotConnected => {
+                        debug!(
+                            to = %outbound.to,
+                            "Occupant not connected, message not delivered"
+                        );
+                        // In a full implementation, we might queue for offline delivery
+                    }
+                    SendResult::ChannelFull => {
+                        warn!(
+                            to = %outbound.to,
+                            "Occupant's channel full, message dropped"
+                        );
+                    }
+                    SendResult::ChannelClosed => {
+                        debug!(
+                            to = %outbound.to,
+                            "Occupant's channel closed, message not delivered"
+                        );
+                    }
+                }
             }
         }
 

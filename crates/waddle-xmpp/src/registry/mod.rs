@@ -18,4 +18,4 @@
 
 mod connection_registry;
 
-pub use connection_registry::{ConnectionRegistry, OutboundStanza};
+pub use connection_registry::{ConnectionRegistry, OutboundStanza, SendResult};

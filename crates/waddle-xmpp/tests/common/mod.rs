@@ -255,12 +255,16 @@ async fn run_test_server<S: AppState>(
                         let state = Arc::clone(&app_state);
                         tokio::spawn(async move {
                             // Create a MUC room registry for the test
-                        let muc_domain = format!("muc.{}", dom);
-                        let room_registry = std::sync::Arc::new(
-                            waddle_xmpp::muc::MucRoomRegistry::new(muc_domain)
-                        );
-                        let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, room_registry
+                            let muc_domain = format!("muc.{}", dom);
+                            let room_registry = std::sync::Arc::new(
+                                waddle_xmpp::muc::MucRoomRegistry::new(muc_domain)
+                            );
+                            // Create a connection registry for the test
+                            let connection_registry = std::sync::Arc::new(
+                                waddle_xmpp::registry::ConnectionRegistry::new()
+                            );
+                            let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
+                                stream, peer_addr, tls, dom, state, room_registry, connection_registry
                             ).await;
                         });
                     }
