@@ -1,13 +1,18 @@
 //! XML stream handling for XMPP connections.
 
 use jid::{BareJid, FullJid};
+use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, instrument};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::presence::Presence;
 
 use crate::connection::Stanza;
+use crate::parser::{element_to_string, ns, ParsedStanza, StreamHeader, XmlParser};
 use crate::XmppError;
 
 /// XMPP stream handler.
@@ -17,6 +22,14 @@ use crate::XmppError;
 pub struct XmppStream {
     /// The underlying stream (either TCP or TLS)
     inner: StreamInner,
+    /// Incremental XML parser
+    parser: XmlParser,
+    /// Server domain
+    domain: String,
+    /// Current stream ID
+    stream_id: String,
+    /// Parsed client stream header
+    client_header: Option<StreamHeader>,
 }
 
 enum StreamInner {
@@ -33,10 +46,24 @@ impl Default for StreamInner {
 
 impl XmppStream {
     /// Create a new XMPP stream from a TCP connection.
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: TcpStream, domain: String) -> Self {
         Self {
             inner: StreamInner::Tcp(stream),
+            parser: XmlParser::new(),
+            domain,
+            stream_id: uuid::Uuid::new_v4().to_string(),
+            client_header: None,
         }
+    }
+
+    /// Get the parsed client stream header.
+    pub fn client_header(&self) -> Option<&StreamHeader> {
+        self.client_header.as_ref()
+    }
+
+    /// Get the current stream ID.
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
     }
 
     /// Read bytes from the underlying stream.
@@ -57,51 +84,88 @@ impl XmppStream {
         }
     }
 
-    /// Read the XMPP stream header from the client.
+    /// Flush the write buffer.
+    async fn flush(&mut self) -> Result<(), XmppError> {
+        match &mut self.inner {
+            StreamInner::None => Err(XmppError::internal("Stream not initialized")),
+            StreamInner::Tcp(s) => Ok(s.flush().await?),
+            StreamInner::Tls(s) => Ok(s.flush().await?),
+        }
+    }
+
+    /// Read data into the parser buffer until we have a complete stream header.
     #[instrument(skip(self), name = "xmpp.stream.read_header")]
-    pub async fn read_stream_header(&mut self) -> Result<(), XmppError> {
-        // Read until we have a complete stream header
-        // For now, simplified implementation
+    pub async fn read_stream_header(&mut self) -> Result<StreamHeader, XmppError> {
+        // Reset parser for new stream
+        self.parser.reset();
+        self.stream_id = uuid::Uuid::new_v4().to_string();
+
         let mut buf = [0u8; 4096];
-        let n = self.read(&mut buf).await?;
 
-        if n == 0 {
-            return Err(XmppError::stream("Connection closed during header"));
+        // Read until we have a complete stream header
+        loop {
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Err(XmppError::stream("Connection closed during header"));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_stream_header() {
+                break;
+            }
         }
 
-        let data = String::from_utf8_lossy(&buf[..n]);
-        debug!(data = %data, "Received stream header");
+        let header = self.parser.take_stream_header()?;
+        header.validate()?;
 
-        // Validate it looks like an XMPP stream header
-        if !data.contains("<stream:stream") && !data.contains("<?xml") {
-            return Err(XmppError::xml_parse("Invalid stream header"));
-        }
+        debug!(
+            to = ?header.to,
+            from = ?header.from,
+            version = ?header.version,
+            "Received stream header"
+        );
+
+        self.client_header = Some(header.clone());
 
         // Send our stream header response
+        self.send_stream_header().await?;
+
+        Ok(header)
+    }
+
+    /// Send the server's stream header.
+    async fn send_stream_header(&mut self) -> Result<(), XmppError> {
         let response = format!(
             "<?xml version='1.0'?>\
             <stream:stream xmlns='jabber:client' \
             xmlns:stream='http://etherx.jabber.org/streams' \
-            id='{}' from='localhost' version='1.0'>",
-            uuid::Uuid::new_v4()
+            id='{}' from='{}' version='1.0'>",
+            self.stream_id, self.domain
         );
 
         self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
 
+        debug!(stream_id = %self.stream_id, "Sent stream header");
         Ok(())
     }
 
     /// Send stream features advertising STARTTLS.
     #[instrument(skip(self), name = "xmpp.stream.send_features_starttls")]
     pub async fn send_features_starttls(&mut self) -> Result<(), XmppError> {
-        let features = "\
-            <stream:features>\
-                <starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'>\
+        let features = format!(
+            "<stream:features>\
+                <starttls xmlns='{}'>\
                     <required/>\
                 </starttls>\
-            </stream:features>";
+            </stream:features>",
+            ns::TLS
+        );
 
         self.write_all(features.as_bytes()).await?;
+        self.flush().await?;
 
         debug!("Sent STARTTLS features");
         Ok(())
@@ -110,28 +174,39 @@ impl XmppStream {
     /// Handle STARTTLS upgrade.
     #[instrument(skip(self, tls_acceptor), name = "xmpp.stream.starttls")]
     pub async fn handle_starttls(&mut self, tls_acceptor: TlsAcceptor) -> Result<(), XmppError> {
-        // Read STARTTLS request
+        // Read until we get a starttls request
         let mut buf = [0u8; 1024];
-        let n = match &mut self.inner {
-            StreamInner::None => return Err(XmppError::internal("Stream not initialized")),
-            StreamInner::Tcp(s) => s.read(&mut buf).await?,
-            StreamInner::Tls(_) => return Err(XmppError::stream("Already using TLS")),
-        };
 
-        if n == 0 {
-            return Err(XmppError::stream("Connection closed during STARTTLS"));
+        loop {
+            let n = match &mut self.inner {
+                StreamInner::None => return Err(XmppError::internal("Stream not initialized")),
+                StreamInner::Tcp(s) => s.read(&mut buf).await?,
+                StreamInner::Tls(_) => return Err(XmppError::stream("Already using TLS")),
+            };
+
+            if n == 0 {
+                return Err(XmppError::stream("Connection closed during STARTTLS"));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_complete_stanza() {
+                if let Some(ParsedStanza::StartTls) = self.parser.next_stanza()? {
+                    break;
+                }
+            }
         }
 
-        let data = String::from_utf8_lossy(&buf[..n]);
-        if !data.contains("<starttls") {
-            return Err(XmppError::stream("Expected STARTTLS"));
-        }
+        debug!("Received STARTTLS request");
 
         // Send proceed
-        let proceed = "<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>";
+        let proceed = format!("<proceed xmlns='{}'/>", ns::TLS);
         match &mut self.inner {
             StreamInner::None => return Err(XmppError::internal("Stream not initialized")),
-            StreamInner::Tcp(s) => s.write_all(proceed.as_bytes()).await?,
+            StreamInner::Tcp(s) => {
+                s.write_all(proceed.as_bytes()).await?;
+                s.flush().await?;
+            }
             StreamInner::Tls(_) => return Err(XmppError::stream("Already using TLS")),
         }
 
@@ -148,6 +223,8 @@ impl XmppStream {
             .map_err(|e| XmppError::internal(format!("TLS accept error: {}", e)))?;
 
         self.inner = StreamInner::Tls(tls_stream);
+        self.parser.reset();
+
         debug!("TLS upgrade complete");
 
         Ok(())
@@ -156,14 +233,17 @@ impl XmppStream {
     /// Send stream features advertising SASL mechanisms.
     #[instrument(skip(self), name = "xmpp.stream.send_features_sasl")]
     pub async fn send_features_sasl(&mut self) -> Result<(), XmppError> {
-        let features = "\
-            <stream:features>\
-                <mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>\
+        let features = format!(
+            "<stream:features>\
+                <mechanisms xmlns='{}'>\
                     <mechanism>PLAIN</mechanism>\
                 </mechanisms>\
-            </stream:features>";
+            </stream:features>",
+            ns::SASL
+        );
 
         self.write_all(features.as_bytes()).await?;
+        self.flush().await?;
 
         debug!("Sent SASL features");
         Ok(())
@@ -175,37 +255,59 @@ impl XmppStream {
     #[instrument(skip(self), name = "xmpp.stream.authenticate")]
     pub async fn handle_sasl_auth(&mut self) -> Result<(BareJid, String), XmppError> {
         let mut buf = [0u8; 4096];
-        let n = self.read(&mut buf).await?;
 
-        if n == 0 {
-            return Err(XmppError::stream("Connection closed during SASL"));
+        loop {
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Err(XmppError::stream("Connection closed during SASL"));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_complete_stanza() {
+                if let Some(ParsedStanza::SaslAuth { mechanism, data }) =
+                    self.parser.next_stanza()?
+                {
+                    debug!(mechanism = %mechanism, "Received SASL auth");
+
+                    if mechanism != "PLAIN" {
+                        return Err(XmppError::auth_failed(format!(
+                            "Unsupported mechanism: {}",
+                            mechanism
+                        )));
+                    }
+
+                    let (jid, token) = self.parse_sasl_plain(&data)?;
+
+                    // Send success (actual validation happens in the connection actor)
+                    let success = format!("<success xmlns='{}'/>", ns::SASL);
+                    self.write_all(success.as_bytes()).await?;
+                    self.flush().await?;
+
+                    return Ok((jid, token));
+                }
+            }
         }
+    }
 
-        let data = String::from_utf8_lossy(&buf[..n]);
-        debug!(data = %data, "Received SASL auth");
-
-        // Parse SASL PLAIN: base64(authzid \0 authcid \0 password)
-        // For our use case: base64(jid \0 token)
-        let (jid, token) = self.parse_sasl_plain(&data)?;
-
-        // Send success (actual validation happens in the connection actor)
-        let success = "<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
-        self.write_all(success.as_bytes()).await?;
-
-        Ok((jid, token))
+    /// Send SASL failure response.
+    pub async fn send_sasl_failure(&mut self, condition: &str) -> Result<(), XmppError> {
+        let failure = format!(
+            "<failure xmlns='{}'><{}/></failure>",
+            ns::SASL, condition
+        );
+        self.write_all(failure.as_bytes()).await?;
+        self.flush().await?;
+        Ok(())
     }
 
     /// Parse SASL PLAIN authentication data.
     fn parse_sasl_plain(&self, data: &str) -> Result<(BareJid, String), XmppError> {
-        // Extract base64 content
-        let start = data.find('>').ok_or_else(|| XmppError::xml_parse("Invalid SASL auth"))? + 1;
-        let end = data.rfind('<').ok_or_else(|| XmppError::xml_parse("Invalid SASL auth"))?;
-        let b64 = &data[start..end];
-
         // Decode base64
         use base64::prelude::*;
         let decoded = BASE64_STANDARD
-            .decode(b64)
+            .decode(data.trim())
             .map_err(|e| XmppError::auth_failed(format!("Invalid base64: {}", e)))?;
 
         // Parse \0-separated parts
@@ -238,15 +340,18 @@ impl XmppStream {
     /// Send stream features for resource binding.
     #[instrument(skip(self), name = "xmpp.stream.send_features_bind")]
     pub async fn send_features_bind(&mut self) -> Result<(), XmppError> {
-        let features = "\
-            <stream:features>\
-                <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
-                <session xmlns='urn:ietf:params:xml:ns:xmpp-session'>\
+        let features = format!(
+            "<stream:features>\
+                <bind xmlns='{}'/>\
+                <session xmlns='{}'>\
                     <optional/>\
                 </session>\
-            </stream:features>";
+            </stream:features>",
+            ns::BIND, ns::SESSION
+        );
 
         self.write_all(features.as_bytes()).await?;
+        self.flush().await?;
 
         debug!("Sent bind features");
         Ok(())
@@ -256,94 +361,166 @@ impl XmppStream {
     #[instrument(skip(self), name = "xmpp.stream.bind")]
     pub async fn handle_bind(&mut self, bare_jid: &BareJid) -> Result<FullJid, XmppError> {
         let mut buf = [0u8; 4096];
-        let n = self.read(&mut buf).await?;
 
-        if n == 0 {
-            return Err(XmppError::stream("Connection closed during bind"));
+        loop {
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Err(XmppError::stream("Connection closed during bind"));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_complete_stanza() {
+                if let Some(ParsedStanza::Iq(element)) = self.parser.next_stanza()? {
+                    debug!("Received bind request");
+
+                    // Extract IQ attributes
+                    let id = element.attr("id").unwrap_or("bind_1").to_string();
+                    let iq_type = element.attr("type").unwrap_or("");
+
+                    if iq_type != "set" {
+                        return Err(XmppError::stream("Bind must be an IQ set"));
+                    }
+
+                    // Look for bind element and optional resource
+                    let resource = element
+                        .get_child("bind", ns::BIND)
+                        .and_then(|bind| bind.get_child("resource", ns::BIND))
+                        .map(|r| r.text())
+                        .unwrap_or_else(|| {
+                            format!("waddle-{}", &uuid::Uuid::new_v4().to_string()[..8])
+                        });
+
+                    let full_jid = bare_jid
+                        .with_resource_str(&resource)
+                        .map_err(|e| XmppError::stream(format!("Invalid resource: {}", e)))?;
+
+                    // Send bind result
+                    let result = format!(
+                        "<iq type='result' id='{}'>\
+                            <bind xmlns='{}'>\
+                                <jid>{}</jid>\
+                            </bind>\
+                        </iq>",
+                        id, ns::BIND, full_jid
+                    );
+
+                    self.write_all(result.as_bytes()).await?;
+                    self.flush().await?;
+
+                    debug!(jid = %full_jid, "Resource bound");
+                    return Ok(full_jid);
+                }
+            }
         }
-
-        let data = String::from_utf8_lossy(&buf[..n]);
-        debug!(data = %data, "Received bind request");
-
-        // Extract requested resource or generate one
-        let resource = if data.contains("<resource>") {
-            // Parse resource from request
-            let start = data.find("<resource>").unwrap() + 10;
-            let end = data.find("</resource>").unwrap_or(start);
-            data[start..end].to_string()
-        } else {
-            // Generate random resource
-            format!("waddle-{}", &uuid::Uuid::new_v4().to_string()[..8])
-        };
-
-        let full_jid = bare_jid.with_resource_str(&resource)
-            .map_err(|e| XmppError::stream(format!("Invalid resource: {}", e)))?;
-
-        // Send bind result
-        // Extract the IQ id from the request
-        let id = if let Some(start) = data.find("id='") {
-            let start = start + 4;
-            let end = data[start..].find('\'').map(|i| start + i).unwrap_or(start);
-            &data[start..end]
-        } else {
-            "bind_1"
-        };
-
-        let result = format!(
-            "<iq type='result' id='{}'>\
-                <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
-                    <jid>{}</jid>\
-                </bind>\
-            </iq>",
-            id, full_jid
-        );
-
-        self.write_all(result.as_bytes()).await?;
-
-        debug!(jid = %full_jid, "Resource bound");
-        Ok(full_jid)
     }
 
     /// Read the next stanza from the stream.
     #[instrument(skip(self), name = "xmpp.stanza.read")]
     pub async fn read_stanza(&mut self) -> Result<Option<Stanza>, XmppError> {
         let mut buf = [0u8; 8192];
-        let n = self.read(&mut buf).await?;
 
-        if n == 0 {
-            return Ok(None); // Connection closed
+        loop {
+            // First check if we already have a complete stanza buffered
+            if self.parser.has_complete_stanza() {
+                return self.process_parsed_stanza();
+            }
+
+            // Read more data
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Ok(None); // Connection closed
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            // Check again
+            if self.parser.has_complete_stanza() {
+                return self.process_parsed_stanza();
+            }
         }
+    }
 
-        let data = String::from_utf8_lossy(&buf[..n]);
-        debug!(data = %data, "Received stanza data");
-
-        // Check for stream close
-        if data.contains("</stream:stream>") {
-            return Ok(None);
+    /// Process a parsed stanza from the parser.
+    fn process_parsed_stanza(&mut self) -> Result<Option<Stanza>, XmppError> {
+        match self.parser.next_stanza()? {
+            Some(ParsedStanza::StreamEnd) => Ok(None),
+            Some(ParsedStanza::Message(element)) => {
+                let msg = element_to_message(element)?;
+                Ok(Some(Stanza::Message(msg)))
+            }
+            Some(ParsedStanza::Presence(element)) => {
+                let pres = element_to_presence(element)?;
+                Ok(Some(Stanza::Presence(pres)))
+            }
+            Some(ParsedStanza::Iq(element)) => {
+                let iq = element_to_iq(element)?;
+                Ok(Some(Stanza::Iq(iq)))
+            }
+            Some(_) => {
+                // Other stanza types (shouldn't happen at this point)
+                debug!("Unexpected stanza type in established session");
+                Ok(None)
+            }
+            None => Ok(None),
         }
+    }
 
-        // TODO: Proper XML parsing with xmpp-parsers
-        // For now, determine stanza type by tag
-        if data.contains("<message") {
-            // Parse message stanza
-            // TODO: Proper XML parsing with xmpp-parsers
-            Ok(Some(Stanza::Message(xmpp_parsers::message::Message::new(None))))
-        } else if data.contains("<presence") {
-            // TODO: Proper XML parsing with xmpp-parsers
-            Ok(Some(Stanza::Presence(xmpp_parsers::presence::Presence::new(
-                xmpp_parsers::presence::Type::None,
-            ))))
-        } else if data.contains("<iq") {
-            // TODO: Proper XML parsing with xmpp-parsers
-            // For now, return a placeholder IQ using ping
-            Ok(Some(Stanza::Iq(xmpp_parsers::iq::Iq::from_get(
-                "placeholder",
-                xmpp_parsers::ping::Ping,
-            ))))
-        } else {
-            debug!("Unknown stanza type, ignoring");
-            // Return None and let the caller retry
-            Ok(None)
+    /// Write a stanza to the stream.
+    pub async fn write_stanza(&mut self, stanza: &Stanza) -> Result<(), XmppError> {
+        let xml = stanza_to_xml(stanza)?;
+        self.write_all(xml.as_bytes()).await?;
+        self.flush().await?;
+        Ok(())
+    }
+
+    /// Write raw XML to the stream.
+    pub async fn write_raw(&mut self, xml: &str) -> Result<(), XmppError> {
+        self.write_all(xml.as_bytes()).await?;
+        self.flush().await?;
+        Ok(())
+    }
+
+    /// Close the stream gracefully.
+    pub async fn close(&mut self) -> Result<(), XmppError> {
+        self.write_all(b"</stream:stream>").await?;
+        self.flush().await?;
+        Ok(())
+    }
+}
+
+/// Convert a minidom Element to an xmpp_parsers Message.
+fn element_to_message(element: Element) -> Result<Message, XmppError> {
+    Message::try_from(element).map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))
+}
+
+/// Convert a minidom Element to an xmpp_parsers Presence.
+fn element_to_presence(element: Element) -> Result<Presence, XmppError> {
+    Presence::try_from(element)
+        .map_err(|e| XmppError::xml_parse(format!("Invalid presence: {:?}", e)))
+}
+
+/// Convert a minidom Element to an xmpp_parsers Iq.
+fn element_to_iq(element: Element) -> Result<Iq, XmppError> {
+    Iq::try_from(element).map_err(|e| XmppError::xml_parse(format!("Invalid iq: {:?}", e)))
+}
+
+/// Convert a Stanza to XML string.
+fn stanza_to_xml(stanza: &Stanza) -> Result<String, XmppError> {
+    match stanza {
+        Stanza::Message(msg) => {
+            let element: Element = msg.clone().into();
+            element_to_string(&element)
+        }
+        Stanza::Presence(pres) => {
+            let element: Element = pres.clone().into();
+            element_to_string(&element)
+        }
+        Stanza::Iq(iq) => {
+            let element: Element = iq.clone().into();
+            element_to_string(&element)
         }
     }
 }

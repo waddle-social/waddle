@@ -40,6 +40,8 @@ kameo = "0.15"
 tokio-xmpp = "4.0"
 jid = "0.10"
 xmpp-parsers = "0.21"
+minidom = "0.16"
+rxml = "0.12"
 dashmap = "6.0"
 
 # XMPP Client

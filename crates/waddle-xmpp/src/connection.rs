@@ -25,7 +25,7 @@ pub struct ConnectionActor<S: AppState> {
     /// Bound JID with resource
     jid: Option<FullJid>,
     /// Server domain
-    _domain: String,
+    domain: String,
     /// Shared application state
     app_state: Arc<S>,
 }
@@ -48,11 +48,11 @@ impl<S: AppState> ConnectionActor<S> {
 
         let mut actor = Self {
             _peer_addr: peer_addr,
-            stream: XmppStream::new(tcp_stream),
+            stream: XmppStream::new(tcp_stream, domain.clone()),
             state: ConnectionState::Initial,
             session: None,
             jid: None,
-            _domain: domain,
+            domain,
             app_state,
         };
 
@@ -63,7 +63,15 @@ impl<S: AppState> ConnectionActor<S> {
     async fn run(&mut self, tls_acceptor: TlsAcceptor) -> Result<(), XmppError> {
         // Wait for initial stream header
         self.state = ConnectionState::Negotiating;
-        self.stream.read_stream_header().await?;
+        let header = self.stream.read_stream_header().await?;
+
+        // Validate the 'to' attribute matches our domain
+        if let Some(ref to) = header.to {
+            if to != &self.domain {
+                debug!(expected = %self.domain, got = %to, "Domain mismatch in stream header");
+                // Continue anyway, but log it
+            }
+        }
 
         // Send stream features (STARTTLS required)
         self.stream.send_features_starttls().await?;
@@ -74,7 +82,7 @@ impl<S: AppState> ConnectionActor<S> {
 
         // TLS established, send new features (SASL)
         self.state = ConnectionState::TlsEstablished;
-        self.stream.read_stream_header().await?;
+        let _header = self.stream.read_stream_header().await?;
         self.stream.send_features_sasl().await?;
 
         // Handle SASL authentication
@@ -82,7 +90,10 @@ impl<S: AppState> ConnectionActor<S> {
         let (jid, token) = self.stream.handle_sasl_auth().await?;
 
         // Validate session with app state
-        let session = self.app_state.validate_session(&jid.clone().into(), &token).await?;
+        let session = self
+            .app_state
+            .validate_session(&jid.clone().into(), &token)
+            .await?;
         self.session = Some(session);
         self.state = ConnectionState::Authenticated;
 
@@ -92,7 +103,7 @@ impl<S: AppState> ConnectionActor<S> {
         tracing::Span::current().record("jid", jid.to_string());
 
         // Stream restart after SASL
-        self.stream.read_stream_header().await?;
+        let _header = self.stream.read_stream_header().await?;
         self.stream.send_features_bind().await?;
 
         // Resource binding
@@ -152,13 +163,19 @@ impl<S: AppState> ConnectionActor<S> {
         }
     }
 
-    async fn handle_message(&mut self, _msg: xmpp_parsers::message::Message) -> Result<(), XmppError> {
+    async fn handle_message(
+        &mut self,
+        _msg: xmpp_parsers::message::Message,
+    ) -> Result<(), XmppError> {
         // TODO: Implement message routing
         debug!("Received message stanza");
         Ok(())
     }
 
-    async fn handle_presence(&mut self, _pres: xmpp_parsers::presence::Presence) -> Result<(), XmppError> {
+    async fn handle_presence(
+        &mut self,
+        _pres: xmpp_parsers::presence::Presence,
+    ) -> Result<(), XmppError> {
         // TODO: Implement presence handling
         debug!("Received presence stanza");
         Ok(())
@@ -172,6 +189,7 @@ impl<S: AppState> ConnectionActor<S> {
 }
 
 /// Parsed stanza types.
+#[derive(Debug, Clone)]
 pub enum Stanza {
     Message(xmpp_parsers::message::Message),
     Presence(xmpp_parsers::presence::Presence),

@@ -19,6 +19,8 @@ kameo = { workspace = true }
 tokio-xmpp = { workspace = true }
 jid = { workspace = true }
 xmpp-parsers = { workspace = true }
+minidom = { workspace = true }
+rxml = { workspace = true }
 
 # Concurrent Data Structures
 dashmap = { workspace = true }

@@ -28,6 +28,7 @@ pub mod connection;
 pub mod mam;
 pub mod metrics;
 pub mod muc;
+pub mod parser;
 pub mod presence;
 pub mod s2s;
 pub mod server;
@@ -36,7 +37,11 @@ pub mod stream;
 mod error;
 mod types;
 
-pub use error::XmppError;
+pub use error::{
+    generate_iq_error, generate_stream_error, stream_errors, StanzaErrorCondition,
+    StanzaErrorType, XmppError,
+};
+pub use parser::{ns, StreamHeader};
 pub use server::{XmppServer, XmppServerConfig};
 pub use types::*;
 
