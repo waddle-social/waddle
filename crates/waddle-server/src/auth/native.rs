@@ -150,24 +150,9 @@ impl NativeUserStore {
                 ),
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to insert user: {}", e)))?;
+            .map_err(db_err)?;
 
-        // Get the user ID from the last insert
-        let mut rows = conn.as_ref()
-            .query(
-                "SELECT id FROM native_users WHERE username = ? AND domain = ?",
-                (request.username.as_str(), request.domain.as_str()),
-            )
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user id: {}", e)))?;
-
-        let user_id: i64 = rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read user id: {}", e)))?
-            .ok_or_else(|| AuthError::DatabaseError("User not found after insert".to_string()))?
-            .get(0)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to get user id: {}", e)))?;
+        let user_id = conn.as_ref().last_insert_rowid();
 
         debug!(
             username = %request.username,
@@ -189,20 +174,12 @@ impl NativeUserStore {
                 (username, domain),
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user: {}", e)))?;
+            .map_err(db_err)?;
 
-        let exists = rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read result: {}", e)))?
-            .is_some();
-
-        Ok(exists)
+        Ok(rows.next().await.map_err(db_err)?.is_some())
     }
 
     /// Get SCRAM credentials for a user.
-    ///
-    /// Used during SCRAM-SHA-256 authentication to retrieve the stored keys.
     pub async fn get_scram_credentials(
         &self,
         username: &str,
@@ -220,32 +197,16 @@ impl NativeUserStore {
                 (username, domain),
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to query credentials: {}", e)))?;
+            .map_err(db_err)?;
 
-        match rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read result: {}", e)))?
-        {
+        match rows.next().await.map_err(db_err)? {
             Some(row) => {
-                let salt_b64: String = row
-                    .get(0)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to get salt: {}", e)))?;
-                let iterations: i64 = row
-                    .get(1)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to get iterations: {}", e)))?;
-                let stored_key: Vec<u8> = row
-                    .get(2)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to get stored_key: {}", e)))?;
-                let server_key: Vec<u8> = row
-                    .get(3)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to get server_key: {}", e)))?;
-
+                let iterations: i64 = row.get(1).map_err(db_err)?;
                 Ok(Some(ScramCredentials {
-                    stored_key,
-                    server_key,
-                    salt_b64,
+                    salt_b64: row.get(0).map_err(db_err)?,
                     iterations: iterations as u32,
+                    stored_key: row.get(2).map_err(db_err)?,
+                    server_key: row.get(3).map_err(db_err)?,
                 }))
             }
             None => Ok(None),
@@ -253,9 +214,6 @@ impl NativeUserStore {
     }
 
     /// Verify a password for a native user using Argon2id.
-    ///
-    /// This is an alternative to SCRAM authentication for scenarios where
-    /// direct password verification is needed.
     pub async fn verify_password(
         &self,
         username: &str,
@@ -270,26 +228,14 @@ impl NativeUserStore {
                 (username, domain),
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user: {}", e)))?;
+            .map_err(db_err)?;
 
-        match rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read result: {}", e)))?
-        {
+        match rows.next().await.map_err(db_err)? {
             Some(row) => {
-                let hash_str: String = row
-                    .get(0)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to get hash: {}", e)))?;
-
+                let hash_str: String = row.get(0).map_err(db_err)?;
                 let parsed_hash = PasswordHash::new(&hash_str)
                     .map_err(|e| AuthError::CryptoError(format!("Invalid password hash: {}", e)))?;
-
-                let argon2 = Argon2::default();
-                match argon2.verify_password(password.as_bytes(), &parsed_hash) {
-                    Ok(()) => Ok(true),
-                    Err(_) => Ok(false),
-                }
+                Ok(Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok())
             }
             None => Ok(false),
         }
@@ -309,29 +255,23 @@ impl NativeUserStore {
                 (username, domain),
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user: {}", e)))?;
+            .map_err(db_err)?;
 
-        match rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read result: {}", e)))?
-        {
+        match rows.next().await.map_err(db_err)? {
             Some(row) => {
+                let iterations: i64 = row.get(5).map_err(db_err)?;
                 let user = NativeUser {
-                    id: row.get(0).map_err(|e| AuthError::DatabaseError(format!("Failed to get id: {}", e)))?,
-                    username: row.get(1).map_err(|e| AuthError::DatabaseError(format!("Failed to get username: {}", e)))?,
-                    domain: row.get(2).map_err(|e| AuthError::DatabaseError(format!("Failed to get domain: {}", e)))?,
-                    password_hash: row.get(3).map_err(|e| AuthError::DatabaseError(format!("Failed to get password_hash: {}", e)))?,
-                    salt: row.get(4).map_err(|e| AuthError::DatabaseError(format!("Failed to get salt: {}", e)))?,
-                    iterations: {
-                        let i: i64 = row.get(5).map_err(|e| AuthError::DatabaseError(format!("Failed to get iterations: {}", e)))?;
-                        i as u32
-                    },
-                    stored_key: row.get(6).map_err(|e| AuthError::DatabaseError(format!("Failed to get stored_key: {}", e)))?,
-                    server_key: row.get(7).map_err(|e| AuthError::DatabaseError(format!("Failed to get server_key: {}", e)))?,
+                    id: row.get(0).map_err(db_err)?,
+                    username: row.get(1).map_err(db_err)?,
+                    domain: row.get(2).map_err(db_err)?,
+                    password_hash: row.get(3).map_err(db_err)?,
+                    salt: row.get(4).map_err(db_err)?,
+                    iterations: iterations as u32,
+                    stored_key: row.get(6).map_err(db_err)?,
+                    server_key: row.get(7).map_err(db_err)?,
                     email: row.get(8).ok(),
-                    created_at: row.get(9).map_err(|e| AuthError::DatabaseError(format!("Failed to get created_at: {}", e)))?,
-                    updated_at: row.get(10).map_err(|e| AuthError::DatabaseError(format!("Failed to get updated_at: {}", e)))?,
+                    created_at: row.get(9).map_err(db_err)?,
+                    updated_at: row.get(10).map_err(db_err)?,
                 };
                 Ok(Some(user))
             }
@@ -440,6 +380,11 @@ fn generate_scram_salt() -> Vec<u8> {
     let mut salt = vec![0u8; 16];
     rand::rng().fill(&mut salt[..]);
     salt
+}
+
+/// Helper to convert libsql errors to AuthError.
+fn db_err<E: std::fmt::Display>(e: E) -> AuthError {
+    AuthError::DatabaseError(e.to_string())
 }
 
 /// Validate a username for JID localpart compliance.

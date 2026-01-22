@@ -1,54 +1,17 @@
 //! XEP-0077: In-Band Registration
 //!
-//! This module implements XEP-0077 which allows users to register accounts
-//! directly through the XMPP connection, before authentication.
-//!
-//! ## Protocol Flow
-//!
-//! 1. Client requests registration form:
-//!    ```xml
-//!    <iq type='get' id='reg1'>
-//!      <query xmlns='jabber:iq:register'/>
-//!    </iq>
-//!    ```
-//!
-//! 2. Server responds with required fields:
-//!    ```xml
-//!    <iq type='result' id='reg1'>
-//!      <query xmlns='jabber:iq:register'>
-//!        <instructions>Choose a username and password.</instructions>
-//!        <username/>
-//!        <password/>
-//!        <email/>
-//!      </query>
-//!    </iq>
-//!    ```
-//!
-//! 3. Client submits registration:
-//!    ```xml
-//!    <iq type='set' id='reg2'>
-//!      <query xmlns='jabber:iq:register'>
-//!        <username>alice</username>
-//!        <password>secret</password>
-//!        <email>alice@example.com</email>
-//!      </query>
-//!    </iq>
-//!    ```
-//!
-//! 4. Server responds with success or error.
-//!
-//! ## Security Considerations
-//!
-//! - Registration should only be allowed over TLS connections
-//! - Rate limiting should be implemented to prevent abuse
-//! - Password requirements should be enforced
+//! Allows users to register accounts directly through the XMPP connection,
+//! before authentication. Supports get (form request) and set (submit) IQs.
 
 use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 
-/// Namespace for XEP-0077 In-Band Registration
+/// Namespace for XEP-0077 In-Band Registration IQ queries.
 pub const NS_REGISTER: &str = "jabber:iq:register";
+
+/// Namespace for XEP-0077 stream feature advertisement (per Section 8).
+pub const NS_REGISTER_FEATURE: &str = "http://jabber.org/features/iq-register";
 
 /// Registration request parsed from an IQ stanza.
 #[derive(Debug, Clone)]
@@ -250,9 +213,9 @@ pub fn build_registration_error(request_id: &str, error: &RegistrationError) -> 
 
 /// Build registration feature advertisement for stream features.
 ///
-/// This is included in stream features to indicate that registration is available.
+/// Per XEP-0077 Section 8, this uses the feature namespace, not the IQ namespace.
 pub fn build_registration_feature() -> String {
-    format!("<register xmlns='{}'/>", NS_REGISTER)
+    format!("<register xmlns='{}'/>", NS_REGISTER_FEATURE)
 }
 
 /// Escape XML special characters.
@@ -403,7 +366,7 @@ mod tests {
     fn test_build_registration_feature() {
         let feature = build_registration_feature();
 
-        assert!(feature.contains(&format!("xmlns='{}'", NS_REGISTER)));
+        assert!(feature.contains(&format!("xmlns='{}'", NS_REGISTER_FEATURE)));
         assert!(feature.contains("<register"));
     }
 
