@@ -6,7 +6,8 @@
 //! - Stream negotiation for S2S
 //! - Server dialback (XEP-0220)
 //! - DNS SRV record discovery for `_xmpp-server._tcp.{domain}`
-//! - Remote JID routing - planned
+//! - Connection pooling for outbound connections
+//! - Automatic connection health checking and cleanup
 //!
 //! # Architecture
 //!
@@ -15,15 +16,43 @@
 //! - Stream namespace is `jabber:server` instead of `jabber:client`
 //! - Both inbound and outbound connection pools are maintained
 //!
+//! ## Outbound Connection Pool
+//!
+//! The outbound connection pool (`S2sConnectionPool`) manages connections to remote
+//! XMPP servers. It provides:
+//! - Connection reuse (multiple requests to same domain share connections)
+//! - DNS SRV resolution for target discovery
+//! - Automatic health checking and cleanup of idle/unhealthy connections
+//! - Exponential backoff for failed connection attempts
+//!
 //! # Usage
 //!
 //! S2S is enabled by setting `WADDLE_XMPP_S2S_ENABLED=true` environment variable
 //! and optionally `WADDLE_XMPP_S2S_ADDR` to customize the bind address.
+//!
+//! ## Outbound Connections
+//!
+//! ```ignore
+//! use waddle_xmpp::s2s::pool::{S2sConnectionPool, S2sPoolConfig};
+//! use waddle_xmpp::s2s::outbound::S2sOutboundConfig;
+//!
+//! // Create pool configuration
+//! let pool_config = S2sPoolConfig::default();
+//! let outbound_config = S2sOutboundConfig::new(tls_connector, dialback_secret);
+//!
+//! // Create the connection pool
+//! let pool = S2sConnectionPool::new(pool_config, "waddle.social".to_string(), outbound_config).await?;
+//!
+//! // Get a connection to a remote server
+//! let conn = pool.get_or_connect("example.com").await?;
+//! ```
 
 pub mod connection;
 pub mod dialback;
 pub mod dns;
 pub mod listener;
+pub mod outbound;
+pub mod pool;
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -31,6 +60,11 @@ pub use connection::S2sConnectionActor;
 pub use dialback::{DialbackKey, DialbackResult, DialbackState, NS_DIALBACK, NS_DIALBACK_FEATURES};
 pub use dns::{DnsError, ResolvedTarget, SrvResolver, DEFAULT_S2S_PORT};
 pub use listener::{S2sListener, S2sListenerConfig};
+pub use outbound::{OutboundConnectionError, OutboundState, S2sOutboundConfig, S2sOutboundConnection};
+pub use pool::{
+    PoolConnectionHandle, PooledConnectionState, RetryConfig, S2sConnectionPool, S2sPoolConfig,
+    S2sPoolError, S2sPoolMetrics,
+};
 
 /// S2S connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

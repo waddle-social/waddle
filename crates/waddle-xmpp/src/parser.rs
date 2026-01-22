@@ -234,6 +234,10 @@ impl XmlParser {
         type StanzaParser = fn(&str) -> Result<ParsedStanza, XmppError>;
         let stanza_patterns: &[(&str, StanzaParser)] = &[
             ("<starttls", parse_starttls),
+            ("<proceed", parse_tls_proceed),
+            ("<failure", parse_tls_failure),
+            ("<stream:features", parse_stream_features),
+            ("<stream:error", parse_stream_error),
             ("<auth", parse_auth),
             ("<response", parse_sasl_response),  // SASL response for SCRAM
             ("<iq", parse_iq_stanza),
@@ -316,6 +320,28 @@ fn find_stanza_end(data: &str, start: usize, tag_name: &str) -> Option<usize> {
 pub enum ParsedStanza {
     /// STARTTLS request
     StartTls,
+    /// TLS proceed response (server accepts STARTTLS)
+    TlsProceed,
+    /// TLS failure response (server rejects STARTTLS)
+    TlsFailure,
+    /// Stream features
+    Features {
+        /// Whether STARTTLS is advertised
+        starttls: bool,
+        /// Whether STARTTLS is required
+        starttls_required: bool,
+        /// Whether dialback is advertised
+        dialback: bool,
+        /// SASL mechanisms available
+        sasl_mechanisms: Vec<String>,
+    },
+    /// Stream error
+    StreamError {
+        /// Error condition
+        condition: String,
+        /// Optional error text
+        text: Option<String>,
+    },
     /// SASL auth request with mechanism and base64 data
     SaslAuth { mechanism: String, data: String },
     /// SASL response (for multi-step auth like SCRAM) with base64 data
