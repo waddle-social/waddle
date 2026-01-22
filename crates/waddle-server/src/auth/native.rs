@@ -18,7 +18,7 @@ use argon2::{
     Argon2,
 };
 use base64::prelude::*;
-use tracing::{debug, warn};
+use tracing::debug;
 use waddle_xmpp::ScramCredentials;
 
 use crate::db::Database;

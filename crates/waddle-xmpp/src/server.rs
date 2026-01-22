@@ -32,6 +32,13 @@ pub struct XmppServerConfig {
     pub domain: String,
     /// MAM database path (None for in-memory, Some(path) for file-based)
     pub mam_db_path: Option<PathBuf>,
+    /// Whether native JID authentication is enabled (default: true)
+    /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
+    pub native_auth_enabled: bool,
+    /// Whether XEP-0077 In-Band Registration is enabled (default: false)
+    /// When enabled, users can register new accounts before authentication.
+    /// Security note: Enable with caution on public servers.
+    pub registration_enabled: bool,
 }
 
 impl Default for XmppServerConfig {
@@ -43,6 +50,8 @@ impl Default for XmppServerConfig {
             tls_key_path: "certs/server.key".to_string(),
             domain: "localhost".to_string(),
             mam_db_path: None, // In-memory by default
+            native_auth_enabled: true,
+            registration_enabled: false, // Disabled by default for security
         }
     }
 }

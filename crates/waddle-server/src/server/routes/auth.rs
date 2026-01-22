@@ -188,6 +188,13 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
         AuthError::HttpError(_) => (StatusCode::BAD_GATEWAY, "http_error"),
         AuthError::DnsError(_) => (StatusCode::BAD_GATEWAY, "dns_error"),
         AuthError::InvalidDid(_) => (StatusCode::BAD_REQUEST, "invalid_did"),
+        // Native user authentication errors (XEP-0077)
+        AuthError::UserAlreadyExists(_) => (StatusCode::CONFLICT, "user_already_exists"),
+        AuthError::UserNotFound(_) => (StatusCode::NOT_FOUND, "user_not_found"),
+        AuthError::InvalidUsername(_) => (StatusCode::BAD_REQUEST, "invalid_username"),
+        AuthError::InvalidPassword(_) => (StatusCode::BAD_REQUEST, "invalid_password"),
+        AuthError::CryptoError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "crypto_error"),
+        AuthError::RegistrationDisabled => (StatusCode::FORBIDDEN, "registration_disabled"),
     };
 
     (status, Json(ErrorResponse::new(error_code, &err.to_string())))

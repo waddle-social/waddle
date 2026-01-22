@@ -67,6 +67,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 p256 = { workspace = true }
 elliptic-curve = { workspace = true }
+argon2 = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }
