@@ -38,6 +38,7 @@ pub mod s2s;
 pub mod server;
 pub mod stream;
 pub mod stream_management;
+pub mod xep;
 
 mod error;
 mod types;

@@ -56,6 +56,13 @@ pub struct XmppConfig {
     pub tls_key_path: String,
     /// MAM database path (None for in-memory)
     pub mam_db_path: Option<PathBuf>,
+    /// Whether native JID authentication is enabled (default: true)
+    /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
+    pub native_auth_enabled: bool,
+    /// Whether XEP-0077 In-Band Registration is enabled (default: false)
+    /// When enabled, users can register new accounts before authentication.
+    /// Security note: Enable with caution on public servers.
+    pub registration_enabled: bool,
 }
 
 impl Default for XmppConfig {
@@ -67,6 +74,8 @@ impl Default for XmppConfig {
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
             mam_db_path: None,
+            native_auth_enabled: true,
+            registration_enabled: false, // Disabled by default for security
         }
     }
 }
@@ -96,6 +105,14 @@ impl XmppConfig {
             .ok()
             .map(PathBuf::from);
 
+        let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
+            .map(|v| v.to_lowercase() != "false" && v != "0")
+            .unwrap_or(true);
+
+        let registration_enabled = std::env::var("WADDLE_REGISTRATION_ENABLED")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
         Self {
             enabled,
             domain,
@@ -103,6 +120,8 @@ impl XmppConfig {
             tls_cert_path,
             tls_key_path,
             mam_db_path,
+            native_auth_enabled,
+            registration_enabled,
         }
     }
 
@@ -115,6 +134,8 @@ impl XmppConfig {
             tls_key_path: self.tls_key_path.clone(),
             domain: self.domain.clone(),
             mam_db_path: self.mam_db_path.clone(),
+            native_auth_enabled: self.native_auth_enabled,
+            registration_enabled: self.registration_enabled,
         }
     }
 }

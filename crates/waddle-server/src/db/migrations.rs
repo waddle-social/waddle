@@ -142,6 +142,32 @@ CREATE INDEX IF NOT EXISTS idx_tuples_relation ON permission_tuples(object_type,
 CREATE INDEX IF NOT EXISTS idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
 "#;
 
+    /// Migration to add native_users table for XEP-0077 In-Band Registration
+    pub const V0004_NATIVE_USERS: &str = r#"
+-- Native XMPP users table for XEP-0077 In-Band Registration
+-- These users authenticate via SCRAM-SHA-256 (native JID) rather than ATProto OAuth
+CREATE TABLE IF NOT EXISTS native_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,                 -- Local part of JID (e.g., "alice" in alice@domain.com)
+    domain TEXT NOT NULL,                   -- Domain part of JID (e.g., "domain.com")
+    password_hash TEXT NOT NULL,            -- Argon2id hash of the password
+    salt TEXT NOT NULL,                     -- SCRAM salt (base64 encoded, used for PBKDF2)
+    iterations INTEGER NOT NULL DEFAULT 4096, -- PBKDF2 iteration count
+    stored_key BLOB NOT NULL,               -- SCRAM StoredKey = H(ClientKey)
+    server_key BLOB NOT NULL,               -- SCRAM ServerKey = HMAC(SaltedPassword, "Server Key")
+    email TEXT,                             -- Optional email for recovery
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(username, domain)
+);
+
+-- Index for username lookup during authentication
+CREATE INDEX IF NOT EXISTS idx_native_users_username_domain ON native_users(username, domain);
+
+-- Index for email (for recovery features)
+CREATE INDEX IF NOT EXISTS idx_native_users_email ON native_users(email) WHERE email IS NOT NULL;
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -159,6 +185,11 @@ CREATE INDEX IF NOT EXISTS idx_tuples_check ON permission_tuples(object_type, ob
                 version: 3,
                 description: "Add permission_tuples table for Zanzibar-style ReBAC".to_string(),
                 sql: V0003_PERMISSION_TUPLES,
+            },
+            Migration {
+                version: 4,
+                description: "Add native_users table for XEP-0077 In-Band Registration".to_string(),
+                sql: V0004_NATIVE_USERS,
             },
         ]
     }
