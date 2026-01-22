@@ -163,6 +163,23 @@ impl AppState for MockAppState {
         // Mock returns false - no users exist in mock by default
         async { Ok(false) }
     }
+
+    fn get_vcard(
+        &self,
+        _jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Option<String>, XmppError>> + Send {
+        // Mock returns None - no vCards exist in mock by default
+        async { Ok(None) }
+    }
+
+    fn set_vcard(
+        &self,
+        _jid: &jid::BareJid,
+        _vcard_xml: &str,
+    ) -> impl Future<Output = Result<(), XmppError>> + Send {
+        // Mock vCard storage always succeeds
+        async { Ok(()) }
+    }
 }
 
 /// Generated TLS credentials for testing.

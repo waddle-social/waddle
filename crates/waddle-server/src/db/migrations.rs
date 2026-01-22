@@ -168,6 +168,18 @@ CREATE INDEX IF NOT EXISTS idx_native_users_username_domain ON native_users(user
 CREATE INDEX IF NOT EXISTS idx_native_users_email ON native_users(email) WHERE email IS NOT NULL;
 "#;
 
+    /// Migration to add vcard_storage table for XEP-0054 vcard-temp
+    pub const V0005_VCARD_STORAGE: &str = r#"
+-- vCard storage table for XEP-0054 vcard-temp
+-- Stores user profile information as XML
+CREATE TABLE IF NOT EXISTS vcard_storage (
+    jid TEXT PRIMARY KEY,                   -- Bare JID (e.g., "user@domain.com")
+    vcard_xml TEXT NOT NULL,                -- Full vCard XML content
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -190,6 +202,11 @@ CREATE INDEX IF NOT EXISTS idx_native_users_email ON native_users(email) WHERE e
                 version: 4,
                 description: "Add native_users table for XEP-0077 In-Band Registration".to_string(),
                 sql: V0004_NATIVE_USERS,
+            },
+            Migration {
+                version: 5,
+                description: "Add vcard_storage table for XEP-0054 vcard-temp".to_string(),
+                sql: V0005_VCARD_STORAGE,
             },
         ]
     }
@@ -504,9 +521,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (4 migrations: initial schema + token endpoint + permission tuples + native users)
+        // Check version (5 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(4));
+        assert_eq!(version, Some(5));
     }
 
     #[tokio::test]

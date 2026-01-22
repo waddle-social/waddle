@@ -11,6 +11,7 @@ use waddle_xmpp::{Session as XmppSession, XmppError};
 use crate::auth::{did_to_jid, jid_to_did, NativeUserStore, RegisterRequest, SessionManager};
 use crate::db::Database;
 use crate::permissions::{Object, PermissionService, Subject};
+use crate::vcard::VCardStore;
 
 /// XMPP application state that bridges to waddle-server services.
 ///
@@ -18,6 +19,7 @@ use crate::permissions::{Object, PermissionService, Subject};
 /// - `SessionManager` for session validation
 /// - `PermissionService` for permission checks
 /// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
+/// - `VCardStore` for XEP-0054 vcard-temp storage
 pub struct XmppAppState {
     /// The XMPP server domain (e.g., "waddle.social")
     domain: String,
@@ -27,6 +29,8 @@ pub struct XmppAppState {
     permission_service: PermissionService,
     /// Native user store for XEP-0077 registration and SCRAM authentication
     native_user_store: NativeUserStore,
+    /// vCard store for XEP-0054 vcard-temp
+    vcard_store: VCardStore,
 }
 
 impl XmppAppState {
@@ -41,12 +45,14 @@ impl XmppAppState {
         let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
         let permission_service = PermissionService::new(Arc::clone(&db));
         let native_user_store = NativeUserStore::new(Arc::clone(&db));
+        let vcard_store = VCardStore::new(Arc::clone(&db));
 
         Self {
             domain,
             session_manager,
             permission_service,
             native_user_store,
+            vcard_store,
         }
     }
 
@@ -405,6 +411,39 @@ impl waddle_xmpp::AppState for XmppAppState {
             Ok(exists) => Ok(exists),
             Err(e) => {
                 warn!(username = username, error = %e, "Failed to check user existence");
+                Err(XmppError::internal(format!("Database error: {}", e)))
+            }
+        }
+    }
+
+    /// Get the vCard for a user (XEP-0054).
+    async fn get_vcard(
+        &self,
+        jid: &jid::BareJid,
+    ) -> Result<Option<String>, XmppError> {
+        debug!(jid = %jid, "Getting vCard");
+
+        match self.vcard_store.get(jid).await {
+            Ok(vcard) => Ok(vcard),
+            Err(e) => {
+                warn!(jid = %jid, error = %e, "Failed to get vCard");
+                Err(XmppError::internal(format!("Database error: {}", e)))
+            }
+        }
+    }
+
+    /// Store/update the vCard for a user (XEP-0054).
+    async fn set_vcard(
+        &self,
+        jid: &jid::BareJid,
+        vcard_xml: &str,
+    ) -> Result<(), XmppError> {
+        debug!(jid = %jid, "Setting vCard");
+
+        match self.vcard_store.set(jid, vcard_xml).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!(jid = %jid, error = %e, "Failed to set vCard");
                 Err(XmppError::internal(format!("Database error: {}", e)))
             }
         }
