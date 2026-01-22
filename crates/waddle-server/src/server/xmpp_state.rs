@@ -20,6 +20,7 @@ use crate::vcard::VCardStore;
 /// - `PermissionService` for permission checks
 /// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
 /// - `VCardStore` for XEP-0054 vcard-temp storage
+/// - `Database` for upload slot storage (XEP-0363)
 pub struct XmppAppState {
     /// The XMPP server domain (e.g., "waddle.social")
     domain: String,
@@ -31,6 +32,8 @@ pub struct XmppAppState {
     native_user_store: NativeUserStore,
     /// vCard store for XEP-0054 vcard-temp
     vcard_store: VCardStore,
+    /// Database for upload slots and other direct DB operations
+    db: Arc<Database>,
 }
 
 impl XmppAppState {
@@ -53,6 +56,7 @@ impl XmppAppState {
             permission_service,
             native_user_store,
             vcard_store,
+            db,
         }
     }
 
@@ -457,7 +461,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         size: u64,
         content_type: Option<&str>,
     ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
-        use waddle_xmpp::xep::xep0363::{sanitize_filename, effective_content_type, DEFAULT_MAX_FILE_SIZE};
+        use waddle_xmpp::xep::xep0363::{sanitize_filename, effective_content_type};
 
         debug!(
             jid = %requester_jid,
@@ -502,30 +506,43 @@ impl waddle_xmpp::AppState for XmppAppState {
         let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
 
         // Store the slot in the database
-        // Note: We use an async block to avoid holding references across await
-        let result = {
-            let conn = self.session_manager.db().connect().map_err(|e| {
+        // Use persistent connection for in-memory databases
+        if let Some(persistent) = self.db.persistent_connection() {
+            let conn = persistent.lock().await;
+            conn.execute(
+                "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                libsql::params![
+                    slot_id.clone(),
+                    requester_jid.to_string(),
+                    safe_filename.clone(),
+                    size as i64,
+                    effective_type.clone(),
+                    expires_at.to_rfc3339(),
+                ],
+            ).await.map_err(|e| {
+                warn!(error = %e, "Failed to create upload slot in database");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+        } else {
+            let conn = self.db.connect().map_err(|e| {
                 warn!(error = %e, "Failed to connect to database for upload slot");
                 XmppError::internal(format!("Database error: {}", e))
             })?;
-
             conn.execute(
                 "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                (
-                    &slot_id,
+                libsql::params![
+                    slot_id.clone(),
                     requester_jid.to_string(),
-                    &safe_filename,
+                    safe_filename.clone(),
                     size as i64,
-                    &effective_type,
+                    effective_type.clone(),
                     expires_at.to_rfc3339(),
-                ),
-            ).await
-        };
-
-        result.map_err(|e| {
-            warn!(error = %e, "Failed to create upload slot in database");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+                ],
+            ).await.map_err(|e| {
+                warn!(error = %e, "Failed to create upload slot in database");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+        }
 
         debug!(
             slot_id = %slot_id,

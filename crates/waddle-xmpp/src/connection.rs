@@ -51,6 +51,10 @@ use crate::xep::xep0054::{
     build_empty_vcard_response, build_vcard_success,
 };
 use crate::xep::xep0077::RegistrationError;
+use crate::xep::xep0363::{
+    is_upload_request, parse_upload_request, build_upload_slot_response, build_upload_error,
+    UploadSlot, UploadError,
+};
 use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.
@@ -2013,6 +2017,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a vCard set request (XEP-0054)
         if is_vcard_set(&iq) {
             return self.handle_vcard_set(iq).await;
+        }
+
+        // Check if this is an HTTP File Upload slot request (XEP-0363)
+        if is_upload_request(&iq) {
+            return self.handle_upload_slot_request(iq).await;
         }
 
         // Unhandled IQ - log and continue
