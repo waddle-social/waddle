@@ -21,13 +21,22 @@ pub struct S2sListenerConfig {
     pub addr: SocketAddr,
     /// Server domain (e.g., "waddle.social")
     pub domain: String,
+    /// Secret key for dialback key generation (XEP-0220)
+    pub dialback_secret: Vec<u8>,
 }
 
 impl Default for S2sListenerConfig {
     fn default() -> Self {
+        // Generate a random dialback secret for development/testing
+        // In production, this should be configured with a persistent secret
+        let mut dialback_secret = vec![0u8; 32];
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut dialback_secret);
+
         Self {
             addr: "0.0.0.0:5269".parse().unwrap(),
             domain: "localhost".to_string(),
+            dialback_secret,
         }
     }
 }
@@ -68,6 +77,7 @@ impl S2sListener {
                 Ok((stream, peer_addr)) => {
                     let tls_acceptor = self.tls_acceptor.clone();
                     let domain = self.config.domain.clone();
+                    let dialback_secret = self.config.dialback_secret.clone();
                     let metrics = Arc::clone(&self.metrics);
 
                     // Record incoming connection
@@ -81,6 +91,7 @@ impl S2sListener {
                                 tls_acceptor,
                                 domain,
                                 metrics,
+                                &dialback_secret,
                             )
                             .await
                             {
@@ -124,8 +135,17 @@ mod tests {
         let config = S2sListenerConfig {
             addr: "127.0.0.1:15269".parse().unwrap(),
             domain: "example.com".to_string(),
+            dialback_secret: vec![1, 2, 3, 4],
         };
         assert_eq!(config.addr.port(), 15269);
         assert_eq!(config.domain, "example.com");
+        assert_eq!(config.dialback_secret, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_default_config_has_dialback_secret() {
+        let config = S2sListenerConfig::default();
+        // Default config should have a 32-byte random dialback secret
+        assert_eq!(config.dialback_secret.len(), 32);
     }
 }

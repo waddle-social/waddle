@@ -117,7 +117,7 @@ impl DialbackKey {
     }
 
     /// Generate a new dialback key generator with a random secret.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub fn random() -> Self {
         use rand::RngCore;
         let mut secret = [0u8; 32];

@@ -82,7 +82,7 @@ crates/waddle-server/src/main.rs              (complete)
 | S2S listener on port 5269 | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | TLS 1.3 for S2S connections | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | Stream negotiation (S2S) | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| XEP-0220 Server Dialback | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| XEP-0220 Server Dialback | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | DNS SRV record resolution | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | S2S connection pool | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | Remote JID routing | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
