@@ -118,11 +118,17 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
         item: &RosterItemRow,
     ) -> Result<bool, RosterStorageError> {
+        // Check if the item exists before upsert to correctly determine if it's new
+        let contact_jid: BareJid = item.contact_jid.parse().map_err(|e| {
+            RosterStorageError::QueryFailed(format!("Invalid contact JID: {}", e))
+        })?;
+        let exists = self.has_roster_item(user_jid, &contact_jid).await?;
+
         let groups_json = serde_json::to_string(&item.groups)
             .map_err(|e| RosterStorageError::SerializationError(e.to_string()))?;
 
         // Use INSERT OR REPLACE to upsert
-        let result = self.execute_with_persistent(
+        self.execute_with_persistent(
             r#"
             INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, groups, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
@@ -146,7 +152,7 @@ impl DatabaseRosterStorage {
         // Update roster version
         self.increment_roster_version(user_jid).await?;
 
-        let is_new = result == 1;
+        let is_new = !exists;
         debug!(is_new, "Set roster item");
         Ok(is_new)
     }

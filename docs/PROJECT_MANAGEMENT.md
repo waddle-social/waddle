@@ -164,7 +164,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| RFC 6121 XMPP IM (roster, presence) | 🔄 In Progress | P0 | Roster management ✅, presence subscription pending |
+| RFC 6121 XMPP IM (roster, presence) | ✅ Complete | P0 | Roster management ✅, presence subscription ✅ |
 | XEP-0054 vcard-temp | ✅ Complete | P0 | User profile information (get/set handlers, storage) |
 | XEP-0249 Direct MUC Invitations | ✅ Complete | P0 | Direct channel invites |
 | Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
