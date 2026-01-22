@@ -232,6 +232,7 @@ impl XmlParser {
         let stanza_patterns: &[(&str, StanzaParser)] = &[
             ("<starttls", parse_starttls),
             ("<auth", parse_auth),
+            ("<response", parse_sasl_response),  // SASL response for SCRAM
             ("<iq", parse_iq_stanza),
             ("<message", parse_message_stanza),
             ("<presence", parse_presence_stanza),
@@ -311,6 +312,8 @@ pub enum ParsedStanza {
     StartTls,
     /// SASL auth request with mechanism and base64 data
     SaslAuth { mechanism: String, data: String },
+    /// SASL response (for multi-step auth like SCRAM) with base64 data
+    SaslResponse { data: String },
     /// Stream end
     StreamEnd,
     /// Message stanza
@@ -345,6 +348,23 @@ fn parse_auth(data: &str) -> Result<ParsedStanza, XmppError> {
     // Extract content between > and </auth>
     let content_start = data.find('>').map(|i| i + 1).unwrap_or(0);
     let content_end = data.find("</auth>").unwrap_or(data.len());
+    let content = if content_start < content_end {
+        data[content_start..content_end].trim().to_string()
+    } else {
+        String::new()
+    };
+
+    Ok(ParsedStanza::SaslAuth {
+        mechanism,
+        data: content,
+    })
+}
+
+/// Parse SASL response stanza (for multi-step auth like SCRAM).
+fn parse_sasl_response(data: &str) -> Result<ParsedStanza, XmppError> {
+    // Extract content between > and </response>
+    let content_start = data.find('>').map(|i| i + 1).unwrap_or(0);
+    let content_end = data.find("</response>").unwrap_or(data.len());
     let content = if content_start < content_end {
         data[content_start..content_end].trim().to_string()
     } else {

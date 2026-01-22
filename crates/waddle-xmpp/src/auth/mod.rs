@@ -3,8 +3,13 @@
 //! Implements SASL authentication for XMPP connections, including:
 //! - SASL PLAIN (username/password or JID/token)
 //! - SASL OAUTHBEARER (RFC 7628, XEP-0493)
+//! - SASL SCRAM-SHA-256 (RFC 5802, RFC 7677)
+
+pub mod scram;
 
 use jid::BareJid;
+
+pub use scram::{generate_salt, generate_scram_keys, encode_sasl_name, ScramServer, ScramState, ServerFirstMessage, ServerFinalMessage, DEFAULT_ITERATIONS};
 
 use crate::XmppError;
 
@@ -15,6 +20,8 @@ pub enum SaslMechanism {
     Plain,
     /// OAUTHBEARER mechanism (RFC 7628, XEP-0493)
     OAuthBearer,
+    /// SCRAM-SHA-256 mechanism (RFC 5802, RFC 7677)
+    ScramSha256,
 }
 
 impl SaslMechanism {
@@ -23,6 +30,7 @@ impl SaslMechanism {
         match s.to_uppercase().as_str() {
             "PLAIN" => Some(SaslMechanism::Plain),
             "OAUTHBEARER" => Some(SaslMechanism::OAuthBearer),
+            "SCRAM-SHA-256" => Some(SaslMechanism::ScramSha256),
             _ => None,
         }
     }
@@ -33,6 +41,7 @@ impl std::fmt::Display for SaslMechanism {
         match self {
             SaslMechanism::Plain => write!(f, "PLAIN"),
             SaslMechanism::OAuthBearer => write!(f, "OAUTHBEARER"),
+            SaslMechanism::ScramSha256 => write!(f, "SCRAM-SHA-256"),
         }
     }
 }
@@ -278,6 +287,8 @@ mod tests {
         assert_eq!(SaslMechanism::from_str("plain"), Some(SaslMechanism::Plain));
         assert_eq!(SaslMechanism::from_str("OAUTHBEARER"), Some(SaslMechanism::OAuthBearer));
         assert_eq!(SaslMechanism::from_str("oauthbearer"), Some(SaslMechanism::OAuthBearer));
+        assert_eq!(SaslMechanism::from_str("SCRAM-SHA-256"), Some(SaslMechanism::ScramSha256));
+        assert_eq!(SaslMechanism::from_str("scram-sha-256"), Some(SaslMechanism::ScramSha256));
         assert_eq!(SaslMechanism::from_str("UNKNOWN"), None);
     }
 
@@ -285,5 +296,6 @@ mod tests {
     fn test_sasl_mechanism_display() {
         assert_eq!(SaslMechanism::Plain.to_string(), "PLAIN");
         assert_eq!(SaslMechanism::OAuthBearer.to_string(), "OAUTHBEARER");
+        assert_eq!(SaslMechanism::ScramSha256.to_string(), "SCRAM-SHA-256");
     }
 }

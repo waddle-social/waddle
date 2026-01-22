@@ -12,7 +12,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
-use crate::auth::{parse_oauthbearer, OAuthBearerResult, SaslMechanism};
+use crate::auth::{parse_oauthbearer, OAuthBearerResult, SaslMechanism, ScramServer, ScramState};
 use crate::connection::Stanza;
 use crate::parser::{element_to_string, ns, ParsedStanza, StreamHeader, XmlParser};
 use crate::XmppError;
@@ -32,6 +32,22 @@ pub enum SaslAuthResult {
     },
     /// OAUTHBEARER discovery request: client needs OAuth metadata
     OAuthBearerDiscovery,
+    /// SCRAM-SHA-256 mechanism: client-first-message received, need password lookup
+    /// The server should look up the stored keys for the username, then call
+    /// `continue_scram_auth` with the keys to complete the exchange.
+    ScramSha256Challenge {
+        /// The username from client-first-message
+        username: String,
+        /// The server-first-message to send to the client (base64 encoded)
+        server_first_message_b64: String,
+        /// The SCRAM server state for continuing the exchange
+        scram_server: ScramServer,
+    },
+    /// SCRAM-SHA-256 complete: authentication verified
+    ScramSha256Complete {
+        /// The authenticated username
+        username: String,
+    },
 }
 
 /// XMPP stream handler.
@@ -247,7 +263,8 @@ impl XmppStream {
 
     /// Send stream features advertising SASL mechanisms.
     ///
-    /// Advertises both PLAIN and OAUTHBEARER mechanisms per XEP-0493.
+    /// Advertises SCRAM-SHA-256, PLAIN, and OAUTHBEARER mechanisms.
+    /// SCRAM-SHA-256 is listed first as it's the most secure.
     /// OAUTHBEARER enables standard XMPP clients to use OAuth authentication.
     /// Also advertises ISR (XEP-0397) for instant stream resumption.
     #[instrument(skip(self), name = "xmpp.stream.send_features_sasl")]
@@ -255,6 +272,7 @@ impl XmppStream {
         let features = format!(
             "<stream:features>\
                 <mechanisms xmlns='{}'>\
+                    <mechanism>SCRAM-SHA-256</mechanism>\
                     <mechanism>PLAIN</mechanism>\
                     <mechanism>OAUTHBEARER</mechanism>\
                 </mechanisms>\
@@ -266,7 +284,7 @@ impl XmppStream {
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent SASL features (PLAIN, OAUTHBEARER) with ISR");
+        debug!("Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR");
         Ok(())
     }
 
@@ -276,6 +294,7 @@ impl XmppStream {
     /// - PLAIN credentials (JID + token)
     /// - OAUTHBEARER credentials (token + optional authzid)
     /// - OAUTHBEARER discovery request (client needs OAuth metadata)
+    /// - SCRAM-SHA-256 challenge (need to continue with `continue_scram_auth`)
     ///
     /// Note: This method does NOT send the SASL success response.
     /// The caller should validate credentials and then call either:
@@ -284,6 +303,11 @@ impl XmppStream {
     ///
     /// For OAUTHBEARER discovery, the caller should use send_oauthbearer_discovery()
     /// and then call this method again after the client completes OAuth.
+    ///
+    /// For SCRAM-SHA-256, the caller should:
+    /// 1. Look up the stored keys for the username
+    /// 2. Send the challenge using `send_scram_challenge()`
+    /// 3. Call `continue_scram_auth()` with the stored keys
     #[instrument(skip(self), name = "xmpp.stream.authenticate")]
     pub async fn handle_sasl_auth(&mut self) -> Result<SaslAuthResult, XmppError> {
         let mut buf = [0u8; 4096];
@@ -329,10 +353,178 @@ impl XmppStream {
                                 }
                             }
                         }
+                        SaslMechanism::ScramSha256 => {
+                            return self.handle_scram_client_first(&data);
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Handle SCRAM-SHA-256 client-first-message.
+    ///
+    /// This processes the initial SCRAM message and returns a challenge.
+    /// The caller should look up the user's stored keys and call `continue_scram_auth`.
+    fn handle_scram_client_first(&mut self, data: &str) -> Result<SaslAuthResult, XmppError> {
+        // Decode base64
+        let decoded = BASE64_STANDARD
+            .decode(data.trim())
+            .map_err(|e| XmppError::auth_failed(format!("Invalid base64: {}", e)))?;
+
+        let client_first = String::from_utf8(decoded)
+            .map_err(|e| XmppError::auth_failed(format!("Invalid UTF-8: {}", e)))?;
+
+        debug!(client_first = %client_first, "SCRAM client-first-message");
+
+        // Create SCRAM server and process client-first
+        let mut scram_server = ScramServer::new();
+        let server_first = scram_server.process_client_first(&client_first)?;
+
+        // Base64 encode the server-first-message for the challenge
+        let server_first_message_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+
+        debug!(
+            username = %server_first.username,
+            "SCRAM-SHA-256 challenge generated"
+        );
+
+        Ok(SaslAuthResult::ScramSha256Challenge {
+            username: server_first.username,
+            server_first_message_b64,
+            scram_server,
+        })
+    }
+
+    /// Send SCRAM challenge (server-first-message).
+    ///
+    /// Call this after receiving `SaslAuthResult::ScramSha256Challenge` and looking up
+    /// the user's stored keys.
+    pub async fn send_scram_challenge(&mut self, server_first_message_b64: &str) -> Result<(), XmppError> {
+        let challenge = format!(
+            "<challenge xmlns='{}'>{}</challenge>",
+            ns::SASL, server_first_message_b64
+        );
+        self.write_all(challenge.as_bytes()).await?;
+        self.flush().await?;
+        debug!("Sent SCRAM challenge");
+        Ok(())
+    }
+
+    /// Continue SCRAM-SHA-256 authentication after sending challenge.
+    ///
+    /// This waits for the client-final-message and verifies the proof.
+    ///
+    /// # Arguments
+    /// * `scram_server` - The ScramServer state from the challenge phase
+    /// * `stored_key` - The user's StoredKey (from database)
+    /// * `server_key` - The user's ServerKey (from database)
+    ///
+    /// # Returns
+    /// * `SaslAuthResult::ScramSha256Complete` on success
+    pub async fn continue_scram_auth(
+        &mut self,
+        mut scram_server: ScramServer,
+        stored_key: &[u8],
+        server_key: &[u8],
+    ) -> Result<SaslAuthResult, XmppError> {
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Err(XmppError::stream("Connection closed during SCRAM"));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_complete_stanza() {
+                if let Some(ParsedStanza::SaslResponse { data }) = self.parser.next_stanza()? {
+                    debug!("Received SCRAM client-final-message");
+
+                    // Decode base64
+                    let decoded = BASE64_STANDARD
+                        .decode(data.trim())
+                        .map_err(|e| XmppError::auth_failed(format!("Invalid base64: {}", e)))?;
+
+                    let client_final = String::from_utf8(decoded)
+                        .map_err(|e| XmppError::auth_failed(format!("Invalid UTF-8: {}", e)))?;
+
+                    debug!(client_final = %client_final, "SCRAM client-final-message");
+
+                    // Verify the client proof
+                    let server_final = scram_server.process_client_final(
+                        &client_final,
+                        stored_key,
+                        server_key,
+                    )?;
+
+                    // Send success with server signature
+                    let server_signature_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
+                    let success = format!(
+                        "<success xmlns='{}'>{}</success>",
+                        ns::SASL, server_signature_b64
+                    );
+                    self.write_all(success.as_bytes()).await?;
+                    self.flush().await?;
+
+                    debug!("SCRAM-SHA-256 authentication successful");
+
+                    return Ok(SaslAuthResult::ScramSha256Complete {
+                        username: scram_server.username().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Handle SCRAM-SHA-256 authentication with custom salt and iterations.
+    ///
+    /// This is useful when the user already has stored SCRAM credentials with
+    /// a specific salt and iteration count.
+    ///
+    /// # Arguments
+    /// * `data` - The base64-encoded client-first-message
+    /// * `salt_b64` - The user's salt (base64 encoded)
+    /// * `iterations` - The iteration count
+    ///
+    /// # Returns
+    /// * `SaslAuthResult::ScramSha256Challenge` with the configured ScramServer
+    pub fn handle_scram_client_first_with_params(
+        &mut self,
+        data: &str,
+        salt_b64: String,
+        iterations: u32,
+    ) -> Result<SaslAuthResult, XmppError> {
+        // Decode base64
+        let decoded = BASE64_STANDARD
+            .decode(data.trim())
+            .map_err(|e| XmppError::auth_failed(format!("Invalid base64: {}", e)))?;
+
+        let client_first = String::from_utf8(decoded)
+            .map_err(|e| XmppError::auth_failed(format!("Invalid UTF-8: {}", e)))?;
+
+        debug!(client_first = %client_first, "SCRAM client-first-message (with params)");
+
+        // Create SCRAM server with user's stored parameters
+        let mut scram_server = ScramServer::with_salt_b64(salt_b64, iterations);
+        let server_first = scram_server.process_client_first(&client_first)?;
+
+        // Base64 encode the server-first-message for the challenge
+        let server_first_message_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+
+        debug!(
+            username = %server_first.username,
+            iterations = iterations,
+            "SCRAM-SHA-256 challenge generated (with params)"
+        );
+
+        Ok(SaslAuthResult::ScramSha256Challenge {
+            username: server_first.username,
+            server_first_message_b64,
+            scram_server,
+        })
     }
 
     /// Send SASL success response.
