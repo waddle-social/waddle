@@ -45,7 +45,7 @@
 
 use minidom::Element;
 use tracing::debug;
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 
 /// Namespace for XEP-0077 In-Band Registration
 pub const NS_REGISTER: &str = "jabber:iq:register";
