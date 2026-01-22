@@ -87,7 +87,7 @@ struct ClientFirstMessage {
     /// GS2 channel binding flag ('n', 'y', or 'p')
     gs2_cbind_flag: char,
     /// Optional authzid (reserved for future use)
-    _authzid: Option<String>,
+    authzid: Option<String>,
     /// Username (authcid)
     username: String,
     /// Client nonce

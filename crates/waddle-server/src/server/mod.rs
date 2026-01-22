@@ -150,6 +150,7 @@ impl XmppConfig {
         XmppServerConfig {
             c2s_addr: self.c2s_addr,
             s2s_addr: if self.s2s_enabled { Some(self.s2s_addr) } else { None },
+            s2s_enabled: self.s2s_enabled,
             tls_cert_path: self.tls_cert_path.clone(),
             tls_key_path: self.tls_key_path.clone(),
             domain: self.domain.clone(),
