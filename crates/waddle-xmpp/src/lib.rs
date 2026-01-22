@@ -216,6 +216,85 @@ pub trait AppState: Send + Sync + 'static {
     fn upload_enabled(&self) -> bool {
         true // Enabled by default
     }
+
+    // =========================================================================
+    // RFC 6121 Roster Storage Methods
+    // =========================================================================
+
+    /// Get all roster items for a user.
+    ///
+    /// Returns all contacts in the user's roster.
+    fn get_roster(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Vec<roster::RosterItem>, XmppError>> + Send;
+
+    /// Get a single roster item by JID.
+    ///
+    /// Returns the roster item if it exists, None otherwise.
+    fn get_roster_item(
+        &self,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Option<roster::RosterItem>, XmppError>> + Send;
+
+    /// Add or update a roster item.
+    ///
+    /// If the item already exists, it will be updated.
+    /// If it doesn't exist, it will be created.
+    fn set_roster_item(
+        &self,
+        user_jid: &jid::BareJid,
+        item: &roster::RosterItem,
+    ) -> impl std::future::Future<Output = Result<roster::RosterSetResult, XmppError>> + Send;
+
+    /// Remove a roster item.
+    ///
+    /// Returns Ok(true) if the item was removed, Ok(false) if it didn't exist.
+    fn remove_roster_item(
+        &self,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<bool, XmppError>> + Send;
+
+    /// Get the current roster version for a user.
+    ///
+    /// Roster versioning (XEP-0237) allows clients to efficiently sync
+    /// their roster by only receiving changes since a known version.
+    fn get_roster_version(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Option<String>, XmppError>> + Send;
+
+    /// Update the subscription state for a roster item.
+    ///
+    /// Creates the roster item if it doesn't exist.
+    /// Returns the updated roster item.
+    fn update_roster_subscription(
+        &self,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+        subscription: roster::Subscription,
+        ask: Option<roster::AskType>,
+    ) -> impl std::future::Future<Output = Result<roster::RosterItem, XmppError>> + Send;
+
+    /// Get all roster items where the user should send presence updates.
+    ///
+    /// Returns contacts with subscription=from or subscription=both.
+    /// These are contacts who are subscribed to the user's presence.
+    fn get_presence_subscribers(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send;
+
+    /// Get all roster items where the user receives presence updates.
+    ///
+    /// Returns contacts with subscription=to or subscription=both.
+    /// These are contacts whose presence the user is subscribed to.
+    fn get_presence_subscriptions(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send;
 }
 
 /// Information about a created upload slot (XEP-0363).

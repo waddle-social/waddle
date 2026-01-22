@@ -207,6 +207,40 @@ CREATE INDEX IF NOT EXISTS idx_upload_slots_expires ON upload_slots(expires_at) 
 CREATE INDEX IF NOT EXISTS idx_upload_slots_status ON upload_slots(status);
 "#;
 
+    /// Migration to add roster_items table for RFC 6121 roster management
+    pub const V0007_ROSTER_ITEMS: &str = r#"
+-- Roster items table for RFC 6121 roster management
+-- Stores contacts/buddies for each user's roster
+CREATE TABLE IF NOT EXISTS roster_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_jid TEXT NOT NULL,                 -- Bare JID of the roster owner (e.g., "alice@domain.com")
+    contact_jid TEXT NOT NULL,              -- Bare JID of the contact (e.g., "bob@domain.com")
+    name TEXT,                              -- Optional display name for the contact
+    subscription TEXT NOT NULL DEFAULT 'none', -- 'none', 'to', 'from', 'both', 'remove'
+    ask TEXT,                               -- 'subscribe' if pending outbound subscription request
+    groups TEXT,                            -- JSON array of group names (e.g., '["Friends", "Work"]')
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_jid, contact_jid)
+);
+
+-- Index for fast roster retrieval by user
+CREATE INDEX IF NOT EXISTS idx_roster_items_user ON roster_items(user_jid);
+
+-- Index for reverse lookups (who has this user in their roster)
+CREATE INDEX IF NOT EXISTS idx_roster_items_contact ON roster_items(contact_jid);
+
+-- Index for subscription state queries (e.g., find all contacts with subscription=from)
+CREATE INDEX IF NOT EXISTS idx_roster_items_subscription ON roster_items(user_jid, subscription);
+
+-- Roster versions table for XEP-0237 roster versioning
+CREATE TABLE IF NOT EXISTS roster_versions (
+    user_jid TEXT PRIMARY KEY,              -- Bare JID of the roster owner
+    version TEXT NOT NULL,                  -- Current roster version string
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -239,6 +273,11 @@ CREATE INDEX IF NOT EXISTS idx_upload_slots_status ON upload_slots(status);
                 version: 6,
                 description: "Add upload_slots table for XEP-0363 HTTP File Upload".to_string(),
                 sql: V0006_UPLOAD_SLOTS,
+            },
+            Migration {
+                version: 7,
+                description: "Add roster_items table for RFC 6121 roster management".to_string(),
+                sql: V0007_ROSTER_ITEMS,
             },
         ]
     }
