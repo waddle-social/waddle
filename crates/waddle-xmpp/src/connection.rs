@@ -15,6 +15,10 @@ use crate::carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
     is_carbons_enable,
 };
+use crate::roster::{
+    build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
+    is_roster_set, parse_roster_get, parse_roster_set, RosterItem, Subscription,
+};
 use crate::disco::{
     build_disco_info_response, build_disco_items_response, is_disco_info_query,
     is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
@@ -1498,6 +1502,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_isr_token_request(iq).await;
         }
 
+        // Check if this is a roster get request (RFC 6121)
+        if is_roster_get(&iq) {
+            return self.handle_roster_get(iq).await;
+        }
+
+        // Check if this is a roster set request (RFC 6121)
+        if is_roster_set(&iq) {
+            return self.handle_roster_set(iq).await;
+        }
+
         // Unhandled IQ - log and continue
         debug!("Received unhandled IQ stanza");
         Ok(())
@@ -1894,6 +1908,168 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             let stanza = Stanza::Message(carbon);
             let _ = self.connection_registry.send_to(&resource_jid, stanza).await;
+        }
+    }
+
+    /// Handle RFC 6121 roster get request.
+    ///
+    /// Returns the user's roster with all contact items:
+    /// ```xml
+    /// <iq type='result' id='...'>
+    ///   <query xmlns='jabber:iq:roster'>
+    ///     <item jid='...' name='...' subscription='...'/>
+    ///   </query>
+    /// </iq>
+    /// ```
+    ///
+    /// Note: This is a stub implementation that returns an empty roster.
+    /// Full roster storage integration requires AppState to implement
+    /// roster storage methods.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_roster_get(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Roster get received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        debug!(jid = %sender_jid, "Processing roster get request");
+
+        // Parse the roster query (mainly for version tracking)
+        let query = parse_roster_get(&iq)?;
+
+        // TODO: Integrate with AppState for actual roster storage
+        // For now, return an empty roster as a stub implementation.
+        // The roster items would come from the application's storage layer.
+        let items: Vec<RosterItem> = Vec::new();
+
+        // Build and send the roster result
+        let response = build_roster_result(&iq, &items, query.ver.as_deref());
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        debug!(
+            item_count = items.len(),
+            ver = ?query.ver,
+            "Sent roster get response"
+        );
+
+        Ok(())
+    }
+
+    /// Handle RFC 6121 roster set request.
+    ///
+    /// Processes add, update, or remove operations on roster items.
+    /// After processing, sends roster push to all connected resources.
+    ///
+    /// Note: This is a stub implementation that acknowledges the request
+    /// but does not persist changes. Full roster storage integration
+    /// requires AppState to implement roster storage methods.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_roster_set(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Roster set received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        debug!(jid = %sender_jid, "Processing roster set request");
+
+        // Parse the roster set query
+        let query = parse_roster_set(&iq)?;
+
+        // Per RFC 6121, roster set should have exactly one item
+        let item = query.items.first().ok_or_else(|| {
+            XmppError::bad_request(Some("Roster set must contain an item".to_string()))
+        })?;
+
+        debug!(
+            contact_jid = %item.jid,
+            subscription = %item.subscription,
+            is_remove = item.subscription.is_remove(),
+            "Processing roster item"
+        );
+
+        // TODO: Integrate with AppState for actual roster storage
+        // For now, acknowledge the request without persisting changes.
+
+        // Send empty result to acknowledge the roster set
+        let response = build_roster_result_empty(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        // RFC 6121: Send roster push to all connected resources
+        // This notifies all user's clients about the roster change
+        self.send_roster_push(item).await;
+
+        info!(
+            contact = %item.jid,
+            subscription = %item.subscription,
+            "Roster set processed"
+        );
+
+        Ok(())
+    }
+
+    /// Send roster push to all connected resources for the user.
+    ///
+    /// Per RFC 6121 Section 2.1.6, after a roster item is modified,
+    /// the server must send a roster push to all of the user's
+    /// connected resources that have requested the roster.
+    async fn send_roster_push(&self, item: &RosterItem) {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid,
+            None => return,
+        };
+
+        let bare_jid = sender_jid.to_bare();
+
+        // Get all connected resources for this user (including self)
+        let resources = self
+            .connection_registry
+            .get_resources_for_user(&bare_jid);
+
+        if resources.is_empty() {
+            return;
+        }
+
+        debug!(
+            resource_count = resources.len(),
+            contact = %item.jid,
+            "Sending roster push to connected resources"
+        );
+
+        for resource_jid in resources {
+            // Generate a unique push ID
+            let push_id = format!("push-{}", uuid::Uuid::new_v4());
+
+            let push = build_roster_push(
+                &push_id,
+                &resource_jid.to_string(),
+                item,
+                None, // No versioning for now
+            );
+
+            let stanza = Stanza::Iq(push);
+            let result = self.connection_registry.send_to(&resource_jid, stanza).await;
+
+            match result {
+                SendResult::Sent => {
+                    debug!(to = %resource_jid, "Roster push sent");
+                }
+                SendResult::NotConnected => {
+                    debug!(to = %resource_jid, "Resource not connected for roster push");
+                }
+                SendResult::ChannelFull | SendResult::ChannelClosed => {
+                    warn!(to = %resource_jid, "Failed to send roster push");
+                }
+            }
         }
     }
 }

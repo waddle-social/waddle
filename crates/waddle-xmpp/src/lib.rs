@@ -34,6 +34,7 @@ pub mod muc;
 pub mod parser;
 pub mod presence;
 pub mod registry;
+pub mod roster;
 pub mod routing;
 pub mod s2s;
 pub mod server;
