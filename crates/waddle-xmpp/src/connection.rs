@@ -1286,7 +1286,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .collect();
 
         // Add the occupant to the room (uses affiliation from the updated list)
-        let new_occupant = room.add_occupant_with_affiliation(join_req.sender_jid.clone(), join_req.nick.clone());
+        let new_occupant = room.add_occupant_with_affiliation(join_req.sender_jid.clone(), join_req.nick.clone(), Some(self.domain.as_str()));
         let new_occupant_affiliation = new_occupant.affiliation;
         let new_occupant_role = new_occupant.role;
 
