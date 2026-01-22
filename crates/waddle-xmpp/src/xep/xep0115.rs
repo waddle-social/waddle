@@ -21,7 +21,7 @@ use sha1::{Digest, Sha1};
 use std::sync::Arc;
 use tracing::debug;
 
-use crate::disco::info::{Feature, Identity, DISCO_INFO_NS};
+use crate::disco::info::{Feature, Identity};
 
 /// XEP-0115 Entity Capabilities namespace.
 pub const NS_CAPS: &str = "http://jabber.org/protocol/caps";
