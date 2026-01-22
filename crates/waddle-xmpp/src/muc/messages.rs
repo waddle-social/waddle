@@ -71,6 +71,29 @@ impl MucMessage {
     pub fn id(&self) -> Option<&str> {
         self.message.id.as_deref()
     }
+
+    /// Check if this message has a subject element.
+    ///
+    /// Per XEP-0045, subject changes are messages with a <subject/>
+    /// element (and typically no <body/>).
+    pub fn has_subject(&self) -> bool {
+        !self.message.subjects.is_empty()
+    }
+
+    /// Get the subject text (first subject if multiple languages).
+    ///
+    /// Returns the subject text, or None if no subject is present.
+    pub fn subject_text(&self) -> Option<&str> {
+        self.message.subjects.iter().next().map(|s| s.1.0.as_str())
+    }
+
+    /// Check if this message is a subject-only message (no body, has subject).
+    ///
+    /// Per XEP-0045 Section 8.1, subject changes are sent as groupchat
+    /// messages with a <subject/> element but no <body/> element.
+    pub fn is_subject_change(&self) -> bool {
+        self.has_subject() && !self.has_body()
+    }
 }
 
 /// An outbound MUC message to send to an occupant.
@@ -150,6 +173,35 @@ pub fn create_broadcast_message(
     broadcast.from = Some(Jid::from(from_room_jid));
     broadcast.to = Some(Jid::from(to_occupant));
     broadcast
+}
+
+/// Create a subject message for broadcasting to a room.
+///
+/// Per XEP-0045 Section 8.1, subject changes are sent as groupchat
+/// messages with a <subject/> element and no <body/> element.
+///
+/// # Arguments
+/// * `room_jid` - The room's bare JID
+/// * `setter_nick` - The nickname of the user who set the subject
+/// * `subject` - The subject text (empty string clears the subject)
+/// * `to_occupant` - The recipient's full JID
+pub fn create_subject_message(
+    room_jid: &BareJid,
+    setter_nick: &str,
+    subject: &str,
+    to_occupant: FullJid,
+) -> Result<Message, XmppError> {
+    let from_room_jid = room_jid
+        .clone()
+        .with_resource_str(setter_nick)
+        .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+
+    let mut msg = Message::new(Some(Jid::from(to_occupant)));
+    msg.type_ = MessageType::Groupchat;
+    msg.from = Some(Jid::from(from_room_jid));
+    msg.subjects.insert(String::new(), xmpp_parsers::message::Subject(subject.to_string()));
+
+    Ok(msg)
 }
 
 #[cfg(test)]

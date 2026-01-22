@@ -16,8 +16,8 @@ pub mod presence;
 pub mod room_registry;
 
 pub use messages::{
-    create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
-    OutboundMucMessage,
+    create_broadcast_message, create_subject_message, is_muc_groupchat, looks_like_muc_jid,
+    MessageRouteResult, MucMessage, OutboundMucMessage,
 };
 pub use federation::{
     build_s2s_leave_presence, build_s2s_muc_message, build_s2s_occupant_presence,
@@ -75,6 +75,8 @@ pub struct RoomConfig {
     pub name: String,
     /// Room description
     pub description: Option<String>,
+    /// Room subject/topic (per XEP-0045)
+    pub subject: Option<String>,
     /// Whether the room is persistent
     pub persistent: bool,
     /// Whether the room is members-only
@@ -102,6 +104,7 @@ impl Default for RoomConfig {
         Self {
             name: String::new(),
             description: None,
+            subject: None,
             persistent: true,
             members_only: true,
             moderated: false,
@@ -532,5 +535,95 @@ impl MucRoom {
         domains.sort();
         domains.dedup();
         domains
+    }
+
+    // === Subject/Topic Management (XEP-0045) ===
+
+    /// Get the current room subject/topic.
+    pub fn get_subject(&self) -> Option<&str> {
+        self.config.subject.as_deref()
+    }
+
+    /// Set the room subject/topic.
+    ///
+    /// Returns true if the subject was changed, false if it was the same.
+    pub fn set_subject(&mut self, subject: Option<String>) -> bool {
+        if self.config.subject != subject {
+            self.config.subject = subject;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if an occupant can change the room subject.
+    ///
+    /// Per XEP-0045 Section 8.1:
+    /// - In moderated rooms, only moderators (and above) can change the subject
+    /// - In unmoderated rooms, any participant (or above) can change the subject
+    /// - Visitors can never change the subject
+    pub fn can_change_subject(&self, nick: &str) -> bool {
+        if let Some(occupant) = self.occupants.get(nick) {
+            match occupant.role {
+                Role::Moderator => true,
+                Role::Participant => !self.config.moderated,
+                Role::Visitor | Role::None => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Build a subject message for broadcasting to occupants.
+    ///
+    /// Per XEP-0045, subject changes are sent as groupchat messages
+    /// with a <subject/> element but no <body/>. The message is sent
+    /// from room@domain/nick (the subject setter).
+    pub fn build_subject_message(&self, setter_nick: &str) -> Result<Message, XmppError> {
+        let from_room_jid = self
+            .room_jid
+            .with_resource_str(setter_nick)
+            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+
+        let mut msg = Message::new(None::<Jid>);
+        msg.type_ = MessageType::Groupchat;
+        msg.from = Some(Jid::from(from_room_jid));
+
+        // Add subject element (empty subject clears the topic)
+        let subject_text = self.config.subject.clone().unwrap_or_default();
+        msg.subjects.insert(String::new(), xmpp_parsers::message::Subject(subject_text));
+
+        Ok(msg)
+    }
+
+    /// Broadcast a subject change to all room occupants.
+    ///
+    /// Returns a list of outbound messages to send to each occupant.
+    #[instrument(skip(self), fields(room = %self.room_jid))]
+    pub fn broadcast_subject_change(
+        &self,
+        setter_nick: &str,
+    ) -> Result<Vec<OutboundMucMessage>, XmppError> {
+        let base_msg = self.build_subject_message(setter_nick)?;
+
+        debug!(
+            setter = %setter_nick,
+            occupant_count = self.occupants.len(),
+            "Broadcasting subject change to room occupants"
+        );
+
+        let mut outbound = Vec::with_capacity(self.occupants.len());
+
+        for occupant in self.occupants.values() {
+            let mut broadcast_msg = base_msg.clone();
+            broadcast_msg.to = Some(Jid::from(occupant.real_jid.clone()));
+
+            outbound.push(OutboundMucMessage::new(
+                occupant.real_jid.clone(),
+                broadcast_msg,
+            ));
+        }
+
+        Ok(outbound)
     }
 }
