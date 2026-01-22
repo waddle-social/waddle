@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{ClientConfig, RootCertStore, ServerConfig}};
-use waddle_xmpp::{AppState, ScramCredentials, Session, XmppError};
+use waddle_xmpp::{AppState, ScramCredentials, Session, XmppError, roster};
 
 /// Install the ring crypto provider for rustls.
 /// Must be called once before any TLS operations.
@@ -191,7 +191,7 @@ impl AppState for MockAppState {
         let domain = self.domain.clone();
         let filename = filename.to_string();
         let content_type = content_type.map(|s| s.to_string());
-        let jid = requester_jid.clone();
+        let _jid = requester_jid.clone();
         async move {
             // Check size limit (mock limit: 10 MB)
             if size > 10 * 1024 * 1024 {
@@ -213,6 +213,90 @@ impl AppState for MockAppState {
                 ],
             })
         }
+    }
+
+    // =========================================================================
+    // RFC 6121 Roster Storage Methods (Mock implementations)
+    // =========================================================================
+
+    fn get_roster(
+        &self,
+        _user_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Vec<roster::RosterItem>, XmppError>> + Send {
+        // Mock returns empty roster
+        async { Ok(vec![]) }
+    }
+
+    fn get_roster_item(
+        &self,
+        _user_jid: &jid::BareJid,
+        _contact_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Option<roster::RosterItem>, XmppError>> + Send {
+        // Mock returns None - no roster items exist in mock
+        async { Ok(None) }
+    }
+
+    fn set_roster_item(
+        &self,
+        _user_jid: &jid::BareJid,
+        item: &roster::RosterItem,
+    ) -> impl Future<Output = Result<roster::RosterSetResult, XmppError>> + Send {
+        // Mock always reports item as added
+        let item = item.clone();
+        async move { Ok(roster::RosterSetResult::Added(item)) }
+    }
+
+    fn remove_roster_item(
+        &self,
+        _user_jid: &jid::BareJid,
+        _contact_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
+        // Mock returns false - no items to remove in mock
+        async { Ok(false) }
+    }
+
+    fn get_roster_version(
+        &self,
+        _user_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Option<String>, XmppError>> + Send {
+        // Mock returns None - no roster versioning in mock
+        async { Ok(None) }
+    }
+
+    fn update_roster_subscription(
+        &self,
+        _user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+        subscription: roster::Subscription,
+        ask: Option<roster::AskType>,
+    ) -> impl Future<Output = Result<roster::RosterItem, XmppError>> + Send {
+        // Mock returns a new roster item with the specified subscription
+        let contact_jid = contact_jid.clone();
+        async move {
+            Ok(roster::RosterItem {
+                jid: contact_jid,
+                name: None,
+                subscription,
+                ask,
+                groups: vec![],
+            })
+        }
+    }
+
+    fn get_presence_subscribers(
+        &self,
+        _user_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send {
+        // Mock returns empty list - no subscribers in mock
+        async { Ok(vec![]) }
+    }
+
+    fn get_presence_subscriptions(
+        &self,
+        _user_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send {
+        // Mock returns empty list - no subscriptions in mock
+        async { Ok(vec![]) }
     }
 }
 
