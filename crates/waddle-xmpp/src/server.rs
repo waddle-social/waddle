@@ -16,6 +16,7 @@ use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
 use crate::muc::MucRoomRegistry;
 use crate::registry::ConnectionRegistry;
+use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
 use crate::{AppState, XmppError};
 
@@ -193,7 +194,17 @@ impl<S: AppState> XmppServer<S> {
                 dialback_secret,
             };
 
-            let s2s_listener = S2sListener::new(s2s_config, self.tls_acceptor.clone());
+            // Create a StanzaRouter for routing inbound S2S stanzas to local users
+            let router_config = RouterConfig::new(self.config.domain.clone())
+                .with_federation(true);
+            let stanza_router = Arc::new(StanzaRouter::new(
+                router_config,
+                Arc::clone(&self.connection_registry),
+                None, // S2S pool not needed for inbound routing
+            ));
+
+            let s2s_listener = S2sListener::new(s2s_config, self.tls_acceptor.clone())
+                .with_stanza_router(stanza_router);
 
             info!(
                 addr = %s2s_addr,
