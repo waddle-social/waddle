@@ -35,7 +35,7 @@ See [RFC-0015: Federation Architecture](rfcs/0015-federation-architecture.md) fo
 | Native JID credential storage | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | `native_users` database table | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | Argon2id password hashing | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
-| Config: `native_auth_enabled` | 🔄 In Progress | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Config: `native_auth_enabled` | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 
 **Verification:**
 - [ ] Register native JID via XMPP client (Gajim/Conversations)

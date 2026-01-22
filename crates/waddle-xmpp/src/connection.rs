@@ -97,6 +97,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         connection_registry: Arc<ConnectionRegistry>,
         mam_storage: Arc<M>,
         isr_token_store: SharedIsrTokenStore,
+        registration_enabled: bool,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -118,11 +119,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             current_isr_token: None,
         };
 
-        actor.run(tls_acceptor).await
+        actor.run(tls_acceptor, registration_enabled).await
     }
 
     /// Main connection loop.
-    async fn run(&mut self, tls_acceptor: TlsAcceptor) -> Result<(), XmppError> {
+    async fn run(&mut self, tls_acceptor: TlsAcceptor, registration_enabled: bool) -> Result<(), XmppError> {
         // Wait for initial stream header
         self.state = ConnectionState::Negotiating;
         let header = self.stream.read_stream_header().await?;
@@ -146,9 +147,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.state = ConnectionState::TlsEstablished;
         let _header = self.stream.read_stream_header().await?;
 
-        // Enable XEP-0077 In-Band Registration in stream features
-        // TODO: Make this configurable via server config
-        let registration_enabled = true;
+        // Enable XEP-0077 In-Band Registration in stream features if configured
         self.stream.send_features_sasl_with_registration(registration_enabled).await?;
 
         // Handle pre-auth phase (registration IQs or SASL authentication)

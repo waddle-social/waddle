@@ -327,8 +327,10 @@ async fn run_test_server<S: AppState>(
                             );
                             // Create an ISR token store for the test
                             let isr_token_store = waddle_xmpp::isr::create_shared_store();
+                            // Enable registration for tests
+                            let registration_enabled = true;
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, room_registry, connection_registry, mam_storage, isr_token_store
+                                stream, peer_addr, tls, dom, state, room_registry, connection_registry, mam_storage, isr_token_store, registration_enabled
                             ).await;
                         });
                     }

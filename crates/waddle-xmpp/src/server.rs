@@ -178,6 +178,7 @@ impl<S: AppState> XmppServer<S> {
             let connection_registry = Arc::clone(&self.connection_registry);
             let mam_storage = Arc::clone(&self.mam_storage);
             let isr_token_store = Arc::clone(&self.isr_token_store);
+            let registration_enabled = self.config.registration_enabled;
 
             tokio::spawn(
                 async move {
@@ -192,6 +193,7 @@ impl<S: AppState> XmppServer<S> {
                             connection_registry,
                             mam_storage,
                             isr_token_store,
+                            registration_enabled,
                         )
                         .await
                     {
