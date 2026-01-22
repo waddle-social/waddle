@@ -165,7 +165,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
 | RFC 6121 XMPP IM (roster, presence) | 🔄 In Progress | P0 | Roster management ✅, presence subscription pending |
-| XEP-0054 vcard-temp | ⬜ Not Started | P0 | User profile information |
+| XEP-0054 vcard-temp | ✅ Complete | P0 | User profile information (get/set handlers, storage) |
 | XEP-0249 Direct MUC Invitations | ⬜ Not Started | P0 | Direct channel invites |
 | Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
 | Complete XEP-0280 Message Carbons | ✅ Complete | P0 | Integrated into chat message routing |
@@ -174,7 +174,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 **Verification:**
 - [ ] Roster operations work with standard clients
 - [ ] Presence subscription flow complete
-- [ ] vCard retrieval and update working
+- [x] vCard retrieval and update working
 - [ ] MUC invitations delivered
 - [x] Message carbons syncing across devices
 - [ ] File upload slot allocation working

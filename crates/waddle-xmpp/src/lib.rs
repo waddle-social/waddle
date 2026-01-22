@@ -162,6 +162,23 @@ pub trait AppState: Send + Sync + 'static {
         &self,
         username: &str,
     ) -> impl std::future::Future<Output = Result<bool, XmppError>> + Send;
+
+    /// Get the vCard for a user (XEP-0054).
+    ///
+    /// Returns the stored vCard XML for the given bare JID, or None if no vCard exists.
+    fn get_vcard(
+        &self,
+        jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Option<String>, XmppError>> + Send;
+
+    /// Store/update the vCard for a user (XEP-0054).
+    ///
+    /// Stores the vCard XML string for the given bare JID.
+    fn set_vcard(
+        &self,
+        jid: &jid::BareJid,
+        vcard_xml: &str,
+    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 }
 
 /// User session information.

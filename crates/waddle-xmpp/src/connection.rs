@@ -2005,6 +2005,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_roster_set(iq).await;
         }
 
+        // Check if this is a vCard get request (XEP-0054)
+        if is_vcard_get(&iq) {
+            return self.handle_vcard_get(iq).await;
+        }
+
+        // Check if this is a vCard set request (XEP-0054)
+        if is_vcard_set(&iq) {
+            return self.handle_vcard_set(iq).await;
+        }
+
         // Unhandled IQ - log and continue
         debug!("Received unhandled IQ stanza");
         Ok(())
@@ -2623,6 +2633,126 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
         }
+    }
+
+    /// Handle XEP-0054 vCard get request.
+    ///
+    /// Retrieves a user's vCard. If no 'to' attribute is specified or it matches
+    /// the sender's bare JID, returns the sender's own vCard. Otherwise returns
+    /// the vCard of the specified user (if they exist).
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_vcard_get(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("vCard get received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Determine whose vCard to retrieve
+        let target_jid: jid::BareJid = match &iq.to {
+            Some(jid) => jid.to_bare(),
+            None => sender_jid.to_bare(),
+        };
+
+        debug!(
+            from = %sender_jid,
+            target = %target_jid,
+            "Processing vCard get request"
+        );
+
+        // Retrieve the vCard from storage
+        let vcard_xml = self.app_state.get_vcard(&target_jid).await?;
+
+        let response = match vcard_xml {
+            Some(xml) => {
+                // Parse the stored XML to build the response
+                match xml.parse::<minidom::Element>() {
+                    Ok(elem) => {
+                        let vcard = crate::xep::xep0054::parse_vcard_element(&elem)
+                            .unwrap_or_default();
+                        build_vcard_response(&iq, &vcard)
+                    }
+                    Err(_) => {
+                        // If stored XML is invalid, return empty vCard
+                        warn!(target = %target_jid, "Stored vCard XML invalid, returning empty");
+                        build_empty_vcard_response(&iq)
+                    }
+                }
+            }
+            None => {
+                // No vCard stored, return empty vCard
+                build_empty_vcard_response(&iq)
+            }
+        };
+
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        debug!(target = %target_jid, "vCard get response sent");
+        Ok(())
+    }
+
+    /// Handle XEP-0054 vCard set request.
+    ///
+    /// Updates the authenticated user's own vCard. Users can only update
+    /// their own vCard, not those of other users.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_vcard_set(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("vCard set received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Users can only update their own vCard
+        if let Some(ref to) = iq.to {
+            let target_bare = to.to_bare();
+            if target_bare != sender_jid.to_bare() {
+                warn!(
+                    from = %sender_jid,
+                    to = %target_bare,
+                    "Attempt to update another user's vCard"
+                );
+                return Err(XmppError::forbidden(Some(
+                    "Cannot update another user's vCard".to_string(),
+                )));
+            }
+        }
+
+        debug!(jid = %sender_jid, "Processing vCard set request");
+
+        // Parse the vCard from the IQ
+        let vcard = parse_vcard_from_iq(&iq).map_err(|e| {
+            XmppError::bad_request(Some(format!("Invalid vCard: {}", e)))
+        })?;
+
+        // Build the vCard XML for storage
+        let vcard_elem = crate::xep::xep0054::build_vcard_element(&vcard);
+        let vcard_xml = String::from(&vcard_elem);
+
+        // Store the vCard
+        self.app_state
+            .set_vcard(&sender_jid.to_bare(), &vcard_xml)
+            .await?;
+
+        // Send success response
+        let response = build_vcard_success(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        info!(
+            jid = %sender_jid,
+            full_name = ?vcard.full_name,
+            "vCard updated"
+        );
+
+        Ok(())
     }
 }
 

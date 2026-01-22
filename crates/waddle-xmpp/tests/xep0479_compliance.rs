@@ -68,7 +68,6 @@ impl Default for XmppInteropTestsImage {
                 "XEP-0060".to_string(), // PubSub
                 "XEP-0163".to_string(), // PEP
                 "XEP-0363".to_string(), // HTTP File Upload
-                "XEP-0054".to_string(), // vcard-temp
                 "XEP-0191".to_string(), // Blocking
             ],
             enabled_specs: vec![],
