@@ -34,12 +34,11 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
 use crate::s2s::dns::{DnsError, SrvResolver};
 use crate::s2s::outbound::{OutboundConnectionError, S2sOutboundConnection, S2sOutboundConfig};
-use crate::s2s::S2sMetrics;
 
 /// Default maximum connections per domain.
 pub const DEFAULT_MAX_CONNECTIONS_PER_DOMAIN: usize = 2;
@@ -643,7 +642,7 @@ impl S2sConnectionPool {
         }
 
         // Remove empty entries
-        self.connections.retain(|_, entry| {
+        self.connections.retain(|_, _entry| {
             // We need to check if entry is empty in a sync context
             // For now, we'll keep all entries to avoid async in retain
             true
@@ -661,6 +660,7 @@ impl S2sConnectionPool {
     pub async fn health_check(&self) {
         for entry in self.connections.iter() {
             let mut entry_guard = entry.value().write().await;
+            let domain = entry_guard.domain.clone();
 
             for conn in &mut entry_guard.connections {
                 if conn.state == PooledConnectionState::Ready {
@@ -668,7 +668,7 @@ impl S2sConnectionPool {
                     if !conn.connection.is_connected() {
                         conn.state = PooledConnectionState::Closed;
                         debug!(
-                            domain = %entry_guard.domain,
+                            domain = %domain,
                             "Connection marked as closed during health check"
                         );
                     }
@@ -760,6 +760,9 @@ struct S2sConnectionPoolRef {
     config: S2sPoolConfig,
     connections: DashMap<String, Arc<RwLock<DomainPoolEntry>>>,
     metrics: Arc<S2sPoolMetrics>,
+    /// Note: shutdown is kept here for future use to enable graceful shutdown
+    /// of the maintenance task when checking connection health.
+    #[allow(dead_code)]
     shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -866,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_domain_pool_entry() {
-        let mut entry = DomainPoolEntry::new("example.com".to_string());
+        let entry = DomainPoolEntry::new("example.com".to_string());
         assert_eq!(entry.domain, "example.com");
         assert!(entry.connections.is_empty());
         assert!(!entry.connecting);

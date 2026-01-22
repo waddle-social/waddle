@@ -398,6 +398,108 @@ fn parse_starttls(data: &str) -> Result<ParsedStanza, XmppError> {
     }
 }
 
+/// Parse TLS proceed response from server.
+fn parse_tls_proceed(data: &str) -> Result<ParsedStanza, XmppError> {
+    if data.contains("proceed") {
+        Ok(ParsedStanza::TlsProceed)
+    } else {
+        Err(XmppError::xml_parse("Invalid TLS proceed element"))
+    }
+}
+
+/// Parse TLS failure response from server.
+fn parse_tls_failure(data: &str) -> Result<ParsedStanza, XmppError> {
+    if data.contains("failure") && data.contains(ns::TLS) {
+        Ok(ParsedStanza::TlsFailure)
+    } else {
+        Err(XmppError::xml_parse("Invalid TLS failure element"))
+    }
+}
+
+/// Parse stream features element.
+fn parse_stream_features(data: &str) -> Result<ParsedStanza, XmppError> {
+    let starttls = data.contains("<starttls");
+    let starttls_required = data.contains("<required");
+    let dialback = data.contains("dialback") || data.contains("db:");
+
+    // Extract SASL mechanisms
+    let mut sasl_mechanisms = Vec::new();
+    let mut search_pos = 0;
+    while let Some(start) = data[search_pos..].find("<mechanism>") {
+        let actual_start = search_pos + start + 11; // "<mechanism>".len()
+        if let Some(end) = data[actual_start..].find("</mechanism>") {
+            let mechanism = data[actual_start..actual_start + end].trim();
+            sasl_mechanisms.push(mechanism.to_string());
+            search_pos = actual_start + end;
+        } else {
+            break;
+        }
+    }
+
+    Ok(ParsedStanza::Features {
+        starttls,
+        starttls_required,
+        dialback,
+        sasl_mechanisms,
+    })
+}
+
+/// Parse stream error element.
+fn parse_stream_error(data: &str) -> Result<ParsedStanza, XmppError> {
+    // Common stream error conditions
+    let conditions = [
+        "bad-format",
+        "bad-namespace-prefix",
+        "conflict",
+        "connection-timeout",
+        "host-gone",
+        "host-unknown",
+        "improper-addressing",
+        "internal-server-error",
+        "invalid-from",
+        "invalid-namespace",
+        "invalid-xml",
+        "not-authorized",
+        "not-well-formed",
+        "policy-violation",
+        "remote-connection-failed",
+        "reset",
+        "resource-constraint",
+        "restricted-xml",
+        "see-other-host",
+        "system-shutdown",
+        "undefined-condition",
+        "unsupported-encoding",
+        "unsupported-feature",
+        "unsupported-stanza-type",
+        "unsupported-version",
+    ];
+
+    let condition = conditions
+        .iter()
+        .find(|c| data.contains(*c))
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "undefined-condition".to_string());
+
+    // Try to extract text element
+    let text = if let Some(start) = data.find("<text") {
+        if let Some(content_start) = data[start..].find('>') {
+            let actual_start = start + content_start + 1;
+            if let Some(end) = data[actual_start..].find("</text>") {
+                Some(data[actual_start..actual_start + end].trim().to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ParsedStanza::StreamError { condition, text })
+}
+
 fn parse_auth(data: &str) -> Result<ParsedStanza, XmppError> {
     let mechanism = extract_attribute(data, "mechanism").unwrap_or_default();
 

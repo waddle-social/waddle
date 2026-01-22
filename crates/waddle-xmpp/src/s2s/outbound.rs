@@ -33,9 +33,8 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, info, instrument, warn};
 
 use crate::parser::{ns, ParsedStanza, StreamHeader, XmlParser};
-use crate::s2s::dialback::{build_db_result, DialbackKey, DialbackResult, DialbackState};
-use crate::s2s::dns::{DnsError, ResolvedTarget, SrvResolver, DEFAULT_S2S_PORT};
-use crate::s2s::{S2sDirection, S2sState};
+use crate::s2s::dialback::{build_db_result, DialbackKey, DialbackState};
+use crate::s2s::dns::{DnsError, ResolvedTarget, SrvResolver};
 
 /// Errors that can occur during outbound S2S connection.
 #[derive(Debug, Error)]
@@ -78,7 +77,7 @@ pub enum OutboundConnectionError {
 }
 
 /// Configuration for outbound S2S connections.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S2sOutboundConfig {
     /// TLS connector for secure connections.
     pub tls_connector: TlsConnector,
@@ -88,6 +87,15 @@ pub struct S2sOutboundConfig {
 
     /// Whether to verify TLS certificates (disable for testing only).
     pub verify_certificates: bool,
+}
+
+impl std::fmt::Debug for S2sOutboundConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S2sOutboundConfig")
+            .field("dialback_secret", &"[REDACTED]")
+            .field("verify_certificates", &self.verify_certificates)
+            .finish()
+    }
 }
 
 impl S2sOutboundConfig {
