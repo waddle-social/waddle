@@ -3,6 +3,8 @@
 //! Tracks active XMPP connections by their full JID for message routing.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use jid::{BareJid, FullJid};
@@ -28,6 +30,41 @@ impl OutboundStanza {
     }
 }
 
+/// Connection state stored in the registry.
+///
+/// Contains the outbound sender and shared state that can be queried
+/// by the registry (like carbons_enabled status for XEP-0280).
+#[derive(Debug)]
+pub struct ConnectionEntry {
+    /// Channel to send stanzas to this connection
+    pub sender: mpsc::Sender<OutboundStanza>,
+    /// Whether XEP-0280 Message Carbons is enabled for this connection
+    pub carbons_enabled: Arc<AtomicBool>,
+}
+
+impl ConnectionEntry {
+    /// Create a new connection entry with carbons disabled by default.
+    pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        Self {
+            sender,
+            carbons_enabled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Get the carbons_enabled handle for this connection.
+    ///
+    /// The returned Arc can be used by the ConnectionActor to update
+    /// the carbons status when enable/disable IQs are received.
+    pub fn carbons_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.carbons_enabled)
+    }
+
+    /// Check if carbons is enabled for this connection.
+    pub fn is_carbons_enabled(&self) -> bool {
+        self.carbons_enabled.load(Ordering::Relaxed)
+    }
+}
+
 /// Result of attempting to send a message to a connection.
 #[derive(Debug)]
 pub enum SendResult {
@@ -43,7 +80,7 @@ pub enum SendResult {
 
 /// Registry for tracking active XMPP connections.
 ///
-/// Thread-safe registry that maps full JIDs to outbound message channels.
+/// Thread-safe registry that maps full JIDs to connection entries.
 /// Uses DashMap for concurrent access without explicit locking.
 ///
 /// ## Usage
@@ -53,7 +90,10 @@ pub enum SendResult {
 ///
 /// // When a connection is established:
 /// let (tx, rx) = mpsc::channel(256);
-/// registry.register(full_jid.clone(), tx);
+/// let carbons_handle = registry.register(full_jid.clone(), tx);
+///
+/// // The connection can update carbons_handle when enable/disable IQs are received
+/// carbons_handle.store(true, Ordering::Relaxed);
 ///
 /// // When routing a message:
 /// let result = registry.send_to(&recipient_jid, stanza).await;
@@ -62,8 +102,8 @@ pub enum SendResult {
 /// registry.unregister(&full_jid);
 /// ```
 pub struct ConnectionRegistry {
-    /// Map of full JID to outbound channel sender
-    connections: DashMap<FullJid, mpsc::Sender<OutboundStanza>>,
+    /// Map of full JID to connection entry (includes sender and carbons status)
+    connections: DashMap<FullJid, ConnectionEntry>,
 }
 
 impl ConnectionRegistry {
@@ -77,31 +117,37 @@ impl ConnectionRegistry {
 
     /// Register a connection with its outbound channel.
     ///
+    /// Returns a handle to the carbons_enabled flag that the ConnectionActor
+    /// can use to update the carbons status when enable/disable IQs are received.
+    ///
     /// If a connection with the same JID already exists, it will be replaced.
     /// This handles reconnection scenarios where a client reconnects with
     /// the same resource before the old connection is cleaned up.
     #[instrument(skip(self, sender), fields(jid = %jid))]
-    pub fn register(&self, jid: FullJid, sender: mpsc::Sender<OutboundStanza>) {
-        let existing = self.connections.insert(jid.clone(), sender);
+    pub fn register(&self, jid: FullJid, sender: mpsc::Sender<OutboundStanza>) -> Arc<AtomicBool> {
+        let entry = ConnectionEntry::new(sender);
+        let carbons_handle = entry.carbons_handle();
+        let existing = self.connections.insert(jid.clone(), entry);
         if existing.is_some() {
             debug!("Replaced existing connection registration");
         } else {
             debug!("Registered new connection");
         }
+        carbons_handle
     }
 
     /// Unregister a connection.
     ///
-    /// Returns the sender if the connection was registered, None otherwise.
+    /// Returns the connection entry if the connection was registered, None otherwise.
     #[instrument(skip(self), fields(jid = %jid))]
-    pub fn unregister(&self, jid: &FullJid) -> Option<mpsc::Sender<OutboundStanza>> {
+    pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove(jid);
         if removed.is_some() {
             debug!("Unregistered connection");
         } else {
             debug!("Connection was not registered");
         }
-        removed.map(|(_, sender)| sender)
+        removed.map(|(_, entry)| entry)
     }
 
     /// Check if a JID is currently connected.
@@ -120,7 +166,7 @@ impl ConnectionRegistry {
     #[instrument(skip(self, stanza), fields(to = %jid))]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         let sender = match self.connections.get(jid) {
-            Some(entry) => entry.value().clone(),
+            Some(entry) => entry.value().sender.clone(),
             None => {
                 debug!("Recipient not connected");
                 return SendResult::NotConnected;

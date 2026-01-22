@@ -13,7 +13,7 @@ use xmpp_parsers::message::MessageType;
 
 use crate::carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
-    is_carbons_enable,
+    is_carbons_enable, should_copy_message,
 };
 use crate::roster::{
     build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
@@ -937,9 +937,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.handle_groupchat_message(msg, sender_jid).await
             }
             MessageType::Chat => {
-                // TODO: Implement direct chat message routing
-                debug!("Received chat message (not yet implemented)");
-                Ok(())
+                self.handle_chat_message(msg, sender_jid).await
             }
             MessageType::Normal | MessageType::Headline | MessageType::Error => {
                 debug!(msg_type = ?msg.type_, "Received message of unsupported type");
@@ -1111,6 +1109,100 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             recipient_count = outbound_messages.len(),
             archived = archive_id.is_some(),
             "Groupchat message processed"
+        );
+
+        Ok(())
+    }
+
+    /// Handle a direct chat (1-to-1) message.
+    ///
+    /// Routes the message to the recipient's connected resources and handles
+    /// XEP-0280 Message Carbons for synchronization across devices.
+    ///
+    /// Per XEP-0280:
+    /// - After sending, "sent" carbons are delivered to sender's other clients
+    /// - When delivering to recipient, "received" carbons go to recipient's other clients
+    /// - Messages with `<private/>` or `<no-copy/>` are not carbon-copied
+    #[instrument(skip(self, msg), fields(to = ?msg.to))]
+    async fn handle_chat_message(
+        &mut self,
+        msg: xmpp_parsers::message::Message,
+        sender_jid: FullJid,
+    ) -> Result<(), XmppError> {
+        let recipient_jid = match &msg.to {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Chat message missing 'to' attribute");
+                return Err(XmppError::bad_request(Some(
+                    "Message must have a recipient".to_string(),
+                )));
+            }
+        };
+
+        debug!(
+            sender = %sender_jid,
+            recipient = %recipient_jid,
+            "Routing chat message"
+        );
+
+        // Ensure the message has the sender's full JID
+        let mut msg_with_from = msg.clone();
+        msg_with_from.from = Some(sender_jid.clone().into());
+
+        // Determine if this message should be carbon-copied
+        let should_carbon = should_copy_message(&msg);
+
+        // Route to all connected resources for the recipient
+        let recipient_bare = recipient_jid.to_bare();
+        let recipient_resources = self.connection_registry.get_resources_for_user(&recipient_bare);
+
+        let mut delivered = false;
+
+        if recipient_resources.is_empty() {
+            debug!(
+                recipient = %recipient_bare,
+                "Recipient has no connected resources"
+            );
+            // In a full implementation, we might queue for offline delivery
+        } else {
+            for resource_jid in &recipient_resources {
+                let stanza = Stanza::Message(msg_with_from.clone());
+                let result = self.connection_registry.send_to(resource_jid, stanza).await;
+
+                match result {
+                    SendResult::Sent => {
+                        debug!(to = %resource_jid, "Message delivered to recipient resource");
+                        delivered = true;
+                    }
+                    SendResult::NotConnected => {
+                        debug!(to = %resource_jid, "Recipient resource not connected");
+                    }
+                    SendResult::ChannelFull => {
+                        warn!(to = %resource_jid, "Recipient's channel full, message dropped");
+                    }
+                    SendResult::ChannelClosed => {
+                        debug!(to = %resource_jid, "Recipient's channel closed");
+                    }
+                }
+            }
+
+            // Send "received" carbons to recipient's other clients
+            if delivered && should_carbon {
+                self.send_received_carbons_to_user(&msg_with_from, &recipient_bare, &recipient_resources).await;
+            }
+        }
+
+        // Send "sent" carbons to sender's other connected clients
+        if should_carbon {
+            self.send_sent_carbons(&msg_with_from).await;
+        }
+
+        debug!(
+            sender = %sender_jid,
+            recipient = %recipient_jid,
+            delivered = delivered,
+            carbon_copied = should_carbon,
+            "Chat message processed"
         );
 
         Ok(())
@@ -1835,7 +1927,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// When the user sends a message from this client, we forward it as a
     /// "sent" carbon to all other connected clients that have carbons enabled.
-    #[allow(dead_code)] // XEP-0280 compliance - will be integrated when full carbons support is added
     async fn send_sent_carbons(&self, msg: &xmpp_parsers::message::Message) {
         let sender_jid = match &self.jid {
             Some(jid) => jid,
@@ -1875,7 +1966,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// When the user receives a message, we forward it as a "received" carbon
     /// to all other connected clients that have carbons enabled.
-    #[allow(dead_code)] // XEP-0280 compliance - will be integrated when full carbons support is added
+    #[allow(dead_code)] // Used for self-targeting carbons, currently we use send_received_carbons_to_user instead
     async fn send_received_carbons(&self, msg: &xmpp_parsers::message::Message) {
         let recipient_jid = match &self.jid {
             Some(jid) => jid,
@@ -1908,6 +1999,66 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             let stanza = Stanza::Message(carbon);
             let _ = self.connection_registry.send_to(&resource_jid, stanza).await;
+        }
+    }
+
+    /// Send "received" carbon copies to a specific user's other connected resources.
+    ///
+    /// This is used when routing a message to a recipient - we need to send
+    /// received carbons to the recipient's other devices, not the sender's.
+    ///
+    /// The `delivered_resources` parameter contains the resources that received
+    /// the original message, so we exclude those from carbon delivery.
+    async fn send_received_carbons_to_user(
+        &self,
+        msg: &xmpp_parsers::message::Message,
+        recipient_bare: &jid::BareJid,
+        delivered_resources: &[FullJid],
+    ) {
+        // Get all resources for the recipient user
+        let all_resources = self.connection_registry.get_resources_for_user(recipient_bare);
+
+        // Filter to resources that didn't receive the original (other devices)
+        // In practice, if the message was routed to all resources, we might not need carbons
+        // But for now, we send received carbons to all resources except the primary recipient
+        // Note: XEP-0280 says received carbons go to OTHER resources, so if we delivered
+        // to all resources, there are no "other" resources to carbon-copy to.
+        // However, the spec intention is that resources with carbons enabled get the carbon,
+        // while all resources get the original message.
+
+        // For simplicity, we skip sending received carbons when we've already
+        // delivered to all connected resources, since they all have the message.
+        // The main use case for received carbons is when a specific resource is targeted.
+        if delivered_resources.len() >= all_resources.len() {
+            debug!("All recipient resources received the message, skipping received carbons");
+            return;
+        }
+
+        // Find resources that didn't get the original message
+        let other_resources: Vec<&FullJid> = all_resources
+            .iter()
+            .filter(|r| !delivered_resources.contains(r))
+            .collect();
+
+        if other_resources.is_empty() {
+            return;
+        }
+
+        debug!(
+            resource_count = other_resources.len(),
+            recipient = %recipient_bare,
+            "Sending received carbons to recipient's other resources"
+        );
+
+        for resource_jid in other_resources {
+            let carbon = build_received_carbon(
+                msg,
+                &recipient_bare.to_string(),
+                &resource_jid.to_string(),
+            );
+
+            let stanza = Stanza::Message(carbon);
+            let _ = self.connection_registry.send_to(resource_jid, stanza).await;
         }
     }
 
