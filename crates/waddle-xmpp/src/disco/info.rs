@@ -107,6 +107,11 @@ impl Feature {
         Self::new("http://jabber.org/protocol/caps")
     }
 
+    /// XEP-0054 vcard-temp feature
+    pub fn vcard() -> Self {
+        Self::new("vcard-temp")
+    }
+
     /// MUC room features (XEP-0045)
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
@@ -227,6 +232,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::stream_management(),
         Feature::roster(),
         Feature::carbons(),
+        Feature::vcard(),
     ]
 }
 

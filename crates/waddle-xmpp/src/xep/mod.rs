@@ -5,13 +5,21 @@
 //!
 //! ## Implemented XEPs
 //!
+//! - **XEP-0054**: vcard-temp - User profile information via vCard format.
 //! - **XEP-0077**: In-Band Registration - Allows users to register accounts
 //!   directly through the XMPP connection before authentication.
 //! - **XEP-0115**: Entity Capabilities - Efficient service discovery caching
 //!   via capability hashes included in presence stanzas.
 
+pub mod xep0054;
 pub mod xep0077;
 pub mod xep0115;
+
+pub use xep0054::{
+    is_vcard_query, is_vcard_get, is_vcard_set, parse_vcard_from_iq, parse_vcard_element,
+    build_vcard_element, build_vcard_response, build_empty_vcard_response, build_vcard_success,
+    build_vcard_error, VCard, VCardPhoto, VCardError, NS_VCARD,
+};
 
 pub use xep0077::{
     parse_registration_iq, build_registration_fields_response, build_registration_success,
