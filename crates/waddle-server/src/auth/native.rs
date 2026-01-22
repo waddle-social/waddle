@@ -116,27 +116,43 @@ impl NativeUserStore {
         // Insert into database
         let conn = self.get_connection().await?;
 
-        let result = conn
+        let email_str = request.email.as_deref();
+        conn
             .execute(
                 r#"
                 INSERT INTO native_users (username, domain, password_hash, salt, iterations, stored_key, server_key, email)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
                 (
-                    &request.username,
-                    &request.domain,
-                    &password_hash,
-                    &scram_salt_b64,
+                    request.username.as_str(),
+                    request.domain.as_str(),
+                    password_hash.as_str(),
+                    scram_salt_b64.as_str(),
                     DEFAULT_SCRAM_ITERATIONS as i64,
-                    &stored_key,
-                    &server_key,
-                    &request.email,
+                    stored_key.as_slice(),
+                    server_key.as_slice(),
+                    email_str,
                 ),
             )
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to insert user: {}", e)))?;
 
-        let user_id = result.last_insert_rowid();
+        // Get the user ID from the last insert
+        let mut rows = conn
+            .query(
+                "SELECT id FROM native_users WHERE username = ? AND domain = ?",
+                (request.username.as_str(), request.domain.as_str()),
+            )
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user id: {}", e)))?;
+
+        let user_id: i64 = rows
+            .next()
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to read user id: {}", e)))?
+            .ok_or_else(|| AuthError::DatabaseError("User not found after insert".to_string()))?
+            .get(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get user id: {}", e)))?;
 
         debug!(
             username = %request.username,
@@ -341,10 +357,10 @@ impl NativeUserStore {
                 WHERE username = ? AND domain = ?
                 "#,
                 (
-                    &password_hash,
-                    &scram_salt_b64,
-                    &stored_key,
-                    &server_key,
+                    password_hash.as_str(),
+                    scram_salt_b64.as_str(),
+                    stored_key.as_slice(),
+                    server_key.as_slice(),
                     username,
                     domain,
                 ),
@@ -383,10 +399,7 @@ impl NativeUserStore {
     /// Get a database connection.
     async fn get_connection(&self) -> Result<libsql::Connection, AuthError> {
         // Use persistent connection for in-memory databases
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            // Clone the connection to return it
-            // Note: This is a workaround; in production we'd handle this differently
+        if self.db.persistent_connection().is_some() {
             return self.db.connect().map_err(|e| AuthError::DatabaseError(e.to_string()));
         }
         self.db.connect().map_err(|e| AuthError::DatabaseError(e.to_string()))
