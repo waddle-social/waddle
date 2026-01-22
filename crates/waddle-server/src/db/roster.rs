@@ -74,15 +74,10 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
         contact_jid: &BareJid,
     ) -> Result<Option<RosterItemRow>, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                libsql::params![user_jid.to_string(), contact_jid.to_string()],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let mut rows = self.query_with_persistent(
+            "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+            libsql::params![user_jid.to_string(), contact_jid.to_string()],
+        ).await?;
 
         match rows.next().await.map_err(|e| {
             RosterStorageError::QueryFailed(format!("Failed to read row: {}", e))
@@ -123,35 +118,30 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
         item: &RosterItemRow,
     ) -> Result<bool, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
         let groups_json = serde_json::to_string(&item.groups)
             .map_err(|e| RosterStorageError::SerializationError(e.to_string()))?;
 
         // Use INSERT OR REPLACE to upsert
-        let result = conn
-            .execute(
-                r#"
-                INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, groups, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
-                    name = excluded.name,
-                    subscription = excluded.subscription,
-                    ask = excluded.ask,
-                    groups = excluded.groups,
-                    updated_at = datetime('now')
-                "#,
-                libsql::params![
-                    user_jid.to_string(),
-                    item.contact_jid.clone(),
-                    item.name.clone(),
-                    item.subscription.clone(),
-                    item.ask.clone(),
-                    groups_json,
-                ],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let result = self.execute_with_persistent(
+            r#"
+            INSERT INTO roster_items (user_jid, contact_jid, name, subscription, ask, groups, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(user_jid, contact_jid) DO UPDATE SET
+                name = excluded.name,
+                subscription = excluded.subscription,
+                ask = excluded.ask,
+                groups = excluded.groups,
+                updated_at = datetime('now')
+            "#,
+            libsql::params![
+                user_jid.to_string(),
+                item.contact_jid.clone(),
+                item.name.clone(),
+                item.subscription.clone(),
+                item.ask.clone(),
+                groups_json,
+            ],
+        ).await?;
 
         // Update roster version
         self.increment_roster_version(user_jid).await?;
@@ -170,15 +160,10 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
         contact_jid: &BareJid,
     ) -> Result<bool, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let result = conn
-            .execute(
-                "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                libsql::params![user_jid.to_string(), contact_jid.to_string()],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let result = self.execute_with_persistent(
+            "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+            libsql::params![user_jid.to_string(), contact_jid.to_string()],
+        ).await?;
 
         if result > 0 {
             // Update roster version
@@ -195,15 +180,10 @@ impl DatabaseRosterStorage {
         &self,
         user_jid: &BareJid,
     ) -> Result<Option<String>, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT version FROM roster_versions WHERE user_jid = ?",
-                libsql::params![user_jid.to_string()],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let mut rows = self.query_with_persistent(
+            "SELECT version FROM roster_versions WHERE user_jid = ?",
+            libsql::params![user_jid.to_string()],
+        ).await?;
 
         match rows.next().await.map_err(|e| {
             RosterStorageError::QueryFailed(format!("Failed to read row: {}", e))
@@ -225,15 +205,10 @@ impl DatabaseRosterStorage {
         user_jid: &BareJid,
         contact_jid: &BareJid,
     ) -> Result<bool, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                libsql::params![user_jid.to_string(), contact_jid.to_string()],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let mut rows = self.query_with_persistent(
+            "SELECT 1 FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
+            libsql::params![user_jid.to_string(), contact_jid.to_string()],
+        ).await?;
 
         let exists = rows.next().await.map_err(|e| {
             RosterStorageError::QueryFailed(format!("Failed to read row: {}", e))
@@ -253,10 +228,8 @@ impl DatabaseRosterStorage {
         subscription: &str,
         ask: Option<&str>,
     ) -> Result<RosterItemRow, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
         // Upsert the roster item with the new subscription state
-        conn.execute(
+        self.execute_with_persistent(
             r#"
             INSERT INTO roster_items (user_jid, contact_jid, subscription, ask, groups, updated_at)
             VALUES (?, ?, ?, ?, '[]', datetime('now'))
@@ -271,9 +244,7 @@ impl DatabaseRosterStorage {
                 subscription.to_string(),
                 ask.map(|s| s.to_string()),
             ],
-        )
-        .await
-        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        ).await?;
 
         // Update roster version
         self.increment_roster_version(user_jid).await?;
@@ -292,15 +263,10 @@ impl DatabaseRosterStorage {
         &self,
         user_jid: &BareJid,
     ) -> Result<Vec<String>, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('from', 'both')",
-                libsql::params![user_jid.to_string()],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let mut rows = self.query_with_persistent(
+            "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('from', 'both')",
+            libsql::params![user_jid.to_string()],
+        ).await?;
 
         let mut jids = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| {
@@ -324,15 +290,10 @@ impl DatabaseRosterStorage {
         &self,
         user_jid: &BareJid,
     ) -> Result<Vec<String>, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('to', 'both')",
-                libsql::params![user_jid.to_string()],
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let mut rows = self.query_with_persistent(
+            "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('to', 'both')",
+            libsql::params![user_jid.to_string()],
+        ).await?;
 
         let mut jids = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| {
@@ -346,19 +307,6 @@ impl DatabaseRosterStorage {
 
         debug!(count = jids.len(), "Retrieved presence subscriptions");
         Ok(jids)
-    }
-
-    /// Get a database connection.
-    ///
-    /// For file-based databases, creates a new connection.
-    /// For in-memory databases, we need to use the same connection to see the data.
-    fn get_connection(&self) -> Result<libsql::Connection, RosterStorageError> {
-        // Always use connect() which works for both in-memory and file-based DBs
-        // For in-memory DBs with :memory:, the Database wrapper ensures all connections
-        // share the same underlying database via the persistent_conn field.
-        // Note: The caller should use the persistent connection pattern for in-memory DBs
-        // to ensure data consistency.
-        self.db.connect().map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))
     }
 
     /// Execute a query using the persistent connection for in-memory databases.
@@ -405,12 +353,10 @@ impl DatabaseRosterStorage {
         &self,
         user_jid: &BareJid,
     ) -> Result<(), RosterStorageError> {
-        let conn = self.get_connection().await?;
-
         // Generate a new version string (UUID-based)
         let new_version = Uuid::new_v4().to_string();
 
-        conn.execute(
+        self.execute_with_persistent(
             r#"
             INSERT INTO roster_versions (user_jid, version, updated_at)
             VALUES (?, ?, datetime('now'))
@@ -419,9 +365,7 @@ impl DatabaseRosterStorage {
                 updated_at = datetime('now')
             "#,
             libsql::params![user_jid.to_string(), new_version],
-        )
-        .await
-        .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        ).await?;
 
         Ok(())
     }
