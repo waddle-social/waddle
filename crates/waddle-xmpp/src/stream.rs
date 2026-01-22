@@ -50,6 +50,23 @@ pub enum SaslAuthResult {
     },
 }
 
+/// Result of pre-auth stanza handling (during SASL negotiation).
+///
+/// Before SASL authentication, clients may send registration IQs (XEP-0077)
+/// if in-band registration is enabled. This enum represents what was received.
+#[derive(Debug)]
+pub enum PreAuthResult {
+    /// A SASL authentication attempt was received
+    SaslAuth(SaslAuthResult),
+    /// An XEP-0077 registration IQ was received (type='get' for form, type='set' for submit)
+    RegistrationIq {
+        /// The IQ 'id' attribute for response correlation
+        id: String,
+        /// The parsed registration request (None for 'get' requests)
+        request: Option<crate::xep::xep0077::RegistrationRequest>,
+    },
+}
+
 /// XMPP stream handler.
 ///
 /// Manages the XML stream lifecycle including STARTTLS upgrade,
@@ -267,8 +284,24 @@ impl XmppStream {
     /// SCRAM-SHA-256 is listed first as it's the most secure.
     /// OAUTHBEARER enables standard XMPP clients to use OAuth authentication.
     /// Also advertises ISR (XEP-0397) for instant stream resumption.
+    /// Optionally advertises XEP-0077 In-Band Registration if enabled.
     #[instrument(skip(self), name = "xmpp.stream.send_features_sasl")]
     pub async fn send_features_sasl(&mut self) -> Result<(), XmppError> {
+        self.send_features_sasl_with_registration(false).await
+    }
+
+    /// Send stream features advertising SASL mechanisms with optional registration.
+    ///
+    /// When `registration_enabled` is true, includes the XEP-0077 registration
+    /// feature advertisement allowing clients to register before authentication.
+    #[instrument(skip(self), name = "xmpp.stream.send_features_sasl")]
+    pub async fn send_features_sasl_with_registration(&mut self, registration_enabled: bool) -> Result<(), XmppError> {
+        let registration_feature = if registration_enabled {
+            crate::xep::xep0077::build_registration_feature()
+        } else {
+            String::new()
+        };
+
         let features = format!(
             "<stream:features>\
                 <mechanisms xmlns='{}'>\
@@ -277,14 +310,19 @@ impl XmppStream {
                     <mechanism>OAUTHBEARER</mechanism>\
                 </mechanisms>\
                 <isr xmlns='{}'/>\
+                {}\
             </stream:features>",
-            ns::SASL, ns::ISR
+            ns::SASL, ns::ISR, registration_feature
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR");
+        if registration_enabled {
+            debug!("Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR and registration");
+        } else {
+            debug!("Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR");
+        }
         Ok(())
     }
 
@@ -943,6 +981,125 @@ impl XmppStream {
     pub async fn close(&mut self) -> Result<(), XmppError> {
         self.write_all(b"</stream:stream>").await?;
         self.flush().await?;
+        Ok(())
+    }
+
+    /// Read pre-auth stanzas (SASL auth or XEP-0077 registration IQs).
+    ///
+    /// This method handles the pre-authentication phase where clients may send
+    /// either SASL authentication or XEP-0077 registration IQs. It reads from
+    /// the stream and returns the type of stanza received.
+    ///
+    /// This should be called in a loop during the SASL negotiation phase when
+    /// registration is enabled, to handle registration requests before auth.
+    #[instrument(skip(self), name = "xmpp.stream.read_pre_auth")]
+    pub async fn read_pre_auth_stanza(&mut self) -> Result<PreAuthResult, XmppError> {
+        use crate::xep::xep0077::{is_registration_query_element, parse_registration_element};
+
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let n = self.read(&mut buf).await?;
+
+            if n == 0 {
+                return Err(XmppError::stream("Connection closed during pre-auth"));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_complete_stanza() {
+                // Check buffer content to determine stanza type
+                let buffer_str = self.parser.buffer_str();
+
+                // Check for registration IQ before consuming the stanza
+                if buffer_str.contains("<iq") && buffer_str.contains("jabber:iq:register") {
+                    // Parse as IQ element
+                    if let Some(crate::parser::ParsedStanza::Iq(element)) = self.parser.next_stanza()? {
+                        if is_registration_query_element(&element) {
+                            let id = element.attr("id").unwrap_or("").to_string();
+                            match parse_registration_element(&element, &id) {
+                                Ok(request) => {
+                                    debug!(id = %id, has_data = request.is_some(), "Received registration IQ");
+                                    return Ok(PreAuthResult::RegistrationIq { id, request });
+                                }
+                                Err(e) => {
+                                    // Return the error - caller will send error response
+                                    debug!(id = %id, error = %e, "Registration parse error");
+                                    return Err(XmppError::bad_request(Some(e.to_string())));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Otherwise, check for SASL auth
+                if let Some(crate::parser::ParsedStanza::SaslAuth { mechanism, data }) =
+                    self.parser.next_stanza()?
+                {
+                    debug!(mechanism = %mechanism, "Received SASL auth");
+
+                    let mech = SaslMechanism::from_str(&mechanism).ok_or_else(|| {
+                        XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
+                    })?;
+
+                    let sasl_result = match mech {
+                        SaslMechanism::Plain => {
+                            let (jid, token) = self.parse_sasl_plain(&data)?;
+                            SaslAuthResult::Plain { jid, token }
+                        }
+                        SaslMechanism::OAuthBearer => {
+                            let result = self.parse_sasl_oauthbearer(&data)?;
+
+                            match result {
+                                OAuthBearerResult::DiscoveryRequest => {
+                                    SaslAuthResult::OAuthBearerDiscovery
+                                }
+                                OAuthBearerResult::Credentials(creds) => {
+                                    SaslAuthResult::OAuthBearer {
+                                        token: creds.token,
+                                        authzid: creds.authzid,
+                                    }
+                                }
+                            }
+                        }
+                        SaslMechanism::ScramSha256 => {
+                            self.handle_scram_client_first(&data)?
+                        }
+                    };
+
+                    return Ok(PreAuthResult::SaslAuth(sasl_result));
+                }
+            }
+        }
+    }
+
+    /// Send XEP-0077 registration form response.
+    ///
+    /// Sends the registration fields form to the client in response to a
+    /// registration 'get' IQ.
+    pub async fn send_registration_form(&mut self, id: &str, instructions: Option<&str>) -> Result<(), XmppError> {
+        let response = crate::xep::xep0077::build_registration_fields_response(id, instructions, true);
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+        debug!(id = %id, "Sent registration form");
+        Ok(())
+    }
+
+    /// Send XEP-0077 registration success response.
+    pub async fn send_registration_success(&mut self, id: &str) -> Result<(), XmppError> {
+        let response = crate::xep::xep0077::build_registration_success(id);
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+        debug!(id = %id, "Sent registration success");
+        Ok(())
+    }
+
+    /// Send XEP-0077 registration error response.
+    pub async fn send_registration_error(&mut self, id: &str, error: &crate::xep::xep0077::RegistrationError) -> Result<(), XmppError> {
+        let response = crate::xep::xep0077::build_registration_error(id, error);
+        self.write_all(response.as_bytes()).await?;
+        self.flush().await?;
+        debug!(id = %id, error = %error, "Sent registration error");
         Ok(())
     }
 }

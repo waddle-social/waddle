@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
-use crate::auth::{did_to_jid, jid_to_did, SessionManager};
+use crate::auth::{did_to_jid, jid_to_did, NativeUserStore, RegisterRequest, SessionManager};
 use crate::db::Database;
 use crate::permissions::{Object, PermissionService, Subject};
 
@@ -17,6 +17,7 @@ use crate::permissions::{Object, PermissionService, Subject};
 /// This struct implements `waddle_xmpp::AppState` by delegating to:
 /// - `SessionManager` for session validation
 /// - `PermissionService` for permission checks
+/// - `NativeUserStore` for XEP-0077 registration and SCRAM authentication
 pub struct XmppAppState {
     /// The XMPP server domain (e.g., "waddle.social")
     domain: String,
@@ -24,6 +25,8 @@ pub struct XmppAppState {
     session_manager: SessionManager,
     /// Permission service for authorization checks
     permission_service: PermissionService,
+    /// Native user store for XEP-0077 registration and SCRAM authentication
+    native_user_store: NativeUserStore,
 }
 
 impl XmppAppState {
@@ -37,11 +40,13 @@ impl XmppAppState {
     pub fn new(domain: String, db: Arc<Database>, encryption_key: Option<&[u8]>) -> Self {
         let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
         let permission_service = PermissionService::new(Arc::clone(&db));
+        let native_user_store = NativeUserStore::new(Arc::clone(&db));
 
         Self {
             domain,
             session_manager,
             permission_service,
+            native_user_store,
         }
     }
 
@@ -314,21 +319,95 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Lookup SCRAM credentials for a native JID user.
     ///
-    /// For this ATProto-based deployment, native JID authentication is not supported.
-    /// All authentication goes through OAUTHBEARER or PLAIN with session tokens.
-    ///
-    /// Returns None to indicate SCRAM-SHA-256 is not available for any user.
+    /// Queries the NativeUserStore for SCRAM credentials if the user exists.
+    /// Returns None if the user doesn't exist or native auth is not available.
     async fn lookup_scram_credentials(
         &self,
         username: &str,
     ) -> Result<Option<waddle_xmpp::ScramCredentials>, XmppError> {
         debug!(
             username = username,
-            "SCRAM credentials lookup - not supported in ATProto deployment"
+            domain = %self.domain,
+            "Looking up SCRAM credentials for native user"
         );
-        // Native JID authentication is not supported in this ATProto-focused deployment.
-        // Users authenticate via OAUTHBEARER (XEP-0493) or PLAIN with session tokens.
-        Ok(None)
+
+        match self.native_user_store.get_scram_credentials(username, &self.domain).await {
+            Ok(Some(creds)) => {
+                debug!(username = username, "Found SCRAM credentials");
+                Ok(Some(creds))
+            }
+            Ok(None) => {
+                debug!(username = username, "No SCRAM credentials found");
+                Ok(None)
+            }
+            Err(e) => {
+                warn!(username = username, error = %e, "Failed to lookup SCRAM credentials");
+                Err(XmppError::internal(format!("Database error: {}", e)))
+            }
+        }
+    }
+
+    /// Register a new native user via XEP-0077 In-Band Registration.
+    ///
+    /// Creates a new user with securely hashed password and SCRAM keys.
+    async fn register_native_user(
+        &self,
+        username: &str,
+        password: &str,
+        email: Option<&str>,
+    ) -> Result<(), XmppError> {
+        debug!(
+            username = username,
+            domain = %self.domain,
+            has_email = email.is_some(),
+            "Registering native user via XEP-0077"
+        );
+
+        let request = RegisterRequest {
+            username: username.to_string(),
+            domain: self.domain.clone(),
+            password: password.to_string(),
+            email: email.map(|s| s.to_string()),
+        };
+
+        match self.native_user_store.register(request).await {
+            Ok(user_id) => {
+                debug!(username = username, user_id = user_id, "Native user registered successfully");
+                Ok(())
+            }
+            Err(crate::auth::AuthError::UserAlreadyExists(_)) => {
+                warn!(username = username, "Registration failed: user already exists");
+                Err(XmppError::conflict(Some(format!("User '{}' already exists", username))))
+            }
+            Err(crate::auth::AuthError::InvalidUsername(msg)) => {
+                warn!(username = username, error = %msg, "Registration failed: invalid username");
+                Err(XmppError::not_acceptable(Some(msg)))
+            }
+            Err(e) => {
+                warn!(username = username, error = %e, "Registration failed");
+                Err(XmppError::internal(format!("Registration failed: {}", e)))
+            }
+        }
+    }
+
+    /// Check if a native user exists.
+    async fn native_user_exists(
+        &self,
+        username: &str,
+    ) -> Result<bool, XmppError> {
+        debug!(
+            username = username,
+            domain = %self.domain,
+            "Checking if native user exists"
+        );
+
+        match self.native_user_store.user_exists(username, &self.domain).await {
+            Ok(exists) => Ok(exists),
+            Err(e) => {
+                warn!(username = username, error = %e, "Failed to check user existence");
+                Err(XmppError::internal(format!("Database error: {}", e)))
+            }
+        }
     }
 }
 

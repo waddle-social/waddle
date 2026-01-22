@@ -49,8 +49,9 @@ pub use error::{
 };
 pub use parser::{ns, StreamHeader};
 pub use server::{XmppServer, XmppServerConfig};
-pub use stream::SaslAuthResult;
+pub use stream::{PreAuthResult, SaslAuthResult};
 pub use types::*;
+pub use xep::xep0077::{RegistrationError, RegistrationRequest};
 
 use std::sync::Arc;
 
@@ -125,6 +126,39 @@ pub trait AppState: Send + Sync + 'static {
         &self,
         username: &str,
     ) -> impl std::future::Future<Output = Result<Option<ScramCredentials>, XmppError>> + Send;
+
+    /// Register a new native user via XEP-0077 In-Band Registration.
+    ///
+    /// Creates a new user account with the given credentials. The password
+    /// will be securely hashed and SCRAM keys will be derived for authentication.
+    ///
+    /// # Arguments
+    /// * `username` - The desired username (local part of JID)
+    /// * `password` - The user's password (will be hashed)
+    /// * `email` - Optional email address for account recovery
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful registration
+    /// * `Err(XmppError)` if registration fails (user exists, invalid username, etc.)
+    ///
+    /// # Errors
+    /// * Returns `XmppError::conflict` if username already exists
+    /// * Returns `XmppError::not_acceptable` if username is invalid
+    /// * Returns `XmppError::not_allowed` if registration is disabled
+    fn register_native_user(
+        &self,
+        username: &str,
+        password: &str,
+        email: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
+
+    /// Check if a native user exists.
+    ///
+    /// Used by XEP-0077 registration to check for conflicts before creating users.
+    fn native_user_exists(
+        &self,
+        username: &str,
+    ) -> impl std::future::Future<Output = Result<bool, XmppError>> + Send;
 }
 
 /// User session information.
