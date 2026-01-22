@@ -466,6 +466,7 @@ impl S2sConnectionPool {
                 return Ok(PoolConnectionHandle {
                     domain: domain.to_string(),
                     pool_metrics: Arc::clone(&self.metrics),
+                    connections: self.connections.clone(),
                 });
             }
 
@@ -516,6 +517,7 @@ impl S2sConnectionPool {
                 Ok(PoolConnectionHandle {
                     domain: domain.to_string(),
                     pool_metrics: Arc::clone(&self.metrics),
+                    connections: self.connections.clone(),
                 })
             }
             Err(e) => {
@@ -753,6 +755,29 @@ impl S2sConnectionPool {
     pub fn local_domain(&self) -> &str {
         &self.local_domain
     }
+
+    /// Send a stanza to a remote domain.
+    ///
+    /// This is a convenience method that gets or creates a connection to the
+    /// specified domain and sends the stanza through it.
+    ///
+    /// # Arguments
+    ///
+    /// * `domain` - The remote domain to send the stanza to
+    /// * `stanza_xml` - The XML stanza bytes to send
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the stanza was sent successfully, or an error if
+    /// connection failed or the write failed.
+    #[instrument(skip(self, stanza_xml), name = "s2s.pool.send_stanza", fields(domain = %domain, data_len = stanza_xml.len()))]
+    pub async fn send_stanza(&self, domain: &str, stanza_xml: &[u8]) -> Result<(), S2sPoolError> {
+        // Get or create a connection to the domain
+        let handle = self.get_or_connect(domain).await?;
+
+        // Send the stanza through the connection
+        handle.send_stanza(stanza_xml).await
+    }
 }
 
 /// Reference to pool for maintenance tasks.
@@ -827,6 +852,8 @@ impl MaintenanceHandle {
 pub struct PoolConnectionHandle {
     domain: String,
     pool_metrics: Arc<S2sPoolMetrics>,
+    /// Reference to the pool's connections for sending stanzas.
+    connections: DashMap<String, Arc<RwLock<DomainPoolEntry>>>,
 }
 
 impl PoolConnectionHandle {
@@ -838,6 +865,54 @@ impl PoolConnectionHandle {
     /// Record that a stanza was sent.
     pub fn record_stanza_sent(&self) {
         self.pool_metrics.record_stanza_sent();
+    }
+
+    /// Send a stanza (as raw bytes) through this connection.
+    ///
+    /// This writes the XML stanza bytes to the underlying S2S connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The XML stanza bytes to send
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the stanza was sent successfully, or an error if
+    /// the connection is not available or the write failed.
+    #[instrument(skip(self, data), fields(domain = %self.domain, data_len = data.len()))]
+    pub async fn send_stanza(&self, data: &[u8]) -> Result<(), S2sPoolError> {
+        // Get the connection entry for this domain
+        let entry = self.connections.get(&self.domain).ok_or_else(|| {
+            S2sPoolError::NoHealthyConnections {
+                domain: self.domain.clone(),
+            }
+        })?;
+
+        // Lock and get a healthy connection
+        let mut entry_guard = entry.write().await;
+
+        // Find a healthy connection
+        let conn = entry_guard.get_healthy_connection().ok_or_else(|| {
+            S2sPoolError::NoHealthyConnections {
+                domain: self.domain.clone(),
+            }
+        })?;
+
+        // Send the stanza through the connection
+        match conn.connection.send_raw(data).await {
+            Ok(()) => {
+                conn.record_activity();
+                self.pool_metrics.record_stanza_sent();
+                debug!(domain = %self.domain, "Stanza sent successfully via S2S");
+                Ok(())
+            }
+            Err(e) => {
+                conn.record_error();
+                self.pool_metrics.record_connection_error();
+                warn!(domain = %self.domain, error = %e, "Failed to send stanza via S2S");
+                Err(S2sPoolError::ConnectionFailed(e))
+            }
+        }
     }
 }
 
@@ -935,5 +1010,67 @@ mod tests {
     fn test_pooled_connection_state() {
         assert_eq!(PooledConnectionState::Ready, PooledConnectionState::Ready);
         assert_ne!(PooledConnectionState::Ready, PooledConnectionState::Closed);
+    }
+
+    #[test]
+    fn test_pool_connection_handle_domain() {
+        let metrics = Arc::new(S2sPoolMetrics::new());
+        let connections = DashMap::new();
+
+        let handle = PoolConnectionHandle {
+            domain: "example.com".to_string(),
+            pool_metrics: metrics,
+            connections,
+        };
+
+        assert_eq!(handle.domain(), "example.com");
+    }
+
+    #[tokio::test]
+    async fn test_pool_connection_handle_send_stanza_no_connection() {
+        let metrics = Arc::new(S2sPoolMetrics::new());
+        let connections: DashMap<String, Arc<RwLock<DomainPoolEntry>>> = DashMap::new();
+
+        let handle = PoolConnectionHandle {
+            domain: "example.com".to_string(),
+            pool_metrics: metrics,
+            connections,
+        };
+
+        // Attempting to send should fail with NoHealthyConnections since there's no entry
+        let result = handle.send_stanza(b"<message/>").await;
+        assert!(result.is_err());
+        match result {
+            Err(S2sPoolError::NoHealthyConnections { domain }) => {
+                assert_eq!(domain, "example.com");
+            }
+            _ => panic!("Expected NoHealthyConnections error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_connection_handle_send_stanza_no_healthy_connection() {
+        let metrics = Arc::new(S2sPoolMetrics::new());
+        let connections: DashMap<String, Arc<RwLock<DomainPoolEntry>>> = DashMap::new();
+
+        // Create an empty domain entry (has no connections)
+        let entry = DomainPoolEntry::new("example.com".to_string());
+        connections.insert("example.com".to_string(), Arc::new(RwLock::new(entry)));
+
+        let handle = PoolConnectionHandle {
+            domain: "example.com".to_string(),
+            pool_metrics: metrics,
+            connections,
+        };
+
+        // Attempting to send should fail with NoHealthyConnections since the entry has no connections
+        let result = handle.send_stanza(b"<message/>").await;
+        assert!(result.is_err());
+        match result {
+            Err(S2sPoolError::NoHealthyConnections { domain }) => {
+                assert_eq!(domain, "example.com");
+            }
+            _ => panic!("Expected NoHealthyConnections error"),
+        }
     }
 }

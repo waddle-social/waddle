@@ -316,33 +316,15 @@ impl StanzaRouter {
             XmppError::internal("S2S pool not available".to_string())
         })?;
 
-        // Get or create a connection to the remote domain
-        match pool.get_or_connect(domain).await {
-            Ok(conn_handle) => {
-                // Serialize the message to XML
-                let _xml = message_to_xml(&message)?;
+        // Serialize the message to XML
+        let xml = message_to_xml(&message)?;
 
-                // Send via the connection
-                // Note: We need to access the actual connection through the pool
-                // For now, we'll use the pool's internal mechanism
-                // This is a simplified implementation - in production, we'd need
-                // to track the actual connection and send through it
-                debug!(
-                    domain = %domain,
-                    "Acquired S2S connection for message routing"
-                );
-
-                conn_handle.record_stanza_sent();
-
-                // TODO: Actually send the XML through the connection
-                // For now, we just log and return success
-                // The pool.get_or_connect returns a handle, but we need access
-                // to the actual connection to write data. This will be addressed
-                // by extending the pool API.
-
+        // Send the stanza through the S2S connection pool
+        match pool.send_stanza(domain, xml.as_bytes()).await {
+            Ok(()) => {
                 info!(
                     domain = %domain,
-                    "Message routed to remote server via S2S"
+                    "Message sent to remote server via S2S"
                 );
 
                 Ok(RoutingResult::SentToRemote {
@@ -353,9 +335,9 @@ impl StanzaRouter {
                 Err(XmppError::internal("S2S pool is shutting down".to_string()))
             }
             Err(e) => {
-                warn!(domain = %domain, error = %e, "Failed to get S2S connection");
+                warn!(domain = %domain, error = %e, "Failed to send message via S2S");
                 Ok(RoutingResult::Failed {
-                    reason: format!("S2S connection failed: {}", e),
+                    reason: format!("S2S send failed: {}", e),
                 })
             }
         }
@@ -461,21 +443,28 @@ impl StanzaRouter {
             XmppError::internal("S2S pool not available".to_string())
         })?;
 
-        match pool.get_or_connect(domain).await {
-            Ok(conn_handle) => {
-                let _xml = presence_to_xml(&presence)?;
-                conn_handle.record_stanza_sent();
+        // Serialize the presence to XML
+        let xml = presence_to_xml(&presence)?;
 
-                debug!(domain = %domain, "Presence routed to remote server via S2S");
+        // Send the stanza through the S2S connection pool
+        match pool.send_stanza(domain, xml.as_bytes()).await {
+            Ok(()) => {
+                info!(
+                    domain = %domain,
+                    "Presence sent to remote server via S2S"
+                );
 
                 Ok(RoutingResult::SentToRemote {
                     domain: domain.to_string(),
                 })
             }
+            Err(S2sPoolError::Shutdown) => {
+                Err(XmppError::internal("S2S pool is shutting down".to_string()))
+            }
             Err(e) => {
-                warn!(domain = %domain, error = %e, "Failed to route presence via S2S");
+                warn!(domain = %domain, error = %e, "Failed to send presence via S2S");
                 Ok(RoutingResult::Failed {
-                    reason: format!("S2S connection failed: {}", e),
+                    reason: format!("S2S send failed: {}", e),
                 })
             }
         }
@@ -587,21 +576,28 @@ impl StanzaRouter {
             XmppError::internal("S2S pool not available".to_string())
         })?;
 
-        match pool.get_or_connect(domain).await {
-            Ok(conn_handle) => {
-                let _xml = iq_to_xml(&iq)?;
-                conn_handle.record_stanza_sent();
+        // Serialize the IQ to XML
+        let xml = iq_to_xml(&iq)?;
 
-                debug!(domain = %domain, "IQ routed to remote server via S2S");
+        // Send the stanza through the S2S connection pool
+        match pool.send_stanza(domain, xml.as_bytes()).await {
+            Ok(()) => {
+                info!(
+                    domain = %domain,
+                    "IQ sent to remote server via S2S"
+                );
 
                 Ok(RoutingResult::SentToRemote {
                     domain: domain.to_string(),
                 })
             }
+            Err(S2sPoolError::Shutdown) => {
+                Err(XmppError::internal("S2S pool is shutting down".to_string()))
+            }
             Err(e) => {
-                warn!(domain = %domain, error = %e, "Failed to route IQ via S2S");
+                warn!(domain = %domain, error = %e, "Failed to send IQ via S2S");
                 Ok(RoutingResult::Failed {
-                    reason: format!("S2S connection failed: {}", e),
+                    reason: format!("S2S send failed: {}", e),
                 })
             }
         }
