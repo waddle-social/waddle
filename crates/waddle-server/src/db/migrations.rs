@@ -180,6 +180,33 @@ CREATE TABLE IF NOT EXISTS vcard_storage (
 );
 "#;
 
+    /// Migration to add upload_slots table for XEP-0363 HTTP File Upload
+    pub const V0006_UPLOAD_SLOTS: &str = r#"
+-- Upload slots table for XEP-0363 HTTP File Upload
+-- Tracks pending and completed file uploads
+CREATE TABLE IF NOT EXISTS upload_slots (
+    id TEXT PRIMARY KEY,                    -- Slot ID (UUID)
+    requester_jid TEXT NOT NULL,            -- JID of user who requested the slot
+    filename TEXT NOT NULL,                 -- Sanitized filename
+    size_bytes INTEGER NOT NULL,            -- File size in bytes
+    content_type TEXT NOT NULL,             -- MIME type (defaults to application/octet-stream)
+    status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'uploaded', 'expired'
+    storage_key TEXT,                       -- Storage key/path once uploaded
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,               -- When the upload slot expires
+    uploaded_at TEXT                        -- When the file was actually uploaded
+);
+
+-- Index for looking up slots by requester (for quota tracking)
+CREATE INDEX IF NOT EXISTS idx_upload_slots_requester ON upload_slots(requester_jid);
+
+-- Index for finding expired slots (for cleanup)
+CREATE INDEX IF NOT EXISTS idx_upload_slots_expires ON upload_slots(expires_at) WHERE status = 'pending';
+
+-- Index for finding slots by status
+CREATE INDEX IF NOT EXISTS idx_upload_slots_status ON upload_slots(status);
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -207,6 +234,11 @@ CREATE TABLE IF NOT EXISTS vcard_storage (
                 version: 5,
                 description: "Add vcard_storage table for XEP-0054 vcard-temp".to_string(),
                 sql: V0005_VCARD_STORAGE,
+            },
+            Migration {
+                version: 6,
+                description: "Add upload_slots table for XEP-0363 HTTP File Upload".to_string(),
+                sql: V0006_UPLOAD_SLOTS,
             },
         ]
     }
@@ -521,9 +553,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (5 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage)
+        // Check version (6 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(5));
+        assert_eq!(version, Some(6));
     }
 
     #[tokio::test]

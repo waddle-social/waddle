@@ -180,6 +180,40 @@ impl AppState for MockAppState {
         // Mock vCard storage always succeeds
         async { Ok(()) }
     }
+
+    fn create_upload_slot(
+        &self,
+        requester_jid: &jid::BareJid,
+        filename: &str,
+        size: u64,
+        content_type: Option<&str>,
+    ) -> impl Future<Output = Result<waddle_xmpp::UploadSlotInfo, XmppError>> + Send {
+        let domain = self.domain.clone();
+        let filename = filename.to_string();
+        let content_type = content_type.map(|s| s.to_string());
+        let jid = requester_jid.clone();
+        async move {
+            // Check size limit (mock limit: 10 MB)
+            if size > 10 * 1024 * 1024 {
+                return Err(XmppError::not_acceptable(Some(
+                    "File too large. Maximum size is 10485760 bytes.".to_string(),
+                )));
+            }
+
+            // Generate mock URLs
+            let slot_id = format!("mock-slot-{}", uuid::Uuid::new_v4());
+            let put_url = format!("https://{}/api/upload/{}", domain, slot_id);
+            let get_url = format!("https://{}/api/files/{}/{}", domain, slot_id, filename);
+
+            Ok(waddle_xmpp::UploadSlotInfo {
+                put_url,
+                get_url,
+                put_headers: vec![
+                    ("Content-Type".to_string(), content_type.unwrap_or_else(|| "application/octet-stream".to_string())),
+                ],
+            })
+        }
+    }
 }
 
 /// Generated TLS credentials for testing.

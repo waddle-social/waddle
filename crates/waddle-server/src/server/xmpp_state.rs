@@ -448,6 +448,109 @@ impl waddle_xmpp::AppState for XmppAppState {
             }
         }
     }
+
+    /// Create an upload slot for XEP-0363 HTTP File Upload.
+    async fn create_upload_slot(
+        &self,
+        requester_jid: &jid::BareJid,
+        filename: &str,
+        size: u64,
+        content_type: Option<&str>,
+    ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
+        use waddle_xmpp::xep::xep0363::{sanitize_filename, effective_content_type, DEFAULT_MAX_FILE_SIZE};
+
+        debug!(
+            jid = %requester_jid,
+            filename = %filename,
+            size = size,
+            content_type = ?content_type,
+            "Creating upload slot"
+        );
+
+        // Check file size limit
+        let max_size = self.max_upload_size();
+        if size > max_size {
+            warn!(
+                jid = %requester_jid,
+                size = size,
+                max_size = max_size,
+                "File too large for upload"
+            );
+            return Err(XmppError::not_acceptable(Some(format!(
+                "File too large. Maximum size is {} bytes.",
+                max_size
+            ))));
+        }
+
+        // Sanitize the filename
+        let safe_filename = sanitize_filename(filename);
+        let effective_type = effective_content_type(content_type).to_string();
+
+        // Generate a unique slot ID
+        let slot_id = uuid::Uuid::new_v4().to_string();
+
+        // Calculate expiration (15 minutes from now)
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+
+        // Get the base URL for uploads
+        let base_url = std::env::var("WADDLE_BASE_URL")
+            .unwrap_or_else(|_| format!("https://{}", self.domain));
+        let base_url = base_url.trim_end_matches('/');
+
+        // Build the PUT and GET URLs
+        let put_url = format!("{}/api/upload/{}", base_url, slot_id);
+        let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
+
+        // Store the slot in the database
+        // Note: We use an async block to avoid holding references across await
+        let result = {
+            let conn = self.session_manager.db().connect().map_err(|e| {
+                warn!(error = %e, "Failed to connect to database for upload slot");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+
+            conn.execute(
+                "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    &slot_id,
+                    requester_jid.to_string(),
+                    &safe_filename,
+                    size as i64,
+                    &effective_type,
+                    expires_at.to_rfc3339(),
+                ),
+            ).await
+        };
+
+        result.map_err(|e| {
+            warn!(error = %e, "Failed to create upload slot in database");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        debug!(
+            slot_id = %slot_id,
+            put_url = %put_url,
+            get_url = %get_url,
+            "Created upload slot"
+        );
+
+        Ok(waddle_xmpp::UploadSlotInfo {
+            put_url,
+            get_url,
+            put_headers: vec![
+                ("Content-Type".to_string(), effective_type),
+            ],
+        })
+    }
+
+    /// Get the maximum allowed file upload size in bytes.
+    fn max_upload_size(&self) -> u64 {
+        // Check environment variable, default to 10 MB
+        std::env::var("WADDLE_MAX_UPLOAD_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10 * 1024 * 1024)
+    }
 }
 
 #[cfg(test)]
