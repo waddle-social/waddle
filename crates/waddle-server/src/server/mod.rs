@@ -53,6 +53,10 @@ pub struct XmppConfig {
     pub domain: String,
     /// Client-to-server bind address (default: "0.0.0.0:5222")
     pub c2s_addr: SocketAddr,
+    /// Server-to-server bind address (default: "0.0.0.0:5269")
+    pub s2s_addr: SocketAddr,
+    /// Whether S2S federation is enabled (default: false)
+    pub s2s_enabled: bool,
     /// TLS certificate path (default: "certs/server.crt")
     pub tls_cert_path: String,
     /// TLS key path (default: "certs/server.key")

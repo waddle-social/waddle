@@ -149,3 +149,49 @@ pub fn record_muc_presence(event_type: &str, room: &str) {
 pub fn record_muc_occupant_count(count: i64, room: &str) {
     muc_occupants().record(count, &[KeyValue::new("room", room.to_string())]);
 }
+
+// ============================================================================
+// S2S Metrics
+// ============================================================================
+
+/// Counter for S2S connection attempts.
+pub fn s2s_connection_attempts() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.s2s.connection.attempts")
+        .with_description("Total S2S connection attempts")
+        .with_unit("connection")
+        .build()
+}
+
+/// Gauge for active S2S connections.
+pub fn s2s_connections_active() -> Gauge<i64> {
+    meter()
+        .i64_gauge("xmpp.s2s.connections.active")
+        .with_description("Current number of active S2S connections")
+        .with_unit("connection")
+        .build()
+}
+
+/// Counter for S2S TLS handshakes completed.
+pub fn s2s_tls_handshakes() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.s2s.tls.established")
+        .with_description("Total S2S TLS handshakes completed")
+        .with_unit("handshake")
+        .build()
+}
+
+/// Record an S2S connection attempt.
+pub fn record_s2s_connection_attempt() {
+    s2s_connection_attempts().add(1, &[]);
+}
+
+/// Record S2S connection count change.
+pub fn record_s2s_connection_count(count: i64) {
+    s2s_connections_active().record(count, &[]);
+}
+
+/// Record S2S TLS handshake completion.
+pub fn record_s2s_tls_established() {
+    s2s_tls_handshakes().add(1, &[]);
+}

@@ -51,37 +51,37 @@ crates/waddle-server/src/db/global.rs         (modify)
 crates/waddle-server/src/config.rs            (modify)
 ```
 
-### Phase F2: Server Mode Configuration (P0 - CRITICAL)
+### Phase F2: Server Mode Configuration (P0 - CRITICAL) ✅ COMPLETE
 
 **Goal:** Support running as either home-server or standalone waddle
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| `ServerMode` enum (HomeServer/Standalone) | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Conditional ATProto initialization | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| `WADDLE_MODE` environment variable | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Mode-specific route registration | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| `ServerMode` enum (HomeServer/Standalone) | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Conditional ATProto initialization | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| `WADDLE_MODE` environment variable | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Mode-specific route registration | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 
 **Verification:**
-- [ ] Start server with `WADDLE_MODE=standalone`
-- [ ] Confirm ATProto routes are disabled
-- [ ] Confirm native registration works
+- [x] Start server with `WADDLE_MODE=standalone`
+- [x] Confirm ATProto routes are disabled
+- [x] Confirm native registration works
 
-**Files to create/modify:**
+**Files created/modified:**
 ```
-crates/waddle-server/src/config.rs            (modify)
-crates/waddle-server/src/main.rs              (modify)
+crates/waddle-server/src/config.rs            (complete)
+crates/waddle-server/src/main.rs              (complete)
 ```
 
-### Phase F3: S2S Federation Core (P0 - CRITICAL)
+### Phase F3: S2S Federation Core (P0 - CRITICAL) 🔄 IN PROGRESS
 
 **Goal:** Enable XMPP server-to-server communication
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| S2S listener on port 5269 | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| TLS 1.3 for S2S connections | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| Stream negotiation (S2S) | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| S2S listener on port 5269 | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| TLS 1.3 for S2S connections | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| Stream negotiation (S2S) | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | XEP-0220 Server Dialback | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | DNS SRV record resolution | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | S2S connection pool | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
@@ -460,10 +460,10 @@ External integrations and bot platform.
 - [x] Native user can login via standard XMPP client
 - [x] Password hashing with Argon2id (waddle-server/src/auth/native.rs)
 
-### MF2: Server Modes
-- [ ] `WADDLE_MODE=standalone` disables ATProto
-- [ ] `WADDLE_MODE=homeserver` runs full stack
-- [ ] Mode-specific feature flags working
+### MF2: Server Modes ✅ COMPLETE
+- [x] `WADDLE_MODE=standalone` disables ATProto
+- [x] `WADDLE_MODE=homeserver` runs full stack
+- [x] Mode-specific feature flags working
 
 ### MF3: S2S Federation
 - [ ] S2S listener on 5269

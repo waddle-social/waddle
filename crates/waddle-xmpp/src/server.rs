@@ -1,6 +1,7 @@
 //! XMPP server implementation.
 //!
-//! The server listens on TCP port 5222 for client-to-server (C2S) connections.
+//! The server listens on TCP port 5222 for client-to-server (C2S) connections
+//! and optionally on port 5269 for server-to-server (S2S) federation.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -8,13 +9,14 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, info_span, Instrument};
+use tracing::{info, info_span, warn, Instrument};
 
 use crate::connection::ConnectionActor;
 use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
 use crate::muc::MucRoomRegistry;
 use crate::registry::ConnectionRegistry;
+use crate::s2s::{S2sListener, S2sListenerConfig};
 use crate::{AppState, XmppError};
 
 /// XMPP server configuration.
@@ -24,6 +26,9 @@ pub struct XmppServerConfig {
     pub c2s_addr: SocketAddr,
     /// Address to bind for S2S connections (default: 0.0.0.0:5269)
     pub s2s_addr: Option<SocketAddr>,
+    /// Whether S2S federation is enabled (default: false)
+    /// When enabled, the server listens on s2s_addr for incoming S2S connections.
+    pub s2s_enabled: bool,
     /// TLS certificate path (PEM format)
     pub tls_cert_path: String,
     /// TLS private key path (PEM format)
@@ -45,7 +50,8 @@ impl Default for XmppServerConfig {
     fn default() -> Self {
         Self {
             c2s_addr: "0.0.0.0:5222".parse().unwrap(),
-            s2s_addr: None,
+            s2s_addr: Some("0.0.0.0:5269".parse().unwrap()),
+            s2s_enabled: false, // S2S disabled by default
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
             domain: "localhost".to_string(),
@@ -164,49 +170,120 @@ impl<S: AppState> XmppServer<S> {
     }
 
     /// Start the XMPP server and listen for connections.
+    ///
+    /// When S2S is enabled, this runs both C2S and S2S listeners concurrently.
+    /// Either listener failing will return an error.
     pub async fn run(self) -> Result<(), XmppError> {
-        let listener = TcpListener::bind(&self.config.c2s_addr).await?;
-        info!(addr = %self.config.c2s_addr, "XMPP C2S server listening");
+        // Start S2S listener if enabled
+        let s2s_handle = if self.config.s2s_enabled {
+            let s2s_addr = self.config.s2s_addr
+                .unwrap_or_else(|| "0.0.0.0:5269".parse().unwrap());
 
-        loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let s2s_config = S2sListenerConfig {
+                addr: s2s_addr,
+                domain: self.config.domain.clone(),
+            };
 
-            let app_state = Arc::clone(&self.app_state);
-            let tls_acceptor = self.tls_acceptor.clone();
-            let domain = self.config.domain.clone();
-            let room_registry = Arc::clone(&self.room_registry);
-            let connection_registry = Arc::clone(&self.connection_registry);
-            let mam_storage = Arc::clone(&self.mam_storage);
-            let isr_token_store = Arc::clone(&self.isr_token_store);
+            let s2s_listener = S2sListener::new(s2s_config, self.tls_acceptor.clone());
+
+            info!(
+                addr = %s2s_addr,
+                domain = %self.config.domain,
+                "S2S federation enabled"
+            );
+
+            Some(tokio::spawn(async move {
+                s2s_listener.run().await
+            }))
+        } else {
+            info!("S2S federation disabled");
+            None
+        };
+
+        // Start C2S listener
+        let c2s_handle = {
+            let listener = TcpListener::bind(&self.config.c2s_addr).await?;
+            info!(addr = %self.config.c2s_addr, "XMPP C2S server listening");
+
+            let app_state = self.app_state;
+            let tls_acceptor = self.tls_acceptor;
+            let domain = self.config.domain;
+            let room_registry = self.room_registry;
+            let connection_registry = self.connection_registry;
+            let mam_storage = self.mam_storage;
+            let isr_token_store = self.isr_token_store;
             let registration_enabled = self.config.registration_enabled;
 
-            tokio::spawn(
-                async move {
-                    if let Err(e) =
-                        ConnectionActor::handle_connection(
-                            stream,
-                            peer_addr,
-                            tls_acceptor,
-                            domain.clone(),
-                            app_state,
-                            room_registry,
-                            connection_registry,
-                            mam_storage,
-                            isr_token_store,
-                            registration_enabled,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "Connection error");
-                    }
+            tokio::spawn(async move {
+                loop {
+                    let (stream, peer_addr) = match listener.accept().await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to accept C2S connection");
+                            continue;
+                        }
+                    };
+
+                    let app_state = Arc::clone(&app_state);
+                    let tls_acceptor = tls_acceptor.clone();
+                    let domain = domain.clone();
+                    let room_registry = Arc::clone(&room_registry);
+                    let connection_registry = Arc::clone(&connection_registry);
+                    let mam_storage = Arc::clone(&mam_storage);
+                    let isr_token_store = Arc::clone(&isr_token_store);
+
+                    tokio::spawn(
+                        async move {
+                            if let Err(e) =
+                                ConnectionActor::handle_connection(
+                                    stream,
+                                    peer_addr,
+                                    tls_acceptor,
+                                    domain.clone(),
+                                    app_state,
+                                    room_registry,
+                                    connection_registry,
+                                    mam_storage,
+                                    isr_token_store,
+                                    registration_enabled,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "Connection error");
+                            }
+                        }
+                        .instrument(info_span!(
+                            "xmpp.connection.lifecycle",
+                            client_ip = %peer_addr,
+                            transport = "tcp+tls",
+                            jid = tracing::field::Empty,  // Set later during authentication
+                        )),
+                    );
                 }
-                .instrument(info_span!(
-                    "xmpp.connection.lifecycle",
-                    client_ip = %peer_addr,
-                    transport = "tcp+tls",
-                    jid = tracing::field::Empty,  // Set later during authentication
-                )),
-            );
+            })
+        };
+
+        // Wait for either listener to complete (or error)
+        tokio::select! {
+            result = c2s_handle => {
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(XmppError::internal(format!("C2S listener task failed: {}", e))),
+                }
+            }
+            result = async {
+                match s2s_handle {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(XmppError::internal(format!("S2S listener task failed: {}", e))),
+                }
+            }
         }
     }
 
