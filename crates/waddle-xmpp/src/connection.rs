@@ -17,7 +17,7 @@ use crate::carbons::{
 };
 use crate::roster::{
     build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
-    is_roster_set, parse_roster_get, parse_roster_set, RosterItem, Subscription,
+    is_roster_set, parse_roster_get, parse_roster_set, RosterItem,
 };
 use crate::disco::{
     build_disco_info_response, build_disco_items_response, is_disco_info_query,

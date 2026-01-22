@@ -145,7 +145,7 @@ impl RosterItem {
         let groups = elem
             .children()
             .filter(|c| c.name() == "group" && c.ns() == ROSTER_NS)
-            .filter_map(|c| c.text().map(|s| s.to_string()))
+            .map(|c| c.text())
             .filter(|s| !s.is_empty())
             .collect();
 

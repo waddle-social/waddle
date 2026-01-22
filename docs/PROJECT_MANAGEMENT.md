@@ -164,7 +164,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| RFC 6121 XMPP IM (roster, presence) | ⬜ Not Started | P0 | Roster management, presence subscription |
+| RFC 6121 XMPP IM (roster, presence) | 🔄 In Progress | P0 | Roster management ✅, presence subscription pending |
 | XEP-0054 vcard-temp | ⬜ Not Started | P0 | User profile information |
 | XEP-0249 Direct MUC Invitations | ⬜ Not Started | P0 | Direct channel invites |
 | Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
@@ -488,7 +488,7 @@ External integrations and bot platform.
 - [x] disco#info responds with capability hash (parse_caps_node())
 
 ### MXC2: XEP-0479 IM Basic Compliance
-- [ ] RFC 6121 roster management working
+- [x] RFC 6121 roster management working
 - [ ] Presence subscription flow complete
 - [ ] XEP-0054 vcard-temp working
 - [ ] XEP-0249 Direct MUC Invitations working
