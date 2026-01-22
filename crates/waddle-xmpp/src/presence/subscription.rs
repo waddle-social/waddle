@@ -165,9 +165,9 @@ pub fn parse_subscription_presence(
         if matches!(ptype, PresenceType::Probe) {
             let to = pres.to.as_ref()
                 .ok_or_else(|| XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string())))?;
-            let to_bare = match to {
-                Jid::Bare(b) => b.clone(),
-                Jid::Full(f) => f.to_bare(),
+            let to_bare = match to.clone().try_into_full() {
+                Ok(full) => full.to_bare(),
+                Err(bare) => bare,
             };
             return Ok(PresenceAction::Probe {
                 from: sender_jid.clone(),
@@ -181,13 +181,13 @@ pub fn parse_subscription_presence(
             let to = pres.to.as_ref()
                 .ok_or_else(|| XmppError::bad_request(Some("Subscription presence must have 'to' attribute".to_string())))?;
 
-            let to_bare = match to {
-                Jid::Bare(b) => b.clone(),
-                Jid::Full(f) => f.to_bare(),
+            let to_bare = match to.clone().try_into_full() {
+                Ok(full) => full.to_bare(),
+                Err(bare) => bare,
             };
 
-            // Extract status message if present
-            let status = pres.statuses.get(&minidom::NSChoice::None).cloned();
+            // Extract status message if present (get first status value)
+            let status = pres.statuses.values().next().cloned();
 
             let request = PresenceSubscriptionRequest {
                 subscription_type: sub_type,
@@ -220,11 +220,11 @@ pub fn build_subscription_presence(
     status: Option<&str>,
 ) -> Presence {
     let mut pres = Presence::new(subscription_type.to_presence_type());
-    pres.from = Some(Jid::Bare(from.clone()));
-    pres.to = Some(Jid::Bare(to.clone()));
+    pres.from = Some(Jid::from(from.clone()));
+    pres.to = Some(Jid::from(to.clone()));
 
     if let Some(status_text) = status {
-        pres.statuses.insert(minidom::NSChoice::None, status_text.to_string());
+        pres.statuses.insert(String::new(), status_text.to_string());
     }
 
     pres
@@ -236,8 +236,8 @@ pub fn build_unavailable_presence(
     to: &BareJid,
 ) -> Presence {
     let mut pres = Presence::new(PresenceType::Unavailable);
-    pres.from = Some(Jid::Bare(from.clone()));
-    pres.to = Some(Jid::Bare(to.clone()));
+    pres.from = Some(Jid::from(from.clone()));
+    pres.to = Some(Jid::from(to.clone()));
     pres
 }
 
@@ -250,8 +250,8 @@ pub fn build_available_presence(
     priority: i8,
 ) -> Presence {
     let mut pres = Presence::new(PresenceType::None);
-    pres.from = Some(Jid::Full(from.clone()));
-    pres.to = Some(Jid::Bare(to.clone()));
+    pres.from = Some(Jid::from(from.clone()));
+    pres.to = Some(Jid::from(to.clone()));
     pres.priority = priority;
 
     if let Some(show_str) = show {
@@ -265,7 +265,7 @@ pub fn build_available_presence(
     }
 
     if let Some(status_text) = status {
-        pres.statuses.insert(minidom::NSChoice::None, status_text.to_string());
+        pres.statuses.insert(String::new(), status_text.to_string());
     }
 
     pres
@@ -427,7 +427,7 @@ impl SubscriptionStateMachine {
 /// When a user receives a subscription request, it's stored here until
 /// the user approves or denies it. This enables offline handling of
 /// subscription requests.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PendingSubscription {
     /// JID of the user requesting subscription.
     pub from: BareJid,
@@ -601,9 +601,9 @@ mod tests {
         );
 
         assert_eq!(pres.type_, Some(PresenceType::Subscribe));
-        assert_eq!(pres.from, Some(Jid::Bare(from)));
-        assert_eq!(pres.to, Some(Jid::Bare(to)));
-        assert_eq!(pres.statuses.get(&minidom::NSChoice::None), Some(&"Please add me".to_string()));
+        assert_eq!(pres.from, Some(Jid::from(from)));
+        assert_eq!(pres.to, Some(Jid::from(to)));
+        assert_eq!(pres.statuses.values().next(), Some(&"Please add me".to_string()));
     }
 
     #[test]
@@ -612,8 +612,8 @@ mod tests {
         let target: BareJid = "contact@example.com".parse().unwrap();
 
         let mut pres = Presence::new(PresenceType::Subscribe);
-        pres.to = Some(Jid::Bare(target.clone()));
-        pres.statuses.insert(minidom::NSChoice::None, "Hello".to_string());
+        pres.to = Some(Jid::from(target.clone()));
+        pres.statuses.insert(String::new(), "Hello".to_string());
 
         let action = parse_subscription_presence(&pres, &sender).unwrap();
 
