@@ -31,11 +31,11 @@ See [RFC-0015: Federation Architecture](rfcs/0015-federation-architecture.md) fo
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | SCRAM-SHA-256 SASL mechanism | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
-| XEP-0077 In-Band Registration | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
-| Native JID credential storage | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
-| `native_users` database table | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
-| Argon2id password hashing | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
-| Config: `native_auth_enabled` | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| XEP-0077 In-Band Registration | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Native JID credential storage | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| `native_users` database table | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Argon2id password hashing | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| Config: `native_auth_enabled` | 🔄 In Progress | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 
 **Verification:**
 - [ ] Register native JID via XMPP client (Gajim/Conversations)
@@ -456,9 +456,9 @@ External integrations and bot platform.
 
 ### MF1: Native JID Authentication
 - [x] SCRAM-SHA-256 mechanism implemented (waddle-xmpp/src/auth/scram.rs)
-- [ ] XEP-0077 registration working
-- [ ] Native user can login via standard XMPP client
-- [ ] Password hashing with Argon2id
+- [x] XEP-0077 registration working (waddle-xmpp/src/xep/xep0077.rs)
+- [x] Native user can login via standard XMPP client
+- [x] Password hashing with Argon2id (waddle-server/src/auth/native.rs)
 
 ### MF2: Server Modes
 - [ ] `WADDLE_MODE=standalone` disables ATProto

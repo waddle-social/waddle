@@ -35,8 +35,9 @@ use crate::muc::{
 use crate::types::{Affiliation, Role};
 use crate::parser::ParsedStanza;
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
-use crate::stream::{SaslAuthResult, XmppStream};
+use crate::stream::{PreAuthResult, SaslAuthResult, XmppStream};
 use crate::types::ConnectionState;
+use crate::xep::xep0077::RegistrationError;
 use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.
@@ -141,14 +142,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.state = ConnectionState::StartTls;
         self.stream.handle_starttls(tls_acceptor).await?;
 
-        // TLS established, send new features (SASL)
+        // TLS established, send new features (SASL with optional registration)
         self.state = ConnectionState::TlsEstablished;
         let _header = self.stream.read_stream_header().await?;
-        self.stream.send_features_sasl().await?;
 
-        // Handle SASL authentication (may require multiple rounds for OAUTHBEARER discovery)
+        // Enable XEP-0077 In-Band Registration in stream features
+        // TODO: Make this configurable via server config
+        let registration_enabled = true;
+        self.stream.send_features_sasl_with_registration(registration_enabled).await?;
+
+        // Handle pre-auth phase (registration IQs or SASL authentication)
         self.state = ConnectionState::Authenticating;
-        let (jid, session) = self.handle_sasl_authentication().await?;
+        let (jid, session) = self.handle_pre_auth_phase(registration_enabled).await?;
         self.session = Some(session);
         self.state = ConnectionState::Authenticated;
 
@@ -323,6 +328,250 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     // not from handle_sasl_auth directly. If we get here, something is wrong.
                     warn!(username = %username, "Unexpected ScramSha256Complete in main auth loop");
                     return Err(XmppError::internal("Unexpected SCRAM state".to_string()));
+                }
+            }
+        }
+    }
+
+    /// Handle the pre-authentication phase with optional XEP-0077 registration.
+    ///
+    /// When registration is enabled, this handles the pre-auth loop where clients
+    /// can either:
+    /// 1. Send registration IQs to create an account (XEP-0077)
+    /// 2. Send SASL auth to authenticate
+    ///
+    /// After successful registration, the connection continues and the client
+    /// can authenticate with their new credentials.
+    #[instrument(skip(self), name = "xmpp.connection.pre_auth")]
+    async fn handle_pre_auth_phase(
+        &mut self,
+        registration_enabled: bool,
+    ) -> Result<(jid::BareJid, Session), XmppError> {
+        if !registration_enabled {
+            // Registration not enabled, go directly to SASL authentication
+            return self.handle_sasl_authentication().await;
+        }
+
+        // Pre-auth loop: handle registration IQs or SASL auth
+        loop {
+            let pre_auth_result = self.stream.read_pre_auth_stanza().await?;
+
+            match pre_auth_result {
+                PreAuthResult::SaslAuth(sasl_result) => {
+                    // Client is attempting SASL authentication
+                    // Process it using the existing SASL handler logic
+                    return self.process_sasl_auth_result(sasl_result).await;
+                }
+                PreAuthResult::RegistrationIq { id, request } => {
+                    // Handle registration IQ
+                    match request {
+                        None => {
+                            // This is a 'get' request - send registration form
+                            debug!(id = %id, "Sending registration form");
+                            self.stream
+                                .send_registration_form(&id, Some("Choose a username and password to register."))
+                                .await?;
+                            // Continue loop to wait for next stanza
+                        }
+                        Some(reg_request) => {
+                            // This is a 'set' request - attempt to register
+                            debug!(
+                                id = %id,
+                                username = %reg_request.username,
+                                "Processing registration request"
+                            );
+
+                            match self.handle_registration_request(&id, reg_request).await {
+                                Ok(()) => {
+                                    // Registration successful - continue loop
+                                    // Client should now send SASL auth with new credentials
+                                    debug!(id = %id, "Registration successful, waiting for SASL auth");
+                                }
+                                Err(reg_error) => {
+                                    // Send error response but continue loop
+                                    self.stream.send_registration_error(&id, &reg_error).await?;
+                                    debug!(id = %id, error = %reg_error, "Registration failed");
+                                }
+                            }
+                            // Continue loop to wait for next stanza
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process a SASL authentication result.
+    ///
+    /// This contains the logic extracted from `handle_sasl_authentication` to handle
+    /// a single SASL auth result. Used by both direct SASL auth and pre-auth phase.
+    async fn process_sasl_auth_result(
+        &mut self,
+        sasl_result: SaslAuthResult,
+    ) -> Result<(jid::BareJid, Session), XmppError> {
+        match sasl_result {
+            SaslAuthResult::Plain { jid, token } => {
+                // PLAIN: Validate session with JID and token
+                match self
+                    .app_state
+                    .validate_session(&jid.clone().into(), &token)
+                    .await
+                {
+                    Ok(session) => {
+                        // Send SASL success with ISR token
+                        self.send_sasl_success_with_isr(&session, &jid).await?;
+                        Ok((jid, session))
+                    }
+                    Err(e) => {
+                        // Send SASL failure before returning error
+                        warn!(error = %e, jid = %jid, "PLAIN authentication failed");
+                        self.stream.send_sasl_failure("not-authorized").await?;
+                        Err(e)
+                    }
+                }
+            }
+            SaslAuthResult::OAuthBearer { token, authzid: _ } => {
+                // OAUTHBEARER: Validate session using just the token
+                match self.app_state.validate_session_token(&token).await {
+                    Ok(session) => {
+                        let jid = session.jid.clone();
+                        self.send_sasl_success_with_isr(&session, &jid).await?;
+                        Ok((jid, session))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "OAUTHBEARER authentication failed");
+                        self.stream.send_sasl_failure("not-authorized").await?;
+                        Err(e)
+                    }
+                }
+            }
+            SaslAuthResult::OAuthBearerDiscovery => {
+                // Client requested OAuth discovery - send discovery URL
+                let discovery_url = self.app_state.oauth_discovery_url();
+                self.stream.send_oauthbearer_discovery(&discovery_url).await?;
+                debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery");
+                // Need to wait for next auth attempt - this would need to loop
+                // For now, return an error indicating client should reconnect
+                Err(XmppError::auth_failed("OAuth discovery sent - complete OAuth flow and reconnect"))
+            }
+            SaslAuthResult::ScramSha256Challenge {
+                username,
+                server_first_message_b64,
+                scram_server,
+            } => {
+                // SCRAM-SHA-256: Look up credentials and continue
+                match self.app_state.lookup_scram_credentials(&username).await {
+                    Ok(Some(creds)) => {
+                        self.stream.send_scram_challenge(&server_first_message_b64).await?;
+                        match self.stream.continue_scram_auth(
+                            scram_server,
+                            &creds.stored_key,
+                            &creds.server_key,
+                        ).await {
+                            Ok(SaslAuthResult::ScramSha256Complete { username }) => {
+                                let jid: jid::BareJid = format!("{}@{}", username, self.domain)
+                                    .parse()
+                                    .map_err(|e| XmppError::auth_failed(format!("Invalid JID: {}", e)))?;
+                                let session = Session {
+                                    did: jid.to_string(),
+                                    jid: jid.clone(),
+                                    created_at: Utc::now(),
+                                    expires_at: Utc::now() + chrono::Duration::hours(24),
+                                };
+                                self.send_sasl_success_with_isr(&session, &jid).await?;
+                                Ok((jid, session))
+                            }
+                            Ok(_) => {
+                                warn!("Unexpected SCRAM auth result");
+                                self.stream.send_sasl_failure("not-authorized").await?;
+                                Err(XmppError::auth_failed("SCRAM authentication failed"))
+                            }
+                            Err(e) => {
+                                warn!(error = %e, username = %username, "SCRAM-SHA-256 authentication failed");
+                                self.stream.send_sasl_failure("not-authorized").await?;
+                                Err(e)
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        warn!(username = %username, "SCRAM user not found");
+                        self.stream.send_sasl_failure("not-authorized").await?;
+                        Err(XmppError::auth_failed("User not found"))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, username = %username, "Failed to lookup SCRAM credentials");
+                        self.stream.send_sasl_failure("not-authorized").await?;
+                        Err(e)
+                    }
+                }
+            }
+            SaslAuthResult::ScramSha256Complete { username } => {
+                warn!(username = %username, "Unexpected ScramSha256Complete");
+                Err(XmppError::internal("Unexpected SCRAM state".to_string()))
+            }
+        }
+    }
+
+    /// Handle a XEP-0077 registration request.
+    ///
+    /// Validates the registration data and creates the user via AppState.
+    async fn handle_registration_request(
+        &mut self,
+        id: &str,
+        request: crate::xep::xep0077::RegistrationRequest,
+    ) -> Result<(), RegistrationError> {
+        // Validate password strength (basic check)
+        if request.password.len() < 6 {
+            return Err(RegistrationError::NotAcceptable(
+                "Password must be at least 6 characters".to_string(),
+            ));
+        }
+
+        // Check if user already exists
+        match self.app_state.native_user_exists(&request.username).await {
+            Ok(true) => {
+                return Err(RegistrationError::Conflict);
+            }
+            Ok(false) => {
+                // User doesn't exist, proceed with registration
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to check user existence");
+                return Err(RegistrationError::InternalError(e.to_string()));
+            }
+        }
+
+        // Register the user
+        match self
+            .app_state
+            .register_native_user(
+                &request.username,
+                &request.password,
+                request.email.as_deref(),
+            )
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    username = %request.username,
+                    "User registered via XEP-0077"
+                );
+
+                // Send success response
+                self.stream.send_registration_success(id).await.map_err(|e| {
+                    RegistrationError::InternalError(format!("Failed to send success: {}", e))
+                })?;
+
+                Ok(())
+            }
+            Err(e) => {
+                // Map XmppError to RegistrationError
+                if e.to_string().contains("already exists") || e.to_string().contains("conflict") {
+                    Err(RegistrationError::Conflict)
+                } else if e.to_string().contains("not acceptable") || e.to_string().contains("invalid") {
+                    Err(RegistrationError::NotAcceptable(e.to_string()))
+                } else {
+                    Err(RegistrationError::InternalError(e.to_string()))
                 }
             }
         }
