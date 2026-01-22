@@ -169,7 +169,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | XEP-0249 Direct MUC Invitations | ✅ Complete | P0 | Direct channel invites |
 | Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
 | Complete XEP-0280 Message Carbons | ✅ Complete | P0 | Integrated into chat message routing |
-| XEP-0363 HTTP File Upload | ⬜ Not Started | P0 | File sharing capability |
+| XEP-0363 HTTP File Upload | ✅ Complete | P0 | File sharing capability |
 
 **Verification:**
 - [ ] Roster operations work with standard clients
@@ -177,7 +177,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 - [x] vCard retrieval and update working
 - [x] MUC invitations delivered
 - [x] Message carbons syncing across devices
-- [ ] File upload slot allocation working
+- [x] File upload slot allocation working
 
 ### Phase XC3: XEP-0479 IM Advanced Compliance (P1)
 
@@ -286,7 +286,7 @@ Enhanced messaging and collaboration features.
 | Threads | ⬜ Not Started | P3 | [RFC-0002](rfcs/0002-channels.md), [RFC-0004](rfcs/0004-message-format.md) |
 | **File Uploads** |
 | S3 storage setup | ⬜ Not Started | P2 | [ADR-0011](adrs/0011-self-hosted-storage.md), [Spec: Uploads](specs/file-upload.md) |
-| HTTP File Upload (XEP-0363) | ⬜ Not Started | P2 | [Spec: Uploads](specs/file-upload.md), [Spec: XMPP](specs/xmpp-integration.md) |
+| HTTP File Upload (XEP-0363) | ✅ Complete | P2 | [Spec: Uploads](specs/file-upload.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | Image processing (thumbnails) | ⬜ Not Started | P3 | [Spec: Uploads](specs/file-upload.md) |
 | Link embeds | ⬜ Not Started | P3 | [RFC-0004](rfcs/0004-message-format.md) |
 | **Direct Messages** |
@@ -494,7 +494,7 @@ External integrations and bot platform.
 - [x] XEP-0249 Direct MUC Invitations working
 - [ ] XEP-0045 MUC fully compliant
 - [x] XEP-0280 Message Carbons integrated
-- [ ] XEP-0363 HTTP File Upload working
+- [x] XEP-0363 HTTP File Upload working
 
 ### MXC3: XEP-0479 IM Advanced Compliance
 - [ ] XEP-0313 MAM fully working
@@ -527,7 +527,7 @@ External integrations and bot platform.
 - [ ] Messages delivered in real-time
 
 ### M2: Rich Messaging
-- [ ] File uploads working (XEP-0363)
+- [x] File uploads working (XEP-0363)
 - [ ] XHTML-IM rendering
 - [ ] Reactions and replies (XEP-0444, XEP-0461)
 - [ ] Direct messages (XMPP 1:1)

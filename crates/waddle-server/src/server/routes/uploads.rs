@@ -562,10 +562,9 @@ pub async fn download_handler(
     }
 
     // Set Content-Length
-    headers.insert(
-        header::CONTENT_LENGTH,
-        file_contents.len().to_string().parse().unwrap(),
-    );
+    if let Ok(content_length) = file_contents.len().to_string().parse() {
+        headers.insert(header::CONTENT_LENGTH, content_length);
+    }
 
     // Set Content-Disposition for download
     let disposition = format!("inline; filename=\"{}\"", slot.filename);
