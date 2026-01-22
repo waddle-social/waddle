@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, warn, Instrument};
 
+use crate::registry::ConnectionRegistry;
 use crate::s2s::connection::S2sConnectionActor;
 use crate::s2s::S2sMetrics;
 use crate::XmppError;
@@ -46,6 +47,8 @@ pub struct S2sListener {
     config: S2sListenerConfig,
     tls_acceptor: TlsAcceptor,
     metrics: Arc<S2sMetrics>,
+    /// Connection registry for routing incoming stanzas to local users.
+    connection_registry: Option<Arc<ConnectionRegistry>>,
 }
 
 impl S2sListener {

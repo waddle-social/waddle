@@ -34,6 +34,7 @@ pub mod muc;
 pub mod parser;
 pub mod presence;
 pub mod registry;
+pub mod routing;
 pub mod s2s;
 pub mod server;
 pub mod stream;
@@ -48,6 +49,7 @@ pub use error::{
     StanzaErrorType, XmppError,
 };
 pub use parser::{ns, StreamHeader};
+pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
 pub use server::{XmppServer, XmppServerConfig};
 pub use stream::{PreAuthResult, SaslAuthResult};
 pub use types::*;
