@@ -20,8 +20,9 @@ pub use messages::{
     OutboundMucMessage,
 };
 pub use federation::{
-    build_s2s_leave_presence, build_s2s_occupant_presence, FederatedPresence,
-    FederatedPresenceSet, PresenceDeliveryTarget,
+    build_s2s_leave_presence, build_s2s_muc_message, build_s2s_occupant_presence,
+    FederatedMessage, FederatedMessageSet, FederatedPresence, FederatedPresenceSet,
+    MessageDeliveryTarget, PresenceDeliveryTarget,
 };
 pub use presence::{
     build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,

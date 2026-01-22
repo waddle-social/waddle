@@ -110,7 +110,7 @@ crates/waddle-xmpp/src/routing.rs             (modify)
 |------|--------|----------|---------------|
 | Accept remote JIDs as MUC occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Route presence to remote occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Route messages to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Route messages to remote occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Permission model for federated users | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 
 **Verification:**
