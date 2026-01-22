@@ -11,6 +11,7 @@ use axum::{
 use routes::auth::AuthState;
 use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
+use routes::uploads::UploadState;
 use routes::waddles::WaddleState;
 use routes::websocket::WebSocketState;
 use waddle_xmpp::{muc::MucRoomRegistry, registry::ConnectionRegistry};
@@ -337,6 +338,10 @@ fn create_router(
     ));
     let channels_router = routes::channels::router(channel_state);
 
+    // Upload router for XEP-0363 HTTP File Upload
+    let upload_state = Arc::new(UploadState::new(state.clone()));
+    let upload_router = routes::uploads::router(upload_state);
+
     // Create server info for the /api/v1/server-info endpoint
     let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
     let server_info_state = ServerInfoState { server_info };
@@ -385,7 +390,7 @@ fn create_router(
         info!("ATProto OAuth routes disabled (Standalone mode)");
     }
 
-    // Always merge common routes (WebSocket, permissions, waddles, channels)
+    // Always merge common routes (WebSocket, permissions, waddles, channels, uploads)
     router
         // Merge XMPP over WebSocket endpoint
         .merge(websocket_router)
@@ -395,6 +400,8 @@ fn create_router(
         .merge(waddles_router)
         // Merge channels routes
         .merge(channels_router)
+        // Merge upload routes for XEP-0363 HTTP File Upload
+        .merge(upload_router)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
