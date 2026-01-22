@@ -504,9 +504,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (3 migrations: initial schema + token endpoint + permission tuples)
+        // Check version (4 migrations: initial schema + token endpoint + permission tuples + native users)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(3));
+        assert_eq!(version, Some(4));
     }
 
     #[tokio::test]

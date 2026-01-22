@@ -182,6 +182,29 @@ impl XmppError {
             text,
         }
     }
+
+    /// Create a stanza error for 'not-acceptable'.
+    ///
+    /// Used when the data provided is not acceptable (e.g., invalid username
+    /// format during XEP-0077 registration).
+    pub fn not_acceptable(text: Option<String>) -> Self {
+        Self::Stanza {
+            condition: StanzaErrorCondition::NotAcceptable,
+            error_type: StanzaErrorType::Modify,
+            text,
+        }
+    }
+
+    /// Create a stanza error for 'not-allowed'.
+    ///
+    /// Used when the operation is not allowed (e.g., registration disabled).
+    pub fn not_allowed(text: Option<String>) -> Self {
+        Self::Stanza {
+            condition: StanzaErrorCondition::NotAllowed,
+            error_type: StanzaErrorType::Cancel,
+            text,
+        }
+    }
 }
 
 /// XMPP stanza error conditions (RFC 6120 Section 8.3.3).

@@ -145,6 +145,24 @@ impl AppState for MockAppState {
         // Mock returns None - native JID auth not supported in mock
         async { Ok(None) }
     }
+
+    fn register_native_user(
+        &self,
+        _username: &str,
+        _password: &str,
+        _email: Option<&str>,
+    ) -> impl Future<Output = Result<(), XmppError>> + Send {
+        // Mock registration always succeeds
+        async { Ok(()) }
+    }
+
+    fn native_user_exists(
+        &self,
+        _username: &str,
+    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
+        // Mock returns false - no users exist in mock by default
+        async { Ok(false) }
+    }
 }
 
 /// Generated TLS credentials for testing.
