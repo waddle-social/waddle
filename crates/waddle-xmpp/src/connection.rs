@@ -19,6 +19,11 @@ use crate::roster::{
     build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
     is_roster_set, parse_roster_get, parse_roster_set, RosterItem,
 };
+use crate::presence::{
+    build_available_presence, build_subscription_presence, build_unavailable_presence,
+    parse_subscription_presence, PresenceAction, PresenceSubscriptionRequest,
+    SubscriptionStateMachine, SubscriptionType,
+};
 use crate::disco::{
     build_disco_info_response, build_disco_items_response, is_disco_info_query,
     is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
@@ -1212,7 +1217,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// Routes presence based on destination:
     /// - MUC presence (to room@muc.domain/nick): Join/leave room operations
-    /// - Other presence: Currently logged and ignored
+    /// - Subscription presence (subscribe/subscribed/unsubscribe/unsubscribed): RFC 6121 flow
+    /// - Probe presence: Presence state query
+    /// - Regular presence: Broadcast to subscribers
     #[instrument(skip(self, pres), fields(presence_type = ?pres.type_, to = ?pres.to))]
     async fn handle_presence(
         &mut self,
@@ -1228,19 +1235,31 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        // Parse the presence to see if it's a MUC action
-        let muc_domain = self.room_registry.muc_domain();
-        match parse_muc_presence(&pres, &sender_jid, muc_domain)? {
-            MucPresenceAction::Join(join_req) => {
-                self.handle_muc_join(join_req).await
+        // First check for subscription-related presence stanzas (RFC 6121)
+        let sender_bare = sender_jid.to_bare();
+        match parse_subscription_presence(&pres, &sender_bare)? {
+            PresenceAction::Subscription(request) => {
+                return self.handle_subscription_presence(request).await;
             }
-            MucPresenceAction::Leave(leave_req) => {
-                self.handle_muc_leave(leave_req).await
+            PresenceAction::Probe { from, to } => {
+                return self.handle_presence_probe(from, to).await;
             }
-            MucPresenceAction::NotMuc => {
-                // Regular presence, not MUC-related
-                debug!("Received non-MUC presence stanza");
-                Ok(())
+            PresenceAction::PresenceUpdate(pres) => {
+                // Continue with MUC/regular presence handling below
+                // Parse the presence to see if it's a MUC action
+                let muc_domain = self.room_registry.muc_domain();
+                match parse_muc_presence(&pres, &sender_jid, muc_domain)? {
+                    MucPresenceAction::Join(join_req) => {
+                        return self.handle_muc_join(join_req).await;
+                    }
+                    MucPresenceAction::Leave(leave_req) => {
+                        return self.handle_muc_leave(leave_req).await;
+                    }
+                    MucPresenceAction::NotMuc => {
+                        // Regular presence update - broadcast to subscribers
+                        return self.handle_presence_broadcast(&pres).await;
+                    }
+                }
             }
         }
     }
@@ -1552,6 +1571,384 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             occupant_count = occupant_count,
             "User left MUC room"
         );
+
+        Ok(())
+    }
+
+    /// Handle RFC 6121 presence subscription stanzas.
+    ///
+    /// Routes to the appropriate handler based on subscription type:
+    /// - subscribe: Request to subscribe to contact's presence
+    /// - subscribed: Approval of incoming subscription request
+    /// - unsubscribe: Request to unsubscribe from contact's presence
+    /// - unsubscribed: Revoke incoming subscription
+    #[instrument(skip(self, request), fields(sub_type = ?request.subscription_type, to = %request.to))]
+    async fn handle_subscription_presence(
+        &mut self,
+        request: PresenceSubscriptionRequest,
+    ) -> Result<(), XmppError> {
+        match request.subscription_type {
+            SubscriptionType::Subscribe => {
+                self.handle_outbound_subscribe(request).await
+            }
+            SubscriptionType::Subscribed => {
+                self.handle_outbound_subscribed(request).await
+            }
+            SubscriptionType::Unsubscribe => {
+                self.handle_outbound_unsubscribe(request).await
+            }
+            SubscriptionType::Unsubscribed => {
+                self.handle_outbound_unsubscribed(request).await
+            }
+        }
+    }
+
+    /// Handle outbound subscribe request (user wants to subscribe to contact).
+    ///
+    /// Per RFC 6121:
+    /// 1. Update local roster item with ask="subscribe"
+    /// 2. Route subscribe stanza to contact
+    /// 3. Send roster push to user's connected resources
+    #[instrument(skip(self, request), fields(contact = %request.to))]
+    async fn handle_outbound_subscribe(
+        &mut self,
+        request: PresenceSubscriptionRequest,
+    ) -> Result<(), XmppError> {
+        let user_jid = request.from.clone();
+        let contact_jid = request.to.clone();
+
+        debug!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Processing outbound subscribe request"
+        );
+
+        // Create or update roster item for the contact
+        let mut item = RosterItem::new(contact_jid.clone());
+        SubscriptionStateMachine::apply_outbound_subscribe(&mut item);
+
+        // Send roster push to user's connected resources
+        self.send_roster_push(&item).await;
+
+        // Build and route the subscribe presence to the contact
+        let subscribe_pres = build_subscription_presence(
+            SubscriptionType::Subscribe,
+            &user_jid,
+            &contact_jid,
+            request.status.as_deref(),
+        );
+
+        // Route to contact (local or remote)
+        let stanza = Stanza::Presence(subscribe_pres);
+        self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
+
+        info!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Sent subscribe request"
+        );
+
+        Ok(())
+    }
+
+    /// Handle outbound subscribed response (user approves contact's subscription request).
+    ///
+    /// Per RFC 6121:
+    /// 1. Update local roster item subscription state (none→from or to→both)
+    /// 2. Route subscribed stanza to contact
+    /// 3. Send roster push to user's connected resources
+    /// 4. Send current presence to the newly subscribed contact
+    #[instrument(skip(self, request), fields(contact = %request.to))]
+    async fn handle_outbound_subscribed(
+        &mut self,
+        request: PresenceSubscriptionRequest,
+    ) -> Result<(), XmppError> {
+        let user_jid = request.from.clone();
+        let contact_jid = request.to.clone();
+
+        debug!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Processing outbound subscribed response"
+        );
+
+        // Update roster item with new subscription state
+        let mut item = RosterItem::new(contact_jid.clone());
+        SubscriptionStateMachine::apply_outbound_subscribed(&mut item);
+
+        // Send roster push to user's connected resources
+        self.send_roster_push(&item).await;
+
+        // Build and route the subscribed presence to the contact
+        let subscribed_pres = build_subscription_presence(
+            SubscriptionType::Subscribed,
+            &user_jid,
+            &contact_jid,
+            None,
+        );
+
+        let stanza = Stanza::Presence(subscribed_pres);
+        self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
+
+        // Send current presence to the newly subscribed contact
+        // (they're now allowed to receive our presence)
+        if let Some(ref jid) = self.jid {
+            let available_pres = build_available_presence(
+                jid,
+                &contact_jid,
+                None, // show
+                None, // status
+                0,    // priority
+            );
+            let stanza = Stanza::Presence(available_pres);
+            self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
+        }
+
+        info!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Approved subscription request"
+        );
+
+        Ok(())
+    }
+
+    /// Handle outbound unsubscribe request (user wants to stop receiving contact's presence).
+    ///
+    /// Per RFC 6121:
+    /// 1. Update local roster item subscription state (to→none or both→from)
+    /// 2. Route unsubscribe stanza to contact
+    /// 3. Send roster push to user's connected resources
+    #[instrument(skip(self, request), fields(contact = %request.to))]
+    async fn handle_outbound_unsubscribe(
+        &mut self,
+        request: PresenceSubscriptionRequest,
+    ) -> Result<(), XmppError> {
+        let user_jid = request.from.clone();
+        let contact_jid = request.to.clone();
+
+        debug!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Processing outbound unsubscribe request"
+        );
+
+        // Update roster item with new subscription state
+        let mut item = RosterItem::new(contact_jid.clone());
+        SubscriptionStateMachine::apply_outbound_unsubscribe(&mut item);
+
+        // Send roster push to user's connected resources
+        self.send_roster_push(&item).await;
+
+        // Build and route the unsubscribe presence to the contact
+        let unsubscribe_pres = build_subscription_presence(
+            SubscriptionType::Unsubscribe,
+            &user_jid,
+            &contact_jid,
+            None,
+        );
+
+        let stanza = Stanza::Presence(unsubscribe_pres);
+        self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
+
+        info!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Sent unsubscribe request"
+        );
+
+        Ok(())
+    }
+
+    /// Handle outbound unsubscribed response (user revokes contact's subscription).
+    ///
+    /// Per RFC 6121:
+    /// 1. Update local roster item subscription state (from→none or both→to)
+    /// 2. Route unsubscribed stanza to contact
+    /// 3. Send roster push to user's connected resources
+    /// 4. Send unavailable presence to the now-unsubscribed contact
+    #[instrument(skip(self, request), fields(contact = %request.to))]
+    async fn handle_outbound_unsubscribed(
+        &mut self,
+        request: PresenceSubscriptionRequest,
+    ) -> Result<(), XmppError> {
+        let user_jid = request.from.clone();
+        let contact_jid = request.to.clone();
+
+        debug!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Processing outbound unsubscribed response"
+        );
+
+        // Update roster item with new subscription state
+        let mut item = RosterItem::new(contact_jid.clone());
+        SubscriptionStateMachine::apply_outbound_unsubscribed(&mut item);
+
+        // Send roster push to user's connected resources
+        self.send_roster_push(&item).await;
+
+        // Build and route the unsubscribed presence to the contact
+        let unsubscribed_pres = build_subscription_presence(
+            SubscriptionType::Unsubscribed,
+            &user_jid,
+            &contact_jid,
+            None,
+        );
+
+        let stanza = Stanza::Presence(unsubscribed_pres);
+        self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
+
+        // Send unavailable presence to the contact (they can no longer see us)
+        let unavailable_pres = build_unavailable_presence(
+            &user_jid,
+            &contact_jid,
+        );
+        let stanza = Stanza::Presence(unavailable_pres);
+        self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
+
+        info!(
+            user = %user_jid,
+            contact = %contact_jid,
+            "Revoked subscription"
+        );
+
+        Ok(())
+    }
+
+    /// Handle a presence probe request.
+    ///
+    /// Per RFC 6121, a presence probe is sent by a server to request the
+    /// current presence of a user. This is typically used when:
+    /// - A user comes online and needs to know contacts' presence
+    /// - A server needs to verify a user's presence state
+    #[instrument(skip(self), fields(from = %from, to = %to))]
+    async fn handle_presence_probe(
+        &mut self,
+        from: jid::BareJid,
+        to: jid::BareJid,
+    ) -> Result<(), XmppError> {
+        debug!(
+            from = %from,
+            to = %to,
+            "Processing presence probe"
+        );
+
+        // Check if the requesting user has a subscription that allows them
+        // to receive the target's presence (subscription=to or both)
+        // For now, we'll respond with current presence if the target is connected
+
+        // Get all connected resources for the target user
+        let resources = self.connection_registry.get_resources_for_user(&to);
+
+        if resources.is_empty() {
+            // User is offline - send unavailable presence
+            let unavailable = build_unavailable_presence(&to, &from);
+            let stanza = Stanza::Presence(unavailable);
+            self.route_stanza_to_bare_jid(&from, stanza).await?;
+
+            debug!(
+                from = %from,
+                to = %to,
+                "Sent unavailable presence in response to probe (user offline)"
+            );
+        } else {
+            // User is online - send available presence from each resource
+            for resource_jid in resources {
+                let available = build_available_presence(
+                    &resource_jid,
+                    &from,
+                    None, // TODO: Get actual show state
+                    None, // TODO: Get actual status
+                    0,    // TODO: Get actual priority
+                );
+                let stanza = Stanza::Presence(available);
+                self.route_stanza_to_bare_jid(&from, stanza).await?;
+            }
+
+            debug!(
+                from = %from,
+                to = %to,
+                "Sent available presence in response to probe"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Handle presence broadcast to subscribers.
+    ///
+    /// When a user sends a presence update (available/unavailable/show change),
+    /// broadcast it to all contacts with subscription=from or subscription=both.
+    #[instrument(skip(self, pres), fields(presence_type = ?pres.type_))]
+    async fn handle_presence_broadcast(
+        &mut self,
+        pres: &xmpp_parsers::presence::Presence,
+    ) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => return Ok(()), // Not bound yet
+        };
+
+        let sender_bare = sender_jid.to_bare();
+
+        debug!(
+            sender = %sender_jid,
+            presence_type = ?pres.type_,
+            "Processing presence broadcast"
+        );
+
+        // For now, we don't have roster storage integration, so we can't
+        // determine which contacts should receive this presence.
+        // This is a stub that logs the presence but doesn't broadcast.
+        //
+        // TODO: When roster storage is integrated:
+        // 1. Get user's roster
+        // 2. For each contact with subscription=from or subscription=both
+        // 3. Send presence to that contact
+
+        // Log initial presence for now
+        if matches!(pres.type_, xmpp_parsers::presence::Type::None) {
+            // Available presence (no type = available)
+            info!(
+                sender = %sender_bare,
+                "User sent initial available presence"
+            );
+        } else if matches!(pres.type_, xmpp_parsers::presence::Type::Unavailable) {
+            info!(
+                sender = %sender_bare,
+                "User sent unavailable presence"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Route a stanza to a bare JID (all connected resources or offline storage).
+    ///
+    /// Helper method to route presence and other stanzas to users.
+    async fn route_stanza_to_bare_jid(
+        &self,
+        target: &jid::BareJid,
+        stanza: Stanza,
+    ) -> Result<(), XmppError> {
+        // Get all connected resources for the target
+        let resources = self.connection_registry.get_resources_for_user(target);
+
+        if resources.is_empty() {
+            // User is offline - presence stanzas are typically not stored
+            // but subscription stanzas should be queued
+            debug!(
+                target = %target,
+                "Target user offline, stanza not delivered"
+            );
+            return Ok(());
+        }
+
+        // Send to all connected resources
+        for resource_jid in resources {
+            let _ = self.connection_registry.send_to(&resource_jid, stanza.clone()).await;
+        }
 
         Ok(())
     }

@@ -10,6 +10,8 @@ use jid::BareJid;
 use super::{RosterItem, RosterSetResult};
 use crate::XmppError;
 
+use super::{AskType, Subscription};
+
 /// Trait for roster storage operations.
 ///
 /// Implementors of this trait provide the backing store for user rosters.
@@ -70,6 +72,36 @@ pub trait RosterStorage: Send + Sync + 'static {
         user_jid: &BareJid,
         contact_jid: &BareJid,
     ) -> impl Future<Output = Result<bool, XmppError>> + Send;
+
+    /// Update the subscription state for a roster item.
+    ///
+    /// Creates the roster item if it doesn't exist.
+    /// Returns the updated roster item.
+    fn update_subscription(
+        &self,
+        user_jid: &BareJid,
+        contact_jid: &BareJid,
+        subscription: Subscription,
+        ask: Option<AskType>,
+    ) -> impl Future<Output = Result<RosterItem, XmppError>> + Send;
+
+    /// Get all roster items where the user should send presence updates.
+    ///
+    /// Returns items with subscription=from or subscription=both.
+    /// These are contacts who are subscribed to the user's presence.
+    fn get_presence_subscribers(
+        &self,
+        user_jid: &BareJid,
+    ) -> impl Future<Output = Result<Vec<BareJid>, XmppError>> + Send;
+
+    /// Get all roster items where the user receives presence updates.
+    ///
+    /// Returns items with subscription=to or subscription=both.
+    /// These are contacts whose presence the user is subscribed to.
+    fn get_presence_subscriptions(
+        &self,
+        user_jid: &BareJid,
+    ) -> impl Future<Output = Result<Vec<BareJid>, XmppError>> + Send;
 }
 
 /// In-memory roster storage for testing.
@@ -168,6 +200,64 @@ pub mod test_storage {
                 .get(user_jid)
                 .map(|items| items.iter().any(|i| &i.jid == contact_jid))
                 .unwrap_or(false))
+        }
+
+        async fn update_subscription(
+            &self,
+            user_jid: &BareJid,
+            contact_jid: &BareJid,
+            subscription: Subscription,
+            ask: Option<AskType>,
+        ) -> Result<RosterItem, XmppError> {
+            let mut rosters = self.rosters.write().unwrap();
+            let roster = rosters.entry(user_jid.clone()).or_insert_with(Vec::new);
+
+            // Find or create the roster item
+            if let Some(existing) = roster.iter_mut().find(|i| &i.jid == contact_jid) {
+                existing.subscription = subscription;
+                existing.ask = ask;
+                Ok(existing.clone())
+            } else {
+                let mut item = RosterItem::new(contact_jid.clone());
+                item.subscription = subscription;
+                item.ask = ask;
+                roster.push(item.clone());
+                Ok(item)
+            }
+        }
+
+        async fn get_presence_subscribers(
+            &self,
+            user_jid: &BareJid,
+        ) -> Result<Vec<BareJid>, XmppError> {
+            let rosters = self.rosters.read().unwrap();
+            Ok(rosters
+                .get(user_jid)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|i| matches!(i.subscription, Subscription::From | Subscription::Both))
+                        .map(|i| i.jid.clone())
+                        .collect()
+                })
+                .unwrap_or_default())
+        }
+
+        async fn get_presence_subscriptions(
+            &self,
+            user_jid: &BareJid,
+        ) -> Result<Vec<BareJid>, XmppError> {
+            let rosters = self.rosters.read().unwrap();
+            Ok(rosters
+                .get(user_jid)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|i| matches!(i.subscription, Subscription::To | Subscription::Both))
+                        .map(|i| i.jid.clone())
+                        .collect()
+                })
+                .unwrap_or_default())
         }
     }
 
