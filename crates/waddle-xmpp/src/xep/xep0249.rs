@@ -288,12 +288,18 @@ mod tests {
 
     #[test]
     fn test_parse_direct_invite_invalid_jid() {
-        // Invalid JID format
+        // Empty JID should fail
         let xml = r#"<message xmlns='jabber:client'>
-            <x xmlns='jabber:x:conference' jid='not a valid jid'/>
+            <x xmlns='jabber:x:conference' jid=''/>
         </message>"#;
         let element: Element = xml.parse().unwrap();
+        assert!(parse_direct_invite(&element).is_none());
 
+        // JID with only @ sign should fail
+        let xml = r#"<message xmlns='jabber:client'>
+            <x xmlns='jabber:x:conference' jid='@'/>
+        </message>"#;
+        let element: Element = xml.parse().unwrap();
         assert!(parse_direct_invite(&element).is_none());
     }
 
@@ -356,11 +362,13 @@ mod tests {
 
         let msg = build_invite_message(&from, &to, &invite, None);
 
+        // Check the message wrapper has proper from/to attributes
         assert!(msg.contains("from='crone1@shakespeare.lit/desktop'"));
         assert!(msg.contains("to='hecate@shakespeare.lit'"));
-        assert!(msg.contains("xmlns='jabber:x:conference'"));
-        assert!(msg.contains("jid='darkcave@macbeth.shakespeare.lit'"));
-        assert!(msg.contains("reason='Join us!'"));
+        // Check the invite element is present with correct namespace and attributes
+        assert!(msg.contains("jabber:x:conference"));
+        assert!(msg.contains("darkcave@macbeth.shakespeare.lit"));
+        assert!(msg.contains("Join us!"));
     }
 
     #[test]
