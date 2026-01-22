@@ -39,7 +39,7 @@ use xmpp_parsers::message::{Message, MessageType};
 
 use crate::types::{Affiliation, Role};
 use crate::XmppError;
-use affiliation::{AffiliationChange, AffiliationList};
+use affiliation::{AffiliationChange, AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy};
 
 /// Check if a JID is from a remote server.
 ///
@@ -85,6 +85,16 @@ pub struct RoomConfig {
     pub max_occupants: u32,
     /// Whether to log messages (for MAM)
     pub enable_logging: bool,
+    /// Federation permission policy for this room.
+    ///
+    /// Controls which users from remote servers can join this room.
+    /// See [`FederatedPermissionPolicy`] for details on each policy type.
+    pub federation_policy: FederatedPermissionPolicy,
+    /// Configuration for federated user affiliations.
+    ///
+    /// Stores allow/block lists and affiliation overrides for federated users.
+    /// Only relevant when `federation_policy` is not `Closed`.
+    pub federated_affiliation_config: FederatedAffiliationConfig,
 }
 
 impl Default for RoomConfig {
@@ -97,6 +107,8 @@ impl Default for RoomConfig {
             moderated: false,
             max_occupants: 0,
             enable_logging: true,
+            federation_policy: FederatedPermissionPolicy::default(),
+            federated_affiliation_config: FederatedAffiliationConfig::open_member(),
         }
     }
 }
