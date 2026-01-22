@@ -140,6 +140,84 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 - [ ] Room `general@penguin.waddle.social` is accessible
 - [ ] Messages stored in penguin's SQLite database
 
+### Phase XC1: XEP-0479 Core Compliance (P0)
+
+**Goal:** Meet XEP-0479 (XMPP Compliance Suites 2023) Core requirements
+
+| Task | Status | Priority | Notes |
+|------|--------|----------|-------|
+| XEP-0115 Entity Capabilities | ⬜ Not Started | P0 | Required for service capability advertisement |
+
+**Currently Passing (from internal interop tests):**
+- RFC 6120 (XMPP Core) - stream.rs, connection.rs
+- RFC 7590 (TLS) - STARTTLS in stream.rs
+- XEP-0030 (Service Discovery) - disco/
+
+**Verification:**
+- [ ] Entity capabilities hash advertised in presence
+- [ ] Capabilities cached correctly
+- [ ] disco#info responds with capabilities
+
+### Phase XC2: XEP-0479 IM Basic Compliance (P0)
+
+**Goal:** Meet XEP-0479 Instant Messaging basic requirements
+
+| Task | Status | Priority | Notes |
+|------|--------|----------|-------|
+| RFC 6121 XMPP IM (roster, presence) | ⬜ Not Started | P0 | Roster management, presence subscription |
+| XEP-0054 vcard-temp | ⬜ Not Started | P0 | User profile information |
+| XEP-0249 Direct MUC Invitations | ⬜ Not Started | P0 | Direct channel invites |
+| Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
+| Complete XEP-0280 Message Carbons | ⚠️ Code exists, unused | P0 | Integrate carbons/ into message flow |
+| XEP-0363 HTTP File Upload | ⬜ Not Started | P0 | File sharing capability |
+
+**Verification:**
+- [ ] Roster operations work with standard clients
+- [ ] Presence subscription flow complete
+- [ ] vCard retrieval and update working
+- [ ] MUC invitations delivered
+- [ ] Message carbons syncing across devices
+- [ ] File upload slot allocation working
+
+### Phase XC3: XEP-0479 IM Advanced Compliance (P1)
+
+**Goal:** Meet XEP-0479 Instant Messaging advanced requirements
+
+| Task | Status | Priority | Notes |
+|------|--------|----------|-------|
+| Complete XEP-0313 MAM | ⚠️ In Progress | P1 | Finish message archive (mam/) |
+| Complete XEP-0198 Stream Management | ⚠️ Partial | P1 | Finish stream_management.rs |
+| XEP-0048 Bookmark Storage | ⬜ Not Started | P1 | Channel bookmark management |
+| XEP-0191 Blocking Command | ⬜ Not Started | P1 | User blocking capability |
+| XEP-0402 PEP Native Bookmarks | ⬜ Not Started | P1 | Modern bookmark storage |
+| XEP-0410 MUC Self-Ping | ⬜ Not Started | P1 | Connection state verification |
+
+**CI Currently Disabled (needs completion first):**
+- XEP-0220 (Server Dialback) - S2S federation
+- XEP-0045 (MUC) - partial implementation
+- XEP-0060 (PubSub) - not started
+- XEP-0163 (PEP) - not started
+
+**Verification:**
+- [ ] MAM queries return correct history
+- [ ] Stream management resumes sessions
+- [ ] Bookmarks persist across sessions
+- [ ] Blocked users cannot send messages
+- [ ] MUC self-ping detects disconnection
+
+### Phase XC4: XEP-0479 Mobile Compliance (P1)
+
+**Goal:** Meet XEP-0479 Mobile requirements
+
+| Task | Status | Priority | Notes |
+|------|--------|----------|-------|
+| XEP-0352 Client State Indication | ⬜ Not Started | P1 | Optimize traffic for mobile clients |
+
+**Verification:**
+- [ ] Client can indicate active/inactive state
+- [ ] Server reduces traffic for inactive clients
+- [ ] State transitions handled correctly
+
 ---
 
 ### Phase 1: Foundation (Current MVP Items)
@@ -356,8 +434,8 @@ External integrations and bot platform.
 
 | Priority | Meaning | Target |
 |----------|---------|--------|
-| **P0** | Critical for federation MVP | Phase F1-F4 |
-| **P1** | Important for full federation | Phase F5, Phase 1 |
+| **P0** | Critical for federation MVP & core compliance | Phase F1-F4, Phase XC1-XC2 |
+| **P1** | Important for full federation & advanced compliance | Phase F5, Phase XC3-XC4, Phase 1 |
 | **P2** | Enhances experience | Phase 1-2 |
 | **P3** | Nice to have | Phase 2-3 |
 | **P4** | Future consideration | Phase 3-5 |
@@ -403,6 +481,31 @@ External integrations and bot platform.
 - [ ] Subdomain provisioning API
 - [ ] `general@penguin.waddle.social` routes correctly
 - [ ] Per-waddle database isolation
+
+### MXC1: XEP-0479 Core Compliance
+- [ ] XEP-0115 Entity Capabilities implemented
+- [ ] Capabilities advertised in presence
+- [ ] disco#info responds with capability hash
+
+### MXC2: XEP-0479 IM Basic Compliance
+- [ ] RFC 6121 roster management working
+- [ ] Presence subscription flow complete
+- [ ] XEP-0054 vcard-temp working
+- [ ] XEP-0249 Direct MUC Invitations working
+- [ ] XEP-0045 MUC fully compliant
+- [ ] XEP-0280 Message Carbons integrated
+- [ ] XEP-0363 HTTP File Upload working
+
+### MXC3: XEP-0479 IM Advanced Compliance
+- [ ] XEP-0313 MAM fully working
+- [ ] XEP-0198 Stream Management complete
+- [ ] XEP-0048 Bookmark Storage working
+- [ ] XEP-0191 Blocking Command working
+- [ ] XEP-0402 PEP Native Bookmarks working
+- [ ] XEP-0410 MUC Self-Ping working
+
+### MXC4: XEP-0479 Mobile Compliance
+- [ ] XEP-0352 Client State Indication working
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created

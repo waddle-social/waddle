@@ -56,3 +56,4 @@ tokio = { workspace = true }
 rcgen = "0.13"
 tempfile = "3.14"
 tracing-subscriber = { workspace = true }
+testcontainers = { workspace = true }

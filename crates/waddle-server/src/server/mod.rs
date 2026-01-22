@@ -11,6 +11,8 @@ use routes::auth::AuthState;
 use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
 use routes::waddles::WaddleState;
+use routes::websocket::WebSocketState;
+use waddle_xmpp::{muc::MucRoomRegistry, registry::ConnectionRegistry};
 use serde::Serialize;
 use serde_json::json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
@@ -254,8 +256,24 @@ fn create_router(state: Arc<AppState>) -> Router {
     // Well-known endpoints for service discovery (XEP-0156)
     let well_known_router = routes::well_known::router(auth_state.clone());
 
-    // XMPP over WebSocket (RFC 7395)
-    let websocket_router = routes::websocket::router(auth_state);
+    // Create connection registry for WebSocket message routing
+    let connection_registry = Arc::new(ConnectionRegistry::new());
+
+    // Create MUC room registry with the MUC domain
+    let domain = url::Url::parse(&base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "localhost".to_string());
+    let muc_domain = format!("muc.{}", domain);
+    let muc_registry = Arc::new(MucRoomRegistry::new(muc_domain));
+
+    // XMPP over WebSocket (RFC 7395) with registries for message routing
+    let websocket_state = Arc::new(WebSocketState {
+        auth_state,
+        connection_registry,
+        muc_registry,
+    });
+    let websocket_router = routes::websocket::router(websocket_state);
 
     // Permission router with Zanzibar-inspired permission service
     let permission_state = Arc::new(PermissionState::new(state.clone()));

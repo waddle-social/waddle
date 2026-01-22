@@ -96,6 +96,9 @@ lru = "0.12"
 pulldown-cmark = "0.12"
 syntect = "5.2"
 
+# Testing
+testcontainers = "0.23"
+
 [profile.release]
 lto = true
 codegen-units = 1

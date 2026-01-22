@@ -20,7 +20,12 @@
       "Bash(cargo doc:*)",
       "Bash(cat:*)",
       "Bash(cargo clippy:*)",
-      "Bash(websocat:*)"
+      "Bash(websocat:*)",
+      "WebFetch(domain:compliance.conversations.im)",
+      "Bash(ls:*)",
+      "Bash(bash -n:*)",
+      "Bash(docker compose:*)",
+      "WebFetch(domain:rust.testcontainers.org)"
     ]
   }
 }
