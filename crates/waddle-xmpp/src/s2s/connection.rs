@@ -412,32 +412,26 @@ impl S2sConnectionActor {
                 self.handle_dialback_verify(from, to, id, key.as_deref(), result_type.as_deref())
                     .await?;
             }
-            ParsedStanza::Iq(_iq) => {
-                // Handle IQ stanzas (disco, etc.)
+            ParsedStanza::Iq(element) => {
                 if self.state != S2sState::Established {
                     debug!("Received S2S IQ before connection established - ignoring");
                     return Ok(());
                 }
-                debug!("Received S2S IQ - not yet implemented");
-                // TODO: Implement S2S IQ handling
+                self.handle_inbound_iq(element.clone()).await?;
             }
-            ParsedStanza::Message(_msg) => {
-                // Handle message routing from remote server
+            ParsedStanza::Message(element) => {
                 if self.state != S2sState::Established {
                     debug!("Received S2S message before connection established - ignoring");
                     return Ok(());
                 }
-                debug!("Received S2S message - not yet implemented");
-                // TODO: Implement message routing to local users
+                self.handle_inbound_message(element.clone()).await?;
             }
-            ParsedStanza::Presence(_presence) => {
-                // Handle presence from remote server
+            ParsedStanza::Presence(element) => {
                 if self.state != S2sState::Established {
                     debug!("Received S2S presence before connection established - ignoring");
                     return Ok(());
                 }
-                debug!("Received S2S presence - not yet implemented");
-                // TODO: Implement presence routing
+                self.handle_inbound_presence(element.clone()).await?;
             }
             ParsedStanza::Unknown(elem) => {
                 let name = elem.name();
@@ -602,6 +596,109 @@ impl S2sConnectionActor {
             debug!(result = ?result, "Sent db:verify response");
         } else {
             warn!("Received db:verify without key or type attribute");
+        }
+
+        Ok(())
+    }
+
+    /// Validate that the 'from' attribute domain matches the authenticated remote domain.
+    ///
+    /// This prevents domain spoofing attacks where a remote server tries to send
+    /// stanzas claiming to be from a different domain.
+    fn validate_from_domain(&self, from_jid: &Jid) -> Result<(), XmppError> {
+        let from_domain = from_jid.domain().as_str();
+
+        if let Some(ref remote_domain) = self.remote_domain {
+            if from_domain != remote_domain {
+                warn!(
+                    from_domain = %from_domain,
+                    authenticated_domain = %remote_domain,
+                    "S2S domain spoofing attempt - rejecting stanza"
+                );
+                return Err(XmppError::not_authorized(Some(format!(
+                    "From domain '{}' does not match authenticated domain '{}'",
+                    from_domain, remote_domain
+                ))));
+            }
+        } else {
+            // This shouldn't happen if state is Established, but be safe
+            return Err(XmppError::internal("Remote domain not set"));
+        }
+
+        Ok(())
+    }
+
+    /// Handle an inbound message from a remote server.
+    #[instrument(skip(self, element), name = "xmpp.s2s.handle_message")]
+    async fn handle_inbound_message(&mut self, element: Element) -> Result<(), XmppError> {
+        let message: Message = element.try_into()
+            .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
+
+        // Validate the 'from' domain matches the authenticated remote domain
+        if let Some(ref from) = message.from {
+            self.validate_from_domain(from)?;
+        } else {
+            warn!("S2S message has no 'from' attribute - rejecting");
+            return Err(XmppError::bad_request(Some("Message missing 'from' attribute".to_string())));
+        }
+
+        // Route to local users via StanzaRouter
+        if let Some(ref router) = self.stanza_router {
+            let result = router.route_message_local(message).await?;
+            debug!(?result, "Routed inbound S2S message");
+        } else {
+            debug!("No stanza router configured - dropping inbound S2S message");
+        }
+
+        Ok(())
+    }
+
+    /// Handle an inbound presence from a remote server.
+    #[instrument(skip(self, element), name = "xmpp.s2s.handle_presence")]
+    async fn handle_inbound_presence(&mut self, element: Element) -> Result<(), XmppError> {
+        let presence: Presence = element.try_into()
+            .map_err(|e| XmppError::xml_parse(format!("Invalid presence: {:?}", e)))?;
+
+        // Validate the 'from' domain matches the authenticated remote domain
+        if let Some(ref from) = presence.from {
+            self.validate_from_domain(from)?;
+        } else {
+            // Presence without 'from' in S2S is suspicious
+            warn!("S2S presence has no 'from' attribute - rejecting");
+            return Err(XmppError::bad_request(Some("Presence missing 'from' attribute".to_string())));
+        }
+
+        // Route to local users via StanzaRouter
+        if let Some(ref router) = self.stanza_router {
+            let result = router.route_presence_local(presence).await?;
+            debug!(?result, "Routed inbound S2S presence");
+        } else {
+            debug!("No stanza router configured - dropping inbound S2S presence");
+        }
+
+        Ok(())
+    }
+
+    /// Handle an inbound IQ from a remote server.
+    #[instrument(skip(self, element), name = "xmpp.s2s.handle_iq")]
+    async fn handle_inbound_iq(&mut self, element: Element) -> Result<(), XmppError> {
+        let iq: Iq = element.try_into()
+            .map_err(|e| XmppError::xml_parse(format!("Invalid IQ: {:?}", e)))?;
+
+        // Validate the 'from' domain matches the authenticated remote domain
+        if let Some(ref from) = iq.from {
+            self.validate_from_domain(from)?;
+        } else {
+            warn!("S2S IQ has no 'from' attribute - rejecting");
+            return Err(XmppError::bad_request(Some("IQ missing 'from' attribute".to_string())));
+        }
+
+        // Route to local users via StanzaRouter
+        if let Some(ref router) = self.stanza_router {
+            let result = router.route_iq_local(iq).await?;
+            debug!(?result, "Routed inbound S2S IQ");
+        } else {
+            debug!("No stanza router configured - dropping inbound S2S IQ");
         }
 
         Ok(())

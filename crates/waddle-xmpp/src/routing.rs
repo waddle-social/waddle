@@ -248,7 +248,10 @@ impl StanzaRouter {
     }
 
     /// Route a message to local users.
-    async fn route_message_local(&self, message: Message) -> Result<RoutingResult, XmppError> {
+    ///
+    /// This is also used by the S2S listener to route inbound messages
+    /// from remote servers to local recipients.
+    pub async fn route_message_local(&self, message: Message) -> Result<RoutingResult, XmppError> {
         let to_jid = message.to.as_ref().ok_or_else(|| {
             XmppError::bad_request(Some("Message has no destination".to_string()))
         })?;
@@ -393,7 +396,10 @@ impl StanzaRouter {
     }
 
     /// Route presence to local users.
-    async fn route_presence_local(&self, presence: Presence) -> Result<RoutingResult, XmppError> {
+    ///
+    /// This is also used by the S2S listener to route inbound presence
+    /// from remote servers to local recipients.
+    pub async fn route_presence_local(&self, presence: Presence) -> Result<RoutingResult, XmppError> {
         // Clone the destination JID before moving presence into the stanza
         let to_jid = presence.to.clone().ok_or_else(|| {
             XmppError::bad_request(Some("Presence has no destination".to_string()))
@@ -510,7 +516,10 @@ impl StanzaRouter {
     }
 
     /// Route IQ to local users.
-    async fn route_iq_local(&self, iq: Iq) -> Result<RoutingResult, XmppError> {
+    ///
+    /// This is also used by the S2S listener to route inbound IQs
+    /// from remote servers to local recipients.
+    pub async fn route_iq_local(&self, iq: Iq) -> Result<RoutingResult, XmppError> {
         // Clone the destination JID before moving iq into the stanza
         let to_jid = iq.to.clone().ok_or_else(|| {
             XmppError::bad_request(Some("IQ has no destination".to_string()))
