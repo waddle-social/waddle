@@ -311,6 +311,25 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         Ok(subject_strings)
     }
+
+    /// Lookup SCRAM credentials for a native JID user.
+    ///
+    /// For this ATProto-based deployment, native JID authentication is not supported.
+    /// All authentication goes through OAUTHBEARER or PLAIN with session tokens.
+    ///
+    /// Returns None to indicate SCRAM-SHA-256 is not available for any user.
+    async fn lookup_scram_credentials(
+        &self,
+        username: &str,
+    ) -> Result<Option<waddle_xmpp::ScramCredentials>, XmppError> {
+        debug!(
+            username = username,
+            "SCRAM credentials lookup - not supported in ATProto deployment"
+        );
+        // Native JID authentication is not supported in this ATProto-focused deployment.
+        // Users authenticate via OAUTHBEARER (XEP-0493) or PLAIN with session tokens.
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

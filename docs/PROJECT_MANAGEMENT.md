@@ -30,7 +30,7 @@ See [RFC-0015: Federation Architecture](rfcs/0015-federation-architecture.md) fo
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| SCRAM-SHA-256 SASL mechanism | 🔄 In Progress | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| SCRAM-SHA-256 SASL mechanism | ✅ Complete | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | XEP-0077 In-Band Registration | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | Native JID credential storage | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | `native_users` database table | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
@@ -455,7 +455,7 @@ External integrations and bot platform.
 ## Milestones
 
 ### MF1: Native JID Authentication
-- [ ] SCRAM-SHA-256 mechanism implemented
+- [x] SCRAM-SHA-256 mechanism implemented (waddle-xmpp/src/auth/scram.rs)
 - [ ] XEP-0077 registration working
 - [ ] Native user can login via standard XMPP client
 - [ ] Password hashing with Argon2id

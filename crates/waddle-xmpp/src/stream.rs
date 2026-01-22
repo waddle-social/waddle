@@ -12,7 +12,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
-use crate::auth::{parse_oauthbearer, OAuthBearerResult, SaslMechanism, ScramServer, ScramState};
+use crate::auth::{parse_oauthbearer, OAuthBearerResult, SaslMechanism, ScramServer};
 use crate::connection::Stanza;
 use crate::parser::{element_to_string, ns, ParsedStanza, StreamHeader, XmlParser};
 use crate::XmppError;
