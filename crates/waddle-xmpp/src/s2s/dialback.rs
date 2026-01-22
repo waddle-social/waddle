@@ -291,11 +291,6 @@ pub fn build_db_verify_response(from: &str, to: &str, id: &str, result: Dialback
     )
 }
 
-/// Convert a hex-encoded string to bytes.
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    hex::decode(s).ok()
-}
-
 /// Helper module for hex encoding.
 mod hex {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
@@ -310,6 +305,8 @@ mod hex {
         result
     }
 
+    // Used only in tests for roundtrip verification
+    #[cfg(test)]
     pub fn decode(s: &str) -> Result<Vec<u8>, ()> {
         if s.len() % 2 != 0 {
             return Err(());
@@ -327,6 +324,7 @@ mod hex {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn hex_char_to_nibble(c: u8) -> Result<u8, ()> {
         match c {
             b'0'..=b'9' => Ok(c - b'0'),

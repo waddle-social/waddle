@@ -179,9 +179,18 @@ impl<S: AppState> XmppServer<S> {
             let s2s_addr = self.config.s2s_addr
                 .unwrap_or_else(|| "0.0.0.0:5269".parse().unwrap());
 
+            // Generate a dialback secret for this server instance
+            // In production, this should be persisted and loaded from configuration
+            let mut dialback_secret = vec![0u8; 32];
+            {
+                use rand::RngCore;
+                rand::rng().fill_bytes(&mut dialback_secret);
+            }
+
             let s2s_config = S2sListenerConfig {
                 addr: s2s_addr,
                 domain: self.config.domain.clone(),
+                dialback_secret,
             };
 
             let s2s_listener = S2sListener::new(s2s_config, self.tls_acceptor.clone());
