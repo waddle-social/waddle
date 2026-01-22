@@ -18,8 +18,8 @@ use crate::XmppError;
 
 /// Actor managing a single S2S connection from a remote server.
 pub struct S2sConnectionActor {
-    /// Peer address
-    peer_addr: SocketAddr,
+    /// Peer address (stored for logging/debugging)
+    _peer_addr: SocketAddr,
     /// The underlying stream (either TCP or TLS)
     inner: S2sStreamInner,
     /// Incremental XML parser
@@ -62,7 +62,7 @@ impl S2sConnectionActor {
         info!("New S2S connection from {}", peer_addr);
 
         let mut actor = Self {
-            peer_addr,
+            _peer_addr: peer_addr,
             inner: S2sStreamInner::Tcp(tcp_stream),
             parser: XmlParser::new(),
             state: S2sState::Initial,

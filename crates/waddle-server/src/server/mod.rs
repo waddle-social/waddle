@@ -1,4 +1,4 @@
-use crate::config::{ServerConfig, ServerInfo, ServerMode};
+use crate::config::{ServerConfig, ServerInfo};
 use crate::db::{DatabasePool, PoolHealth};
 use anyhow::Result;
 use axum::{
@@ -78,6 +78,8 @@ impl Default for XmppConfig {
             enabled: true,
             domain: "localhost".to_string(),
             c2s_addr: "0.0.0.0:5222".parse().expect("Valid default address"),
+            s2s_addr: "0.0.0.0:5269".parse().expect("Valid default S2S address"),
+            s2s_enabled: false, // Disabled by default
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
             mam_db_path: None,
@@ -120,10 +122,21 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
 
+        let s2s_enabled = std::env::var("WADDLE_XMPP_S2S_ENABLED")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
+        let s2s_addr = std::env::var("WADDLE_XMPP_S2S_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:5269".to_string())
+            .parse()
+            .unwrap_or_else(|_| "0.0.0.0:5269".parse().expect("Valid fallback S2S address"));
+
         Self {
             enabled,
             domain,
             c2s_addr,
+            s2s_addr,
+            s2s_enabled,
             tls_cert_path,
             tls_key_path,
             mam_db_path,
@@ -136,7 +149,7 @@ impl XmppConfig {
     pub fn to_xmpp_server_config(&self) -> XmppServerConfig {
         XmppServerConfig {
             c2s_addr: self.c2s_addr,
-            s2s_addr: None,
+            s2s_addr: if self.s2s_enabled { Some(self.s2s_addr) } else { None },
             tls_cert_path: self.tls_cert_path.clone(),
             tls_key_path: self.tls_key_path.clone(),
             domain: self.domain.clone(),

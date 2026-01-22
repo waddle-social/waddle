@@ -13,7 +13,7 @@ use xmpp_parsers::message::MessageType;
 
 use crate::carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
-    is_carbons_enable, should_copy_message,
+    is_carbons_enable,
 };
 use crate::disco::{
     build_disco_info_response, build_disco_items_response, is_disco_info_query,

@@ -33,8 +33,6 @@ use tracing::debug;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 
-use crate::XmppError;
-
 /// Namespace for XEP-0280 Message Carbons.
 pub const CARBONS_NS: &str = "urn:xmpp:carbons:2";
 
