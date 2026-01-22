@@ -109,7 +109,7 @@ crates/waddle-xmpp/src/routing.rs             (modify)
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
 | Accept remote JIDs as MUC occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
-| Route presence to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Route presence to remote occupants | ✅ Complete | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Route messages to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Permission model for federated users | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 
@@ -472,8 +472,8 @@ External integrations and bot platform.
 - [ ] DNS SRV resolution working
 
 ### MF4: Federated MUC
-- [ ] Remote user can join local MUC
-- [ ] Presence broadcasts to remote occupants
+- [x] Remote user can join local MUC
+- [x] Presence broadcasts to remote occupants
 - [ ] Messages route to remote occupants
 - [ ] Mixed local/remote channel working
 

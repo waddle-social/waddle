@@ -10,6 +10,7 @@
 //! permission-to-affiliation mapping.
 
 pub mod affiliation;
+pub mod federation;
 pub mod messages;
 pub mod presence;
 pub mod room_registry;
@@ -17,6 +18,10 @@ pub mod room_registry;
 pub use messages::{
     create_broadcast_message, is_muc_groupchat, looks_like_muc_jid, MessageRouteResult, MucMessage,
     OutboundMucMessage,
+};
+pub use federation::{
+    build_s2s_leave_presence, build_s2s_occupant_presence, FederatedPresence,
+    FederatedPresenceSet, PresenceDeliveryTarget,
 };
 pub use presence::{
     build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
