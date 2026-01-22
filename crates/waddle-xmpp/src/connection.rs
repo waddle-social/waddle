@@ -2763,6 +2763,97 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         Ok(())
     }
+
+    /// Handle XEP-0363 HTTP File Upload slot request.
+    ///
+    /// Processes upload slot requests from authenticated users. Validates the
+    /// request, checks file size limits, and returns PUT/GET URLs for the file.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_upload_slot_request(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Upload slot request received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        debug!(
+            from = %sender_jid,
+            "Processing HTTP upload slot request"
+        );
+
+        // Check if uploads are enabled
+        if !self.app_state.upload_enabled() {
+            let error_response = build_upload_error(&iq.id, &UploadError::NotAllowed);
+            self.stream.write_raw(&error_response).await?;
+            return Ok(());
+        }
+
+        // Parse the upload request
+        let request = match parse_upload_request(&iq) {
+            Ok(req) => req,
+            Err(e) => {
+                let error_response = build_upload_error(&iq.id, &e);
+                self.stream.write_raw(&error_response).await?;
+                return Ok(());
+            }
+        };
+
+        // Check file size limits
+        let max_size = self.app_state.max_upload_size();
+        if request.size > max_size {
+            let error_response = build_upload_error(
+                &iq.id,
+                &UploadError::FileTooLarge { max_size },
+            );
+            self.stream.write_raw(&error_response).await?;
+            return Ok(());
+        }
+
+        // Create the upload slot
+        let slot_info = match self
+            .app_state
+            .create_upload_slot(
+                &sender_jid.to_bare(),
+                &request.filename,
+                request.size,
+                request.content_type.as_deref(),
+            )
+            .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                warn!(error = %e, "Failed to create upload slot");
+                let error_response = build_upload_error(
+                    &iq.id,
+                    &UploadError::InternalError(e.to_string()),
+                );
+                self.stream.write_raw(&error_response).await?;
+                return Ok(());
+            }
+        };
+
+        // Build the success response
+        let slot = UploadSlot {
+            put_url: slot_info.put_url,
+            put_headers: slot_info.put_headers,
+            get_url: slot_info.get_url,
+        };
+        let response = build_upload_slot_response(&iq, &slot);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        debug!(
+            from = %sender_jid,
+            filename = %request.filename,
+            size = request.size,
+            "Upload slot created"
+        );
+
+        Ok(())
+    }
 }
 
 /// Parsed stanza types.
