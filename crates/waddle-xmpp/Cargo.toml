@@ -47,6 +47,9 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
 
+# DNS Resolution
+hickory-resolver = { workspace = true }
+
 # SCRAM-SHA-256 Authentication
 sha2 = { workspace = true }
 hmac = { workspace = true }

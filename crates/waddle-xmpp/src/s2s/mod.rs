@@ -4,8 +4,8 @@
 //! - TCP listener on port 5269 for incoming S2S connections
 //! - TLS 1.3 for secure inter-server communication
 //! - Stream negotiation for S2S
-//! - Server dialback (XEP-0220) - planned
-//! - DNS SRV record discovery - planned
+//! - Server dialback (XEP-0220)
+//! - DNS SRV record discovery for `_xmpp-server._tcp.{domain}`
 //! - Remote JID routing - planned
 //!
 //! # Architecture
@@ -22,12 +22,14 @@
 
 pub mod connection;
 pub mod dialback;
+pub mod dns;
 pub mod listener;
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
 pub use connection::S2sConnectionActor;
 pub use dialback::{DialbackKey, DialbackResult, DialbackState, NS_DIALBACK, NS_DIALBACK_FEATURES};
+pub use dns::{DnsError, ResolvedTarget, SrvResolver, DEFAULT_S2S_PORT};
 pub use listener::{S2sListener, S2sListenerConfig};
 
 /// S2S connection state.
