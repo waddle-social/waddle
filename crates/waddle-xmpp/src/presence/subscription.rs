@@ -159,53 +159,48 @@ pub fn parse_subscription_presence(
     pres: &Presence,
     sender_jid: &BareJid,
 ) -> Result<PresenceAction, XmppError> {
-    // Check if this is a subscription-related presence
-    if let Some(ref ptype) = pres.type_ {
-        // Check for probe first
-        if matches!(ptype, PresenceType::Probe) {
-            let to = pres.to.as_ref()
-                .ok_or_else(|| XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string())))?;
-            let to_bare = match to.clone().try_into_full() {
-                Ok(full) => full.to_bare(),
-                Err(bare) => bare,
-            };
-            return Ok(PresenceAction::Probe {
-                from: sender_jid.clone(),
-                to: to_bare,
-            });
-        }
+    // Check for probe first
+    if matches!(pres.type_, PresenceType::Probe) {
+        let to = pres.to.as_ref()
+            .ok_or_else(|| XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string())))?;
+        let to_bare = match to.clone().try_into_full() {
+            Ok(full) => full.to_bare(),
+            Err(bare) => bare,
+        };
+        return Ok(PresenceAction::Probe {
+            from: sender_jid.clone(),
+            to: to_bare,
+        });
+    }
 
-        // Check for subscription types
-        if let Some(sub_type) = SubscriptionType::from_presence_type(ptype) {
-            // Extract the target JID
-            let to = pres.to.as_ref()
-                .ok_or_else(|| XmppError::bad_request(Some("Subscription presence must have 'to' attribute".to_string())))?;
+    // Check for subscription types
+    if let Some(sub_type) = SubscriptionType::from_presence_type(&pres.type_) {
+        let to = pres.to.as_ref()
+            .ok_or_else(|| XmppError::bad_request(Some("Subscription presence must have 'to' attribute".to_string())))?;
 
-            let to_bare = match to.clone().try_into_full() {
-                Ok(full) => full.to_bare(),
-                Err(bare) => bare,
-            };
+        let to_bare = match to.clone().try_into_full() {
+            Ok(full) => full.to_bare(),
+            Err(bare) => bare,
+        };
 
-            // Extract status message if present (get first status value)
-            let status = pres.statuses.values().next().cloned();
+        let status = pres.statuses.values().next().cloned();
 
-            let request = PresenceSubscriptionRequest {
-                subscription_type: sub_type,
-                from: sender_jid.clone(),
-                to: to_bare,
-                status,
-                id: pres.id.clone(),
-            };
+        let request = PresenceSubscriptionRequest {
+            subscription_type: sub_type,
+            from: sender_jid.clone(),
+            to: to_bare,
+            status,
+            id: pres.id.clone(),
+        };
 
-            debug!(
-                subscription_type = ?sub_type,
-                from = %sender_jid,
-                to = %request.to,
-                "Parsed subscription presence"
-            );
+        debug!(
+            subscription_type = ?sub_type,
+            from = %sender_jid,
+            to = %request.to,
+            "Parsed subscription presence"
+        );
 
-            return Ok(PresenceAction::Subscription(request));
-        }
+        return Ok(PresenceAction::Subscription(request));
     }
 
     // Not subscription-related, treat as regular presence
@@ -600,7 +595,7 @@ mod tests {
             Some("Please add me"),
         );
 
-        assert_eq!(pres.type_, Some(PresenceType::Subscribe));
+        assert_eq!(pres.type_, PresenceType::Subscribe);
         assert_eq!(pres.from, Some(Jid::from(from)));
         assert_eq!(pres.to, Some(Jid::from(to)));
         assert_eq!(pres.statuses.values().next(), Some(&"Please add me".to_string()));
@@ -634,7 +629,7 @@ mod tests {
         let target: BareJid = "contact@example.com".parse().unwrap();
 
         let mut pres = Presence::new(PresenceType::Probe);
-        pres.to = Some(Jid::Bare(target.clone()));
+        pres.to = Some(Jid::from(target.clone()));
 
         let action = parse_subscription_presence(&pres, &sender).unwrap();
 
