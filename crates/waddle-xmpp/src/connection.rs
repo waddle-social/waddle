@@ -51,6 +51,9 @@ use crate::xep::xep0054::{
     build_empty_vcard_response, build_vcard_success,
 };
 use crate::xep::xep0077::RegistrationError;
+use crate::xep::xep0249::{
+    parse_direct_invite_from_message, DirectInvite,
+};
 use crate::xep::xep0363::{
     is_upload_request, parse_upload_request, build_upload_slot_response, build_upload_error,
     UploadSlot, UploadError,
@@ -944,6 +947,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
+        // Check for XEP-0249 Direct MUC Invitation (can be in normal or chat messages)
+        if let Some(invite) = parse_direct_invite_from_message(&msg) {
+            return self.handle_direct_invite(msg, invite, sender_jid).await;
+        }
+
         // Route based on message type
         match msg.type_ {
             MessageType::Groupchat => {
@@ -1216,6 +1224,94 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             delivered = delivered,
             carbon_copied = should_carbon,
             "Chat message processed"
+        );
+
+        Ok(())
+    }
+
+    /// Handle a XEP-0249 Direct MUC Invitation.
+    ///
+    /// Routes the invitation message to the recipient's connected resources.
+    /// The invitation contains:
+    /// - Room JID to join (required)
+    /// - Optional reason for the invitation
+    /// - Optional password for password-protected rooms
+    ///
+    /// Per XEP-0249, direct invites are sent as messages with an
+    /// `<x xmlns='jabber:x:conference'>` child element.
+    #[instrument(skip(self, msg, invite), fields(room = %invite.jid, to = ?msg.to))]
+    async fn handle_direct_invite(
+        &mut self,
+        msg: xmpp_parsers::message::Message,
+        invite: DirectInvite,
+        sender_jid: FullJid,
+    ) -> Result<(), XmppError> {
+        let recipient_jid = match &msg.to {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Direct invite missing 'to' attribute");
+                return Err(XmppError::bad_request(Some(
+                    "Direct invite must have a recipient".to_string(),
+                )));
+            }
+        };
+
+        debug!(
+            sender = %sender_jid,
+            recipient = %recipient_jid,
+            room = %invite.jid,
+            has_reason = invite.reason.is_some(),
+            has_password = invite.password.is_some(),
+            "Processing XEP-0249 direct MUC invitation"
+        );
+
+        // Ensure the message has the sender's full JID
+        let mut msg_with_from = msg.clone();
+        msg_with_from.from = Some(sender_jid.clone().into());
+
+        // Route to all connected resources for the recipient
+        let recipient_bare = recipient_jid.to_bare();
+        let recipient_resources = self.connection_registry.get_resources_for_user(&recipient_bare);
+
+        let mut delivered = false;
+
+        if recipient_resources.is_empty() {
+            debug!(
+                recipient = %recipient_bare,
+                "Recipient has no connected resources for direct invite"
+            );
+            // Note: In a full implementation, we might queue for offline delivery.
+            // For now, we log this and continue - the invite will be lost if the
+            // recipient is offline.
+        } else {
+            for resource_jid in &recipient_resources {
+                let stanza = Stanza::Message(msg_with_from.clone());
+                let result = self.connection_registry.send_to(resource_jid, stanza).await;
+
+                match result {
+                    SendResult::Sent => {
+                        debug!(to = %resource_jid, "Direct invite delivered to recipient resource");
+                        delivered = true;
+                    }
+                    SendResult::NotConnected => {
+                        debug!(to = %resource_jid, "Recipient resource not connected for direct invite");
+                    }
+                    SendResult::ChannelFull => {
+                        warn!(to = %resource_jid, "Recipient's channel full, direct invite dropped");
+                    }
+                    SendResult::ChannelClosed => {
+                        debug!(to = %resource_jid, "Recipient's channel closed");
+                    }
+                }
+            }
+        }
+
+        debug!(
+            sender = %sender_jid,
+            recipient = %recipient_jid,
+            room = %invite.jid,
+            delivered = delivered,
+            "Direct MUC invitation processed"
         );
 
         Ok(())
