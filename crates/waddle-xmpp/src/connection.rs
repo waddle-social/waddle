@@ -48,7 +48,7 @@ use crate::stream::{PreAuthResult, SaslAuthResult, XmppStream};
 use crate::types::ConnectionState;
 use crate::xep::xep0054::{
     is_vcard_get, is_vcard_set, parse_vcard_from_iq, build_vcard_response,
-    build_empty_vcard_response, build_vcard_success, VCard,
+    build_empty_vcard_response, build_vcard_success,
 };
 use crate::xep::xep0077::RegistrationError;
 use crate::{AppState, Session, XmppError};
