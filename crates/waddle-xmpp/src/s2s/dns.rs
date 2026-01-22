@@ -24,8 +24,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::proto::error::ProtoErrorKind;
 use hickory_resolver::proto::rr::rdata::SRV;
-use hickory_resolver::{ResolveError, ResolveErrorKind, TokioResolver};
+use hickory_resolver::{ResolveError, ResolveErrorKind, Resolver};
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
@@ -93,6 +95,9 @@ impl ResolvedTarget {
     }
 }
 
+/// Type alias for the Tokio-based resolver.
+pub type TokioResolver = Resolver<TokioConnectionProvider>;
+
 /// DNS SRV resolver for XMPP S2S federation.
 ///
 /// This resolver handles the complete DNS resolution process for XMPP
@@ -106,7 +111,11 @@ pub struct SrvResolver {
 impl SrvResolver {
     /// Create a new SRV resolver with system DNS configuration.
     pub async fn new() -> Result<Self, DnsError> {
-        let resolver = TokioResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let resolver = Resolver::builder_with_config(
+            ResolverConfig::default(),
+            TokioConnectionProvider::default(),
+        )
+        .build();
         Ok(Self {
             resolver: Arc::new(resolver),
         })
@@ -114,7 +123,9 @@ impl SrvResolver {
 
     /// Create a new SRV resolver with custom configuration.
     pub fn with_config(config: ResolverConfig, opts: ResolverOpts) -> Self {
-        let resolver = TokioResolver::tokio(config, opts);
+        let resolver = Resolver::builder_with_config(config, TokioConnectionProvider::default())
+            .with_options(opts)
+            .build();
         Self {
             resolver: Arc::new(resolver),
         }
@@ -280,8 +291,15 @@ impl SrvResolver {
 }
 
 /// Check if a resolve error indicates no records exist.
+///
+/// In hickory-resolver 0.25, NoRecordsFound is in ProtoErrorKind,
+/// not ResolveErrorKind. We need to check the inner Proto error.
 fn is_no_records_error(error: &ResolveError) -> bool {
-    matches!(error.kind(), ResolveErrorKind::NoRecordsFound { .. })
+    if let ResolveErrorKind::Proto(proto_error) = error.kind() {
+        matches!(proto_error.kind(), ProtoErrorKind::NoRecordsFound { .. })
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
