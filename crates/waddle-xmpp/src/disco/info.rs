@@ -102,6 +102,11 @@ impl Feature {
         Self::new("urn:xmpp:carbons:2")
     }
 
+    /// XEP-0115 Entity Capabilities feature
+    pub fn caps() -> Self {
+        Self::new("http://jabber.org/protocol/caps")
+    }
+
     /// MUC room features (XEP-0045)
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")

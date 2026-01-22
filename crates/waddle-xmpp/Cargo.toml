@@ -50,7 +50,8 @@ base64 = { workspace = true }
 # DNS Resolution
 hickory-resolver = { workspace = true }
 
-# SCRAM-SHA-256 Authentication
+# SCRAM-SHA-256 Authentication and XEP-0115 Entity Capabilities
+sha1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }

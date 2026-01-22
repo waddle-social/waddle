@@ -140,13 +140,13 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 - [ ] Room `general@penguin.waddle.social` is accessible
 - [ ] Messages stored in penguin's SQLite database
 
-### Phase XC1: XEP-0479 Core Compliance (P0)
+### Phase XC1: XEP-0479 Core Compliance (P0) ✅ COMPLETE
 
 **Goal:** Meet XEP-0479 (XMPP Compliance Suites 2023) Core requirements
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| XEP-0115 Entity Capabilities | ⬜ Not Started | P0 | Required for service capability advertisement |
+| XEP-0115 Entity Capabilities | ✅ Complete | P0 | waddle-xmpp/src/xep/xep0115.rs |
 
 **Currently Passing (from internal interop tests):**
 - RFC 6120 (XMPP Core) - stream.rs, connection.rs
@@ -482,10 +482,10 @@ External integrations and bot platform.
 - [ ] `general@penguin.waddle.social` routes correctly
 - [ ] Per-waddle database isolation
 
-### MXC1: XEP-0479 Core Compliance
-- [ ] XEP-0115 Entity Capabilities implemented
-- [ ] Capabilities advertised in presence
-- [ ] disco#info responds with capability hash
+### MXC1: XEP-0479 Core Compliance ✅ COMPLETE
+- [x] XEP-0115 Entity Capabilities implemented (xep/xep0115.rs)
+- [x] Capabilities advertised in presence (Caps::build_element())
+- [x] disco#info responds with capability hash (parse_caps_node())
 
 ### MXC2: XEP-0479 IM Basic Compliance
 - [ ] RFC 6121 roster management working

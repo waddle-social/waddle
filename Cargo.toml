@@ -78,6 +78,7 @@ tracing-opentelemetry = "0.29"
 # Security/Crypto
 rustls = "0.23"
 hmac = "0.12"
+sha1 = "0.10"
 sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
 elliptic-curve = { version = "0.13", features = ["jwk"] }
