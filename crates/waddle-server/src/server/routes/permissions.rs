@@ -393,7 +393,7 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(db_pool));
+        let app_state = Arc::new(AppState::new(db_pool, crate::config::ServerConfig::test_homeserver()));
         Arc::new(PermissionState::new(app_state))
     }
 

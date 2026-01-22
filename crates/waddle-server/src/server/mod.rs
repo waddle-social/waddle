@@ -521,13 +521,14 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        Arc::new(AppState::new(db_pool))
+        Arc::new(AppState::new(db_pool, ServerConfig::test_homeserver()))
     }
 
     #[tokio::test]
     async fn test_health_endpoint() {
         let state = create_test_state().await;
-        let app = create_router(state);
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true);
 
         let response = app
             .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
@@ -547,7 +548,8 @@ mod tests {
     #[tokio::test]
     async fn test_detailed_health_endpoint() {
         let state = create_test_state().await;
-        let app = create_router(state);
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true);
 
         let response = app
             .oneshot(
