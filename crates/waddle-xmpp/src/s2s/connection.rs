@@ -7,13 +7,19 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use jid::Jid;
+use minidom::Element;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::presence::Presence;
 
 use crate::parser::{ns, ParsedStanza, StreamHeader, XmlParser};
+use crate::routing::StanzaRouter;
 use crate::s2s::dialback::{
     build_db_result_response, build_db_verify_response, DialbackKey, DialbackResult, DialbackState,
     NS_DIALBACK_FEATURES,
@@ -43,6 +49,8 @@ pub struct S2sConnectionActor {
     stream_id: String,
     /// Metrics for tracking S2S connections
     metrics: Arc<S2sMetrics>,
+    /// Stanza router for routing incoming stanzas to local users
+    stanza_router: Option<Arc<StanzaRouter>>,
 }
 
 /// Inner stream type for S2S connections.
@@ -58,7 +66,7 @@ impl S2sConnectionActor {
     /// Handle a new incoming S2S connection.
     #[instrument(
         name = "xmpp.s2s.connection.handle",
-        skip(tcp_stream, tls_acceptor, metrics, dialback_secret),
+        skip(tcp_stream, tls_acceptor, metrics, dialback_secret, stanza_router),
         fields(peer = %peer_addr)
     )]
     pub async fn handle_connection(
@@ -68,6 +76,7 @@ impl S2sConnectionActor {
         local_domain: String,
         metrics: Arc<S2sMetrics>,
         dialback_secret: &[u8],
+        stanza_router: Option<Arc<StanzaRouter>>,
     ) -> Result<(), XmppError> {
         info!("New S2S connection from {}", peer_addr);
 
@@ -82,6 +91,7 @@ impl S2sConnectionActor {
             remote_domain: None,
             stream_id: uuid::Uuid::new_v4().to_string(),
             metrics,
+            stanza_router,
         };
 
         actor.run(tls_acceptor).await

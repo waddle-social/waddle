@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, warn, Instrument};
 
-use crate::registry::ConnectionRegistry;
+use crate::routing::StanzaRouter;
 use crate::s2s::connection::S2sConnectionActor;
 use crate::s2s::S2sMetrics;
 use crate::XmppError;
@@ -47,8 +47,8 @@ pub struct S2sListener {
     config: S2sListenerConfig,
     tls_acceptor: TlsAcceptor,
     metrics: Arc<S2sMetrics>,
-    /// Connection registry for routing incoming stanzas to local users.
-    connection_registry: Option<Arc<ConnectionRegistry>>,
+    /// Stanza router for routing incoming stanzas to local users.
+    stanza_router: Option<Arc<StanzaRouter>>,
 }
 
 impl S2sListener {
@@ -61,8 +61,14 @@ impl S2sListener {
             config,
             tls_acceptor,
             metrics: Arc::new(S2sMetrics::new()),
-            connection_registry: None,
+            stanza_router: None,
         }
+    }
+
+    /// Set the stanza router for routing incoming stanzas to local users.
+    pub fn with_stanza_router(mut self, router: Arc<StanzaRouter>) -> Self {
+        self.stanza_router = Some(router);
+        self
     }
 
     /// Start listening for incoming S2S connections.
@@ -83,6 +89,7 @@ impl S2sListener {
                     let domain = self.config.domain.clone();
                     let dialback_secret = self.config.dialback_secret.clone();
                     let metrics = Arc::clone(&self.metrics);
+                    let stanza_router = self.stanza_router.clone();
 
                     // Record incoming connection
                     metrics.record_connection_attempt();
@@ -96,6 +103,7 @@ impl S2sListener {
                                 domain,
                                 metrics,
                                 &dialback_secret,
+                                stanza_router,
                             )
                             .await
                             {
