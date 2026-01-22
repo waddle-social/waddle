@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::proto::error::ProtoErrorKind;
 use hickory_resolver::proto::rr::rdata::SRV;
+use hickory_resolver::proto::ProtoErrorKind;
 use hickory_resolver::{ResolveError, ResolveErrorKind, Resolver};
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
