@@ -536,6 +536,8 @@ async fn handle_muc_join(
         nick: nick.to_string(),
         role: Role::Participant,
         affiliation: Affiliation::Member,
+        is_remote: false,
+        home_server: None,
     };
     room.add_occupant(occupant);
 

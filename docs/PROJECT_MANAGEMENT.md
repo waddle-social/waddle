@@ -168,7 +168,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | XEP-0054 vcard-temp | ⬜ Not Started | P0 | User profile information |
 | XEP-0249 Direct MUC Invitations | ⬜ Not Started | P0 | Direct channel invites |
 | Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
-| Complete XEP-0280 Message Carbons | ⚠️ Code exists, unused | P0 | Integrate carbons/ into message flow |
+| Complete XEP-0280 Message Carbons | ✅ Complete | P0 | Integrated into chat message routing |
 | XEP-0363 HTTP File Upload | ⬜ Not Started | P0 | File sharing capability |
 
 **Verification:**
@@ -176,7 +176,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 - [ ] Presence subscription flow complete
 - [ ] vCard retrieval and update working
 - [ ] MUC invitations delivered
-- [ ] Message carbons syncing across devices
+- [x] Message carbons syncing across devices
 - [ ] File upload slot allocation working
 
 ### Phase XC3: XEP-0479 IM Advanced Compliance (P1)
@@ -493,7 +493,7 @@ External integrations and bot platform.
 - [ ] XEP-0054 vcard-temp working
 - [ ] XEP-0249 Direct MUC Invitations working
 - [ ] XEP-0045 MUC fully compliant
-- [ ] XEP-0280 Message Carbons integrated
+- [x] XEP-0280 Message Carbons integrated
 - [ ] XEP-0363 HTTP File Upload working
 
 ### MXC3: XEP-0479 IM Advanced Compliance

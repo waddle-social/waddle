@@ -258,7 +258,7 @@ impl ConnectionRegistry {
         let stale: Vec<FullJid> = self
             .connections
             .iter()
-            .filter(|entry| entry.value().is_closed())
+            .filter(|entry| entry.value().sender.is_closed())
             .map(|entry| entry.key().clone())
             .collect();
 
