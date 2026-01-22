@@ -2,6 +2,7 @@
 //!
 //! Manages individual connections from remote XMPP servers.
 //! Implements stream negotiation with TLS 1.3 and feature advertisement.
+//! Supports Server Dialback (XEP-0220) for authentication.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,7 +13,11 @@ use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 
-use crate::parser::{ns, StreamHeader, XmlParser};
+use crate::parser::{ns, ParsedStanza, StreamHeader, XmlParser};
+use crate::s2s::dialback::{
+    build_db_result_response, build_db_verify_response, DialbackKey, DialbackResult, DialbackState,
+    NS_DIALBACK_FEATURES,
+};
 use crate::s2s::{S2sMetrics, S2sState};
 use crate::XmppError;
 
@@ -26,6 +31,10 @@ pub struct S2sConnectionActor {
     parser: XmlParser,
     /// Current connection state
     state: S2sState,
+    /// Current dialback state
+    dialback_state: DialbackState,
+    /// Dialback key generator
+    dialback_key: DialbackKey,
     /// Local server domain
     local_domain: String,
     /// Remote server domain (from stream header)
@@ -49,7 +58,7 @@ impl S2sConnectionActor {
     /// Handle a new incoming S2S connection.
     #[instrument(
         name = "xmpp.s2s.connection.handle",
-        skip(tcp_stream, tls_acceptor, metrics),
+        skip(tcp_stream, tls_acceptor, metrics, dialback_secret),
         fields(peer = %peer_addr)
     )]
     pub async fn handle_connection(
@@ -58,6 +67,7 @@ impl S2sConnectionActor {
         tls_acceptor: TlsAcceptor,
         local_domain: String,
         metrics: Arc<S2sMetrics>,
+        dialback_secret: &[u8],
     ) -> Result<(), XmppError> {
         info!("New S2S connection from {}", peer_addr);
 
@@ -66,6 +76,8 @@ impl S2sConnectionActor {
             inner: S2sStreamInner::Tcp(tcp_stream),
             parser: XmlParser::new(),
             state: S2sState::Initial,
+            dialback_state: DialbackState::None,
+            dialback_key: DialbackKey::new(dialback_secret),
             local_domain,
             remote_domain: None,
             stream_id: uuid::Uuid::new_v4().to_string(),
@@ -309,14 +321,22 @@ impl S2sConnectionActor {
     }
 
     /// Send stream features advertising dialback and other S2S features.
+    ///
+    /// Per XEP-0220 Section 2.2, the dialback feature is advertised with the
+    /// `urn:xmpp:features:dialback` namespace. The `<errors/>` child element
+    /// indicates that this server supports dialback error conditions.
     #[instrument(skip(self), name = "xmpp.s2s.stream.send_features_dialback")]
     async fn send_features_dialback(&mut self) -> Result<(), XmppError> {
-        // Advertise Server Dialback (XEP-0220) and other S2S features
-        let features = r#"<stream:features>
-            <dialback xmlns='urn:xmpp:features:dialback'>
-                <errors/>
-            </dialback>
-        </stream:features>"#;
+        // Advertise Server Dialback (XEP-0220) per Section 2.2
+        // The <errors/> element indicates support for dialback error conditions
+        let features = format!(
+            "<stream:features>\
+                <dialback xmlns='{}'>\
+                    <errors/>\
+                </dialback>\
+            </stream:features>",
+            NS_DIALBACK_FEATURES
+        );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
@@ -356,63 +376,222 @@ impl S2sConnectionActor {
     }
 
     /// Handle an individual S2S stanza.
-    async fn handle_s2s_stanza(
-        &mut self,
-        stanza: &crate::parser::ParsedStanza,
-    ) -> Result<(), XmppError> {
-        use crate::parser::ParsedStanza;
-
+    async fn handle_s2s_stanza(&mut self, stanza: &ParsedStanza) -> Result<(), XmppError> {
         match stanza {
             ParsedStanza::StreamEnd => {
                 debug!("Received stream end from remote server");
                 self.send_stream_end().await?;
                 return Ok(());
             }
+            ParsedStanza::DialbackResult {
+                from,
+                to,
+                key,
+                result_type,
+            } => {
+                self.handle_dialback_result(from, to, key.as_deref(), result_type.as_deref())
+                    .await?;
+            }
+            ParsedStanza::DialbackVerify {
+                from,
+                to,
+                id,
+                key,
+                result_type,
+            } => {
+                self.handle_dialback_verify(from, to, id, key.as_deref(), result_type.as_deref())
+                    .await?;
+            }
             ParsedStanza::Iq(_iq) => {
                 // Handle IQ stanzas (disco, etc.)
+                if self.state != S2sState::Established {
+                    debug!("Received S2S IQ before connection established - ignoring");
+                    return Ok(());
+                }
                 debug!("Received S2S IQ - not yet implemented");
                 // TODO: Implement S2S IQ handling
             }
             ParsedStanza::Message(_msg) => {
                 // Handle message routing from remote server
+                if self.state != S2sState::Established {
+                    debug!("Received S2S message before connection established - ignoring");
+                    return Ok(());
+                }
                 debug!("Received S2S message - not yet implemented");
                 // TODO: Implement message routing to local users
             }
             ParsedStanza::Presence(_presence) => {
                 // Handle presence from remote server
+                if self.state != S2sState::Established {
+                    debug!("Received S2S presence before connection established - ignoring");
+                    return Ok(());
+                }
                 debug!("Received S2S presence - not yet implemented");
                 // TODO: Implement presence routing
             }
             ParsedStanza::Unknown(elem) => {
-                // Check for dialback elements
                 let name = elem.name();
                 let xmlns = elem.ns();
-
-                if xmlns == "jabber:server:dialback" {
-                    match name {
-                        "result" => {
-                            debug!("Received dialback result - not yet implemented");
-                            // TODO: Implement dialback result handling
-                        }
-                        "verify" => {
-                            debug!("Received dialback verify - not yet implemented");
-                            // TODO: Implement dialback verification
-                        }
-                        _ => {
-                            warn!(name = %name, "Unknown dialback element");
-                        }
-                    }
-                } else {
-                    debug!(
-                        name = %name,
-                        xmlns = %xmlns,
-                        "Unknown S2S element"
-                    );
-                }
+                debug!(
+                    name = %name,
+                    xmlns = %xmlns,
+                    "Unknown S2S element"
+                );
             }
             _ => {
                 debug!(?stanza, "Unhandled S2S stanza type");
             }
+        }
+
+        Ok(())
+    }
+
+    /// Handle an incoming `db:result` element.
+    ///
+    /// This can be either:
+    /// 1. An initial dialback request from a remote server (contains key)
+    /// 2. A response to our dialback request (contains type="valid"|"invalid")
+    #[instrument(skip(self), name = "xmpp.s2s.dialback.result")]
+    async fn handle_dialback_result(
+        &mut self,
+        from: &str,
+        to: &str,
+        key: Option<&str>,
+        result_type: Option<&str>,
+    ) -> Result<(), XmppError> {
+        // Validate the 'to' attribute matches our domain
+        if to != self.local_domain {
+            warn!(
+                expected = %self.local_domain,
+                got = %to,
+                "Dialback result 'to' domain mismatch"
+            );
+            // Send invalid response
+            let response = build_db_result_response(&self.local_domain, from, DialbackResult::Invalid);
+            self.write_all(response.as_bytes()).await?;
+            self.flush().await?;
+            return Ok(());
+        }
+
+        // Check if this is a response to our request or a new request
+        if let Some(result) = result_type {
+            // This is a response to our dialback request
+            match DialbackResult::from_str(result) {
+                Some(DialbackResult::Valid) => {
+                    info!(from = %from, "Dialback verification successful");
+                    self.dialback_state = DialbackState::Verified;
+                    self.state = S2sState::Established;
+                    self.remote_domain = Some(from.to_string());
+                }
+                Some(DialbackResult::Invalid) | None => {
+                    warn!(from = %from, "Dialback verification failed");
+                    self.dialback_state = DialbackState::Failed;
+                }
+            }
+        } else if let Some(dialback_key) = key {
+            // This is a new dialback request from a remote server
+            debug!(from = %from, "Received dialback request");
+
+            // Update remote domain
+            self.remote_domain = Some(from.to_string());
+            self.dialback_state = DialbackState::Pending;
+
+            // For now, we do "piggyback" verification - verify the key locally
+            // since we're using HMAC-SHA256 with a shared secret approach.
+            //
+            // In a full implementation, we would:
+            // 1. Open a connection back to the originating server
+            // 2. Send a db:verify request
+            // 3. Wait for the response
+            // 4. Send db:result back to the originating server
+            //
+            // For simplicity in this implementation, we verify locally using our
+            // dialback key generator. The remote server should have generated the
+            // key using the same algorithm with the stream ID we sent.
+            let is_valid = self.dialback_key.verify(
+                dialback_key,
+                &self.stream_id,
+                &self.local_domain,
+                from,
+            );
+
+            let result = if is_valid {
+                info!(from = %from, "Dialback key verified successfully");
+                self.dialback_state = DialbackState::Verified;
+                self.state = S2sState::Established;
+                DialbackResult::Valid
+            } else {
+                warn!(from = %from, "Dialback key verification failed");
+                self.dialback_state = DialbackState::Failed;
+                DialbackResult::Invalid
+            };
+
+            // Send the result back
+            let response = build_db_result_response(&self.local_domain, from, result);
+            self.write_all(response.as_bytes()).await?;
+            self.flush().await?;
+
+            debug!(result = ?result, "Sent dialback result response");
+        } else {
+            warn!("Received db:result without key or type attribute");
+        }
+
+        Ok(())
+    }
+
+    /// Handle an incoming `db:verify` element.
+    ///
+    /// This can be either:
+    /// 1. A verification request from a receiving server (contains key)
+    /// 2. A response to our verification request (contains type="valid"|"invalid")
+    #[instrument(skip(self), name = "xmpp.s2s.dialback.verify")]
+    async fn handle_dialback_verify(
+        &mut self,
+        from: &str,
+        to: &str,
+        id: &str,
+        key: Option<&str>,
+        result_type: Option<&str>,
+    ) -> Result<(), XmppError> {
+        // Check if this is a response to our verify request or a new request
+        if let Some(result) = result_type {
+            // This is a response to our db:verify request
+            match DialbackResult::from_str(result) {
+                Some(DialbackResult::Valid) => {
+                    debug!(from = %from, id = %id, "db:verify response: valid");
+                    // The receiving server has confirmed the dialback key is valid
+                    // We should now send a valid db:result to the originating server
+                }
+                Some(DialbackResult::Invalid) | None => {
+                    debug!(from = %from, id = %id, "db:verify response: invalid");
+                    // The dialback key was invalid
+                }
+            }
+        } else if let Some(dialback_key) = key {
+            // This is a verification request from a receiving server
+            // We need to verify the key and respond
+            debug!(from = %from, to = %to, id = %id, "Received db:verify request");
+
+            // Verify the key using our dialback key generator
+            // The key should have been generated by us for the stream ID specified
+            let is_valid = self.dialback_key.verify(dialback_key, id, from, to);
+
+            let result = if is_valid {
+                debug!("Dialback key verified for stream {}", id);
+                DialbackResult::Valid
+            } else {
+                warn!("Dialback key verification failed for stream {}", id);
+                DialbackResult::Invalid
+            };
+
+            // Send the verification response
+            let response = build_db_verify_response(&self.local_domain, from, id, result);
+            self.write_all(response.as_bytes()).await?;
+            self.flush().await?;
+
+            debug!(result = ?result, "Sent db:verify response");
+        } else {
+            warn!("Received db:verify without key or type attribute");
         }
 
         Ok(())

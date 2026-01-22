@@ -190,6 +190,9 @@ impl XmlParser {
             "failed",
             "r",
             "a",
+            // XEP-0220 Server Dialback elements
+            "db:result",
+            "db:verify",
         ];
 
         for tag in stanza_tags {
@@ -241,6 +244,9 @@ impl XmlParser {
             ("<resume", parse_sm_resume),  // Must come before <r
             ("<r", parse_sm_request),
             ("<a ", parse_sm_ack),  // Note: space to avoid matching <auth
+            // XEP-0220 Server Dialback stanzas
+            ("<db:result", parse_dialback_result),
+            ("<db:verify", parse_dialback_verify),
         ];
 
         for (pattern, parser) in stanza_patterns {
@@ -332,6 +338,30 @@ pub enum ParsedStanza {
     SmAck { h: u32 },
     /// XEP-0198: Stream Management resume request
     SmResume { previd: String, h: u32 },
+    /// XEP-0220: Server Dialback result (initial request or response)
+    DialbackResult {
+        /// Originating domain (from attribute)
+        from: String,
+        /// Receiving domain (to attribute)
+        to: String,
+        /// Dialback key (content of db:result for initial request)
+        key: Option<String>,
+        /// Result type (only present in response: "valid" or "invalid")
+        result_type: Option<String>,
+    },
+    /// XEP-0220: Server Dialback verification request/response
+    DialbackVerify {
+        /// Originating domain (from attribute)
+        from: String,
+        /// Receiving domain (to attribute)
+        to: String,
+        /// Stream ID being verified
+        id: String,
+        /// Dialback key (content for request, empty for response)
+        key: Option<String>,
+        /// Result type (only present in response: "valid" or "invalid")
+        result_type: Option<String>,
+    },
 }
 
 fn parse_starttls(data: &str) -> Result<ParsedStanza, XmppError> {
@@ -435,6 +465,87 @@ fn parse_sm_resume(data: &str) -> Result<ParsedStanza, XmppError> {
         .ok_or_else(|| XmppError::xml_parse("SM resume missing 'h' attribute"))?;
 
     Ok(ParsedStanza::SmResume { previd, h })
+}
+
+/// Parse XEP-0220 Server Dialback result element.
+///
+/// Handles both initial requests (with key content) and responses (with type attribute).
+fn parse_dialback_result(data: &str) -> Result<ParsedStanza, XmppError> {
+    let from = extract_attribute(data, "from")
+        .ok_or_else(|| XmppError::xml_parse("db:result missing 'from' attribute"))?;
+    let to = extract_attribute(data, "to")
+        .ok_or_else(|| XmppError::xml_parse("db:result missing 'to' attribute"))?;
+
+    // Check for type attribute (present in responses)
+    let result_type = extract_attribute(data, "type");
+
+    // Extract key content (present in initial requests)
+    let key = if result_type.is_none() {
+        // Extract content between > and </db:result>
+        let content_start = data.find('>').map(|i| i + 1).unwrap_or(0);
+        let content_end = data.find("</db:result>").unwrap_or(data.len());
+        if content_start < content_end {
+            let content = data[content_start..content_end].trim();
+            if !content.is_empty() {
+                Some(content.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ParsedStanza::DialbackResult {
+        from,
+        to,
+        key,
+        result_type,
+    })
+}
+
+/// Parse XEP-0220 Server Dialback verify element.
+///
+/// Handles both verification requests (with key content) and responses (with type attribute).
+fn parse_dialback_verify(data: &str) -> Result<ParsedStanza, XmppError> {
+    let from = extract_attribute(data, "from")
+        .ok_or_else(|| XmppError::xml_parse("db:verify missing 'from' attribute"))?;
+    let to = extract_attribute(data, "to")
+        .ok_or_else(|| XmppError::xml_parse("db:verify missing 'to' attribute"))?;
+    let id = extract_attribute(data, "id")
+        .ok_or_else(|| XmppError::xml_parse("db:verify missing 'id' attribute"))?;
+
+    // Check for type attribute (present in responses)
+    let result_type = extract_attribute(data, "type");
+
+    // Extract key content (present in verification requests)
+    let key = if result_type.is_none() {
+        // Extract content between > and </db:verify>
+        let content_start = data.find('>').map(|i| i + 1).unwrap_or(0);
+        let content_end = data.find("</db:verify>").unwrap_or(data.len());
+        if content_start < content_end {
+            let content = data[content_start..content_end].trim();
+            if !content.is_empty() {
+                Some(content.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ParsedStanza::DialbackVerify {
+        from,
+        to,
+        id,
+        key,
+        result_type,
+    })
 }
 
 /// Parse a string into a minidom Element.

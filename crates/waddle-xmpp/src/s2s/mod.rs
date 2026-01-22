@@ -21,11 +21,13 @@
 //! and optionally `WADDLE_XMPP_S2S_ADDR` to customize the bind address.
 
 pub mod connection;
+pub mod dialback;
 pub mod listener;
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
 pub use connection::S2sConnectionActor;
+pub use dialback::{DialbackKey, DialbackResult, DialbackState, NS_DIALBACK, NS_DIALBACK_FEATURES};
 pub use listener::{S2sListener, S2sListenerConfig};
 
 /// S2S connection state.
