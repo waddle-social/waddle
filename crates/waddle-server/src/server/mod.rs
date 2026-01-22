@@ -1,3 +1,4 @@
+use crate::config::{ServerConfig, ServerInfo, ServerMode};
 use crate::db::{DatabasePool, PoolHealth};
 use anyhow::Result;
 use axum::{
@@ -33,11 +34,13 @@ pub use xmpp_state::XmppAppState;
 pub struct AppState {
     /// Database pool for global and per-waddle databases
     pub db_pool: DatabasePool,
+    /// Server configuration (mode, etc.)
+    pub server_config: ServerConfig,
 }
 
 impl AppState {
-    pub fn new(db_pool: DatabasePool) -> Self {
-        Self { db_pool }
+    pub fn new(db_pool: DatabasePool, server_config: ServerConfig) -> Self {
+        Self { db_pool, server_config }
     }
 }
 
@@ -143,15 +146,19 @@ impl XmppConfig {
 /// Start both HTTP and XMPP servers.
 ///
 /// This function spawns both servers concurrently and returns when either fails.
-pub async fn start(db_pool: DatabasePool) -> Result<()> {
+pub async fn start(db_pool: DatabasePool, server_config: ServerConfig) -> Result<()> {
     let xmpp_config = XmppConfig::from_env();
 
-    start_with_config(db_pool, xmpp_config).await
+    start_with_config(db_pool, xmpp_config, server_config).await
 }
 
 /// Start both HTTP and XMPP servers with explicit configuration.
-pub async fn start_with_config(db_pool: DatabasePool, xmpp_config: XmppConfig) -> Result<()> {
-    let encryption_key = std::env::var("WADDLE_SESSION_KEY").ok();
+pub async fn start_with_config(
+    db_pool: DatabasePool,
+    xmpp_config: XmppConfig,
+    server_config: ServerConfig,
+) -> Result<()> {
+    let encryption_key = server_config.session_key.clone();
 
     // Create XMPP app state first (before db_pool is moved)
     // Clone the global database for XMPP state
@@ -166,12 +173,14 @@ pub async fn start_with_config(db_pool: DatabasePool, xmpp_config: XmppConfig) -
     };
 
     // Now create HTTP state (takes ownership of db_pool)
-    let state = Arc::new(AppState::new(db_pool));
+    let state = Arc::new(AppState::new(db_pool, server_config.clone()));
+    let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
 
     // Start HTTP server
     let http_state = state.clone();
+    let http_server_config = server_config.clone();
     let http_handle = tokio::spawn(async move {
-        start_http_server(http_state).await
+        start_http_server(http_state, http_server_config, xmpp_native_auth_enabled).await
     });
 
     // Optionally start XMPP server
@@ -211,8 +220,12 @@ pub async fn start_with_config(db_pool: DatabasePool, xmpp_config: XmppConfig) -
 }
 
 /// Start the HTTP server.
-async fn start_http_server(state: Arc<AppState>) -> Result<()> {
-    let app = create_router(state);
+async fn start_http_server(
+    state: Arc<AppState>,
+    server_config: ServerConfig,
+    xmpp_native_auth_enabled: bool,
+) -> Result<()> {
+    let app = create_router(state, server_config, xmpp_native_auth_enabled);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     info!("Starting Axum HTTP server on {}", addr);
@@ -246,36 +259,28 @@ async fn start_xmpp_server(
     Ok(())
 }
 
+/// State for the server-info endpoint
+#[derive(Clone)]
+struct ServerInfoState {
+    server_info: ServerInfo,
+}
+
 /// Create the Axum router with all routes and middleware
-fn create_router(state: Arc<AppState>) -> Router {
+fn create_router(
+    state: Arc<AppState>,
+    server_config: ServerConfig,
+    xmpp_native_auth_enabled: bool,
+) -> Router {
     // Create auth state with configuration from environment or defaults
     // The base URL is used to construct client_id and redirect_uri for OAuth
-    let base_url = std::env::var("WADDLE_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let encryption_key = std::env::var("WADDLE_SESSION_KEY").ok();
+    let base_url = server_config.base_url.clone();
+    let encryption_key = server_config.session_key.clone();
 
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
         &base_url,
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
-
-    // Auth router uses its own state type, so we apply .with_state() before merging
-    // This converts Router<Arc<AuthState>> to Router<()>, which can then be merged
-    let auth_router = routes::auth::router(auth_state.clone());
-
-    // Device flow router for CLI authentication
-    let device_store = Arc::new(dashmap::DashMap::new());
-    let device_router = routes::device::router(auth_state.clone(), device_store);
-
-    // XMPP OAuth router (XEP-0493) for standard XMPP client authentication
-    let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
-
-    // Auth page router for web-based XMPP credential retrieval
-    let auth_page_router = routes::auth_page::router(auth_state.clone());
-
-    // Well-known endpoints for service discovery (XEP-0156)
-    let well_known_router = routes::well_known::router(auth_state.clone());
 
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
@@ -290,7 +295,7 @@ fn create_router(state: Arc<AppState>) -> Router {
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
-        auth_state,
+        auth_state: auth_state.clone(),
         connection_registry,
         muc_registry,
     });
@@ -314,22 +319,56 @@ fn create_router(state: Arc<AppState>) -> Router {
     ));
     let channels_router = routes::channels::router(channel_state);
 
-    Router::new()
+    // Create server info for the /api/v1/server-info endpoint
+    let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
+    let server_info_state = ServerInfoState { server_info };
+
+    // Build the base router with health and server-info endpoints
+    let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/api/v1/health", get(detailed_health_handler))
-        // Future routes will be mounted here
-        // .merge(routes::messages::router())
         .with_state(state)
-        // Merge auth routes after the main router has its state applied
-        .merge(auth_router)
-        // Merge device flow routes for CLI authentication
-        .merge(device_router)
-        // Merge XMPP OAuth routes for standard XMPP client authentication (XEP-0493)
-        .merge(xmpp_oauth_router)
-        // Merge auth page routes for web-based XMPP credential retrieval
-        .merge(auth_page_router)
-        // Merge well-known endpoints for XMPP service discovery
-        .merge(well_known_router)
+        .route("/api/v1/server-info", get(server_info_handler))
+        .with_state(server_info_state);
+
+    // Conditionally merge ATProto routes based on server mode
+    if server_config.mode.atproto_enabled() {
+        info!("Registering ATProto OAuth routes (HomeServer mode)");
+
+        // Auth router uses its own state type, so we apply .with_state() before merging
+        // This converts Router<Arc<AuthState>> to Router<()>, which can then be merged
+        let auth_router = routes::auth::router(auth_state.clone());
+
+        // Device flow router for CLI authentication
+        let device_store = Arc::new(dashmap::DashMap::new());
+        let device_router = routes::device::router(auth_state.clone(), device_store);
+
+        // XMPP OAuth router (XEP-0493) for standard XMPP client authentication
+        let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
+
+        // Auth page router for web-based XMPP credential retrieval
+        let auth_page_router = routes::auth_page::router(auth_state.clone());
+
+        // Well-known endpoints for service discovery (XEP-0156)
+        let well_known_router = routes::well_known::router(auth_state.clone());
+
+        router = router
+            // Merge auth routes after the main router has its state applied
+            .merge(auth_router)
+            // Merge device flow routes for CLI authentication
+            .merge(device_router)
+            // Merge XMPP OAuth routes for standard XMPP client authentication (XEP-0493)
+            .merge(xmpp_oauth_router)
+            // Merge auth page routes for web-based XMPP credential retrieval
+            .merge(auth_page_router)
+            // Merge well-known endpoints for XMPP service discovery
+            .merge(well_known_router);
+    } else {
+        info!("ATProto OAuth routes disabled (Standalone mode)");
+    }
+
+    // Always merge common routes (WebSocket, permissions, waddles, channels)
+    router
         // Merge XMPP over WebSocket endpoint
         .merge(websocket_router)
         // Merge permission routes
@@ -345,6 +384,11 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive()) // TODO: Configure proper CORS in production
+}
+
+/// Handler for the /api/v1/server-info endpoint
+async fn server_info_handler(State(state): State<ServerInfoState>) -> impl IntoResponse {
+    (StatusCode::OK, Json(state.server_info))
 }
 
 /// Response for detailed health check

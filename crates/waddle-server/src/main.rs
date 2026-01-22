@@ -2,11 +2,14 @@ use anyhow::Result;
 use tracing::info;
 
 mod auth;
+mod config;
 mod db;
 mod messages;
 mod permissions;
 mod server;
 mod telemetry;
+
+pub use config::{ServerConfig, ServerMode};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,6 +30,10 @@ async fn main() -> Result<()> {
     info!("Waddle Server starting...");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     info!("License: AGPL-3.0");
+
+    // Load and log server configuration
+    let server_config = ServerConfig::from_env();
+    server_config.log_config();
 
     // Initialize database pool
     let db_config = if let Ok(db_path) = std::env::var("WADDLE_DB_PATH") {
@@ -51,8 +58,8 @@ async fn main() -> Result<()> {
 
     info!("Database initialized and migrations complete");
 
-    // Start the HTTP server
-    server::start(db_pool).await?;
+    // Start the HTTP server with server configuration
+    server::start(db_pool, server_config).await?;
 
     // Shutdown telemetry on exit
     telemetry::shutdown();
