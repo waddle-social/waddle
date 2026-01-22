@@ -86,7 +86,8 @@ pub struct ServerFinalMessage {
 struct ClientFirstMessage {
     /// GS2 channel binding flag ('n', 'y', or 'p')
     gs2_cbind_flag: char,
-    /// Optional authzid (reserved for future use)
+    /// Optional authzid (reserved for future use per SCRAM spec)
+    #[allow(dead_code)]
     authzid: Option<String>,
     /// Username (authcid)
     username: String,
@@ -99,7 +100,8 @@ struct ClientFirstMessage {
 /// Parsed client-final-message components.
 #[derive(Debug, Clone)]
 struct ClientFinalMessage {
-    /// Channel binding data (base64)
+    /// Channel binding data (base64) - required by SCRAM protocol
+    #[allow(dead_code)]
     channel_binding: String,
     /// Combined nonce
     nonce: String,

@@ -476,7 +476,7 @@ impl S2sConnectionActor {
         // Check if this is a response to our request or a new request
         if let Some(result) = result_type {
             // This is a response to our dialback request
-            match DialbackResult::from_str(result) {
+            match DialbackResult::parse(result) {
                 Some(DialbackResult::Valid) => {
                     info!(from = %from, "Dialback verification successful");
                     self.dialback_state = DialbackState::Verified;
@@ -556,7 +556,7 @@ impl S2sConnectionActor {
         // Check if this is a response to our verify request or a new request
         if let Some(result) = result_type {
             // This is a response to our db:verify request
-            match DialbackResult::from_str(result) {
+            match DialbackResult::parse(result) {
                 Some(DialbackResult::Valid) => {
                     debug!(from = %from, id = %id, "db:verify response: valid");
                     // The receiving server has confirmed the dialback key is valid

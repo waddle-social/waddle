@@ -396,10 +396,7 @@ impl SmStanza {
             None
         } else if xml.contains("<resume") {
             SmResume::parse(xml).map(SmStanza::Resume)
-        } else if xml.contains("<resumed") {
-            // Server response, not typically parsed by server
-            None
-        } else if xml.contains("<failed") {
+        } else if xml.contains("<resumed") || xml.contains("<failed") {
             // Server response, not typically parsed by server
             None
         } else if SmRequest::is_request(xml) {

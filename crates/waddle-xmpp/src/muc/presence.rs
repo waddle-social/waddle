@@ -99,7 +99,7 @@ pub fn parse_muc_presence(
                 .statuses
                 .values()
                 .next()
-                .map(|s| s.clone());
+                .cloned();
 
             debug!(
                 room = %room_jid,

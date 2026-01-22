@@ -26,7 +26,7 @@ pub enum SaslMechanism {
 
 impl SaslMechanism {
     /// Parse a mechanism name string into a SaslMechanism.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "PLAIN" => Some(SaslMechanism::Plain),
             "OAUTHBEARER" => Some(SaslMechanism::OAuthBearer),
@@ -282,14 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sasl_mechanism_from_str() {
-        assert_eq!(SaslMechanism::from_str("PLAIN"), Some(SaslMechanism::Plain));
-        assert_eq!(SaslMechanism::from_str("plain"), Some(SaslMechanism::Plain));
-        assert_eq!(SaslMechanism::from_str("OAUTHBEARER"), Some(SaslMechanism::OAuthBearer));
-        assert_eq!(SaslMechanism::from_str("oauthbearer"), Some(SaslMechanism::OAuthBearer));
-        assert_eq!(SaslMechanism::from_str("SCRAM-SHA-256"), Some(SaslMechanism::ScramSha256));
-        assert_eq!(SaslMechanism::from_str("scram-sha-256"), Some(SaslMechanism::ScramSha256));
-        assert_eq!(SaslMechanism::from_str("UNKNOWN"), None);
+    fn test_sasl_mechanism_parse() {
+        assert_eq!(SaslMechanism::parse("PLAIN"), Some(SaslMechanism::Plain));
+        assert_eq!(SaslMechanism::parse("plain"), Some(SaslMechanism::Plain));
+        assert_eq!(SaslMechanism::parse("OAUTHBEARER"), Some(SaslMechanism::OAuthBearer));
+        assert_eq!(SaslMechanism::parse("oauthbearer"), Some(SaslMechanism::OAuthBearer));
+        assert_eq!(SaslMechanism::parse("SCRAM-SHA-256"), Some(SaslMechanism::ScramSha256));
+        assert_eq!(SaslMechanism::parse("scram-sha-256"), Some(SaslMechanism::ScramSha256));
+        assert_eq!(SaslMechanism::parse("UNKNOWN"), None);
     }
 
     #[test]

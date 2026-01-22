@@ -365,7 +365,7 @@ impl XmppStream {
                 {
                     debug!(mechanism = %mechanism, "Received SASL auth");
 
-                    let mech = SaslMechanism::from_str(&mechanism).ok_or_else(|| {
+                    let mech = SaslMechanism::parse(&mechanism).ok_or_else(|| {
                         XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
                     })?;
 
@@ -943,7 +943,7 @@ impl XmppStream {
         loop {
             // First check if we already have a complete stanza buffered
             if self.parser.has_complete_stanza() {
-                return Ok(self.parser.next_stanza()?);
+                return self.parser.next_stanza();
             }
 
             // Read more data
@@ -957,7 +957,7 @@ impl XmppStream {
 
             // Check again
             if self.parser.has_complete_stanza() {
-                return Ok(self.parser.next_stanza()?);
+                return self.parser.next_stanza();
             }
         }
     }
@@ -1038,7 +1038,7 @@ impl XmppStream {
                 {
                     debug!(mechanism = %mechanism, "Received SASL auth");
 
-                    let mech = SaslMechanism::from_str(&mechanism).ok_or_else(|| {
+                    let mech = SaslMechanism::parse(&mechanism).ok_or_else(|| {
                         XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
                     })?;
 

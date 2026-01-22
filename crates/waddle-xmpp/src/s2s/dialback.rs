@@ -37,9 +37,10 @@ pub const NS_DIALBACK: &str = "jabber:server:dialback";
 pub const NS_DIALBACK_FEATURES: &str = "urn:xmpp:features:dialback";
 
 /// State of a dialback verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DialbackState {
     /// Dialback not yet initiated.
+    #[default]
     None,
     /// Waiting for verification (db:result sent, waiting for response).
     Pending,
@@ -47,12 +48,6 @@ pub enum DialbackState {
     Verified,
     /// Dialback verification failed.
     Failed,
-}
-
-impl Default for DialbackState {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl fmt::Display for DialbackState {
@@ -85,7 +80,7 @@ impl DialbackResult {
     }
 
     /// Parse from XEP-0220 type attribute value.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "valid" => Some(Self::Valid),
             "invalid" => Some(Self::Invalid),
@@ -415,9 +410,9 @@ mod tests {
         assert_eq!(DialbackResult::Valid.as_str(), "valid");
         assert_eq!(DialbackResult::Invalid.as_str(), "invalid");
 
-        assert_eq!(DialbackResult::from_str("valid"), Some(DialbackResult::Valid));
-        assert_eq!(DialbackResult::from_str("invalid"), Some(DialbackResult::Invalid));
-        assert_eq!(DialbackResult::from_str("unknown"), None);
+        assert_eq!(DialbackResult::parse("valid"), Some(DialbackResult::Valid));
+        assert_eq!(DialbackResult::parse("invalid"), Some(DialbackResult::Invalid));
+        assert_eq!(DialbackResult::parse("unknown"), None);
     }
 
     #[test]

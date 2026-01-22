@@ -87,6 +87,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store),
         fields(peer = %peer_addr)
     )]
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_connection(
         tcp_stream: TcpStream,
         peer_addr: SocketAddr,
@@ -1820,6 +1821,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// When the user sends a message from this client, we forward it as a
     /// "sent" carbon to all other connected clients that have carbons enabled.
+    #[allow(dead_code)] // XEP-0280 compliance - will be integrated when full carbons support is added
     async fn send_sent_carbons(&self, msg: &xmpp_parsers::message::Message) {
         let sender_jid = match &self.jid {
             Some(jid) => jid,
@@ -1859,6 +1861,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// When the user receives a message, we forward it as a "received" carbon
     /// to all other connected clients that have carbons enabled.
+    #[allow(dead_code)] // XEP-0280 compliance - will be integrated when full carbons support is added
     async fn send_received_carbons(&self, msg: &xmpp_parsers::message::Message) {
         let recipient_jid = match &self.jid {
             Some(jid) => jid,
