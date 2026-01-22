@@ -79,10 +79,10 @@ crates/waddle-server/src/main.rs              (complete)
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| S2S listener on port 5269 | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| TLS 1.3 for S2S connections | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| Stream negotiation (S2S) | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| XEP-0220 Server Dialback | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| S2S listener on port 5269 | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| TLS 1.3 for S2S connections | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| Stream negotiation (S2S) | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| XEP-0220 Server Dialback | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | DNS SRV record resolution | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | S2S connection pool | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | Remote JID routing | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
@@ -102,13 +102,13 @@ crates/waddle-xmpp/src/s2s/dns.rs             (new)
 crates/waddle-xmpp/src/routing.rs             (modify)
 ```
 
-### Phase F4: Federated MUC Participation (P0 - CRITICAL)
+### Phase F4: Federated MUC Participation (P0 - CRITICAL) 🔄 IN PROGRESS
 
 **Goal:** Users from remote servers can join local MUC rooms
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| Accept remote JIDs as MUC occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
+| Accept remote JIDs as MUC occupants | 🔄 In Progress | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Route presence to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Route messages to remote occupants | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |
 | Permission model for federated users | ⬜ Not Started | P0 | [RFC-0015](rfcs/0015-federation-architecture.md) |

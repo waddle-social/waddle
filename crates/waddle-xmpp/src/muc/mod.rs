@@ -35,6 +35,33 @@ use crate::types::{Affiliation, Role};
 use crate::XmppError;
 use affiliation::{AffiliationChange, AffiliationList};
 
+/// Check if a JID is from a remote server.
+///
+/// A JID is considered remote if its domain differs from the local server domain.
+/// This is used for S2S federation to determine which occupants need presence/messages
+/// routed via server-to-server connections.
+///
+/// # Arguments
+/// * `jid` - The JID to check
+/// * `local_domain` - The local server's domain (e.g., "waddle.social")
+///
+/// # Returns
+/// `true` if the JID is from a different domain, `false` if local
+///
+/// # Example
+/// ```ignore
+/// use jid::FullJid;
+///
+/// let jid: FullJid = "user@remote.example.com/resource".parse().unwrap();
+/// assert!(is_remote_jid(&jid, "waddle.social"));
+///
+/// let local_jid: FullJid = "user@waddle.social/resource".parse().unwrap();
+/// assert!(!is_remote_jid(&local_jid, "waddle.social"));
+/// ```
+pub fn is_remote_jid(jid: &FullJid, local_domain: &str) -> bool {
+    jid.domain().as_str() != local_domain
+}
+
 /// MUC room configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomConfig {
@@ -79,6 +106,10 @@ pub struct Occupant {
     pub role: Role,
     /// Affiliation with the room
     pub affiliation: Affiliation,
+    /// Whether this occupant is from a remote server (S2S federation)
+    pub is_remote: bool,
+    /// The home server domain for this occupant (for S2S routing)
+    pub home_server: Option<String>,
 }
 
 /// MUC room actor state.
@@ -244,16 +275,46 @@ impl MucRoom {
     ///
     /// This is the preferred way to add occupants as it ensures
     /// affiliation consistency.
-    pub fn add_occupant_with_affiliation(&mut self, real_jid: FullJid, nick: String) -> &Occupant {
+    ///
+    /// If `local_domain` is provided, the occupant's remote status will be
+    /// automatically detected based on whether their JID domain matches.
+    ///
+    /// # Arguments
+    /// * `real_jid` - The user's full JID
+    /// * `nick` - The nickname to use in the room
+    /// * `local_domain` - Optional local server domain for remote detection
+    pub fn add_occupant_with_affiliation(
+        &mut self,
+        real_jid: FullJid,
+        nick: String,
+        local_domain: Option<&str>,
+    ) -> &Occupant {
         let bare_jid = real_jid.to_bare();
         let affiliation = self.affiliation_list.get(&bare_jid);
         let role = self.derive_role_from_affiliation(affiliation);
+
+        // Determine remote status based on domain comparison
+        let (is_remote, home_server) = match local_domain {
+            Some(domain) => {
+                let jid_domain = real_jid.domain().as_str();
+                let remote = jid_domain != domain;
+                let server = if remote {
+                    Some(jid_domain.to_string())
+                } else {
+                    None
+                };
+                (remote, server)
+            }
+            None => (false, None),
+        };
 
         let occupant = Occupant {
             real_jid,
             nick: nick.clone(),
             role,
             affiliation,
+            is_remote,
+            home_server,
         };
 
         self.occupants.insert(nick.clone(), occupant);
@@ -354,5 +415,104 @@ impl MucRoom {
     pub fn find_nick_by_real_jid(&self, jid: &FullJid) -> Option<&str> {
         self.find_occupant_by_real_jid(jid)
             .map(|o| o.nick.as_str())
+    }
+
+    // === Remote Occupant Management (S2S Federation) ===
+
+    /// Get all remote occupants in the room.
+    ///
+    /// Returns occupants whose `is_remote` flag is true, meaning they are
+    /// connected via S2S federation from another server.
+    ///
+    /// This is useful for routing presence updates and messages to remote
+    /// servers during federation.
+    pub fn get_remote_occupants(&self) -> Vec<&Occupant> {
+        self.occupants
+            .values()
+            .filter(|o| o.is_remote)
+            .collect()
+    }
+
+    /// Get all occupants grouped by their home server domain.
+    ///
+    /// Returns a map from domain name to list of occupants from that domain.
+    /// Local occupants (where `home_server` is `None`) are grouped under
+    /// the key "local".
+    ///
+    /// This is useful for efficient S2S routing - instead of sending individual
+    /// stanzas, you can batch messages/presence by destination server.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let occupants_by_domain = room.get_occupants_by_domain();
+    /// for (domain, occupants) in occupants_by_domain {
+    ///     if domain == "local" {
+    ///         // Handle local occupants via C2S
+    ///     } else {
+    ///         // Route to remote server via S2S
+    ///         s2s_pool.send_to_server(&domain, stanzas);
+    ///     }
+    /// }
+    /// ```
+    pub fn get_occupants_by_domain(&self) -> HashMap<String, Vec<&Occupant>> {
+        let mut by_domain: HashMap<String, Vec<&Occupant>> = HashMap::new();
+
+        for occupant in self.occupants.values() {
+            let domain = occupant
+                .home_server
+                .as_deref()
+                .unwrap_or("local")
+                .to_string();
+
+            by_domain.entry(domain).or_default().push(occupant);
+        }
+
+        by_domain
+    }
+
+    /// Get occupants from a specific domain.
+    ///
+    /// # Arguments
+    /// * `domain` - The domain to filter by. Use "local" for local occupants,
+    ///              or a specific domain name for remote occupants.
+    pub fn get_occupants_for_domain(&self, domain: &str) -> Vec<&Occupant> {
+        if domain == "local" {
+            // Return occupants without a home_server (local users)
+            self.occupants
+                .values()
+                .filter(|o| o.home_server.is_none())
+                .collect()
+        } else {
+            // Return occupants from the specified remote domain
+            self.occupants
+                .values()
+                .filter(|o| o.home_server.as_deref() == Some(domain))
+                .collect()
+        }
+    }
+
+    /// Get the count of remote occupants.
+    pub fn remote_occupant_count(&self) -> usize {
+        self.occupants.values().filter(|o| o.is_remote).count()
+    }
+
+    /// Get the count of local occupants.
+    pub fn local_occupant_count(&self) -> usize {
+        self.occupants.values().filter(|o| !o.is_remote).count()
+    }
+
+    /// Get all unique remote server domains that have occupants in this room.
+    ///
+    /// Useful for determining which S2S connections are needed for this room.
+    pub fn get_remote_domains(&self) -> Vec<String> {
+        let mut domains: Vec<String> = self
+            .occupants
+            .values()
+            .filter_map(|o| o.home_server.clone())
+            .collect();
+
+        domains.sort();
+        domains.dedup();
+        domains
     }
 }
