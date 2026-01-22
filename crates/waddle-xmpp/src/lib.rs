@@ -179,6 +179,54 @@ pub trait AppState: Send + Sync + 'static {
         jid: &jid::BareJid,
         vcard_xml: &str,
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
+
+    /// Create an upload slot for XEP-0363 HTTP File Upload.
+    ///
+    /// Creates a new upload slot with the given parameters and returns the
+    /// slot ID and URLs for uploading and retrieving the file.
+    ///
+    /// # Arguments
+    /// * `requester_jid` - The JID of the user requesting the upload
+    /// * `filename` - The original filename (will be sanitized)
+    /// * `size` - The file size in bytes
+    /// * `content_type` - Optional MIME content type
+    ///
+    /// # Returns
+    /// * `Ok(UploadSlotInfo)` with PUT URL, GET URL, and optional headers
+    /// * `Err(XmppError)` if slot creation fails
+    fn create_upload_slot(
+        &self,
+        requester_jid: &jid::BareJid,
+        filename: &str,
+        size: u64,
+        content_type: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<UploadSlotInfo, XmppError>> + Send;
+
+    /// Get the maximum allowed file upload size in bytes.
+    ///
+    /// Returns the configured maximum file size for HTTP uploads.
+    /// Default is 10 MB (10,485,760 bytes).
+    fn max_upload_size(&self) -> u64 {
+        10 * 1024 * 1024 // 10 MB default
+    }
+
+    /// Check if HTTP file upload is enabled.
+    ///
+    /// Returns true if the server supports XEP-0363 HTTP File Upload.
+    fn upload_enabled(&self) -> bool {
+        true // Enabled by default
+    }
+}
+
+/// Information about a created upload slot (XEP-0363).
+#[derive(Debug, Clone)]
+pub struct UploadSlotInfo {
+    /// URL for uploading the file (HTTP PUT).
+    pub put_url: String,
+    /// URL for retrieving the file (HTTP GET).
+    pub get_url: String,
+    /// Optional headers to include with the PUT request.
+    pub put_headers: Vec<(String, String)>,
 }
 
 /// User session information.

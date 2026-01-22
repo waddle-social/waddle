@@ -112,6 +112,11 @@ impl Feature {
         Self::new("vcard-temp")
     }
 
+    /// XEP-0363 HTTP File Upload feature
+    pub fn http_upload() -> Self {
+        Self::new("urn:xmpp:http:upload:0")
+    }
+
     /// MUC room features (XEP-0045)
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
@@ -233,6 +238,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::roster(),
         Feature::carbons(),
         Feature::vcard(),
+        Feature::http_upload(),
     ]
 }
 
