@@ -51,6 +51,7 @@ use crate::xep::xep0054::{
     build_empty_vcard_response, build_vcard_success,
 };
 use crate::xep::xep0077::RegistrationError;
+use crate::xep::xep0249::message_has_direct_invite;
 use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.

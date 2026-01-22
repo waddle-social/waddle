@@ -10,10 +10,13 @@
 //!   directly through the XMPP connection before authentication.
 //! - **XEP-0115**: Entity Capabilities - Efficient service discovery caching
 //!   via capability hashes included in presence stanzas.
+//! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
+//!   for inviting users directly to MUC rooms.
 
 pub mod xep0054;
 pub mod xep0077;
 pub mod xep0115;
+pub mod xep0249;
 
 pub use xep0054::{
     is_vcard_query, is_vcard_get, is_vcard_set, parse_vcard_from_iq, parse_vcard_element,
@@ -31,3 +34,14 @@ pub use xep0115::{
     extract_caps_from_presence, is_caps_node_query, parse_caps_node,
     NS_CAPS, WADDLE_CAPS_NODE,
 };
+
+pub use xep0249::{
+    DirectInvite, is_direct_invite, message_has_direct_invite,
+    parse_direct_invite, parse_direct_invite_from_message,
+    build_direct_invite, build_invite_message, NS_CONFERENCE,
+};
+
+// Re-export commonly used items at the xep module level
+pub mod prelude {
+    pub use super::xep0249::message_has_direct_invite;
+}
