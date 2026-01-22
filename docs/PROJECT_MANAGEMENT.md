@@ -30,7 +30,7 @@ See [RFC-0015: Federation Architecture](rfcs/0015-federation-architecture.md) fo
 
 | Task | Status | Priority | Documentation |
 |------|--------|----------|---------------|
-| SCRAM-SHA-256 SASL mechanism | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
+| SCRAM-SHA-256 SASL mechanism | 🔄 In Progress | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | XEP-0077 In-Band Registration | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | Native JID credential storage | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |
 | `native_users` database table | ⬜ Not Started | P0 | [ADR-0015](adrs/0015-dual-authentication.md) |

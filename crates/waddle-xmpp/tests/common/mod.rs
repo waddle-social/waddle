@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{ClientConfig, RootCertStore, ServerConfig}};
-use waddle_xmpp::{AppState, Session, XmppError};
+use waddle_xmpp::{AppState, ScramCredentials, Session, XmppError};
 
 /// Install the ring crypto provider for rustls.
 /// Must be called once before any TLS operations.
@@ -136,6 +136,14 @@ impl AppState for MockAppState {
     ) -> impl Future<Output = Result<Vec<String>, XmppError>> + Send {
         // Mock returns empty list by default
         async { Ok(vec![]) }
+    }
+
+    fn lookup_scram_credentials(
+        &self,
+        _username: &str,
+    ) -> impl Future<Output = Result<Option<ScramCredentials>, XmppError>> + Send {
+        // Mock returns None - native JID auth not supported in mock
+        async { Ok(None) }
     }
 }
 

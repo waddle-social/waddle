@@ -255,6 +255,75 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     // Or some clients may send the token in the same session
                     // Continue the loop to wait for the next auth attempt
                 }
+                SaslAuthResult::ScramSha256Challenge {
+                    username,
+                    server_first_message_b64,
+                    scram_server,
+                } => {
+                    // SCRAM-SHA-256: Client sent client-first-message
+                    // Look up SCRAM credentials for the username
+                    match self.app_state.lookup_scram_credentials(&username).await {
+                        Ok(Some(creds)) => {
+                            // Send the challenge
+                            self.stream.send_scram_challenge(&server_first_message_b64).await?;
+
+                            // Continue the SCRAM exchange
+                            match self.stream.continue_scram_auth(
+                                scram_server,
+                                &creds.stored_key,
+                                &creds.server_key,
+                            ).await {
+                                Ok(SaslAuthResult::ScramSha256Complete { username }) => {
+                                    // Authentication successful - create session for native user
+                                    // The JID is username@domain
+                                    let jid: jid::BareJid = format!("{}@{}", username, self.domain)
+                                        .parse()
+                                        .map_err(|e| XmppError::auth_failed(format!("Invalid JID: {}", e)))?;
+
+                                    // For native users, the DID is the JID itself (no ATProto)
+                                    let session = Session {
+                                        did: jid.to_string(),
+                                        jid: jid.clone(),
+                                        created_at: Utc::now(),
+                                        expires_at: Utc::now() + chrono::Duration::hours(24),
+                                    };
+
+                                    // Send SASL success with ISR token
+                                    self.send_sasl_success_with_isr(&session, &jid).await?;
+                                    return Ok((jid, session));
+                                }
+                                Ok(_) => {
+                                    // Unexpected result
+                                    warn!("Unexpected SCRAM auth result");
+                                    self.stream.send_sasl_failure("not-authorized").await?;
+                                    return Err(XmppError::auth_failed("SCRAM authentication failed"));
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, username = %username, "SCRAM-SHA-256 authentication failed");
+                                    self.stream.send_sasl_failure("not-authorized").await?;
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            // User not found - native JID auth may not be supported
+                            warn!(username = %username, "SCRAM user not found");
+                            self.stream.send_sasl_failure("not-authorized").await?;
+                            return Err(XmppError::auth_failed("User not found"));
+                        }
+                        Err(e) => {
+                            warn!(error = %e, username = %username, "Failed to lookup SCRAM credentials");
+                            self.stream.send_sasl_failure("not-authorized").await?;
+                            return Err(e);
+                        }
+                    }
+                }
+                SaslAuthResult::ScramSha256Complete { username } => {
+                    // This variant should only be returned from continue_scram_auth,
+                    // not from handle_sasl_auth directly. If we get here, something is wrong.
+                    warn!(username = %username, "Unexpected ScramSha256Complete in main auth loop");
+                    return Err(XmppError::internal("Unexpected SCRAM state".to_string()));
+                }
             }
         }
     }

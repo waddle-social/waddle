@@ -112,6 +112,18 @@ pub trait AppState: Send + Sync + 'static {
         resource: &str,
         relation: &str,
     ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
+
+    /// Lookup SCRAM credentials for a native JID user.
+    ///
+    /// Used for SCRAM-SHA-256 authentication (RFC 5802/7677).
+    /// Returns (StoredKey, ServerKey, salt_b64, iterations) if the user exists.
+    ///
+    /// For ATProto-only deployments, this can return None to indicate
+    /// native JID authentication is not supported.
+    fn lookup_scram_credentials(
+        &self,
+        username: &str,
+    ) -> impl std::future::Future<Output = Result<Option<ScramCredentials>, XmppError>> + Send;
 }
 
 /// User session information.
@@ -125,6 +137,22 @@ pub struct Session {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Session expiration time
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// SCRAM credentials for native JID authentication.
+///
+/// These are the stored values needed to verify SCRAM-SHA-256 authentication.
+/// The password itself is never stored; only derived keys.
+#[derive(Debug, Clone)]
+pub struct ScramCredentials {
+    /// StoredKey = H(ClientKey) where ClientKey = HMAC(SaltedPassword, "Client Key")
+    pub stored_key: Vec<u8>,
+    /// ServerKey = HMAC(SaltedPassword, "Server Key")
+    pub server_key: Vec<u8>,
+    /// Salt used for PBKDF2 (base64 encoded for storage)
+    pub salt_b64: String,
+    /// Number of PBKDF2 iterations used
+    pub iterations: u32,
 }
 
 /// Start the XMPP server with the given configuration and application state.

@@ -371,10 +371,7 @@ fn parse_sasl_response(data: &str) -> Result<ParsedStanza, XmppError> {
         String::new()
     };
 
-    Ok(ParsedStanza::SaslAuth {
-        mechanism,
-        data: content,
-    })
+    Ok(ParsedStanza::SaslResponse { data: content })
 }
 
 fn parse_iq_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
