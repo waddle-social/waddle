@@ -8,6 +8,7 @@ mod messages;
 mod permissions;
 mod server;
 mod telemetry;
+mod vcard;
 
 pub use config::{ServerConfig, ServerMode};
 

@@ -490,7 +490,7 @@ External integrations and bot platform.
 ### MXC2: XEP-0479 IM Basic Compliance
 - [x] RFC 6121 roster management working
 - [ ] Presence subscription flow complete
-- [ ] XEP-0054 vcard-temp working
+- [x] XEP-0054 vcard-temp working
 - [ ] XEP-0249 Direct MUC Invitations working
 - [ ] XEP-0045 MUC fully compliant
 - [x] XEP-0280 Message Carbons integrated
