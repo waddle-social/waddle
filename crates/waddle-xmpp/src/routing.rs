@@ -175,11 +175,7 @@ impl StanzaRouter {
     ///
     /// Returns whether the JID is local, local MUC, or remote.
     pub fn get_destination(&self, jid: &Jid) -> RoutingDestination {
-        let domain = match jid {
-            Jid::Full(full) => full.domain().as_str(),
-            Jid::Bare(bare) => bare.domain().as_str(),
-        };
-
+        let domain = jid.domain().as_str();
         self.get_destination_for_domain(domain)
     }
 
@@ -258,9 +254,9 @@ impl StanzaRouter {
         })?;
 
         // Get the bare JID for looking up all resources
-        let bare_jid: BareJid = match to_jid {
-            Jid::Full(full) => full.to_bare(),
-            Jid::Bare(bare) => bare.clone(),
+        let bare_jid: BareJid = match to_jid.clone().try_into_full() {
+            Ok(full) => full.to_bare(),
+            Err(bare) => bare,
         };
 
         // Get all connected resources for this user
@@ -405,10 +401,10 @@ impl StanzaRouter {
         // For presence, we usually send to a specific full JID
         let stanza = Stanza::Presence(presence);
 
-        match to_jid {
-            Jid::Full(full_jid) => {
+        match to_jid.clone().try_into_full() {
+            Ok(full_jid) => {
                 // Send to specific resource
-                match self.connection_registry.send_to(full_jid, stanza).await {
+                match self.connection_registry.send_to(&full_jid, stanza).await {
                     SendResult::Sent => {
                         Ok(RoutingResult::DeliveredLocal {
                             delivered_count: 1,
@@ -423,9 +419,9 @@ impl StanzaRouter {
                     }
                 }
             }
-            Jid::Bare(bare_jid) => {
+            Err(bare_jid) => {
                 // Send to all resources
-                let resources = self.connection_registry.get_resources_for_user(bare_jid);
+                let resources = self.connection_registry.get_resources_for_user(&bare_jid);
                 let mut delivered = 0;
                 let mut offline = 0;
 
@@ -479,7 +475,7 @@ impl StanzaRouter {
     }
 
     /// Route an IQ stanza to its destination.
-    #[instrument(skip(self, iq), fields(to = ?iq.to, iq_type = ?iq.type_))]
+    #[instrument(skip(self, iq), fields(to = ?iq.to))]
     pub async fn route_iq(
         &self,
         iq: Iq,
@@ -520,9 +516,9 @@ impl StanzaRouter {
 
         let stanza = Stanza::Iq(iq);
 
-        match to_jid {
-            Jid::Full(full_jid) => {
-                match self.connection_registry.send_to(full_jid, stanza).await {
+        match to_jid.clone().try_into_full() {
+            Ok(full_jid) => {
+                match self.connection_registry.send_to(&full_jid, stanza).await {
                     SendResult::Sent => {
                         Ok(RoutingResult::DeliveredLocal {
                             delivered_count: 1,
@@ -537,9 +533,9 @@ impl StanzaRouter {
                     }
                 }
             }
-            Jid::Bare(bare_jid) => {
+            Err(bare_jid) => {
                 // For bare JID, send to first available resource
-                let resources = self.connection_registry.get_resources_for_user(bare_jid);
+                let resources = self.connection_registry.get_resources_for_user(&bare_jid);
 
                 if let Some(resource_jid) = resources.first() {
                     match self.connection_registry.send_to(resource_jid, stanza).await {
