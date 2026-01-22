@@ -568,6 +568,261 @@ impl waddle_xmpp::AppState for XmppAppState {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10 * 1024 * 1024)
     }
+
+    // =========================================================================
+    // RFC 6121 Roster Storage Methods
+    // =========================================================================
+
+    /// Get all roster items for a user.
+    async fn get_roster(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> Result<Vec<waddle_xmpp::roster::RosterItem>, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(jid = %user_jid, "Getting roster");
+
+        // Clone the Database to create a DatabaseRosterStorage
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        let rows = storage.get_roster(user_jid).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to get roster");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        // Convert RosterItemRow to RosterItem
+        let items: Result<Vec<_>, _> = rows
+            .into_iter()
+            .map(|row| row_to_roster_item(&row))
+            .collect();
+
+        items.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to convert roster items");
+            XmppError::internal(format!("Roster conversion error: {}", e))
+        })
+    }
+
+    /// Get a single roster item by JID.
+    async fn get_roster_item(
+        &self,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+    ) -> Result<Option<waddle_xmpp::roster::RosterItem>, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(user = %user_jid, contact = %contact_jid, "Getting roster item");
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        let row = storage.get_roster_item(user_jid, contact_jid).await.map_err(|e| {
+            warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to get roster item");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        match row {
+            Some(r) => row_to_roster_item(&r).map(Some).map_err(|e| {
+                warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to convert roster item");
+                XmppError::internal(format!("Roster conversion error: {}", e))
+            }),
+            None => Ok(None),
+        }
+    }
+
+    /// Add or update a roster item.
+    async fn set_roster_item(
+        &self,
+        user_jid: &jid::BareJid,
+        item: &waddle_xmpp::roster::RosterItem,
+    ) -> Result<waddle_xmpp::roster::RosterSetResult, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(user = %user_jid, contact = %item.jid, "Setting roster item");
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        let row = roster_item_to_row(item);
+        let is_new = storage.set_roster_item(user_jid, &row).await.map_err(|e| {
+            warn!(user = %user_jid, contact = %item.jid, error = %e, "Failed to set roster item");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        if is_new {
+            Ok(waddle_xmpp::roster::RosterSetResult::Added(item.clone()))
+        } else {
+            Ok(waddle_xmpp::roster::RosterSetResult::Updated(item.clone()))
+        }
+    }
+
+    /// Remove a roster item.
+    async fn remove_roster_item(
+        &self,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+    ) -> Result<bool, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(user = %user_jid, contact = %contact_jid, "Removing roster item");
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        storage.remove_roster_item(user_jid, contact_jid).await.map_err(|e| {
+            warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to remove roster item");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
+
+    /// Get the current roster version for a user.
+    async fn get_roster_version(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> Result<Option<String>, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(jid = %user_jid, "Getting roster version");
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        storage.get_roster_version(user_jid).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to get roster version");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
+
+    /// Update the subscription state for a roster item.
+    async fn update_roster_subscription(
+        &self,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
+        subscription: waddle_xmpp::roster::Subscription,
+        ask: Option<waddle_xmpp::roster::AskType>,
+    ) -> Result<waddle_xmpp::roster::RosterItem, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(
+            user = %user_jid,
+            contact = %contact_jid,
+            subscription = %subscription,
+            ask = ?ask,
+            "Updating roster subscription"
+        );
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        let subscription_str = subscription.as_str();
+        let ask_str = ask.map(|a| a.as_str());
+
+        let row = storage
+            .update_subscription(user_jid, contact_jid, subscription_str, ask_str)
+            .await
+            .map_err(|e| {
+                warn!(
+                    user = %user_jid,
+                    contact = %contact_jid,
+                    error = %e,
+                    "Failed to update roster subscription"
+                );
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+
+        row_to_roster_item(&row).map_err(|e| {
+            warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to convert roster item");
+            XmppError::internal(format!("Roster conversion error: {}", e))
+        })
+    }
+
+    /// Get all roster items where the user should send presence updates.
+    async fn get_presence_subscribers(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(jid = %user_jid, "Getting presence subscribers");
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        let jid_strings = storage.get_presence_subscribers(user_jid).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        // Parse JID strings into BareJids
+        let jids: Result<Vec<_>, _> = jid_strings
+            .iter()
+            .map(|s| s.parse::<jid::BareJid>())
+            .collect();
+
+        jids.map_err(|e| {
+            warn!(jid = %user_jid, error = ?e, "Failed to parse presence subscriber JIDs");
+            XmppError::internal(format!("JID parse error: {:?}", e))
+        })
+    }
+
+    /// Get all roster items where the user receives presence updates.
+    async fn get_presence_subscriptions(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, XmppError> {
+        use crate::db::roster::DatabaseRosterStorage;
+
+        debug!(jid = %user_jid, "Getting presence subscriptions");
+
+        let storage = DatabaseRosterStorage::new((*self.db).clone());
+
+        let jid_strings = storage.get_presence_subscriptions(user_jid).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to get presence subscriptions");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        // Parse JID strings into BareJids
+        let jids: Result<Vec<_>, _> = jid_strings
+            .iter()
+            .map(|s| s.parse::<jid::BareJid>())
+            .collect();
+
+        jids.map_err(|e| {
+            warn!(jid = %user_jid, error = ?e, "Failed to parse presence subscription JIDs");
+            XmppError::internal(format!("JID parse error: {:?}", e))
+        })
+    }
+}
+
+// =========================================================================
+// Roster Conversion Helpers
+// =========================================================================
+
+/// Convert a database roster item row to a waddle_xmpp RosterItem.
+fn row_to_roster_item(row: &crate::db::roster::RosterItemRow) -> Result<waddle_xmpp::roster::RosterItem, String> {
+    let jid: jid::BareJid = row.contact_jid.parse()
+        .map_err(|e| format!("Invalid JID '{}': {:?}", row.contact_jid, e))?;
+
+    let subscription = waddle_xmpp::roster::Subscription::from_str(&row.subscription)
+        .map_err(|e| format!("Invalid subscription '{}': {}", row.subscription, e))?;
+
+    let ask = match &row.ask {
+        Some(a) => Some(waddle_xmpp::roster::AskType::from_str(a)
+            .map_err(|e| format!("Invalid ask '{}': {}", a, e))?),
+        None => None,
+    };
+
+    Ok(waddle_xmpp::roster::RosterItem {
+        jid,
+        name: row.name.clone(),
+        subscription,
+        ask,
+        groups: row.groups.clone(),
+    })
+}
+
+/// Convert a waddle_xmpp RosterItem to a database roster item row.
+fn roster_item_to_row(item: &waddle_xmpp::roster::RosterItem) -> crate::db::roster::RosterItemRow {
+    crate::db::roster::RosterItemRow {
+        contact_jid: item.jid.to_string(),
+        name: item.name.clone(),
+        subscription: item.subscription.as_str().to_string(),
+        ask: item.ask.map(|a| a.as_str().to_string()),
+        groups: item.groups.clone(),
+    }
 }
 
 #[cfg(test)]

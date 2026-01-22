@@ -30,15 +30,10 @@ impl DatabaseRosterStorage {
         &self,
         user_jid: &BareJid,
     ) -> Result<Vec<RosterItemRow>, RosterStorageError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ?",
-                (user_jid.to_string(),),
-            )
-            .await
-            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
+        let mut rows = self.query_with_persistent(
+            "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ?",
+            libsql::params![user_jid.to_string()],
+        ).await?;
 
         let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| {
@@ -83,7 +78,7 @@ impl DatabaseRosterStorage {
         let mut rows = conn
             .query(
                 "SELECT contact_jid, name, subscription, ask, groups FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                (user_jid.to_string(), contact_jid.to_string()),
+                libsql::params![user_jid.to_string(), contact_jid.to_string()],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -145,14 +140,14 @@ impl DatabaseRosterStorage {
                     groups = excluded.groups,
                     updated_at = datetime('now')
                 "#,
-                (
+                libsql::params![
                     user_jid.to_string(),
                     item.contact_jid.clone(),
                     item.name.clone(),
                     item.subscription.clone(),
                     item.ask.clone(),
                     groups_json,
-                ),
+                ],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -179,7 +174,7 @@ impl DatabaseRosterStorage {
         let result = conn
             .execute(
                 "DELETE FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                (user_jid.to_string(), contact_jid.to_string()),
+                libsql::params![user_jid.to_string(), contact_jid.to_string()],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -204,7 +199,7 @@ impl DatabaseRosterStorage {
         let mut rows = conn
             .query(
                 "SELECT version FROM roster_versions WHERE user_jid = ?",
-                (user_jid.to_string(),),
+                libsql::params![user_jid.to_string()],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -234,7 +229,7 @@ impl DatabaseRosterStorage {
         let mut rows = conn
             .query(
                 "SELECT 1 FROM roster_items WHERE user_jid = ? AND contact_jid = ?",
-                (user_jid.to_string(), contact_jid.to_string()),
+                libsql::params![user_jid.to_string(), contact_jid.to_string()],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -269,12 +264,12 @@ impl DatabaseRosterStorage {
                 ask = excluded.ask,
                 updated_at = datetime('now')
             "#,
-            (
+            libsql::params![
                 user_jid.to_string(),
                 contact_jid.to_string(),
                 subscription.to_string(),
                 ask.map(|s| s.to_string()),
-            ),
+            ],
         )
         .await
         .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -301,7 +296,7 @@ impl DatabaseRosterStorage {
         let mut rows = conn
             .query(
                 "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('from', 'both')",
-                (user_jid.to_string(),),
+                libsql::params![user_jid.to_string()],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -333,7 +328,7 @@ impl DatabaseRosterStorage {
         let mut rows = conn
             .query(
                 "SELECT contact_jid FROM roster_items WHERE user_jid = ? AND subscription IN ('to', 'both')",
-                (user_jid.to_string(),),
+                libsql::params![user_jid.to_string()],
             )
             .await
             .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
@@ -353,15 +348,54 @@ impl DatabaseRosterStorage {
     }
 
     /// Get a database connection.
-    async fn get_connection(&self) -> Result<libsql::Connection, RosterStorageError> {
-        // Use persistent connection for in-memory databases
+    ///
+    /// For file-based databases, creates a new connection.
+    /// For in-memory databases, we need to use the same connection to see the data.
+    fn get_connection(&self) -> Result<libsql::Connection, RosterStorageError> {
+        // Always use connect() which works for both in-memory and file-based DBs
+        // For in-memory DBs with :memory:, the Database wrapper ensures all connections
+        // share the same underlying database via the persistent_conn field.
+        // Note: The caller should use the persistent connection pattern for in-memory DBs
+        // to ensure data consistency.
+        self.db.connect().map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))
+    }
+
+    /// Execute a query using the persistent connection for in-memory databases.
+    /// This ensures data written by migrations is visible to queries.
+    async fn query_with_persistent<'a>(
+        &self,
+        sql: &'a str,
+        params: impl libsql::IntoParams,
+    ) -> Result<libsql::Rows, RosterStorageError> {
         if let Some(persistent) = self.db.persistent_connection() {
-            // For operations that need the full connection, we need to lock
-            // But since Connection doesn't implement Clone, we'll use connect()
-            // which creates a new connection to the same database
-            Ok(self.db.connect().map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?)
+            let conn = persistent.lock().await;
+            conn.query(sql, params)
+                .await
+                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
         } else {
-            self.db.connect().map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))
+            let conn = self.db.connect().map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+            conn.query(sql, params)
+                .await
+                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
+        }
+    }
+
+    /// Execute a statement using the persistent connection for in-memory databases.
+    async fn execute_with_persistent(
+        &self,
+        sql: &str,
+        params: impl libsql::IntoParams,
+    ) -> Result<u64, RosterStorageError> {
+        if let Some(persistent) = self.db.persistent_connection() {
+            let conn = persistent.lock().await;
+            conn.execute(sql, params)
+                .await
+                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
+        } else {
+            let conn = self.db.connect().map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+            conn.execute(sql, params)
+                .await
+                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
         }
     }
 
@@ -383,7 +417,7 @@ impl DatabaseRosterStorage {
                 version = excluded.version,
                 updated_at = datetime('now')
             "#,
-            (user_jid.to_string(), new_version),
+            libsql::params![user_jid.to_string(), new_version],
         )
         .await
         .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))?;
