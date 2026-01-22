@@ -4,6 +4,7 @@
 //! libSQL/Turso for persistent storage.
 
 use jid::BareJid;
+use libsql::params::IntoParams;
 use tracing::{debug, instrument};
 use uuid::Uuid;
 
@@ -365,7 +366,7 @@ impl DatabaseRosterStorage {
     async fn query_with_persistent<'a>(
         &self,
         sql: &'a str,
-        params: impl libsql::IntoParams,
+        params: impl IntoParams,
     ) -> Result<libsql::Rows, RosterStorageError> {
         if let Some(persistent) = self.db.persistent_connection() {
             let conn = persistent.lock().await;
@@ -384,7 +385,7 @@ impl DatabaseRosterStorage {
     async fn execute_with_persistent(
         &self,
         sql: &str,
-        params: impl libsql::IntoParams,
+        params: impl IntoParams,
     ) -> Result<u64, RosterStorageError> {
         if let Some(persistent) = self.db.persistent_connection() {
             let conn = persistent.lock().await;

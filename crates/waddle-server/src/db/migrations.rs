@@ -592,9 +592,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (6 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots)
+        // Check version (7 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(6));
+        assert_eq!(version, Some(7));
     }
 
     #[tokio::test]
