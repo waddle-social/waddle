@@ -85,7 +85,7 @@ crates/waddle-server/src/main.rs              (complete)
 | XEP-0220 Server Dialback | 🔄 In Progress | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | DNS SRV record resolution | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
 | S2S connection pool | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
-| Remote JID routing | ⬜ Not Started | P0 | [Spec: S2S](specs/s2s-federation.md) |
+| Remote JID routing | ✅ Complete | P0 | [Spec: S2S](specs/s2s-federation.md) |
 
 **Verification:**
 - [ ] Two waddle instances communicate (waddle.social:5269, test.local:5269)

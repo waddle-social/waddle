@@ -61,6 +61,7 @@ impl S2sListener {
             config,
             tls_acceptor,
             metrics: Arc::new(S2sMetrics::new()),
+            connection_registry: None,
         }
     }
 

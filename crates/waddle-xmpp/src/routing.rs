@@ -317,7 +317,7 @@ impl StanzaRouter {
         match pool.get_or_connect(domain).await {
             Ok(conn_handle) => {
                 // Serialize the message to XML
-                let xml = message_to_xml(&message)?;
+                let _xml = message_to_xml(&message)?;
 
                 // Send via the connection
                 // Note: We need to access the actual connection through the pool
@@ -394,14 +394,15 @@ impl StanzaRouter {
 
     /// Route presence to local users.
     async fn route_presence_local(&self, presence: Presence) -> Result<RoutingResult, XmppError> {
-        let to_jid = presence.to.as_ref().ok_or_else(|| {
+        // Clone the destination JID before moving presence into the stanza
+        let to_jid = presence.to.clone().ok_or_else(|| {
             XmppError::bad_request(Some("Presence has no destination".to_string()))
         })?;
 
         // For presence, we usually send to a specific full JID
         let stanza = Stanza::Presence(presence);
 
-        match to_jid.clone().try_into_full() {
+        match to_jid.try_into_full() {
             Ok(full_jid) => {
                 // Send to specific resource
                 match self.connection_registry.send_to(&full_jid, stanza).await {
@@ -510,13 +511,14 @@ impl StanzaRouter {
 
     /// Route IQ to local users.
     async fn route_iq_local(&self, iq: Iq) -> Result<RoutingResult, XmppError> {
-        let to_jid = iq.to.as_ref().ok_or_else(|| {
+        // Clone the destination JID before moving iq into the stanza
+        let to_jid = iq.to.clone().ok_or_else(|| {
             XmppError::bad_request(Some("IQ has no destination".to_string()))
         })?;
 
         let stanza = Stanza::Iq(iq);
 
-        match to_jid.clone().try_into_full() {
+        match to_jid.try_into_full() {
             Ok(full_jid) => {
                 match self.connection_registry.send_to(&full_jid, stanza).await {
                     SendResult::Sent => {
