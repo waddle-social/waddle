@@ -156,6 +156,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             carbons_enabled: false,
             isr_token_store,
             current_isr_token: None,
+            stanza_router: None, // Federation routing disabled by default; can be set via set_stanza_router()
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -990,6 +991,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Routes the message to the appropriate MUC room, which broadcasts
     /// it to all occupants (including sending an echo back to the sender
     /// per XEP-0045). Also archives the message to MAM storage.
+    ///
+    /// ## Federation Support
+    ///
+    /// When `stanza_router` is configured and federation is enabled, messages
+    /// are routed via the federated broadcast mechanism:
+    /// - Local occupants receive messages via ConnectionRegistry (C2S)
+    /// - Remote occupants receive messages via S2S federation
     #[instrument(skip(self, msg), fields(room = ?msg.to))]
     async fn handle_groupchat_message(
         &mut self,
@@ -1026,12 +1034,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             XmppError::item_not_found(Some(format!("Room {} not found", room_jid)))
         })?;
 
-        // Read the room and broadcast the message
+        // Read the room and broadcast the message using federated routing
         let room = room_data.read().await;
 
-        // Find the sender's nick in the room
-        let sender_nick = room
-            .find_nick_by_real_jid(&sender_jid)
+        // Find the sender's nick in the room and verify permissions
+        let sender_occupant = room
+            .find_occupant_by_real_jid(&sender_jid)
             .ok_or_else(|| {
                 debug!(
                     sender = %sender_jid,
@@ -1042,11 +1050,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     "You are not an occupant of {}",
                     room_jid
                 )))
-            })?
-            .to_owned();
+            })?;
 
-        // Broadcast the message to all occupants
-        let mut outbound_messages = room.broadcast_message(&sender_nick, &muc_msg.message)?;
+        let sender_nick = sender_occupant.nick.clone();
+
+        // Check if sender has permission to speak (XEP-0045: visitors cannot speak in moderated rooms)
+        if room.config.moderated && sender_occupant.role == Role::Visitor {
+            return Err(XmppError::forbidden(Some(
+                "Visitors cannot speak in moderated rooms".to_string(),
+            )));
+        }
+
+        // Use federated broadcast to get messages grouped by delivery target
+        let federated_messages = room.broadcast_message_federated(&sender_nick, &muc_msg.message);
 
         drop(room); // Release the read lock before archival and sending
 
@@ -1096,15 +1112,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             None
         };
 
-        // Add stanza-id to outbound messages if we archived successfully
-        if let Some(ref archive_id) = archive_id {
-            for outbound in &mut outbound_messages {
+        // Route local messages via ConnectionRegistry
+        for mut outbound in federated_messages.local {
+            // Add stanza-id if we archived successfully
+            if let Some(ref archive_id) = archive_id {
                 add_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
             }
-        }
 
-        // Send the messages to all occupants via the connection registry
-        for outbound in &outbound_messages {
             if outbound.to == sender_jid {
                 // This is the echo back to the sender - write directly to our stream
                 debug!(to = %outbound.to, "Sending message echo to sender");
@@ -1112,42 +1126,96 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .write_stanza(&Stanza::Message(outbound.message.clone()))
                     .await?;
             } else {
-                // Route to other occupants via the connection registry
+                // Route to other local occupants via the connection registry
                 let stanza = Stanza::Message(outbound.message.clone());
                 let result = self.connection_registry.send_to(&outbound.to, stanza).await;
 
                 match result {
                     SendResult::Sent => {
-                        debug!(to = %outbound.to, "Message routed to occupant");
+                        debug!(to = %outbound.to, "Message routed to local occupant");
                     }
                     SendResult::NotConnected => {
                         debug!(
                             to = %outbound.to,
-                            "Occupant not connected, message not delivered"
+                            "Local occupant not connected, message not delivered"
                         );
-                        // In a full implementation, we might queue for offline delivery
                     }
                     SendResult::ChannelFull => {
                         warn!(
                             to = %outbound.to,
-                            "Occupant's channel full, message dropped"
+                            "Local occupant's channel full, message dropped"
                         );
                     }
                     SendResult::ChannelClosed => {
                         debug!(
                             to = %outbound.to,
-                            "Occupant's channel closed, message not delivered"
+                            "Local occupant's channel closed, message not delivered"
                         );
                     }
                 }
             }
         }
 
+        // Route remote messages via S2S when federation is enabled
+        if !federated_messages.remote.is_empty() {
+            if let Some(ref router) = self.stanza_router {
+                if router.is_federation_enabled() {
+                    for (domain, messages) in federated_messages.remote {
+                        debug!(
+                            domain = %domain,
+                            message_count = messages.len(),
+                            room = %room_jid,
+                            "Routing messages to remote occupants via S2S"
+                        );
+
+                        for mut outbound in messages {
+                            // Add stanza-id if we archived successfully
+                            if let Some(ref archive_id) = archive_id {
+                                add_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
+                            }
+
+                            // Route via the stanza router which handles S2S
+                            match router.route_message(outbound.message.clone(), &sender_jid).await {
+                                Ok(result) => {
+                                    debug!(
+                                        to = %outbound.to,
+                                        result = ?result,
+                                        "Message routed to remote occupant"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        to = %outbound.to,
+                                        error = %e,
+                                        "Failed to route message to remote occupant"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    debug!(
+                        room = %room_jid,
+                        remote_domain_count = federated_messages.remote.len(),
+                        "Federation disabled, skipping remote occupant delivery"
+                    );
+                }
+            } else {
+                debug!(
+                    room = %room_jid,
+                    remote_domain_count = federated_messages.remote.len(),
+                    "No stanza router configured, skipping remote occupant delivery"
+                );
+            }
+        }
+
         debug!(
             room = %room_jid,
-            recipient_count = outbound_messages.len(),
+            local_count = federated_messages.local_count(),
+            remote_domain_count = federated_messages.remote_domain_count(),
+            remote_count = federated_messages.remote_count(),
             archived = archive_id.is_some(),
-            "Groupchat message processed"
+            "Groupchat message processed with federated routing"
         );
 
         Ok(())
