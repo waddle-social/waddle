@@ -188,7 +188,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | Complete XEP-0313 MAM | ✅ Complete | P1 | Message archive with RSM pagination (mam/) |
 | Complete XEP-0198 Stream Management | ⚠️ Partial | P1 | Finish stream_management.rs |
 | XEP-0048 Bookmark Storage | ⬜ Not Started | P1 | Channel bookmark management |
-| XEP-0191 Blocking Command | ⬜ Not Started | P1 | User blocking capability |
+| XEP-0191 Blocking Command | ✅ Complete | P1 | User blocking capability |
 | XEP-0402 PEP Native Bookmarks | ⬜ Not Started | P1 | Modern bookmark storage |
 | XEP-0410 MUC Self-Ping | ⬜ Not Started | P1 | Connection state verification |
 
@@ -499,7 +499,7 @@ External integrations and bot platform.
 - [x] XEP-0313 MAM fully working
 - [ ] XEP-0198 Stream Management complete
 - [ ] XEP-0048 Bookmark Storage working
-- [ ] XEP-0191 Blocking Command working
+- [x] XEP-0191 Blocking Command working
 - [ ] XEP-0402 PEP Native Bookmarks working
 - [ ] XEP-0410 MUC Self-Ping working
 
