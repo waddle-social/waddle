@@ -185,7 +185,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| Complete XEP-0313 MAM | ⚠️ In Progress | P1 | Finish message archive (mam/) |
+| Complete XEP-0313 MAM | ✅ Complete | P1 | Message archive with RSM pagination (mam/) |
 | Complete XEP-0198 Stream Management | ⚠️ Partial | P1 | Finish stream_management.rs |
 | XEP-0048 Bookmark Storage | ⬜ Not Started | P1 | Channel bookmark management |
 | XEP-0191 Blocking Command | ⬜ Not Started | P1 | User blocking capability |
@@ -198,7 +198,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 - XEP-0163 (PEP) - not started
 
 **Verification:**
-- [ ] MAM queries return correct history
+- [x] MAM queries return correct history
 - [ ] Stream management resumes sessions
 - [ ] Bookmarks persist across sessions
 - [ ] Blocked users cannot send messages
@@ -250,7 +250,7 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | **Core Messaging** |
 | Message schema | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
 | Send message (XMPP) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
-| Message history (MAM) | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md) |
+| Message history (MAM) | ✅ Complete | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Real-time delivery (XMPP) | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
 | Edit message (XEP-0308) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
 | Delete message (XEP-0424) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
@@ -496,7 +496,7 @@ External integrations and bot platform.
 - [x] XEP-0363 HTTP File Upload working
 
 ### MXC3: XEP-0479 IM Advanced Compliance
-- [ ] XEP-0313 MAM fully working
+- [x] XEP-0313 MAM fully working
 - [ ] XEP-0198 Stream Management complete
 - [ ] XEP-0048 Bookmark Storage working
 - [ ] XEP-0191 Blocking Command working

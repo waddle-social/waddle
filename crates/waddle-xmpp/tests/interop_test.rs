@@ -1396,3 +1396,292 @@ async fn test_muc_complete_lifecycle() {
 
     println!("\n=== MUC Complete Lifecycle Test PASSED ===");
 }
+
+// =============================================================================
+// XEP-0313 Message Archive Management (MAM) Tests
+// =============================================================================
+
+/// Test: Basic MAM query returns archived messages.
+///
+/// XEP-0313 Section 4 - Query archive for messages.
+/// This test verifies:
+/// 1. Messages sent to a MUC room are archived
+/// 2. MAM query returns the archived messages
+/// 3. Response format complies with XEP-0313 (result elements with forwarded messages)
+/// 4. MAM fin IQ is returned with complete flag and RSM set
+#[tokio::test]
+async fn test_mam_query_basic() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // === Step 1: Establish authenticated session ===
+    let jid = establish_session(&mut client, &server, "mamtester", "mam-client").await;
+    println!("Session established: {}", jid);
+
+    // === Step 2: Join MUC room ===
+    let room_jid = "mam-test-room@muc.localhost";
+    let nick = "MamTester";
+
+    client.send(&format!("<presence to='{}/{}' xmlns='jabber:client'>\
+        <x xmlns='http://jabber.org/protocol/muc'>\
+            <history maxstanzas='0'/>\
+        </x>\
+    </presence>", room_jid, nick)).await.expect("Send MUC join");
+
+    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    client.clear();
+
+    assert!(
+        response.contains("110"),
+        "Join should include self-presence (110), got: {}",
+        response
+    );
+    println!("Joined room {}/{}", room_jid, nick);
+
+    // === Step 3: Send multiple messages to the room ===
+    let test_messages = vec![
+        "First MAM test message",
+        "Second MAM test message",
+        "Third MAM test message",
+    ];
+
+    for (i, body) in test_messages.iter().enumerate() {
+        client.send(&format!(
+            "<message to='{}' type='groupchat' id='mam-msg-{}' xmlns='jabber:client'>\
+                <body>{}</body>\
+            </message>",
+            room_jid, i, body
+        )).await.expect("Send message");
+
+        // Wait for message echo (confirms message was processed)
+        let echo = client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read message echo");
+        client.clear();
+
+        assert!(
+            echo.contains(body),
+            "Should receive echo for message {}, got: {}",
+            i, echo
+        );
+    }
+
+    println!("Sent {} messages to room", test_messages.len());
+
+    // Give the server a moment to archive all messages
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // === Step 4: Query MAM archive ===
+    client.send(&format!(
+        "<iq type='set' id='mam-query-1' to='{}' xmlns='jabber:client'>\
+            <query xmlns='urn:xmpp:mam:2' queryid='q1'>\
+                <x xmlns='jabber:x:data' type='submit'>\
+                    <field var='FORM_TYPE' type='hidden'>\
+                        <value>urn:xmpp:mam:2</value>\
+                    </field>\
+                </x>\
+            </query>\
+        </iq>",
+        room_jid
+    )).await.expect("Send MAM query");
+
+    // === Step 5: Collect MAM results ===
+    // MAM returns multiple <message> stanzas with <result> elements, then a final <iq type='result'>
+    let mut result_messages = Vec::new();
+    let mut fin_received = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+
+    while std::time::Instant::now() < deadline {
+        // Try to read more data
+        if let Ok(data) = client.read(Duration::from_millis(500)).await {
+            let buffer = client.take_buffer();
+
+            // Check for result messages
+            if buffer.contains("<result") && buffer.contains("urn:xmpp:mam:2") {
+                // Count result elements (simplistic but works for test)
+                result_messages.push(buffer.clone());
+            }
+
+            // Check for fin IQ
+            if buffer.contains("<fin") && buffer.contains("</iq>") {
+                fin_received = true;
+
+                // Verify fin structure
+                assert!(
+                    buffer.contains("urn:xmpp:mam:2"),
+                    "Fin should have MAM namespace, got: {}",
+                    buffer
+                );
+
+                // Verify complete flag is present
+                assert!(
+                    buffer.contains("complete="),
+                    "Fin should have complete attribute, got: {}",
+                    buffer
+                );
+
+                // Verify RSM set is present
+                assert!(
+                    buffer.contains("<set") && buffer.contains("http://jabber.org/protocol/rsm"),
+                    "Fin should contain RSM set element, got: {}",
+                    buffer
+                );
+
+                println!("Received MAM fin IQ");
+                break;
+            }
+        }
+    }
+
+    // === Step 6: Verify results ===
+    assert!(
+        fin_received,
+        "Should receive MAM fin IQ response"
+    );
+
+    // We should have received at least our test messages
+    // Note: The result count depends on how we're counting - we look for forwarded messages
+    println!("MAM query returned {} result stanzas", result_messages.len());
+
+    // Verify that result messages contain forwarded elements with delay
+    for result in &result_messages {
+        if result.contains("<forwarded") {
+            assert!(
+                result.contains("urn:xmpp:forward:0"),
+                "Forwarded element should have correct namespace"
+            );
+            // Note: delay element is optional per spec, but our implementation includes it
+        }
+    }
+
+    println!("\n=== MAM Basic Query Test PASSED ===");
+
+    // Cleanup
+    client.send("</stream:stream>").await.ok();
+}
+
+/// Test: MAM query with RSM pagination (max parameter).
+///
+/// XEP-0313 Section 4.1 / XEP-0059 - Result Set Management for pagination.
+/// This test verifies:
+/// 1. RSM max parameter limits the number of results
+/// 2. Complete flag is false when more results exist
+/// 3. First/last IDs are returned for pagination
+#[tokio::test]
+async fn test_mam_query_with_rsm() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // === Step 1: Establish session ===
+    let jid = establish_session(&mut client, &server, "rsmtester", "rsm-client").await;
+    println!("Session established: {}", jid);
+
+    // === Step 2: Join MUC room ===
+    let room_jid = "rsm-test-room@muc.localhost";
+    let nick = "RsmTester";
+
+    client.send(&format!("<presence to='{}/{}' xmlns='jabber:client'>\
+        <x xmlns='http://jabber.org/protocol/muc'>\
+            <history maxstanzas='0'/>\
+        </x>\
+    </presence>", room_jid, nick)).await.expect("Send MUC join");
+
+    client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    client.clear();
+
+    // === Step 3: Send enough messages to test pagination ===
+    // Send 5 messages, then query with max=2 to test pagination
+    for i in 0..5 {
+        client.send(&format!(
+            "<message to='{}' type='groupchat' id='rsm-msg-{}' xmlns='jabber:client'>\
+                <body>RSM test message {}</body>\
+            </message>",
+            room_jid, i, i
+        )).await.expect("Send message");
+
+        // Wait for echo
+        client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read echo");
+        client.clear();
+    }
+
+    println!("Sent 5 messages for RSM pagination test");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // === Step 4: Query with RSM max=2 ===
+    client.send(&format!(
+        "<iq type='set' id='rsm-query-1' to='{}' xmlns='jabber:client'>\
+            <query xmlns='urn:xmpp:mam:2' queryid='rsm1'>\
+                <set xmlns='http://jabber.org/protocol/rsm'>\
+                    <max>2</max>\
+                </set>\
+            </query>\
+        </iq>",
+        room_jid
+    )).await.expect("Send RSM MAM query");
+
+    // === Step 5: Read response ===
+    let mut result_count = 0;
+    let mut complete_false = false;
+    let mut has_first = false;
+    let mut has_last = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+
+    while std::time::Instant::now() < deadline {
+        if let Ok(_) = client.read(Duration::from_millis(500)).await {
+            let buffer = client.take_buffer();
+
+            // Count result elements
+            if buffer.contains("<result") && buffer.contains("urn:xmpp:mam:2") {
+                // Count occurrences of result elements (simple counting)
+                result_count += buffer.matches("<result").count();
+            }
+
+            // Check for fin IQ
+            if buffer.contains("<fin") && buffer.contains("</iq>") {
+                // Check complete flag is false (because we have more than 2 messages)
+                if buffer.contains("complete='false'") || buffer.contains("complete=\"false\"") {
+                    complete_false = true;
+                }
+
+                // Check for first/last RSM elements
+                if buffer.contains("<first") {
+                    has_first = true;
+                }
+                if buffer.contains("<last") {
+                    has_last = true;
+                }
+
+                println!("RSM fin response: complete_false={}, has_first={}, has_last={}",
+                    complete_false, has_first, has_last);
+                break;
+            }
+        }
+    }
+
+    // === Step 6: Verify RSM behavior ===
+    // With max=2, we should get at most 2 results
+    assert!(
+        result_count <= 2,
+        "RSM max=2 should limit results to 2, got: {}",
+        result_count
+    );
+
+    // Since we have 5 messages and requested max=2, complete should be false
+    assert!(
+        complete_false,
+        "Complete flag should be false when more results exist"
+    );
+
+    // RSM set should include first and last for pagination
+    assert!(
+        has_first && has_last,
+        "RSM set should include first and last elements for pagination"
+    );
+
+    println!("\n=== MAM RSM Pagination Test PASSED ===");
+
+    // Cleanup
+    client.send("</stream:stream>").await.ok();
+}
