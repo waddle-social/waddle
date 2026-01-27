@@ -42,10 +42,16 @@ use crate::muc::{
         is_muc_admin_iq, parse_admin_query, build_admin_result, build_admin_set_result,
         is_role_change_query, build_role_result,
     },
+    owner::{
+        parse_owner_query, build_config_form, build_config_result, build_owner_set_result,
+        build_destroy_notification, apply_config_form,
+        OwnerAction,
+    },
     build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
     MucLeaveRequest, MucMessage, MucPresenceAction, MucRoomRegistry,
     build_kick_presence, build_ban_presence, build_affiliation_change_presence,
     build_role_change_presence,
+    is_muc_owner_get, is_muc_owner_set,
 };
 use crate::types::{Affiliation, Role};
 use crate::parser::ParsedStanza;
@@ -2227,8 +2233,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_upload_slot_request(iq).await;
         }
 
-        // Check if this is a MUC admin IQ (XEP-0045 §10)
+        // Check if this is a MUC owner IQ (XEP-0045 §10.1-10.2, room config/destroy)
         let muc_domain = self.room_registry.muc_domain();
+        if (is_muc_owner_get(&iq) || is_muc_owner_set(&iq))
+            && iq.to.as_ref().map(|j| j.to_bare().domain().as_str() == muc_domain).unwrap_or(false)
+        {
+            return self.handle_muc_owner_iq(iq).await;
+        }
+
+        // Check if this is a MUC admin IQ (XEP-0045 §10, affiliation/role changes)
         if is_muc_admin_iq(&iq, muc_domain) {
             return self.handle_muc_admin_iq(iq).await;
         }
@@ -3515,6 +3528,194 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 room = %query.room_jid,
                 "MUC admin set completed"
             );
+        }
+
+        Ok(())
+    }
+
+    /// Handle a MUC owner IQ (XEP-0045 §10.1-10.2).
+    ///
+    /// Processes owner operations for MUC rooms:
+    /// - GET: Retrieve room configuration form
+    /// - SET with form: Update room configuration
+    /// - SET with destroy: Destroy the room
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_muc_owner_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("MUC owner IQ received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        let muc_domain = self.room_registry.muc_domain();
+        let query = match parse_owner_query(&iq, muc_domain) {
+            Ok(q) => q,
+            Err(e) => {
+                warn!(error = %e, "Failed to parse MUC owner query");
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::BadRequest,
+                    crate::StanzaErrorType::Cancel,
+                    Some(&e.to_string()),
+                );
+                self.stream.write_raw(&error).await?;
+                return Ok(());
+            }
+        };
+
+        debug!(
+            room = %query.room_jid,
+            action = ?query.action,
+            "Processing MUC owner IQ"
+        );
+
+        // Get the room
+        let room_data = match self.room_registry.get_room_data(&query.room_jid) {
+            Some(data) => data,
+            None => {
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::ItemNotFound,
+                    crate::StanzaErrorType::Cancel,
+                    Some(&format!("Room {} not found", query.room_jid)),
+                );
+                self.stream.write_raw(&error).await?;
+                return Ok(());
+            }
+        };
+
+        // Check if sender is a room owner
+        {
+            let room = room_data.read().await;
+            let sender_affiliation = room.get_affiliation(&sender_jid.to_bare());
+            if sender_affiliation != Affiliation::Owner {
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::Forbidden,
+                    crate::StanzaErrorType::Auth,
+                    Some("Only room owners can perform owner operations"),
+                );
+                self.stream.write_raw(&error).await?;
+                return Ok(());
+            }
+        }
+
+        match query.action {
+            OwnerAction::GetConfig => {
+                // Return room configuration form
+                let room = room_data.read().await;
+                let config_form = build_config_form(&room);
+                let response = build_config_result(
+                    &query.iq_id,
+                    &query.room_jid,
+                    &query.from,
+                    config_form,
+                );
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                debug!(
+                    room = %query.room_jid,
+                    "Sent room configuration form"
+                );
+            }
+
+            OwnerAction::SetConfig(form_data) => {
+                // Update room configuration
+                {
+                    let mut room = room_data.write().await;
+                    apply_config_form(&mut room.config, &form_data);
+
+                    debug!(
+                        room = %query.room_jid,
+                        name = ?form_data.name,
+                        persistent = ?form_data.persistent,
+                        members_only = ?form_data.members_only,
+                        "Room configuration updated"
+                    );
+                }
+
+                // Send success response
+                let response = build_owner_set_result(
+                    &query.iq_id,
+                    &query.room_jid,
+                    &query.from,
+                );
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                debug!(
+                    room = %query.room_jid,
+                    "Room configuration set completed"
+                );
+            }
+
+            OwnerAction::Destroy(destroy_request) => {
+                // Destroy the room
+                let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> = Vec::new();
+
+                {
+                    let room = room_data.read().await;
+
+                    debug!(
+                        room = %query.room_jid,
+                        occupant_count = room.occupants.len(),
+                        reason = ?destroy_request.reason,
+                        alternate = ?destroy_request.alternate_venue,
+                        "Destroying room"
+                    );
+
+                    // Build destroy notifications for all occupants
+                    for (nick, occupant) in room.occupants.iter() {
+                        let is_self = occupant.real_jid == sender_jid;
+                        let presence = build_destroy_notification(
+                            &query.room_jid,
+                            nick,
+                            &occupant.real_jid,
+                            &destroy_request,
+                            is_self,
+                        );
+                        presence_updates.push((occupant.real_jid.clone(), presence));
+                    }
+                }
+
+                // Send destroy notifications to all occupants
+                for (to_jid, presence) in presence_updates {
+                    match self.connection_registry.send_to(&to_jid, Stanza::Presence(presence)).await {
+                        SendResult::Sent => {
+                            debug!(to = %to_jid, "Sent room destroy notification");
+                        }
+                        _ => {
+                            debug!(to = %to_jid, "Failed to send room destroy notification (user may be offline)");
+                        }
+                    }
+                }
+
+                // Remove the room from the registry
+                self.room_registry.remove_room(&query.room_jid);
+
+                // Send success response
+                let response = build_owner_set_result(
+                    &query.iq_id,
+                    &query.room_jid,
+                    &query.from,
+                );
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                info!(
+                    room = %query.room_jid,
+                    reason = ?destroy_request.reason,
+                    "Room destroyed"
+                );
+            }
         }
 
         Ok(())

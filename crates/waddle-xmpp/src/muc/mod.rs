@@ -13,6 +13,7 @@ pub mod admin;
 pub mod affiliation;
 pub mod federation;
 pub mod messages;
+pub mod owner;
 pub mod presence;
 pub mod room_registry;
 
@@ -39,6 +40,12 @@ pub use admin::{
     AdminItem, AdminQuery, AffiliationChangeResult, RoleChangeResult,
     MucStatusCode, KickBanInfo,
     NS_MUC_ADMIN, NS_MUC_OWNER,
+};
+pub use owner::{
+    parse_owner_query, build_config_form, build_config_result, build_owner_set_result,
+    build_destroy_notification, apply_config_form,
+    OwnerQuery, OwnerAction, ConfigFormData, DestroyRequest,
+    DATA_FORMS_NS, MUC_ROOMCONFIG_NS,
 };
 
 use std::collections::HashMap;
