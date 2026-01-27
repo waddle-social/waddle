@@ -1065,3 +1065,334 @@ async fn test_complete_session_establishment() {
 
     println!("Full session established successfully with JID: {}", jid);
 }
+
+// =============================================================================
+// XEP-0045 Multi-User Chat (MUC) Tests
+// =============================================================================
+
+/// Helper function to establish a fully authenticated XMPP session and return the bound JID.
+///
+/// This sets up: TCP -> STARTTLS -> TLS -> SASL PLAIN -> Resource Bind
+async fn establish_session(
+    client: &mut RawXmppClient,
+    server: &TestServer,
+    username: &str,
+    resource: &str,
+) -> String {
+    // Initial stream
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.expect("Send stream header");
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read features");
+    client.clear();
+
+    // STARTTLS
+    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.expect("Send STARTTLS");
+    client.read_until("<proceed", DEFAULT_TIMEOUT).await.expect("Read proceed");
+    client.clear();
+
+    let connector = server.tls_connector();
+    client.upgrade_tls(connector, "localhost").await.expect("TLS upgrade");
+
+    // Post-TLS stream
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.expect("Send post-TLS stream");
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read SASL features");
+    client.clear();
+
+    // SASL PLAIN auth
+    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), "token123");
+    client.send(&format!(
+        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+        auth_data
+    )).await.expect("Send auth");
+    client.read_until("<success", DEFAULT_TIMEOUT).await.expect("Auth success");
+    client.clear();
+
+    // Post-SASL stream
+    client.send("<?xml version='1.0'?>\
+        <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+        to='localhost' version='1.0'>").await.expect("Send post-auth stream");
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read bind features");
+    client.clear();
+
+    // Resource bind
+    client.send(&format!("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+        <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
+            <resource>{}</resource>\
+        </bind>\
+    </iq>", resource)).await.expect("Send bind");
+    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read bind result");
+    client.clear();
+
+    extract_bound_jid(&response).expect("Should have JID in response")
+}
+
+/// Test: MUC join presence flow.
+///
+/// XEP-0045 Section 7.1 - User joins a room by sending presence to room@service/nick.
+/// The server should respond with:
+/// 1. Presence from each existing occupant (none if room is new)
+/// 2. Self-presence with status code 110
+#[tokio::test]
+async fn test_muc_join_room() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // Establish session
+    let jid = establish_session(&mut client, &server, "alice", "client1").await;
+    println!("User session established: {}", jid);
+
+    // Join MUC room
+    // Per XEP-0045, send presence to room@muc.domain/nickname with <x xmlns='http://jabber.org/protocol/muc'/>
+    client.send("<presence to='testroom@muc.localhost/Alice' xmlns='jabber:client'>\
+        <x xmlns='http://jabber.org/protocol/muc'/>\
+    </presence>").await.expect("Send MUC join");
+
+    // Read self-presence response
+    // Should receive presence from testroom@muc.localhost/Alice with:
+    // - <x xmlns='http://jabber.org/protocol/muc#user'> containing <item> and <status code='110'/>
+    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read MUC presence");
+
+    // Verify it's from the room
+    assert!(
+        response.contains("from='testroom@muc.localhost/Alice'") ||
+        response.contains("from=\"testroom@muc.localhost/Alice\""),
+        "Presence should be from room/nick, got: {}",
+        response
+    );
+
+    // Verify MUC user extension is present
+    assert!(
+        response.contains("http://jabber.org/protocol/muc#user"),
+        "Response should contain MUC user namespace, got: {}",
+        response
+    );
+
+    // Verify self-presence indicator (status code 110)
+    assert!(
+        response.contains("110"),
+        "Self-presence should have status code 110, got: {}",
+        response
+    );
+
+    println!("MUC join successful!");
+
+    // Clean shutdown
+    client.send("</stream:stream>").await.ok();
+}
+
+/// Test: MUC leave presence flow.
+///
+/// XEP-0045 Section 7.14 - User leaves by sending unavailable presence to room/nick.
+#[tokio::test]
+async fn test_muc_leave_room() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // Establish session
+    let _jid = establish_session(&mut client, &server, "bob", "client1").await;
+
+    // Join MUC room first
+    client.send("<presence to='leavetest@muc.localhost/Bob' xmlns='jabber:client'>\
+        <x xmlns='http://jabber.org/protocol/muc'/>\
+    </presence>").await.expect("Send MUC join");
+    client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    client.clear();
+
+    // Now leave the room
+    client.send("<presence to='leavetest@muc.localhost/Bob' type='unavailable' xmlns='jabber:client'/>"
+    ).await.expect("Send MUC leave");
+
+    // Should receive unavailable presence back
+    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read leave presence");
+
+    assert!(
+        response.contains("type='unavailable'") || response.contains("type=\"unavailable\""),
+        "Leave response should be unavailable presence, got: {}",
+        response
+    );
+
+    assert!(
+        response.contains("110"),
+        "Self-presence should have status code 110, got: {}",
+        response
+    );
+
+    println!("MUC leave successful!");
+
+    client.send("</stream:stream>").await.ok();
+}
+
+/// Test: MUC groupchat message flow.
+///
+/// XEP-0045 Section 7.4 - Messages sent to room are broadcast to all occupants.
+/// The message 'from' is rewritten to room@service/sender_nick.
+#[tokio::test]
+async fn test_muc_send_groupchat_message() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // Establish session
+    let _jid = establish_session(&mut client, &server, "charlie", "client1").await;
+
+    // Join MUC room
+    client.send("<presence to='msgtest@muc.localhost/Charlie' xmlns='jabber:client'>\
+        <x xmlns='http://jabber.org/protocol/muc'/>\
+    </presence>").await.expect("Send MUC join");
+    client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    client.clear();
+
+    // Send a groupchat message to the room
+    client.send("<message to='msgtest@muc.localhost' type='groupchat' id='msg-1' xmlns='jabber:client'>\
+        <body>Hello, room!</body>\
+    </message>").await.expect("Send groupchat message");
+
+    // Should receive the message echoed back (from room/nick)
+    let response = client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read message echo");
+
+    // Verify it's a groupchat message
+    assert!(
+        response.contains("type='groupchat'") || response.contains("type=\"groupchat\""),
+        "Echo should be groupchat type, got: {}",
+        response
+    );
+
+    // Verify 'from' is room/nick
+    assert!(
+        response.contains("from='msgtest@muc.localhost/Charlie'") ||
+        response.contains("from=\"msgtest@muc.localhost/Charlie\""),
+        "Message should be from room/nick, got: {}",
+        response
+    );
+
+    // Verify body is preserved
+    assert!(
+        response.contains("Hello, room!"),
+        "Message body should be preserved, got: {}",
+        response
+    );
+
+    println!("MUC message send/echo successful!");
+
+    client.send("</stream:stream>").await.ok();
+}
+
+/// Test: Complete MUC session lifecycle.
+///
+/// Tests the full XEP-0045 flow: discover MUC service -> join room -> send message -> receive echo -> leave room.
+/// This is an end-to-end integration test for MUC functionality.
+#[tokio::test]
+async fn test_muc_complete_lifecycle() {
+    init_tracing();
+
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+
+    // === Step 1: Establish authenticated session ===
+    let jid = establish_session(&mut client, &server, "dave", "lifecycle-test").await;
+    println!("Step 1: Session established with JID: {}", jid);
+
+    // === Step 2: Discover MUC service via disco#items ===
+    client.send("<iq type='get' id='disco-items-1' to='localhost' xmlns='jabber:client'>\
+        <query xmlns='http://jabber.org/protocol/disco#items'/>\
+    </iq>").await.expect("Send disco#items");
+
+    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read disco#items response");
+    client.clear();
+
+    assert!(
+        response.contains("jid='muc.localhost'") || response.contains("jid=\"muc.localhost\""),
+        "Should discover MUC service, got: {}",
+        response
+    );
+    println!("Step 2: Discovered MUC service at muc.localhost");
+
+    // === Step 3: Query MUC service capabilities ===
+    client.send("<iq type='get' id='disco-info-muc' to='muc.localhost' xmlns='jabber:client'>\
+        <query xmlns='http://jabber.org/protocol/disco#info'/>\
+    </iq>").await.expect("Send disco#info to MUC");
+
+    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read MUC disco#info");
+    client.clear();
+
+    assert!(
+        response.contains("http://jabber.org/protocol/muc"),
+        "MUC service should advertise MUC feature, got: {}",
+        response
+    );
+    println!("Step 3: MUC service supports XEP-0045");
+
+    // === Step 4: Join room ===
+    let room_jid = "lifecycle-room@muc.localhost";
+    let nick = "Dave";
+
+    client.send(&format!("<presence to='{}/{}' xmlns='jabber:client'>\
+        <x xmlns='http://jabber.org/protocol/muc'>\
+            <history maxstanzas='0'/>\
+        </x>\
+    </presence>", room_jid, nick)).await.expect("Send MUC join");
+
+    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    client.clear();
+
+    assert!(
+        response.contains("110"),
+        "Join should include self-presence (110), got: {}",
+        response
+    );
+    println!("Step 4: Joined room as {}/{}", room_jid, nick);
+
+    // === Step 5: Send groupchat message ===
+    let test_message = "Hello from the lifecycle test!";
+    client.send(&format!("<message to='{}' type='groupchat' id='lifecycle-msg-1' xmlns='jabber:client'>\
+        <body>{}</body>\
+    </message>", room_jid, test_message)).await.expect("Send message");
+
+    let response = client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read message echo");
+    client.clear();
+
+    assert!(
+        response.contains(test_message),
+        "Should receive message echo with body, got: {}",
+        response
+    );
+    assert!(
+        response.contains(&format!("from='{}/{}'", room_jid, nick)) ||
+        response.contains(&format!("from=\"{}/{}\"", room_jid, nick)),
+        "Message should be from room/nick, got: {}",
+        response
+    );
+    println!("Step 5: Message sent and echoed successfully");
+
+    // === Step 6: Leave room ===
+    client.send(&format!("<presence to='{}/{}' type='unavailable' xmlns='jabber:client'/>",
+        room_jid, nick)).await.expect("Send leave presence");
+
+    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read leave presence");
+
+    assert!(
+        response.contains("type='unavailable'") || response.contains("type=\"unavailable\""),
+        "Leave should be unavailable presence, got: {}",
+        response
+    );
+    assert!(
+        response.contains("110"),
+        "Leave should include self-presence (110), got: {}",
+        response
+    );
+    println!("Step 6: Left room successfully");
+
+    // === Step 7: Clean shutdown ===
+    client.send("</stream:stream>").await.ok();
+    println!("Step 7: Session closed");
+
+    println!("\n=== MUC Complete Lifecycle Test PASSED ===");
+}

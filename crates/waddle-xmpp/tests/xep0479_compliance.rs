@@ -64,7 +64,6 @@ impl Default for XmppInteropTestsImage {
             // Default disabled specs - features not yet implemented
             disabled_specs: vec![
                 "XEP-0220".to_string(), // Server Dialback (S2S)
-                "XEP-0045".to_string(), // MUC (partial implementation)
                 "XEP-0060".to_string(), // PubSub
                 "XEP-0163".to_string(), // PEP
                 "XEP-0363".to_string(), // HTTP File Upload
