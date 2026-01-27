@@ -277,7 +277,6 @@ pub struct AffiliationChangeResult {
 }
 
 /// Result of a role change (kick) operation.
-/// Result of a role change (kick) operation.
 #[derive(Debug)]
 pub struct RoleChangeResult {
     /// Nick of the affected occupant
