@@ -5,6 +5,7 @@
 //!
 //! - Stanza acknowledgments (tracking which stanzas have been received)
 //! - Stream resumption (reconnecting without losing messages)
+//! - Unacknowledged stanza queuing (for resending after resume)
 //!
 //! ## Protocol Overview
 //!
@@ -16,9 +17,31 @@
 //! - `<resume/>` - Request to resume a previous stream
 //! - `<resumed/>` - Confirmation that stream was resumed
 //! - `<failed/>` - Stream management operation failed
+//!
+//! ## Architecture
+//!
+//! - `StreamManagementState` - Per-connection SM state (counters, queue)
+//! - `SmSessionRegistry` - Server-wide registry for detached resumable sessions
+//! - `UnackedQueue` - Queue of unacknowledged outbound stanzas
+
+mod session_registry;
+mod unacked_queue;
+
+pub use session_registry::{
+    DetachedSession, InMemorySmSessionRegistry, SmRegistryError, SmSessionRegistry,
+};
+pub use unacked_queue::{UnackedQueue, UnackedStanza};
+
+use std::time::Instant;
 
 /// XEP-0198 Stream Management namespace (version 3)
 pub const SM_NS: &str = "urn:xmpp:sm:3";
+
+/// Default maximum unacked queue size (stanzas)
+pub const DEFAULT_MAX_UNACKED_QUEUE_SIZE: usize = 1000;
+
+/// Default ack request threshold (request ack after this many unacked stanzas)
+pub const DEFAULT_ACK_REQUEST_THRESHOLD: u32 = 5;
 
 /// Enable request from client to activate stream management.
 ///
@@ -226,7 +249,9 @@ pub struct SmRequest;
 impl SmRequest {
     /// Check if XML is an ack request.
     pub fn is_request(xml: &str) -> bool {
-        (xml.contains("<r") && xml.contains(SM_NS)) || xml.trim() == "<r/>" || xml.contains("<r xmlns=")
+        (xml.contains("<r") && xml.contains(SM_NS))
+            || xml.trim() == "<r/>"
+            || xml.contains("<r xmlns=")
     }
 
     /// Serialize to XML string.
@@ -268,8 +293,9 @@ impl SmAck {
 
 /// Stream management state for a connection.
 ///
-/// Tracks the counters and state needed for XEP-0198 operation.
-#[derive(Debug, Clone)]
+/// Tracks the counters, state, and unacknowledged stanza queue
+/// needed for XEP-0198 operation.
+#[derive(Debug)]
 pub struct StreamManagementState {
     /// Whether stream management is enabled
     pub enabled: bool,
@@ -285,6 +311,12 @@ pub struct StreamManagementState {
     pub last_acked: u32,
     /// Maximum resumption timeout in seconds
     pub max_resume_time: Option<u32>,
+    /// Queue of unacknowledged outbound stanzas
+    unacked_queue: UnackedQueue,
+    /// Ack request threshold (request ack after this many unacked stanzas)
+    ack_threshold: u32,
+    /// When this SM state was created
+    created_at: Instant,
 }
 
 impl Default for StreamManagementState {
@@ -304,6 +336,25 @@ impl StreamManagementState {
             outbound_count: 0,
             last_acked: 0,
             max_resume_time: None,
+            unacked_queue: UnackedQueue::new(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
+            ack_threshold: DEFAULT_ACK_REQUEST_THRESHOLD,
+            created_at: Instant::now(),
+        }
+    }
+
+    /// Create with custom configuration.
+    pub fn with_config(max_queue_size: usize, ack_threshold: u32) -> Self {
+        Self {
+            enabled: false,
+            stream_id: None,
+            resumable: false,
+            inbound_count: 0,
+            outbound_count: 0,
+            last_acked: 0,
+            max_resume_time: None,
+            unacked_queue: UnackedQueue::new(max_queue_size),
+            ack_threshold,
+            created_at: Instant::now(),
         }
     }
 
@@ -325,9 +376,21 @@ impl StreamManagementState {
         self.outbound_count = self.outbound_count.wrapping_add(1);
     }
 
+    /// Record an outbound stanza and add it to the unacked queue.
+    ///
+    /// This should be called after sending each stanza when SM is enabled.
+    /// The stanza is stored for potential resending after stream resumption.
+    pub fn record_outbound(&mut self, stanza_xml: String) {
+        self.outbound_count = self.outbound_count.wrapping_add(1);
+        self.unacked_queue.push(self.outbound_count, stanza_xml);
+    }
+
     /// Update the last acknowledged count from a client ack.
+    ///
+    /// This also removes acknowledged stanzas from the queue.
     pub fn acknowledge(&mut self, h: u32) {
         self.last_acked = h;
+        self.unacked_queue.acknowledge(h);
     }
 
     /// Get the current inbound count for sending in an <a/> response.
@@ -345,6 +408,70 @@ impl StreamManagementState {
     /// Returns true if there are many unacked stanzas.
     pub fn should_request_ack(&self, threshold: u32) -> bool {
         self.enabled && self.unacked_count() >= threshold
+    }
+
+    /// Check if we should request an ack using the configured threshold.
+    pub fn should_request_ack_auto(&self) -> bool {
+        self.should_request_ack(self.ack_threshold)
+    }
+
+    /// Get stanzas that need to be resent after resumption.
+    ///
+    /// `client_h` is the last sequence number the client acknowledged receiving.
+    /// Returns stanzas with sequence > client_h.
+    pub fn get_stanzas_to_resend(&self, client_h: u32) -> Vec<String> {
+        self.unacked_queue.get_unacked_after(client_h)
+    }
+
+    /// Get the queue length (for diagnostics).
+    pub fn queue_len(&self) -> usize {
+        self.unacked_queue.len()
+    }
+
+    /// Check if the stream is resumable (enabled + resumable flag + has stream_id).
+    pub fn is_resumable(&self) -> bool {
+        self.enabled && self.resumable && self.stream_id.is_some()
+    }
+
+    /// Get the age of this SM state.
+    pub fn age(&self) -> std::time::Duration {
+        self.created_at.elapsed()
+    }
+
+    /// Create a detached session for storage in the registry.
+    ///
+    /// This captures all the state needed to resume this stream later.
+    pub fn to_detached_session(&self, jid: jid::FullJid) -> Option<DetachedSession> {
+        if !self.is_resumable() {
+            return None;
+        }
+
+        Some(DetachedSession {
+            stream_id: self.stream_id.clone()?,
+            jid,
+            inbound_count: self.inbound_count,
+            outbound_count: self.outbound_count,
+            last_acked: self.last_acked,
+            unacked_stanzas: self.unacked_queue.get_all_unacked(),
+            max_resume_time: self.max_resume_time,
+            detached_at: Instant::now(),
+        })
+    }
+
+    /// Restore state from a detached session.
+    ///
+    /// This is used when resuming a stream.
+    pub fn restore_from_session(&mut self, session: &DetachedSession) {
+        self.enabled = true;
+        self.stream_id = Some(session.stream_id.clone());
+        self.resumable = true;
+        self.inbound_count = session.inbound_count;
+        self.outbound_count = session.outbound_count;
+        self.last_acked = session.last_acked;
+        self.max_resume_time = session.max_resume_time;
+
+        // Restore unacked queue
+        self.unacked_queue.restore(&session.unacked_stanzas);
     }
 }
 
@@ -385,7 +512,8 @@ pub enum SmStanza {
 impl SmStanza {
     /// Try to parse a stream management stanza from XML.
     pub fn parse(xml: &str) -> Option<Self> {
-        if !xml.contains(SM_NS) && !xml.trim().starts_with("<r/>") && !xml.trim().starts_with("<a ") {
+        if !xml.contains(SM_NS) && !xml.trim().starts_with("<r/>") && !xml.trim().starts_with("<a ")
+        {
             return None;
         }
 
@@ -488,6 +616,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sm_state_record_outbound() {
+        let mut state = StreamManagementState::new();
+        state.enable("test-id".to_string(), true, Some(300));
+
+        state.record_outbound("<message id='1'/>".to_string());
+        state.record_outbound("<message id='2'/>".to_string());
+        state.record_outbound("<message id='3'/>".to_string());
+
+        assert_eq!(state.outbound_count, 3);
+        assert_eq!(state.queue_len(), 3);
+
+        // Acknowledge first two
+        state.acknowledge(2);
+        assert_eq!(state.queue_len(), 1);
+
+        // Get stanzas to resend after client says h=1 (needs 2 and 3)
+        let resend = state.get_stanzas_to_resend(1);
+        assert_eq!(resend.len(), 1); // Only 3 is left in queue after ack(2)
+    }
+
+    #[test]
     fn test_sm_stanza_parse() {
         // Enable
         let enable = SmStanza::parse("<enable xmlns='urn:xmpp:sm:3' resume='true'/>");
@@ -512,5 +661,17 @@ mod tests {
         let resume = SmResume::parse(xml).unwrap();
         assert_eq!(resume.previd, "stream-123");
         assert_eq!(resume.h, 5);
+    }
+
+    #[test]
+    fn test_sm_state_resumable() {
+        let mut state = StreamManagementState::new();
+        assert!(!state.is_resumable());
+
+        state.enable("test-id".to_string(), false, None);
+        assert!(!state.is_resumable()); // Not resumable flag
+
+        state.enable("test-id".to_string(), true, Some(300));
+        assert!(state.is_resumable());
     }
 }

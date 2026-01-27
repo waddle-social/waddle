@@ -186,7 +186,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
 | Complete XEP-0313 MAM | ✅ Complete | P1 | Message archive with RSM pagination (mam/) |
-| Complete XEP-0198 Stream Management | ⚠️ Partial | P1 | Finish stream_management.rs |
+| Complete XEP-0198 Stream Management | ✅ Complete | P1 | stream_management/ with session registry |
 | XEP-0048 Bookmark Storage | ⬜ Not Started | P1 | Channel bookmark management |
 | XEP-0191 Blocking Command | ✅ Complete | P1 | User blocking capability |
 | XEP-0402 PEP Native Bookmarks | ⬜ Not Started | P1 | Modern bookmark storage |
@@ -199,7 +199,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 
 **Verification:**
 - [x] MAM queries return correct history
-- [ ] Stream management resumes sessions
+- [x] Stream management resumes sessions
 - [ ] Bookmarks persist across sessions
 - [ ] Blocked users cannot send messages
 - [ ] MUC self-ping detects disconnection
@@ -248,10 +248,10 @@ Core infrastructure and basic messaging for the CLI TUI client.
 | Permission check API | ✅ Complete | P0 | [Spec: Permissions](specs/permission-model.md) |
 | MUC affiliation sync | ✅ Complete | P0 | [RFC-0002](rfcs/0002-channels.md), [Spec: XMPP](specs/xmpp-integration.md) |
 | **Core Messaging** |
-| Message schema | 🔄 In Progress | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
-| Send message (XMPP) | ⬜ Not Started | P0 | [RFC-0004](rfcs/0004-message-format.md) |
+| Message schema | ✅ Complete | P0 | [RFC-0004](rfcs/0004-message-format.md), [Spec: Messages](specs/message-schema.md) |
+| Send message (XMPP) | ✅ Complete | P0 | [RFC-0004](rfcs/0004-message-format.md) |
 | Message history (MAM) | ✅ Complete | P0 | [RFC-0004](rfcs/0004-message-format.md) |
-| Real-time delivery (XMPP) | ⬜ Not Started | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
+| Real-time delivery (XMPP) | ✅ Complete | P0 | [Spec: XMPP](specs/xmpp-integration.md) |
 | Edit message (XEP-0308) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
 | Delete message (XEP-0424) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
 | **Waddles (Communities)** |
@@ -497,7 +497,7 @@ External integrations and bot platform.
 
 ### MXC3: XEP-0479 IM Advanced Compliance
 - [x] XEP-0313 MAM fully working
-- [ ] XEP-0198 Stream Management complete
+- [x] XEP-0198 Stream Management complete
 - [ ] XEP-0048 Bookmark Storage working
 - [x] XEP-0191 Blocking Command working
 - [ ] XEP-0402 PEP Native Bookmarks working
@@ -522,8 +522,8 @@ External integrations and bot platform.
 - [x] XMPP account provisioned from DID
 - [x] User can create a Waddle
 - [x] User can create channels (MUC rooms)
-- [ ] User can send/receive messages in CLI via XMPP
-- [ ] Messages delivered in real-time
+- [x] User can send/receive messages in CLI via XMPP
+- [x] Messages delivered in real-time
 
 ### M2: Rich Messaging
 - [x] File uploads working (XEP-0363)

@@ -482,6 +482,29 @@ async fn run_test_server<S: AppState>(
     app_state: Arc<S>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    // Create SHARED registries at server level - these are used by all connections
+    let muc_domain = format!("muc.{}", domain);
+    let room_registry = std::sync::Arc::new(
+        waddle_xmpp::muc::MucRoomRegistry::new(muc_domain)
+    );
+    let connection_registry = std::sync::Arc::new(
+        waddle_xmpp::registry::ConnectionRegistry::new()
+    );
+    // Create an in-memory MAM storage for the test (shared)
+    let db = libsql::Builder::new_local(":memory:")
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    let mam_storage = std::sync::Arc::new(
+        waddle_xmpp::mam::LibSqlMamStorage::new(conn)
+    );
+    // Create a shared ISR token store
+    let isr_token_store = waddle_xmpp::isr::create_shared_store();
+    // Create a shared SM session registry for stream resumption
+    let sm_session_registry: std::sync::Arc<dyn waddle_xmpp::stream_management::SmSessionRegistry> =
+        std::sync::Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -490,31 +513,17 @@ async fn run_test_server<S: AppState>(
                         let tls = tls_acceptor.clone();
                         let dom = domain.clone();
                         let state = Arc::clone(&app_state);
+                        // Clone the shared registries for this connection
+                        let rooms = Arc::clone(&room_registry);
+                        let conns = Arc::clone(&connection_registry);
+                        let mam = Arc::clone(&mam_storage);
+                        let isr = Arc::clone(&isr_token_store);
+                        let sm_reg = Arc::clone(&sm_session_registry);
+                        // Enable registration for tests
+                        let registration_enabled = true;
                         tokio::spawn(async move {
-                            // Create a MUC room registry for the test
-                            let muc_domain = format!("muc.{}", dom);
-                            let room_registry = std::sync::Arc::new(
-                                waddle_xmpp::muc::MucRoomRegistry::new(muc_domain)
-                            );
-                            // Create a connection registry for the test
-                            let connection_registry = std::sync::Arc::new(
-                                waddle_xmpp::registry::ConnectionRegistry::new()
-                            );
-                            // Create an in-memory MAM storage for the test
-                            let db = libsql::Builder::new_local(":memory:")
-                                .build()
-                                .await
-                                .unwrap();
-                            let conn = db.connect().unwrap();
-                            let mam_storage = std::sync::Arc::new(
-                                waddle_xmpp::mam::LibSqlMamStorage::new(conn)
-                            );
-                            // Create an ISR token store for the test
-                            let isr_token_store = waddle_xmpp::isr::create_shared_store();
-                            // Enable registration for tests
-                            let registration_enabled = true;
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, room_registry, connection_registry, mam_storage, isr_token_store, registration_enabled
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled
                             ).await;
                         });
                     }

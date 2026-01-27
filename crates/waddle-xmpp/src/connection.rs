@@ -34,7 +34,7 @@ use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
 };
-use crate::stream_management::StreamManagementState;
+use crate::stream_management::{SmRequest, SmSessionRegistry, StreamManagementState};
 use crate::metrics::{record_muc_occupant_count, record_muc_presence};
 use crate::muc::{
     affiliation::{AffiliationResolver, AppStateAffiliationResolver},
@@ -109,6 +109,8 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     outbound_rx: Option<OutboundReceiver>,
     /// XEP-0198 Stream Management state
     sm_state: StreamManagementState,
+    /// XEP-0198 Stream Management session registry (for resumption)
+    sm_session_registry: Arc<dyn SmSessionRegistry>,
     /// XEP-0280 Message Carbons enabled state
     carbons_enabled: bool,
     /// XEP-0397 ISR token store for instant stream resumption
@@ -125,7 +127,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -139,6 +141,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         connection_registry: Arc<ConnectionRegistry>,
         mam_storage: Arc<M>,
         isr_token_store: SharedIsrTokenStore,
+        sm_session_registry: Arc<dyn SmSessionRegistry>,
         registration_enabled: bool,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
@@ -156,6 +159,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             mam_storage,
             outbound_rx: None,
             sm_state: StreamManagementState::new(),
+            sm_session_registry,
             carbons_enabled: false,
             isr_token_store,
             current_isr_token: None,
@@ -222,6 +226,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Main stanza processing loop
         let result = self.process_stanzas().await;
+
+        // Store SM session for potential resumption (if enabled and resumable)
+        if let Some(ref jid) = self.jid {
+            if let Some(detached) = self.sm_state.to_detached_session(jid.clone()) {
+                debug!(
+                    stream_id = %detached.stream_id,
+                    jid = %jid,
+                    unacked_count = detached.unacked_stanzas.len(),
+                    "Storing detached SM session for potential resumption"
+                );
+                if let Err(e) = self.sm_session_registry.store_session(detached).await {
+                    warn!(error = %e, "Failed to store SM session for resumption");
+                }
+            }
+        }
 
         // Unregister this connection on disconnect
         if let Some(ref jid) = self.jid {
@@ -922,11 +941,126 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return Ok(());
         }
 
-        // Standard SM resumption is not yet implemented (requires persistent session state)
-        // For now, reject resume requests that aren't ISR tokens
-        self.stream.send_sm_failed(Some("item-not-found"), None).await?;
+        // Standard SM resumption via session registry (XEP-0198)
+        match self.sm_session_registry.take_session(previd).await {
+            Ok(Some(session)) => {
+                info!(
+                    stream_id = %previd,
+                    jid = %session.jid,
+                    "SM session found in registry, resuming"
+                );
 
-        warn!(previd = %previd, "SM resume rejected - session not found (non-ISR resumption not yet implemented)");
+                // Restore session from detached state
+                self.jid = Some(session.jid.clone());
+                self.session = Some(Session {
+                    did: format!("did:sm:{}", session.jid.node().map(|n| n.to_string()).unwrap_or_default()),
+                    jid: session.jid.to_bare().into(),
+                    created_at: Utc::now(),
+                    expires_at: Utc::now() + chrono::Duration::hours(24),
+                });
+
+                // Restore SM state
+                self.sm_state.restore_from_session(&session);
+
+                // Get stanzas that need to be resent (client's h tells us what they received)
+                let stanzas_to_resend: Vec<_> = session.unacked_stanzas
+                    .iter()
+                    .filter(|(seq, _)| *seq > h)
+                    .map(|(_, xml)| xml.clone())
+                    .collect();
+                let resent_count = stanzas_to_resend.len();
+
+                // Send resumed response
+                self.stream
+                    .write_raw(&crate::stream_management::SmResumed::new(
+                        previd.to_string(),
+                        session.inbound_count,
+                    ).to_xml())
+                    .await?;
+
+                // Resend unacked stanzas
+                for stanza_xml in stanzas_to_resend {
+                    debug!(stanza_len = stanza_xml.len(), "Resending unacked stanza after resume");
+                    self.stream.write_raw(&stanza_xml).await?;
+                }
+
+                // Re-register in connection registry with the restored JID
+                let (tx, rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
+                self.connection_registry.register(session.jid.clone(), tx);
+                self.outbound_rx = Some(rx);
+
+                info!(
+                    jid = %session.jid,
+                    stream_id = %previd,
+                    resent_count = resent_count,
+                    "Stream resumed via SM session registry"
+                );
+
+                return Ok(());
+            }
+            Ok(None) => {
+                // Session not found or expired
+                debug!(previd = %previd, "SM session not found in registry");
+            }
+            Err(e) => {
+                warn!(previd = %previd, error = %e, "Error looking up SM session");
+            }
+        }
+
+        // No session found via any method
+        self.stream.send_sm_failed(Some("item-not-found"), None).await?;
+        warn!(previd = %previd, "SM resume rejected - session not found");
+        Ok(())
+    }
+
+    /// Send a stanza with proper XEP-0198 Stream Management tracking.
+    ///
+    /// This method:
+    /// 1. Sends the stanza to the client
+    /// 2. If SM is enabled, records the stanza for potential resend
+    /// 3. Periodically requests acknowledgment from the client
+    ///
+    /// Use this method instead of `self.stream.write_stanza()` directly
+    /// when SM tracking is desired.
+    async fn send_stanza_with_sm(&mut self, stanza: &Stanza) -> Result<(), XmppError> {
+        // Send the stanza
+        self.stream.write_stanza(stanza).await?;
+
+        // Track for SM if enabled
+        if self.sm_state.enabled {
+            // Serialize stanza for the unacked queue
+            if let Ok(stanza_xml) = crate::parser::element_to_string(&stanza.to_element()) {
+                self.sm_state.record_outbound(stanza_xml);
+            }
+
+            // Periodically request ack to keep the unacked queue manageable
+            if self.sm_state.should_request_ack_auto() {
+                self.stream.write_raw(&SmRequest::to_xml()).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send multiple stanzas with SM tracking (batched).
+    ///
+    /// Sends all stanzas and then requests a single ack if SM is enabled.
+    async fn send_stanzas_with_sm(&mut self, stanzas: &[Stanza]) -> Result<(), XmppError> {
+        for stanza in stanzas {
+            self.stream.write_stanza(stanza).await?;
+
+            if self.sm_state.enabled {
+                if let Ok(stanza_xml) = crate::parser::element_to_string(&stanza.to_element()) {
+                    self.sm_state.record_outbound(stanza_xml);
+                }
+            }
+        }
+
+        // Request ack after batch if we have many unacked stanzas
+        if self.sm_state.enabled && self.sm_state.should_request_ack_auto() {
+            self.stream.write_raw(&SmRequest::to_xml()).await?;
+        }
+
         Ok(())
     }
 
@@ -4032,6 +4166,15 @@ impl Stanza {
             Stanza::Message(_) => "message",
             Stanza::Presence(_) => "presence",
             Stanza::Iq(_) => "iq",
+        }
+    }
+
+    /// Convert the stanza to a minidom Element.
+    pub fn to_element(&self) -> minidom::Element {
+        match self {
+            Stanza::Message(m) => m.clone().into(),
+            Stanza::Presence(p) => p.clone().into(),
+            Stanza::Iq(i) => i.clone().into(),
         }
     }
 }

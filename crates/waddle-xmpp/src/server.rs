@@ -18,6 +18,7 @@ use crate::muc::MucRoomRegistry;
 use crate::registry::ConnectionRegistry;
 use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
+use crate::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
 use crate::{AppState, XmppError};
 
 /// XMPP server configuration.
@@ -73,6 +74,8 @@ pub struct XmppServer<S: AppState> {
     mam_storage: Arc<LibSqlMamStorage>,
     /// XEP-0397 ISR token store shared across all connections
     isr_token_store: SharedIsrTokenStore,
+    /// XEP-0198 Stream Management session registry for resumption
+    sm_session_registry: Arc<dyn SmSessionRegistry>,
 }
 
 impl<S: AppState> XmppServer<S> {
@@ -94,6 +97,11 @@ impl<S: AppState> XmppServer<S> {
         let isr_token_store = create_shared_store();
         info!("ISR token store initialized");
 
+        // Create the SM session registry for stream resumption (XEP-0198)
+        let sm_session_registry: Arc<dyn SmSessionRegistry> =
+            Arc::new(InMemorySmSessionRegistry::new());
+        info!("SM session registry initialized");
+
         Ok(Self {
             config,
             app_state,
@@ -102,6 +110,7 @@ impl<S: AppState> XmppServer<S> {
             connection_registry,
             mam_storage,
             isr_token_store,
+            sm_session_registry,
         })
     }
 
@@ -232,6 +241,7 @@ impl<S: AppState> XmppServer<S> {
             let connection_registry = self.connection_registry;
             let mam_storage = self.mam_storage;
             let isr_token_store = self.isr_token_store;
+            let sm_session_registry = self.sm_session_registry;
             let registration_enabled = self.config.registration_enabled;
 
             tokio::spawn(async move {
@@ -251,6 +261,7 @@ impl<S: AppState> XmppServer<S> {
                     let connection_registry = Arc::clone(&connection_registry);
                     let mam_storage = Arc::clone(&mam_storage);
                     let isr_token_store = Arc::clone(&isr_token_store);
+                    let sm_session_registry = Arc::clone(&sm_session_registry);
 
                     tokio::spawn(
                         async move {
@@ -265,6 +276,7 @@ impl<S: AppState> XmppServer<S> {
                                     connection_registry,
                                     mam_storage,
                                     isr_token_store,
+                                    sm_session_registry,
                                     registration_enabled,
                                 )
                                 .await
