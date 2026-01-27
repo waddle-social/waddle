@@ -385,9 +385,12 @@ pub fn build_kick_presence(
     }
 
     // Build actor element if provided
-    let actor_elem = actor.map(|a| xmpp_parsers::muc::user::Actor {
-        jid: Some(a.clone().into()),
-        nick: None,
+    // Actor is an enum with Jid(FullJid) or Nick(String) variants
+    // We use the FullJid variant, adding a synthetic resource to the BareJid
+    let actor_elem = actor.and_then(|a| {
+        a.with_resource_str("admin")
+            .ok()
+            .map(xmpp_parsers::muc::user::Actor::Jid)
     });
 
     let item = Item {
@@ -440,9 +443,12 @@ pub fn build_ban_presence(
     }
 
     // Build actor element if provided
-    let actor_elem = actor.map(|a| xmpp_parsers::muc::user::Actor {
-        jid: Some(a.clone().into()),
-        nick: None,
+    // Actor is an enum with Jid(FullJid) or Nick(String) variants
+    // We use the FullJid variant, adding a synthetic resource to the BareJid
+    let actor_elem = actor.and_then(|a| {
+        a.with_resource_str("admin")
+            .ok()
+            .map(xmpp_parsers::muc::user::Actor::Jid)
     });
 
     let item = Item {
