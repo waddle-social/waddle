@@ -3700,7 +3700,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
 
                 // Remove the room from the registry
-                self.room_registry.remove_room(&query.room_jid);
+                self.room_registry.destroy_room(&query.room_jid);
 
                 // Send success response
                 let response = build_owner_set_result(
