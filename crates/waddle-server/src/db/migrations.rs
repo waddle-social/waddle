@@ -241,6 +241,25 @@ CREATE TABLE IF NOT EXISTS roster_versions (
 );
 "#;
 
+    /// Migration to add blocking_list table for XEP-0191 Blocking Command
+    pub const V0008_BLOCKING_LIST: &str = r#"
+-- Blocking list table for XEP-0191 Blocking Command
+-- Stores blocked JIDs for each user
+CREATE TABLE IF NOT EXISTS blocking_list (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_jid TEXT NOT NULL,                 -- Bare JID of the user doing the blocking
+    blocked_jid TEXT NOT NULL,              -- Bare JID of the blocked user
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_jid, blocked_jid)
+);
+
+-- Index for fast blocklist retrieval by user
+CREATE INDEX IF NOT EXISTS idx_blocking_list_user ON blocking_list(user_jid);
+
+-- Index for checking if a JID is blocked by anyone (for presence filtering)
+CREATE INDEX IF NOT EXISTS idx_blocking_list_blocked ON blocking_list(blocked_jid);
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -278,6 +297,11 @@ CREATE TABLE IF NOT EXISTS roster_versions (
                 version: 7,
                 description: "Add roster_items table for RFC 6121 roster management".to_string(),
                 sql: V0007_ROSTER_ITEMS,
+            },
+            Migration {
+                version: 8,
+                description: "Add blocking_list table for XEP-0191 Blocking Command".to_string(),
+                sql: V0008_BLOCKING_LIST,
             },
         ]
     }
@@ -592,9 +616,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (7 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items)
+        // Check version (8 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items + blocking list)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(7));
+        assert_eq!(version, Some(8));
     }
 
     #[tokio::test]

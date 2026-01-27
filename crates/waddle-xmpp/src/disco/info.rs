@@ -117,6 +117,11 @@ impl Feature {
         Self::new("urn:xmpp:http:upload:0")
     }
 
+    /// XEP-0191 Blocking Command feature
+    pub fn blocking() -> Self {
+        Self::new("urn:xmpp:blocking")
+    }
+
     /// MUC room features (XEP-0045)
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
@@ -239,6 +244,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::carbons(),
         Feature::vcard(),
         Feature::http_upload(),
+        Feature::blocking(),
     ]
 }
 

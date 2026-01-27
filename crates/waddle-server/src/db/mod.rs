@@ -18,6 +18,7 @@
 
 mod migrations;
 mod pool;
+pub mod blocking;
 pub mod roster;
 
 use libsql::{Connection, Database as LibSqlDatabase};
