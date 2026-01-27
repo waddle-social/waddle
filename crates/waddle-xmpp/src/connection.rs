@@ -52,7 +52,6 @@ use crate::muc::{
     build_kick_presence, build_ban_presence, build_affiliation_change_presence,
     build_role_change_presence,
     is_muc_owner_get, is_muc_owner_set,
-    FederatedMessageSet,
 };
 use crate::routing::StanzaRouter;
 use crate::types::{Affiliation, Role};
@@ -1064,6 +1063,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Use federated broadcast to get messages grouped by delivery target
         let federated_messages = room.broadcast_message_federated(&sender_nick, &muc_msg.message);
 
+        // Capture counts before consuming the FederatedMessageSet
+        let local_count = federated_messages.local_count();
+        let remote_domain_count = federated_messages.remote_domain_count();
+        let remote_count = federated_messages.remote_count();
+
         drop(room); // Release the read lock before archival and sending
 
         // Archive the message to MAM storage (only if it has a body)
@@ -1196,14 +1200,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 } else {
                     debug!(
                         room = %room_jid,
-                        remote_domain_count = federated_messages.remote.len(),
+                        remote_domain_count = remote_domain_count,
                         "Federation disabled, skipping remote occupant delivery"
                     );
                 }
             } else {
                 debug!(
                     room = %room_jid,
-                    remote_domain_count = federated_messages.remote.len(),
+                    remote_domain_count = remote_domain_count,
                     "No stanza router configured, skipping remote occupant delivery"
                 );
             }
@@ -1211,9 +1215,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         debug!(
             room = %room_jid,
-            local_count = federated_messages.local_count(),
-            remote_domain_count = federated_messages.remote_domain_count(),
-            remote_count = federated_messages.remote_count(),
+            local_count = local_count,
+            remote_domain_count = remote_domain_count,
+            remote_count = remote_count,
             archived = archive_id.is_some(),
             "Groupchat message processed with federated routing"
         );
