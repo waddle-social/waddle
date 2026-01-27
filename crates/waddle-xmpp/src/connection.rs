@@ -52,7 +52,9 @@ use crate::muc::{
     build_kick_presence, build_ban_presence, build_affiliation_change_presence,
     build_role_change_presence,
     is_muc_owner_get, is_muc_owner_set,
+    FederatedMessageSet,
 };
+use crate::routing::StanzaRouter;
 use crate::types::{Affiliation, Role};
 use crate::parser::ParsedStanza;
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
@@ -110,6 +112,10 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     isr_token_store: SharedIsrTokenStore,
     /// Current ISR token for this connection (if any)
     current_isr_token: Option<String>,
+    /// Optional stanza router for S2S federation routing
+    /// When present and federation is enabled, allows routing MUC messages
+    /// to remote occupants via S2S connections.
+    stanza_router: Option<Arc<StanzaRouter>>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
