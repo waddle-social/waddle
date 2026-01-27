@@ -71,6 +71,10 @@ use crate::xep::xep0363::{
     is_upload_request, parse_upload_request, build_upload_slot_response, build_upload_error,
     UploadSlot, UploadError,
 };
+use crate::xep::xep0191::{
+    is_blocking_query, parse_blocking_request, build_blocklist_response, build_blocking_success,
+    build_block_push, build_unblock_push, build_blocking_error, BlockingRequest, BlockingError,
+};
 use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.
@@ -2335,6 +2339,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a MUC admin IQ (XEP-0045 §10, affiliation/role changes)
         if is_muc_admin_iq(&iq, muc_domain) {
             return self.handle_muc_admin_iq(iq).await;
+        }
+
+        // Check if this is a blocking query (XEP-0191)
+        if is_blocking_query(&iq) {
+            return self.handle_blocking_query(iq).await;
         }
 
         // Unhandled IQ - log and continue

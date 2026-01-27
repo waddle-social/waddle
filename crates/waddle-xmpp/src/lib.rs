@@ -295,6 +295,53 @@ pub trait AppState: Send + Sync + 'static {
         &self,
         user_jid: &jid::BareJid,
     ) -> impl std::future::Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send;
+
+    // =========================================================================
+    // XEP-0191 Blocking Command Methods
+    // =========================================================================
+
+    /// Get all blocked JIDs for a user.
+    ///
+    /// Returns a list of bare JID strings that the user has blocked.
+    fn get_blocklist(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, XmppError>> + Send;
+
+    /// Check if a JID is blocked by a user.
+    ///
+    /// Returns true if blocked_jid is on user_jid's blocklist.
+    fn is_blocked(
+        &self,
+        user_jid: &jid::BareJid,
+        blocked_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<bool, XmppError>> + Send;
+
+    /// Add JIDs to a user's blocklist.
+    ///
+    /// Returns the number of JIDs that were newly blocked (duplicates are ignored).
+    fn add_blocks(
+        &self,
+        user_jid: &jid::BareJid,
+        blocked_jids: &[String],
+    ) -> impl std::future::Future<Output = Result<usize, XmppError>> + Send;
+
+    /// Remove JIDs from a user's blocklist.
+    ///
+    /// Returns the number of JIDs that were removed.
+    fn remove_blocks(
+        &self,
+        user_jid: &jid::BareJid,
+        blocked_jids: &[String],
+    ) -> impl std::future::Future<Output = Result<usize, XmppError>> + Send;
+
+    /// Remove all JIDs from a user's blocklist.
+    ///
+    /// Returns the number of JIDs that were removed.
+    fn remove_all_blocks(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<usize, XmppError>> + Send;
 }
 
 /// Information about a created upload slot (XEP-0363).

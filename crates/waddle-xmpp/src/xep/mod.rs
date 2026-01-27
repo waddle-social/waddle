@@ -10,6 +10,8 @@
 //!   directly through the XMPP connection before authentication.
 //! - **XEP-0115**: Entity Capabilities - Efficient service discovery caching
 //!   via capability hashes included in presence stanzas.
+//! - **XEP-0191**: Blocking Command - User blocking capability for managing
+//!   blocklists and silently dropping messages from blocked JIDs.
 //! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
 //!   for inviting users directly to MUC rooms.
 //! - **XEP-0363**: HTTP File Upload - Server-side support for HTTP-based
@@ -18,6 +20,7 @@
 pub mod xep0054;
 pub mod xep0077;
 pub mod xep0115;
+pub mod xep0191;
 pub mod xep0249;
 pub mod xep0363;
 
@@ -48,6 +51,13 @@ pub use xep0363::{
     is_upload_request, parse_upload_request, build_upload_slot_response,
     build_upload_error, sanitize_filename, effective_content_type,
     UploadRequest, UploadSlot, UploadError, NS_HTTP_UPLOAD, DEFAULT_MAX_FILE_SIZE,
+};
+
+pub use xep0191::{
+    is_blocking_query, is_blocklist_get, is_block_set, is_unblock_set,
+    parse_blocking_request, build_blocklist_response, build_blocking_success,
+    build_block_push, build_unblock_push, build_blocking_error,
+    BlockingRequest, BlockingError, NS_BLOCKING,
 };
 
 // Re-export commonly used items at the xep module level
