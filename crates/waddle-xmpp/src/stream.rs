@@ -687,6 +687,7 @@ impl XmppStream {
     pub async fn send_features_bind(&mut self) -> Result<(), XmppError> {
         // XEP-0198: Stream Management is advertised alongside bind
         // XEP-0397: ISR is also advertised for instant stream resumption
+        // XEP-0352: CSI is advertised for client state indication
         let features = format!(
             "<stream:features>\
                 <bind xmlns='{}'/>\
@@ -695,6 +696,7 @@ impl XmppStream {
                 </session>\
                 <sm xmlns='{}'/>\
                 <isr xmlns='{}'/>\
+                <csi xmlns='urn:xmpp:csi:0'/>\
             </stream:features>",
             ns::BIND, ns::SESSION, ns::SM, ns::ISR
         );
@@ -702,7 +704,7 @@ impl XmppStream {
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent bind features (with Stream Management and ISR)");
+        debug!("Sent bind features (with Stream Management, ISR, and CSI)");
         Ok(())
     }
 

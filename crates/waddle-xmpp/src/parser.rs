@@ -31,6 +31,8 @@ pub mod ns {
     pub const SM: &str = "urn:xmpp:sm:3";
     /// Instant Stream Resumption namespace (XEP-0397)
     pub const ISR: &str = "urn:xmpp:isr:0";
+    /// Client State Indication namespace (XEP-0352)
+    pub const CSI: &str = "urn:xmpp:csi:0";
 }
 
 /// Parsed stream header information.
@@ -251,6 +253,9 @@ impl XmlParser {
             // XEP-0220 Server Dialback stanzas
             ("<db:result", parse_dialback_result),
             ("<db:verify", parse_dialback_verify),
+            // XEP-0352 Client State Indication stanzas
+            ("<active", parse_csi_active),
+            ("<inactive", parse_csi_inactive),
         ];
 
         for (pattern, parser) in stanza_patterns {
@@ -388,6 +393,10 @@ pub enum ParsedStanza {
         /// Result type (only present in response: "valid" or "invalid")
         result_type: Option<String>,
     },
+    /// XEP-0352: Client State Indication - active
+    CsiActive,
+    /// XEP-0352: Client State Indication - inactive
+    CsiInactive,
 }
 
 fn parse_starttls(data: &str) -> Result<ParsedStanza, XmppError> {
@@ -674,6 +683,24 @@ fn parse_dialback_verify(data: &str) -> Result<ParsedStanza, XmppError> {
         key,
         result_type,
     })
+}
+
+/// Parse XEP-0352 Client State Indication active element.
+fn parse_csi_active(data: &str) -> Result<ParsedStanza, XmppError> {
+    if data.contains("<active") && data.contains(ns::CSI) {
+        Ok(ParsedStanza::CsiActive)
+    } else {
+        Err(XmppError::xml_parse("Invalid CSI active element"))
+    }
+}
+
+/// Parse XEP-0352 Client State Indication inactive element.
+fn parse_csi_inactive(data: &str) -> Result<ParsedStanza, XmppError> {
+    if data.contains("<inactive") && data.contains(ns::CSI) {
+        Ok(ParsedStanza::CsiInactive)
+    } else {
+        Err(XmppError::xml_parse("Invalid CSI inactive element"))
+    }
 }
 
 /// Parse a string into a minidom Element.

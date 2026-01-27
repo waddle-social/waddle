@@ -12,17 +12,24 @@
 //!   via capability hashes included in presence stanzas.
 //! - **XEP-0191**: Blocking Command - User blocking capability for managing
 //!   blocklists and silently dropping messages from blocked JIDs.
+//! - **XEP-0199**: XMPP Ping - Simple ping/pong for connection liveness.
 //! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
 //!   for inviting users directly to MUC rooms.
+//! - **XEP-0352**: Client State Indication - Allows clients to indicate
+//!   active/inactive state for traffic optimization.
 //! - **XEP-0363**: HTTP File Upload - Server-side support for HTTP-based
 //!   file uploads, returning PUT and GET URLs for file transfer.
+//! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
 
 pub mod xep0054;
 pub mod xep0077;
 pub mod xep0115;
 pub mod xep0191;
+pub mod xep0199;
 pub mod xep0249;
+pub mod xep0352;
 pub mod xep0363;
+pub mod xep0402;
 
 pub use xep0054::{
     is_vcard_query, is_vcard_get, is_vcard_set, parse_vcard_from_iq, parse_vcard_element,
@@ -58,6 +65,19 @@ pub use xep0191::{
     parse_blocking_request, build_blocklist_response, build_blocking_success,
     build_block_push, build_unblock_push, build_blocking_error,
     BlockingRequest, BlockingError, NS_BLOCKING,
+};
+
+pub use xep0199::{is_ping, build_ping_result, NS_PING};
+
+pub use xep0352::{
+    ClientState, is_csi_active, is_csi_inactive, data_contains_csi_active,
+    data_contains_csi_inactive, build_csi_feature, NS_CSI, MAX_CSI_BUFFER_SIZE,
+    StanzaUrgency, classify_message_urgency, classify_presence_urgency, is_muc_mention,
+};
+
+pub use xep0402::{
+    Bookmark, BookmarkError, parse_bookmark, build_bookmark_element,
+    build_bookmark_item, is_bookmarks_node, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
 };
 
 // Re-export commonly used items at the xep module level

@@ -122,6 +122,61 @@ impl Feature {
         Self::new("urn:xmpp:blocking")
     }
 
+    /// XEP-0199 XMPP Ping feature
+    pub fn ping() -> Self {
+        Self::new("urn:xmpp:ping")
+    }
+
+    /// XEP-0352 Client State Indication feature
+    pub fn csi() -> Self {
+        Self::new("urn:xmpp:csi:0")
+    }
+
+    /// XEP-0410 MUC Self-Ping Optimization feature
+    pub fn muc_self_ping_optimization() -> Self {
+        Self::new("urn:xmpp:muc-selfping:0")
+    }
+
+    /// XEP-0060 PubSub feature
+    pub fn pubsub() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub")
+    }
+
+    /// XEP-0163 Personal Eventing Protocol feature
+    pub fn pep() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#pep")
+    }
+
+    /// PubSub auto-create feature (XEP-0060)
+    pub fn pubsub_auto_create() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#auto-create")
+    }
+
+    /// PubSub persistent-items feature (XEP-0060)
+    pub fn pubsub_persistent_items() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#persistent-items")
+    }
+
+    /// PubSub publish feature (XEP-0060)
+    pub fn pubsub_publish() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#publish")
+    }
+
+    /// PubSub retrieve-items feature (XEP-0060)
+    pub fn pubsub_retrieve_items() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#retrieve-items")
+    }
+
+    /// XEP-0402 PEP Native Bookmarks feature
+    pub fn bookmarks2() -> Self {
+        Self::new("urn:xmpp:bookmarks:1")
+    }
+
+    /// XEP-0402 Bookmarks Compatibility feature
+    pub fn bookmarks_compat() -> Self {
+        Self::new("urn:xmpp:bookmarks:1#compat")
+    }
+
     /// MUC room features (XEP-0045)
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
@@ -245,6 +300,14 @@ pub fn server_features() -> Vec<Feature> {
         Feature::vcard(),
         Feature::http_upload(),
         Feature::blocking(),
+        Feature::ping(),
+        Feature::csi(),
+        Feature::pubsub(),
+        Feature::pep(),
+        Feature::pubsub_auto_create(),
+        Feature::pubsub_persistent_items(),
+        Feature::pubsub_publish(),
+        Feature::pubsub_retrieve_items(),
     ]
 }
 
@@ -254,6 +317,7 @@ pub fn muc_service_features() -> Vec<Feature> {
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::muc(),
+        Feature::muc_self_ping_optimization(),
     ]
 }
 

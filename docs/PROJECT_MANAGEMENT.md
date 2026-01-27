@@ -190,7 +190,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | XEP-0048 Bookmark Storage | ⬜ Not Started | P1 | Channel bookmark management |
 | XEP-0191 Blocking Command | ✅ Complete | P1 | User blocking capability |
 | XEP-0402 PEP Native Bookmarks | ⬜ Not Started | P1 | Modern bookmark storage |
-| XEP-0410 MUC Self-Ping | ⬜ Not Started | P1 | Connection state verification |
+| XEP-0410 MUC Self-Ping | ✅ Complete | P1 | Connection state verification |
 
 **CI Currently Disabled (needs completion first):**
 - XEP-0220 (Server Dialback) - S2S federation
@@ -201,8 +201,8 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 - [x] MAM queries return correct history
 - [x] Stream management resumes sessions
 - [ ] Bookmarks persist across sessions
-- [ ] Blocked users cannot send messages
-- [ ] MUC self-ping detects disconnection
+- [x] Blocked users cannot send messages (direct chat + invites)
+- [x] MUC self-ping detects disconnection
 
 ### Phase XC4: XEP-0479 Mobile Compliance (P1)
 
@@ -501,7 +501,7 @@ External integrations and bot platform.
 - [ ] XEP-0048 Bookmark Storage working
 - [x] XEP-0191 Blocking Command working
 - [ ] XEP-0402 PEP Native Bookmarks working
-- [ ] XEP-0410 MUC Self-Ping working
+- [x] XEP-0410 MUC Self-Ping working
 
 ### MXC4: XEP-0479 Mobile Compliance
 - [ ] XEP-0352 Client State Indication working

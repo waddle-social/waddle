@@ -33,6 +33,7 @@ pub mod metrics;
 pub mod muc;
 pub mod parser;
 pub mod presence;
+pub mod pubsub;
 pub mod registry;
 pub mod roster;
 pub mod routing;

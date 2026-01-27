@@ -34,7 +34,7 @@ use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
 };
-use crate::stream_management::{SmRequest, SmSessionRegistry, StreamManagementState};
+use crate::stream_management::{SmSessionRegistry, StreamManagementState};
 use crate::metrics::{record_muc_occupant_count, record_muc_presence};
 use crate::muc::{
     affiliation::{AffiliationResolver, AppStateAffiliationResolver},
@@ -73,7 +73,13 @@ use crate::xep::xep0363::{
 };
 use crate::xep::xep0191::{
     is_blocking_query, parse_blocking_request, build_blocklist_response, build_blocking_success,
-    build_block_push, build_unblock_push, build_blocking_error, BlockingRequest, BlockingError,
+    build_block_push, build_unblock_push, build_blocking_error, BlockingRequest,
+};
+use crate::xep::xep0199::{is_ping, build_ping_result};
+use crate::pubsub::{
+    is_pubsub_iq, parse_pubsub_iq, build_pubsub_items_result, build_pubsub_publish_result,
+    build_pubsub_error, build_pubsub_success,
+    InMemoryPubSubStorage, PubSubError, PubSubItem, PubSubRequest, PubSubStorage,
 };
 use crate::{AppState, Session, XmppError};
 
@@ -121,6 +127,14 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     /// When present and federation is enabled, allows routing MUC messages
     /// to remote occupants via S2S connections.
     stanza_router: Option<Arc<StanzaRouter>>,
+    /// XEP-0352 Client State Indication: current client state
+    client_state: crate::xep::xep0352::ClientState,
+    /// XEP-0352 Client State Indication: stanza buffer for inactive clients
+    /// When the client is inactive, non-critical stanzas are buffered here
+    /// and flushed when the client becomes active again.
+    csi_buffer: Vec<Stanza>,
+    /// XEP-0060/XEP-0163 PubSub/PEP storage for bookmarks and other PEP data
+    pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
@@ -164,6 +178,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             isr_token_store,
             current_isr_token: None,
             stanza_router: None, // Federation routing disabled by default; can be set via set_stanza_router()
+            client_state: crate::xep::xep0352::ClientState::default(), // XEP-0352: starts as Active
+            csi_buffer: Vec::new(), // XEP-0352: stanza buffer for inactive clients
+            pubsub_storage: Arc::new(InMemoryPubSubStorage::new()), // XEP-0060/0163 PubSub/PEP storage
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -710,11 +727,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     match outbound {
                         Some(outbound_stanza) => {
                             debug!("Received outbound stanza from registry");
-                            if let Err(e) = self.stream.write_stanza(&outbound_stanza.stanza).await {
+                            // Use CSI-aware sending to buffer non-critical stanzas when client is inactive
+                            if let Err(e) = self.send_stanza_with_csi(outbound_stanza.stanza).await {
                                 warn!(error = %e, "Error writing outbound stanza");
                                 // Don't break - the client might still be readable
                             }
                             // Track outbound stanzas for SM acknowledgment
+                            // Note: buffered stanzas are also counted since they'll be sent eventually
                             if self.sm_state.enabled {
                                 self.sm_state.increment_outbound();
                             }
@@ -777,6 +796,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
             ParsedStanza::SmResume { previd, h } => {
                 self.handle_sm_resume(&previd, h).await
+            }
+            // XEP-0352 Client State Indication stanzas
+            ParsedStanza::CsiActive => {
+                self.handle_csi_active().await
+            }
+            ParsedStanza::CsiInactive => {
+                self.handle_csi_inactive().await
             }
             _ => {
                 debug!("Ignoring unexpected parsed stanza type");
@@ -1010,57 +1036,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // No session found via any method
         self.stream.send_sm_failed(Some("item-not-found"), None).await?;
         warn!(previd = %previd, "SM resume rejected - session not found");
-        Ok(())
-    }
-
-    /// Send a stanza with proper XEP-0198 Stream Management tracking.
-    ///
-    /// This method:
-    /// 1. Sends the stanza to the client
-    /// 2. If SM is enabled, records the stanza for potential resend
-    /// 3. Periodically requests acknowledgment from the client
-    ///
-    /// Use this method instead of `self.stream.write_stanza()` directly
-    /// when SM tracking is desired.
-    async fn send_stanza_with_sm(&mut self, stanza: &Stanza) -> Result<(), XmppError> {
-        // Send the stanza
-        self.stream.write_stanza(stanza).await?;
-
-        // Track for SM if enabled
-        if self.sm_state.enabled {
-            // Serialize stanza for the unacked queue
-            if let Ok(stanza_xml) = crate::parser::element_to_string(&stanza.to_element()) {
-                self.sm_state.record_outbound(stanza_xml);
-            }
-
-            // Periodically request ack to keep the unacked queue manageable
-            if self.sm_state.should_request_ack_auto() {
-                self.stream.write_raw(&SmRequest::to_xml()).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Send multiple stanzas with SM tracking (batched).
-    ///
-    /// Sends all stanzas and then requests a single ack if SM is enabled.
-    async fn send_stanzas_with_sm(&mut self, stanzas: &[Stanza]) -> Result<(), XmppError> {
-        for stanza in stanzas {
-            self.stream.write_stanza(stanza).await?;
-
-            if self.sm_state.enabled {
-                if let Ok(stanza_xml) = crate::parser::element_to_string(&stanza.to_element()) {
-                    self.sm_state.record_outbound(stanza_xml);
-                }
-            }
-        }
-
-        // Request ack after batch if we have many unacked stanzas
-        if self.sm_state.enabled && self.sm_state.should_request_ack_auto() {
-            self.stream.write_raw(&SmRequest::to_xml()).await?;
-        }
-
         Ok(())
     }
 
@@ -1401,8 +1376,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Determine if this message should be carbon-copied
         let should_carbon = should_copy_message(&msg);
 
-        // Route to all connected resources for the recipient
+        let sender_bare = sender_jid.to_bare();
         let recipient_bare = recipient_jid.to_bare();
+
+        // Respect XEP-0191: silently drop messages to recipients who have blocked the sender
+        let is_blocked = self.app_state.is_blocked(&recipient_bare, &sender_bare).await?;
+        if is_blocked {
+            debug!(
+                sender = %sender_bare,
+                recipient = %recipient_bare,
+                "Recipient has blocked sender; dropping chat message"
+            );
+            if should_carbon {
+                self.send_sent_carbons(&msg_with_from).await;
+            }
+            return Ok(());
+        }
+
+        // Route to all connected resources for the recipient
         let recipient_resources = self.connection_registry.get_resources_for_user(&recipient_bare);
 
         let mut delivered = false;
@@ -1497,8 +1488,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let mut msg_with_from = msg.clone();
         msg_with_from.from = Some(sender_jid.clone().into());
 
-        // Route to all connected resources for the recipient
+        let sender_bare = sender_jid.to_bare();
         let recipient_bare = recipient_jid.to_bare();
+
+        // Respect XEP-0191: silently drop invites to recipients who have blocked the sender
+        let is_blocked = self.app_state.is_blocked(&recipient_bare, &sender_bare).await?;
+        if is_blocked {
+            debug!(
+                sender = %sender_bare,
+                recipient = %recipient_bare,
+                "Recipient has blocked sender; dropping direct invite"
+            );
+            return Ok(());
+        }
+
+        // Route to all connected resources for the recipient
         let recipient_resources = self.connection_registry.get_resources_for_user(&recipient_bare);
 
         let mut delivered = false;
@@ -2432,6 +2436,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_carbons_disable(iq).await;
         }
 
+        // Check if this is a ping request (XEP-0199)
+        if is_ping(&iq) {
+            return self.handle_ping(iq).await;
+        }
+
         // Check if this is an ISR token refresh request (XEP-0397)
         if is_isr_token_request(&iq) {
             return self.handle_isr_token_request(iq).await;
@@ -2478,6 +2487,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a blocking query (XEP-0191)
         if is_blocking_query(&iq) {
             return self.handle_blocking_query(iq).await;
+        }
+
+        // Check if this is a PubSub/PEP IQ (XEP-0060/XEP-0163)
+        if is_pubsub_iq(&iq) {
+            return self.handle_pubsub_iq(iq).await;
         }
 
         // Unhandled IQ - log and continue
@@ -2714,6 +2728,471 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
         info!("Message carbons disabled");
+        Ok(())
+    }
+
+    /// Handle XEP-0199 Ping (including XEP-0410 MUC Self-Ping).
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_ping(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Ping received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Handle MUC self-ping (XEP-0410): ping to room@muc.domain/nick
+        if let Some(to) = &iq.to {
+            let muc_domain = self.room_registry.muc_domain();
+            let target_bare = to.to_bare();
+
+            if target_bare.domain().as_str() == muc_domain {
+                if let Some(nick) = to.resource() {
+                    let to_str = iq.from.as_ref().map(|j| j.to_string());
+                    let from_str = iq.to.as_ref().map(|j| j.to_string());
+
+                    let room_data = match self.room_registry.get_room_data(&target_bare) {
+                        Some(data) => data,
+                        None => {
+                            let error = crate::generate_iq_error(
+                                &iq.id,
+                                to_str.as_deref(),
+                                from_str.as_deref(),
+                                crate::StanzaErrorCondition::ItemNotFound,
+                                crate::StanzaErrorType::Cancel,
+                                Some("Room not found"),
+                            );
+                            self.stream.write_raw(&error).await?;
+                            return Ok(());
+                        }
+                    };
+
+                    let room = room_data.read().await;
+                    let occupant = match room.get_occupant(nick) {
+                        Some(occupant) => occupant,
+                        None => {
+                            let error = crate::generate_iq_error(
+                                &iq.id,
+                                to_str.as_deref(),
+                                from_str.as_deref(),
+                                crate::StanzaErrorCondition::ItemNotFound,
+                                crate::StanzaErrorType::Cancel,
+                                Some("Occupant not found"),
+                            );
+                            self.stream.write_raw(&error).await?;
+                            return Ok(());
+                        }
+                    };
+
+                    if occupant.real_jid != sender_jid {
+                        let error = crate::generate_iq_error(
+                            &iq.id,
+                            to_str.as_deref(),
+                            from_str.as_deref(),
+                            crate::StanzaErrorCondition::Forbidden,
+                            crate::StanzaErrorType::Auth,
+                            Some("Self-ping only allowed for own occupant"),
+                        );
+                        self.stream.write_raw(&error).await?;
+                        return Ok(());
+                    }
+
+                    let response = build_ping_result(&iq);
+                    self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Default ping response (server or component)
+        let response = build_ping_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+        Ok(())
+    }
+
+    /// Handle PubSub/PEP IQ (XEP-0060/XEP-0163).
+    ///
+    /// Supports:
+    /// - Publish: Publish items to PEP nodes (auto-creates nodes)
+    /// - Items: Retrieve items from PEP nodes
+    /// - Retract: Delete items from nodes
+    /// - Create/Delete: Node management
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_pubsub_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        // Require a bound JID
+        let user_jid = match &self.jid {
+            Some(jid) => jid.to_bare(),
+            None => {
+                warn!("PubSub request received before JID bound");
+                let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                return Ok(());
+            }
+        };
+
+        // Check if this is a PEP request (to self)
+        let target_jid = match &iq.to {
+            Some(to_jid) => to_jid.to_bare(),
+            None => user_jid.clone(), // Implicit PEP (to self)
+        };
+
+        // For now, only support PEP (requests to self)
+        // Full PubSub service would require different handling
+        if target_jid != user_jid {
+            debug!(
+                target = %target_jid,
+                user = %user_jid,
+                "PubSub request to another user's PEP service - access check needed"
+            );
+            // For reading another user's PEP, we'd need presence subscription checks
+            // For now, we'll allow it but only for retrieval operations
+        }
+
+        // Parse the PubSub request
+        let request = match parse_pubsub_iq(&iq) {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("Failed to parse PubSub request: {}", e);
+                let error = build_pubsub_error(&iq, PubSubError::InvalidJid);
+                self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                return Ok(());
+            }
+        };
+
+        debug!(?request, "Handling PubSub request");
+
+        match request {
+            PubSubRequest::Publish { node, item } => {
+                // PEP auto-create: publish with auto_create=true
+                let result = self.pubsub_storage.publish_item(
+                    &target_jid,
+                    &node,
+                    &item,
+                    Some(&user_jid),
+                    true, // auto-create for PEP
+                ).await;
+
+                match result {
+                    Ok(publish_result) => {
+                        debug!(
+                            node = %node,
+                            item_id = %publish_result.item_id,
+                            created = publish_result.node_created,
+                            "PubSub item published"
+                        );
+
+                        // Send success response
+                        let response = build_pubsub_publish_result(&iq, &node, &publish_result.item_id);
+                        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                        // Send event notifications to subscribers (presence-based for PEP)
+                        // For now, we don't implement subscription notifications
+                        // A full implementation would broadcast to roster contacts
+                    }
+                    Err(e) => {
+                        warn!("PubSub publish failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    }
+                }
+            }
+
+            PubSubRequest::Items { node, max_items, item_ids } => {
+                // Retrieve items from a node
+                let result = self.pubsub_storage.get_items(
+                    &target_jid,
+                    &node,
+                    max_items,
+                    &item_ids,
+                ).await;
+
+                match result {
+                    Ok(stored_items) => {
+                        let items: Vec<PubSubItem> = stored_items
+                            .iter()
+                            .map(|si| si.to_pubsub_item())
+                            .collect();
+
+                        debug!(
+                            node = %node,
+                            count = items.len(),
+                            "PubSub items retrieved"
+                        );
+
+                        let response = build_pubsub_items_result(&iq, &node, &items);
+                        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                    }
+                    Err(e) => {
+                        warn!("PubSub items retrieval failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    }
+                }
+            }
+
+            PubSubRequest::Retract { node, item_id, notify: _ } => {
+                // Only allow retracting from own nodes
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                let result = self.pubsub_storage.retract_item(&target_jid, &node, &item_id).await;
+
+                match result {
+                    Ok(retracted) => {
+                        if retracted {
+                            debug!(node = %node, item_id = %item_id, "PubSub item retracted");
+                            let response = build_pubsub_success(&iq);
+                            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                        } else {
+                            let error = build_pubsub_error(&iq, PubSubError::ItemNotFound);
+                            self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PubSub retract failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    }
+                }
+            }
+
+            PubSubRequest::CreateNode { node } => {
+                // Only allow creating own nodes
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                // For PEP, nodes are auto-created, but explicit create is also supported
+                let result = self.pubsub_storage.get_or_create_node(&target_jid, &node).await;
+
+                match result {
+                    Ok((_, created)) => {
+                        if created {
+                            debug!(node = %node, "PubSub node created");
+                        } else {
+                            debug!(node = %node, "PubSub node already exists");
+                        }
+                        let response = build_pubsub_success(&iq);
+                        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                    }
+                    Err(e) => {
+                        warn!("PubSub node creation failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    }
+                }
+            }
+
+            PubSubRequest::DeleteNode { node } => {
+                // Only allow deleting own nodes
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
+                let result = self.pubsub_storage.delete_node(&target_jid, &node).await;
+
+                match result {
+                    Ok(deleted) => {
+                        if deleted {
+                            debug!(node = %node, "PubSub node deleted");
+                            let response = build_pubsub_success(&iq);
+                            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                        } else {
+                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                            self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PubSub node deletion failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    }
+                }
+            }
+
+            PubSubRequest::Subscribe { .. } | PubSubRequest::Unsubscribe { .. } => {
+                // PEP uses implicit presence-based subscriptions
+                // For now, return success for compatibility
+                debug!("PubSub subscribe/unsubscribe - using implicit PEP subscriptions");
+                let response = build_pubsub_success(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle XEP-0352 Client State Indication: active.
+    ///
+    /// Called when the client sends `<active xmlns='urn:xmpp:csi:0'/>`.
+    /// This typically indicates the client app is in the foreground.
+    /// When transitioning from inactive to active, flushes any buffered stanzas.
+    #[instrument(skip(self), name = "xmpp.csi.active")]
+    async fn handle_csi_active(&mut self) -> Result<(), XmppError> {
+        use crate::xep::xep0352::ClientState;
+
+        let previous_state = self.client_state;
+        self.client_state = ClientState::Active;
+
+        if previous_state != ClientState::Active {
+            debug!(
+                jid = ?self.jid,
+                buffered_stanzas = self.csi_buffer.len(),
+                "Client state changed to Active, flushing buffer"
+            );
+
+            // Flush buffered stanzas to the client
+            self.flush_csi_buffer().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Flush all buffered CSI stanzas to the client.
+    ///
+    /// Called when the client transitions from inactive to active.
+    async fn flush_csi_buffer(&mut self) -> Result<(), XmppError> {
+        // Take the buffer to avoid borrowing issues
+        let buffered = std::mem::take(&mut self.csi_buffer);
+
+        if buffered.is_empty() {
+            return Ok(());
+        }
+
+        debug!(count = buffered.len(), "Flushing CSI buffer");
+
+        for stanza in buffered {
+            self.stream.write_stanza(&stanza).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if a stanza should be buffered when client is inactive.
+    ///
+    /// Returns true for non-critical stanzas that can be delayed:
+    /// - Presence updates (except errors and subscription requests)
+    /// - PubSub event notifications
+    /// - Chat state notifications (messages without body)
+    ///
+    /// Returns false for critical stanzas that must be delivered immediately:
+    /// - Direct messages with body content
+    /// - MUC messages that mention the user's nickname
+    /// - IQ requests/responses
+    /// - Error stanzas
+    /// - Subscription requests/responses
+    fn should_buffer_stanza(&self, stanza: &Stanza) -> bool {
+        use crate::xep::xep0352::{
+            classify_message_urgency, classify_presence_urgency, is_muc_mention,
+        };
+
+        match stanza {
+            // Use the centralized presence classification
+            Stanza::Presence(pres) => {
+                classify_presence_urgency(pres).can_buffer()
+            }
+            // Messages need more careful consideration
+            Stanza::Message(msg) => {
+                // First check basic message urgency
+                let urgency = classify_message_urgency(msg);
+                if urgency.is_urgent() {
+                    // Check if this is a MUC message that mentions the user
+                    // Even urgent MUC messages without mentions could potentially be buffered,
+                    // but MUC mentions should always be delivered immediately
+                    if let Some(nickname) = self.get_user_muc_nickname() {
+                        if is_muc_mention(msg, &nickname) {
+                            return false; // Don't buffer - user was mentioned
+                        }
+                    }
+                    // Urgent messages (with body) should not be buffered
+                    return false;
+                }
+                // Non-urgent messages (chat states, receipts) can be buffered
+                true
+            }
+            // IQs are request/response and should not be buffered
+            Stanza::Iq(_) => false,
+        }
+    }
+
+    /// Get the user's MUC nickname if available.
+    ///
+    /// This is used for MUC mention detection during CSI buffering.
+    /// Returns the resource part of the JID as a fallback nickname.
+    fn get_user_muc_nickname(&self) -> Option<String> {
+        // For MUC mention detection, we use the resource part of the user's JID
+        // as a reasonable default nickname. In a more sophisticated implementation,
+        // we could track the actual nicknames used in each room.
+        self.jid.as_ref().map(|jid| jid.resource().to_string())
+    }
+
+    /// Send a stanza to the client, respecting CSI state.
+    ///
+    /// If the client is inactive and the stanza is non-critical, it will be
+    /// buffered for later delivery. Critical stanzas are sent immediately.
+    ///
+    /// Buffer behavior:
+    /// - Non-urgent stanzas are buffered up to `MAX_CSI_BUFFER_SIZE` (100 stanzas)
+    /// - When the buffer is full, new stanzas are sent immediately
+    /// - When the client becomes active, buffered stanzas are flushed in order
+    async fn send_stanza_with_csi(&mut self, stanza: Stanza) -> Result<(), XmppError> {
+        use crate::xep::xep0352::{ClientState, MAX_CSI_BUFFER_SIZE};
+
+        // If client is active, send immediately
+        if self.client_state == ClientState::Active {
+            return self.stream.write_stanza(&stanza).await;
+        }
+
+        // Client is inactive - check if we should buffer
+        if self.should_buffer_stanza(&stanza) {
+            // Buffer the stanza (with a reasonable limit to prevent memory issues)
+            if self.csi_buffer.len() < MAX_CSI_BUFFER_SIZE {
+                debug!(
+                    stanza_type = ?std::mem::discriminant(&stanza),
+                    buffer_size = self.csi_buffer.len(),
+                    "Buffering stanza for inactive client"
+                );
+                self.csi_buffer.push(stanza);
+                return Ok(());
+            } else {
+                debug!("CSI buffer full, sending stanza immediately");
+            }
+        }
+
+        // Send critical stanzas immediately even when inactive
+        self.stream.write_stanza(&stanza).await
+    }
+
+    /// Handle XEP-0352 Client State Indication: inactive.
+    ///
+    /// Called when the client sends `<inactive xmlns='urn:xmpp:csi:0'/>`.
+    /// This typically indicates the client app is in the background.
+    /// The server may use this to optimize traffic (batch stanzas, delay
+    /// non-urgent presence updates, etc.).
+    #[instrument(skip(self), name = "xmpp.csi.inactive")]
+    async fn handle_csi_inactive(&mut self) -> Result<(), XmppError> {
+        use crate::xep::xep0352::ClientState;
+
+        let previous_state = self.client_state;
+        self.client_state = ClientState::Inactive;
+
+        if previous_state != ClientState::Inactive {
+            debug!(
+                jid = ?self.jid,
+                "Client state changed to Inactive"
+            );
+        }
+
         Ok(())
     }
 

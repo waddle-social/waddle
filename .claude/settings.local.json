@@ -26,7 +26,13 @@
       "Bash(bash -n:*)",
       "Bash(docker compose:*)",
       "WebFetch(domain:rust.testcontainers.org)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "WebFetch(domain:codeberg.org)",
+      "Bash(docker --version:*)",
+      "Bash(tee:*)",
+      "Bash(docker run:*)",
+      "Bash(# Let''s create a simple test to print out the exact XML that gets sent # Looking at the namespace constants first grep -n \"\"NS_ISR\\\\|NS_SASL\\\\|NS_REGISTER_FEATURE\"\" crates/waddle-xmpp/src/**/*.rs)",
+      "Bash(timeout 3 nc:*)"
     ]
   }
 }

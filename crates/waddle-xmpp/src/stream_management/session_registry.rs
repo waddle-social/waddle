@@ -8,7 +8,7 @@
 //! a resume request, the server can restore the session.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -267,16 +267,6 @@ fn sequence_gt(a: u32, b: u32) -> bool {
     }
     let diff = a.wrapping_sub(b);
     diff < 0x8000_0000
-}
-
-/// Create a shared in-memory SM session registry.
-pub fn create_shared_registry() -> Arc<InMemorySmSessionRegistry> {
-    Arc::new(InMemorySmSessionRegistry::new())
-}
-
-/// Create a shared registry with custom capacity.
-pub fn create_shared_registry_with_capacity(max_sessions: usize) -> Arc<InMemorySmSessionRegistry> {
-    Arc::new(InMemorySmSessionRegistry::with_capacity(max_sessions))
 }
 
 #[cfg(test)]
