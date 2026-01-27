@@ -1486,10 +1486,23 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             ))));
         }
 
-        // Get or create the room data
-        let room_data = self.room_registry.get_room_data(&join_req.room_jid).ok_or_else(|| {
-            XmppError::item_not_found(Some(format!("Room {} not found", join_req.room_jid)))
-        })?;
+        // Get the room data, or create an instant room if it doesn't exist
+        // Per XEP-0045 Section 10.1.2, rooms can be created dynamically when a user joins
+        let room_data = match self.room_registry.get_room_data(&join_req.room_jid) {
+            Some(data) => data,
+            None => {
+                // Create instant room (XEP-0045 Section 10.1.2)
+                debug!(
+                    room = %join_req.room_jid,
+                    creator = %join_req.sender_jid,
+                    "Creating instant room on first join"
+                );
+                self.room_registry.create_instant_room(join_req.room_jid.clone())?;
+                self.room_registry.get_room_data(&join_req.room_jid).ok_or_else(|| {
+                    XmppError::internal("Failed to get room data after creation".to_string())
+                })?
+            }
+        };
 
         // Get the user's DID from the session for permission checking
         let user_did = self

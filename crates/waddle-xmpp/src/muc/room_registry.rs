@@ -162,6 +162,57 @@ impl MucRoomRegistry {
         self.get_or_create_room(room_jid, waddle_id, channel_id, config)
     }
 
+    /// Create an instant room per XEP-0045 Section 10.1.2.
+    ///
+    /// An instant room is created when a user joins a non-existent room.
+    /// The room is created with default configuration (open, not members-only).
+    /// The creator is given owner affiliation.
+    ///
+    /// This is used for testing and scenarios where rooms are created dynamically
+    /// without going through the Waddle/Channel API.
+    #[instrument(skip(self), fields(room = %room_jid))]
+    pub fn create_instant_room(
+        &self,
+        room_jid: BareJid,
+    ) -> Result<RoomHandle, XmppError> {
+        // Check if room already exists
+        if let Some(handle) = self.rooms.get(&room_jid) {
+            debug!("Room already exists");
+            return Ok(handle.value().clone());
+        }
+
+        // Derive waddle_id and channel_id from room JID for instant rooms
+        // Format: use the room local part as both
+        let room_local = room_jid.node().map(|n| n.to_string()).unwrap_or_else(|| "instant".to_string());
+        let waddle_id = format!("instant:{}", room_local);
+        let channel_id = room_local.clone();
+
+        // Create default config for instant room (open, not members-only)
+        let mut config = RoomConfig::default();
+        config.name = room_local;
+        config.members_only = false; // Instant rooms are open by default
+        config.persistent = false;   // Instant rooms are not persistent
+
+        // Create new room
+        let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
+        let room_data = Arc::new(tokio::sync::RwLock::new(room));
+
+        // Create channel for room messages
+        let (sender, _receiver) = mpsc::channel(256);
+
+        let handle = RoomHandle {
+            room_jid: room_jid.clone(),
+            sender,
+        };
+
+        // Insert into registries
+        self.rooms.insert(room_jid.clone(), handle.clone());
+        self.room_data.insert(room_jid.clone(), room_data);
+
+        info!("Created instant MUC room (XEP-0045)");
+        Ok(handle)
+    }
+
     /// Destroy a room.
     #[instrument(skip(self), fields(room = %room_jid))]
     pub fn destroy_room(&self, room_jid: &BareJid) -> Option<RoomHandle> {
