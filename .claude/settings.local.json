@@ -25,7 +25,8 @@
       "Bash(ls:*)",
       "Bash(bash -n:*)",
       "Bash(docker compose:*)",
-      "WebFetch(domain:rust.testcontainers.org)"
+      "WebFetch(domain:rust.testcontainers.org)",
+      "Bash(wc:*)"
     ]
   }
 }

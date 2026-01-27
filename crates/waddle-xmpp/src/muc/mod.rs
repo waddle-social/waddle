@@ -9,6 +9,7 @@
 //! to derive MUC affiliations. See [`affiliation`] for details on the
 //! permission-to-affiliation mapping.
 
+pub mod admin;
 pub mod affiliation;
 pub mod federation;
 pub mod messages;
@@ -25,10 +26,20 @@ pub use federation::{
     MessageDeliveryTarget, PresenceDeliveryTarget,
 };
 pub use presence::{
-    build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
-    MucLeaveRequest, MucPresenceAction, OutboundMucPresence,
+    build_leave_presence, build_occupant_presence, parse_muc_presence, HistoryRequest,
+    MucJoinRequest, MucLeaveRequest, MucPresenceAction, OutboundMucPresence,
+    build_kick_presence, build_ban_presence, build_affiliation_change_presence,
+    build_role_change_presence,
 };
 pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
+pub use admin::{
+    is_muc_admin_get, is_muc_admin_iq, is_muc_admin_set, is_muc_owner_get, is_muc_owner_set,
+    parse_admin_query, build_admin_result, build_admin_set_result, build_role_result,
+    is_role_change_query, is_affiliation_change_query,
+    AdminItem, AdminQuery, AffiliationChangeResult, RoleChangeResult,
+    MucStatusCode, KickBanInfo,
+    NS_MUC_ADMIN, NS_MUC_OWNER,
+};
 
 use std::collections::HashMap;
 

@@ -32,7 +32,8 @@ use app::{App, ConnectionState, Focus};
 use config::Config;
 use event::{key_to_action, Event, EventHandler, KeyAction};
 use ui::render_layout;
-use xmpp::{XmppClient, XmppClientEvent};
+use crate::xmpp::{XmppClient, XmppClientEvent};
+use ::xmpp::BareJid;
 
 /// Waddle CLI - Terminal client for Waddle Social
 #[derive(Parser)]
@@ -367,9 +368,16 @@ fn handle_xmpp_event(app: &mut App, event: XmppClientEvent) {
             }
         }
         XmppClientEvent::ChatMessage { from, body, id: _ } => {
-            // For direct messages, show them if we're viewing that conversation
-            // For now, just log them
-            info!("Direct message from {}: {}", from, body);
+            // Show direct messages if we're viewing that conversation
+            if app.current_dm_jid.as_ref() == Some(&from) {
+                let sender_name = from.node()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| from.to_string());
+                app.add_message(sender_name, body);
+            } else {
+                // TODO: Store for later / show notification
+                info!("Direct message from {} (not in view): {}", from, body);
+            }
         }
     }
 }
@@ -400,11 +408,12 @@ async fn handle_sidebar_selection(
                 }
             }
         }
-        SidebarItem::DirectMessage { id: _, name } => {
-            // For DMs, we'd switch to that conversation
-            app.current_view_name = name;
-            app.current_room_jid = None; // DMs aren't MUC rooms
-            app.messages.clear();
+        SidebarItem::DirectMessage { id, name: _ } => {
+            // For DMs, switch to that conversation
+            // The id is the JID of the DM partner
+            if let Ok(dm_jid) = id.parse::<BareJid>() {
+                app.set_current_dm(Some(dm_jid));
+            }
         }
         SidebarItem::Waddle { id, name } => {
             // Selecting a Waddle could show its info or channels
@@ -421,8 +430,13 @@ async fn send_message(app: &mut App, xmpp_client: &mut Option<XmppClient>, messa
             if let Some(ref room_jid) = app.current_room_jid {
                 // Send to MUC room
                 client.send_room_message(room_jid, message).await;
+            } else if let Some(ref dm_jid) = app.current_dm_jid {
+                // Send direct message
+                client.send_chat_message(dm_jid, message).await;
+                // Add our own message to the view (DMs don't echo back like MUC)
+                app.add_message(app.nickname.clone(), message.to_string());
             } else {
-                // Not in a room - could be a DM or just show locally
+                // Not in a room or DM - just show locally
                 app.add_message(app.nickname.clone(), message.to_string());
             }
         } else {

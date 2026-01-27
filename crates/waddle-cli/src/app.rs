@@ -162,6 +162,9 @@ pub struct App {
     /// Currently active MUC room JID (if any)
     pub current_room_jid: Option<BareJid>,
 
+    /// Currently active direct message conversation JID (if any)
+    pub current_dm_jid: Option<BareJid>,
+
     /// Set of joined MUC rooms
     pub joined_rooms: std::collections::HashSet<BareJid>,
 
@@ -209,6 +212,7 @@ impl App {
             current_view_name: "Welcome".into(),
             connection_state: ConnectionState::Disconnected,
             current_room_jid: None,
+            current_dm_jid: None,
             joined_rooms: std::collections::HashSet::new(),
             own_jid: None,
             nickname: "user".into(),
@@ -498,7 +502,26 @@ impl App {
     pub fn clear_xmpp_state(&mut self) {
         self.joined_rooms.clear();
         self.current_room_jid = None;
+        self.current_dm_jid = None;
         self.connection_state = ConnectionState::Disconnected;
+    }
+
+    /// Set the current active DM conversation
+    pub fn set_current_dm(&mut self, dm_jid: Option<BareJid>) {
+        self.current_dm_jid = dm_jid.clone();
+        self.current_room_jid = None; // DMs are not MUC rooms
+        if let Some(jid) = dm_jid {
+            // Update the view name to show the DM partner
+            if let Some(node) = jid.node() {
+                self.current_view_name = format!("@{}", node);
+            } else {
+                self.current_view_name = jid.to_string();
+            }
+            // Clear messages when switching conversations
+            // (In a real app, we'd load from MAM storage)
+            self.messages.clear();
+            self.message_scroll = 0;
+        }
     }
 }
 

@@ -18,6 +18,54 @@ pub const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 /// Namespace for MUC protocol (join request).
 pub const NS_MUC: &str = "http://jabber.org/protocol/muc";
 
+/// History request from a joining user (XEP-0045 §7.1.16).
+#[derive(Debug, Clone, Default)]
+pub struct HistoryRequest {
+    /// Maximum number of stanzas to send
+    pub maxstanzas: Option<u32>,
+    /// Maximum number of characters to send
+    pub maxchars: Option<u32>,
+    /// Only send messages from the last N seconds
+    pub seconds: Option<u64>,
+    /// Only send messages since this timestamp (ISO 8601)
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl HistoryRequest {
+    /// Create a default history request (server decides amount).
+    pub fn default_request() -> Self {
+        Self {
+            maxstanzas: Some(25), // Reasonable default
+            ..Default::default()
+        }
+    }
+
+    /// Whether history is disabled (maxchars=0 or maxstanzas=0).
+    pub fn is_disabled(&self) -> bool {
+        self.maxchars == Some(0) || self.maxstanzas == Some(0)
+    }
+}
+
+/// Parse a <history/> element from a MUC join presence.
+fn parse_history_element(elem: &Element) -> HistoryRequest {
+    let maxstanzas = elem.attr("maxstanzas")
+        .and_then(|s| s.parse().ok());
+    let maxchars = elem.attr("maxchars")
+        .and_then(|s| s.parse().ok());
+    let seconds = elem.attr("seconds")
+        .and_then(|s| s.parse().ok());
+    let since = elem.attr("since")
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    HistoryRequest {
+        maxstanzas,
+        maxchars,
+        seconds,
+        since,
+    }
+}
+
 /// Parsed MUC join request.
 #[derive(Debug, Clone)]
 pub struct MucJoinRequest {
@@ -29,6 +77,8 @@ pub struct MucJoinRequest {
     pub sender_jid: FullJid,
     /// Optional password for room entry
     pub password: Option<String>,
+    /// Optional history request parameters
+    pub history: Option<HistoryRequest>,
 }
 
 /// Parsed MUC leave request.
@@ -122,16 +172,20 @@ pub fn parse_muc_presence(
                 payload.is("x", NS_MUC) || payload.is("x", NS_MUC_USER)
             });
 
-            // Extract password if present
-            let password = presence.payloads.iter().find_map(|payload| {
+            // Extract password and history from MUC element
+            let (password, history) = presence.payloads.iter().find_map(|payload| {
                 if payload.is("x", NS_MUC) {
-                    payload
+                    let password = payload
                         .get_child("password", NS_MUC)
-                        .map(|p| p.text())
+                        .map(|p| p.text());
+                    let history = payload
+                        .get_child("history", NS_MUC)
+                        .map(parse_history_element);
+                    Some((password, history))
                 } else {
                     None
                 }
-            });
+            }).unwrap_or((None, None));
 
             if has_muc_element {
                 debug!(
@@ -139,6 +193,7 @@ pub fn parse_muc_presence(
                     nick = %nick,
                     sender = %sender_jid,
                     has_password = password.is_some(),
+                    has_history = history.is_some(),
                     "Parsed MUC join request"
                 );
 
@@ -147,6 +202,7 @@ pub fn parse_muc_presence(
                     nick,
                     sender_jid: sender_jid.clone(),
                     password,
+                    history,
                 }))
             } else {
                 // Presence to MUC JID but without MUC element
@@ -163,6 +219,7 @@ pub fn parse_muc_presence(
                     nick,
                     sender_jid: sender_jid.clone(),
                     password: None,
+                    history: None,
                 }))
             }
         }
@@ -295,6 +352,218 @@ fn role_to_muc(role: Role) -> MucRole {
         Role::Visitor => MucRole::Visitor,
         Role::None => MucRole::None,
     }
+}
+
+/// Build a kick presence notification (role changed to none).
+///
+/// Per XEP-0045 §8.2: When a user is kicked, an unavailable presence is sent
+/// with status code 307 to all occupants. The kicked user also receives
+/// status code 110 to indicate it's about themselves.
+///
+/// # Arguments
+/// * `from_room_jid` - The room@domain/nick of the kicked user
+/// * `to_jid` - The recipient's full JID
+/// * `affiliation` - The kicked user's affiliation (unchanged by kick)
+/// * `is_self` - True if this presence is going to the kicked user
+/// * `reason` - Optional reason for the kick
+/// * `actor` - Optional JID of who performed the kick
+pub fn build_kick_presence(
+    from_room_jid: &FullJid,
+    to_jid: &FullJid,
+    affiliation: Affiliation,
+    is_self: bool,
+    reason: Option<&str>,
+    actor: Option<&BareJid>,
+) -> Presence {
+    let mut presence = Presence::new(PresenceType::Unavailable);
+    presence.from = Some(Jid::from(from_room_jid.clone()));
+    presence.to = Some(Jid::from(to_jid.clone()));
+
+    let mut statuses = vec![Status::Kicked];
+    if is_self {
+        statuses.push(Status::SelfPresence);
+    }
+
+    // Build actor element if provided
+    let actor_elem = actor.map(|a| xmpp_parsers::muc::user::Actor {
+        jid: Some(a.clone().into()),
+        nick: None,
+    });
+
+    let item = Item {
+        affiliation: affiliation_to_muc(affiliation),
+        role: MucRole::None, // Kicked = role none
+        jid: None,
+        nick: None,
+        actor: actor_elem,
+        continue_: None,
+        reason: reason.map(|r| xmpp_parsers::muc::user::Reason(r.to_string())),
+    };
+
+    let muc_user = MucUser {
+        status: statuses,
+        items: vec![item],
+    };
+
+    let muc_element: Element = muc_user.into();
+    presence.payloads.push(muc_element);
+
+    presence
+}
+
+/// Build a ban presence notification (affiliation changed to outcast).
+///
+/// Per XEP-0045 §9.1: When a user is banned, an unavailable presence is sent
+/// with status code 301 to all occupants. The banned user also receives
+/// status code 110 to indicate it's about themselves.
+///
+/// # Arguments
+/// * `from_room_jid` - The room@domain/nick of the banned user
+/// * `to_jid` - The recipient's full JID
+/// * `is_self` - True if this presence is going to the banned user
+/// * `reason` - Optional reason for the ban
+/// * `actor` - Optional JID of who performed the ban
+pub fn build_ban_presence(
+    from_room_jid: &FullJid,
+    to_jid: &FullJid,
+    is_self: bool,
+    reason: Option<&str>,
+    actor: Option<&BareJid>,
+) -> Presence {
+    let mut presence = Presence::new(PresenceType::Unavailable);
+    presence.from = Some(Jid::from(from_room_jid.clone()));
+    presence.to = Some(Jid::from(to_jid.clone()));
+
+    let mut statuses = vec![Status::Banned];
+    if is_self {
+        statuses.push(Status::SelfPresence);
+    }
+
+    // Build actor element if provided
+    let actor_elem = actor.map(|a| xmpp_parsers::muc::user::Actor {
+        jid: Some(a.clone().into()),
+        nick: None,
+    });
+
+    let item = Item {
+        affiliation: MucAffiliation::Outcast, // Banned = outcast
+        role: MucRole::None, // Banned = role none
+        jid: None,
+        nick: None,
+        actor: actor_elem,
+        continue_: None,
+        reason: reason.map(|r| xmpp_parsers::muc::user::Reason(r.to_string())),
+    };
+
+    let muc_user = MucUser {
+        status: statuses,
+        items: vec![item],
+    };
+
+    let muc_element: Element = muc_user.into();
+    presence.payloads.push(muc_element);
+
+    presence
+}
+
+/// Build a presence notification for affiliation change.
+///
+/// Per XEP-0045 §9.6: When a user's affiliation changes, a presence update
+/// is sent to all occupants showing the new affiliation.
+///
+/// # Arguments
+/// * `from_room_jid` - The room@domain/nick of the affected user
+/// * `to_jid` - The recipient's full JID
+/// * `new_affiliation` - The user's new affiliation
+/// * `role` - The user's current role
+/// * `is_self` - True if this presence is going to the affected user
+/// * `occupant_real_jid` - Optional real JID for semi-anonymous rooms
+pub fn build_affiliation_change_presence(
+    from_room_jid: &FullJid,
+    to_jid: &FullJid,
+    new_affiliation: Affiliation,
+    role: Role,
+    is_self: bool,
+    occupant_real_jid: Option<&FullJid>,
+) -> Presence {
+    let mut presence = Presence::new(PresenceType::None);
+    presence.from = Some(Jid::from(from_room_jid.clone()));
+    presence.to = Some(Jid::from(to_jid.clone()));
+
+    let mut statuses = Vec::new();
+    if is_self {
+        statuses.push(Status::SelfPresence);
+    }
+
+    let item = Item {
+        affiliation: affiliation_to_muc(new_affiliation),
+        role: role_to_muc(role),
+        jid: occupant_real_jid.cloned(),
+        nick: None,
+        actor: None,
+        continue_: None,
+        reason: None,
+    };
+
+    let muc_user = MucUser {
+        status: statuses,
+        items: vec![item],
+    };
+
+    let muc_element: Element = muc_user.into();
+    presence.payloads.push(muc_element);
+
+    presence
+}
+
+/// Build a presence notification for role change.
+///
+/// Per XEP-0045 §8.4: When a user's role changes (e.g., voice granted/revoked),
+/// a presence update is sent to all occupants showing the new role.
+///
+/// # Arguments
+/// * `from_room_jid` - The room@domain/nick of the affected user
+/// * `to_jid` - The recipient's full JID
+/// * `affiliation` - The user's affiliation
+/// * `new_role` - The user's new role
+/// * `is_self` - True if this presence is going to the affected user
+/// * `occupant_real_jid` - Optional real JID for semi-anonymous rooms
+pub fn build_role_change_presence(
+    from_room_jid: &FullJid,
+    to_jid: &FullJid,
+    affiliation: Affiliation,
+    new_role: Role,
+    is_self: bool,
+    occupant_real_jid: Option<&FullJid>,
+) -> Presence {
+    let mut presence = Presence::new(PresenceType::None);
+    presence.from = Some(Jid::from(from_room_jid.clone()));
+    presence.to = Some(Jid::from(to_jid.clone()));
+
+    let mut statuses = Vec::new();
+    if is_self {
+        statuses.push(Status::SelfPresence);
+    }
+
+    let item = Item {
+        affiliation: affiliation_to_muc(affiliation),
+        role: role_to_muc(new_role),
+        jid: occupant_real_jid.cloned(),
+        nick: None,
+        actor: None,
+        continue_: None,
+        reason: None,
+    };
+
+    let muc_user = MucUser {
+        status: statuses,
+        items: vec![item],
+    };
+
+    let muc_element: Element = muc_user.into();
+    presence.payloads.push(muc_element);
+
+    presence
 }
 
 #[cfg(test)]
@@ -431,5 +700,72 @@ mod tests {
 
         assert_eq!(presence.type_, PresenceType::Unavailable);
         assert!(!presence.payloads.is_empty());
+    }
+
+    #[test]
+    fn test_parse_muc_join_with_history() {
+        let to_jid: Jid = "room@muc.example.com/nickname".parse().unwrap();
+        let mut presence = Presence::new(PresenceType::None);
+        presence.to = Some(to_jid);
+
+        // Add MUC element with history request
+        let history = Element::builder("history", NS_MUC)
+            .attr("maxstanzas", "50")
+            .attr("seconds", "3600")
+            .build();
+        let muc_element = Element::builder("x", NS_MUC)
+            .append(history)
+            .build();
+        presence.payloads.push(muc_element);
+
+        let sender = make_sender_jid();
+        let result = parse_muc_presence(&presence, &sender, "muc.example.com").unwrap();
+
+        match result {
+            MucPresenceAction::Join(req) => {
+                assert!(req.history.is_some());
+                let history = req.history.unwrap();
+                assert_eq!(history.maxstanzas, Some(50));
+                assert_eq!(history.seconds, Some(3600));
+                assert!(history.maxchars.is_none());
+                assert!(history.since.is_none());
+            }
+            _ => panic!("Expected Join action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_muc_join_with_history_disabled() {
+        let to_jid: Jid = "room@muc.example.com/nickname".parse().unwrap();
+        let mut presence = Presence::new(PresenceType::None);
+        presence.to = Some(to_jid);
+
+        // Add MUC element with history disabled (maxchars=0)
+        let history = Element::builder("history", NS_MUC)
+            .attr("maxchars", "0")
+            .build();
+        let muc_element = Element::builder("x", NS_MUC)
+            .append(history)
+            .build();
+        presence.payloads.push(muc_element);
+
+        let sender = make_sender_jid();
+        let result = parse_muc_presence(&presence, &sender, "muc.example.com").unwrap();
+
+        match result {
+            MucPresenceAction::Join(req) => {
+                assert!(req.history.is_some());
+                let history = req.history.unwrap();
+                assert!(history.is_disabled());
+            }
+            _ => panic!("Expected Join action"),
+        }
+    }
+
+    #[test]
+    fn test_history_request_default() {
+        let default = HistoryRequest::default_request();
+        assert_eq!(default.maxstanzas, Some(25));
+        assert!(!default.is_disabled());
     }
 }

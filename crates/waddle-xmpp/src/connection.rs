@@ -38,8 +38,14 @@ use crate::stream_management::StreamManagementState;
 use crate::metrics::{record_muc_occupant_count, record_muc_presence};
 use crate::muc::{
     affiliation::{AffiliationResolver, AppStateAffiliationResolver},
+    admin::{
+        is_muc_admin_iq, parse_admin_query, build_admin_result, build_admin_set_result,
+        is_role_change_query, build_role_result,
+    },
     build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
     MucLeaveRequest, MucMessage, MucPresenceAction, MucRoomRegistry,
+    build_kick_presence, build_ban_presence, build_affiliation_change_presence,
+    build_role_change_presence,
 };
 use crate::types::{Affiliation, Role};
 use crate::parser::ParsedStanza;
@@ -1544,6 +1550,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             self.stream.write_stanza(&Stanza::Presence(presence)).await?;
         }
 
+        // Send room history to the joining user (XEP-0045 §7.2.15)
+        // History comes after other occupants' presence but before self-presence
+        self.send_muc_history(&join_req).await;
+
         // Send the new occupant's presence to all existing occupants
         for (existing_jid, _, _, _) in &existing_occupants {
             let presence = build_occupant_presence(
@@ -1579,6 +1589,103 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         Ok(())
+    }
+
+    /// Send room history to a joining user (XEP-0045 §7.2.15).
+    ///
+    /// Queries MAM storage for recent messages and sends them as
+    /// groupchat messages with delay timestamps.
+    async fn send_muc_history(&mut self, join_req: &MucJoinRequest) {
+        // Get history parameters from the join request, or use defaults
+        let history = join_req.history.as_ref()
+            .cloned()
+            .unwrap_or_else(crate::muc::HistoryRequest::default_request);
+
+        // Check if history is disabled (maxchars=0 or maxstanzas=0)
+        if history.is_disabled() {
+            debug!(room = %join_req.room_jid, "History disabled by client");
+            return;
+        }
+
+        // Build MAM query based on history request
+        let max = history.maxstanzas.unwrap_or(25).min(100); // Cap at 100
+        let start = if let Some(seconds) = history.seconds {
+            Some(chrono::Utc::now() - chrono::Duration::seconds(seconds as i64))
+        } else {
+            history.since
+        };
+
+        let mam_query = crate::mam::MamQuery {
+            start,
+            max: Some(max),
+            ..Default::default()
+        };
+
+        // Query MAM storage
+        let room_jid_str = join_req.room_jid.to_string();
+        match self.mam_storage.query_messages(&room_jid_str, &mam_query).await {
+            Ok(result) => {
+                debug!(
+                    room = %join_req.room_jid,
+                    message_count = result.messages.len(),
+                    "Sending room history to joining user"
+                );
+
+                for archived_msg in result.messages {
+                    // Build a history message with delay stamp
+                    if let Err(e) = self.send_history_message(&join_req.room_jid, &join_req.sender_jid, &archived_msg).await {
+                        warn!(
+                            room = %join_req.room_jid,
+                            error = %e,
+                            "Failed to send history message"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    room = %join_req.room_jid,
+                    error = %e,
+                    "Failed to query room history"
+                );
+            }
+        }
+    }
+
+    /// Send a single history message to a user.
+    async fn send_history_message(
+        &mut self,
+        room_jid: &jid::BareJid,
+        to_jid: &FullJid,
+        archived: &crate::mam::ArchivedMessage,
+    ) -> Result<(), XmppError> {
+        use xmpp_parsers::message::{Message, MessageType as MsgType, Body};
+        use minidom::Element;
+        use jid::Jid;
+
+        // Delay namespace (XEP-0203)
+        const DELAY_NS: &str = "urn:xmpp:delay";
+
+        // Build the from JID (room@domain/sender_nick)
+        // The 'from' in archived message is typically the full room JID with nick
+        let from_jid: Jid = archived.from.parse()
+            .unwrap_or_else(|_| Jid::from(room_jid.clone()));
+
+        // Create the history message
+        let mut message = Message::new(Some(Jid::from(to_jid.clone())));
+        message.type_ = MsgType::Groupchat;
+        message.from = Some(from_jid);
+        message.id = Some(archived.id.clone());
+        message.bodies.insert(String::new(), Body(archived.body.clone()));
+
+        // Add delay element per XEP-0203
+        let delay = Element::builder("delay", DELAY_NS)
+            .attr("stamp", archived.timestamp.to_rfc3339())
+            .attr("from", room_jid.to_string())
+            .build();
+        message.payloads.push(delay);
+
+        self.stream.write_stanza(&Stanza::Message(message)).await
     }
 
     /// Handle a MUC leave request.
@@ -2118,6 +2225,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is an HTTP File Upload slot request (XEP-0363)
         if is_upload_request(&iq) {
             return self.handle_upload_slot_request(iq).await;
+        }
+
+        // Check if this is a MUC admin IQ (XEP-0045 §10)
+        let muc_domain = self.room_registry.muc_domain();
+        if is_muc_admin_iq(&iq, muc_domain) {
+            return self.handle_muc_admin_iq(iq).await;
         }
 
         // Unhandled IQ - log and continue
@@ -2947,6 +3060,462 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             size = request.size,
             "Upload slot created"
         );
+
+        Ok(())
+    }
+
+    /// Handle XEP-0045 MUC admin IQ requests.
+    ///
+    /// Processes admin operations for MUC rooms:
+    /// - GET: Query affiliation/role lists (members, admins, owners, outcasts, moderators)
+    /// - SET: Modify affiliations (grant member/admin/owner, ban users)
+    /// - SET: Modify roles (grant moderator/participant/visitor, kick users)
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_muc_admin_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("MUC admin IQ received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        let muc_domain = self.room_registry.muc_domain();
+        let query = match parse_admin_query(&iq, muc_domain) {
+            Ok(q) => q,
+            Err(e) => {
+                warn!(error = %e, "Failed to parse MUC admin query");
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::BadRequest,
+                    crate::StanzaErrorType::Cancel,
+                    Some(&e.to_string()),
+                );
+                self.stream.write_raw(&error).await?;
+                return Ok(());
+            }
+        };
+
+        debug!(
+            room = %query.room_jid,
+            is_get = query.is_get,
+            item_count = query.items.len(),
+            "Processing MUC admin IQ"
+        );
+
+        // Get the room
+        let room_data = match self.room_registry.get_room_data(&query.room_jid) {
+            Some(data) => data,
+            None => {
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::ItemNotFound,
+                    crate::StanzaErrorType::Cancel,
+                    Some(&format!("Room {} not found", query.room_jid)),
+                );
+                self.stream.write_raw(&error).await?;
+                return Ok(());
+            }
+        };
+
+        if query.is_get {
+            // Handle GET - query affiliation or role list
+            let room = room_data.read().await;
+
+            // Check if sender has permission to view affiliations/roles
+            // Per XEP-0045, admins and owners can query affiliation lists
+            // Moderators can query role lists
+            let sender_affiliation = room.get_affiliation(&sender_jid.to_bare());
+            let sender_occupant = room.find_occupant_by_real_jid(&sender_jid);
+            let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
+
+            // Check if this is a role query (has role attribute) or affiliation query
+            let requested_role = query.items.first().and_then(|item| item.role);
+
+            if requested_role.is_some() {
+                // Role query - moderators and above can query
+                if sender_role < Role::Moderator && !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin) {
+                    let error = crate::generate_iq_error(
+                        &iq.id,
+                        iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                        iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                        crate::StanzaErrorCondition::Forbidden,
+                        crate::StanzaErrorType::Auth,
+                        Some("Only moderators can query role lists"),
+                    );
+                    self.stream.write_raw(&error).await?;
+                    return Ok(());
+                }
+
+                // Build role list response
+                let role = requested_role.unwrap();
+                let items: Vec<(String, Role, Option<jid::BareJid>)> = room.occupants
+                    .values()
+                    .filter(|o| o.role == role)
+                    .map(|o| (o.nick.clone(), o.role, Some(o.real_jid.to_bare())))
+                    .collect();
+
+                let response = build_role_result(
+                    &query.iq_id,
+                    &query.room_jid,
+                    &query.from,
+                    &items,
+                );
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                debug!(
+                    room = %query.room_jid,
+                    item_count = items.len(),
+                    role = ?role,
+                    "Sent MUC role query result"
+                );
+            } else {
+                // Affiliation query - admins and owners can query
+                if !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin) {
+                    let error = crate::generate_iq_error(
+                        &iq.id,
+                        iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                        iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                        crate::StanzaErrorCondition::Forbidden,
+                        crate::StanzaErrorType::Auth,
+                        Some("Only admins and owners can query affiliation lists"),
+                    );
+                    self.stream.write_raw(&error).await?;
+                    return Ok(());
+                }
+
+                // Get the requested affiliation from the first item (per XEP-0045)
+                let requested_affiliation = query.items.first()
+                    .and_then(|item| item.affiliation);
+
+                let items: Vec<(jid::BareJid, Affiliation)> = match requested_affiliation {
+                    Some(aff) => room.get_jids_by_affiliation(aff)
+                        .into_iter()
+                        .map(|jid| (jid, aff))
+                        .collect(),
+                    None => room.get_all_affiliations()
+                        .into_iter()
+                        .map(|entry| (entry.jid, entry.affiliation))
+                        .collect(),
+                };
+
+                let response = build_admin_result(
+                    &query.iq_id,
+                    &query.room_jid,
+                    &query.from,
+                    &items,
+                );
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                debug!(
+                    room = %query.room_jid,
+                    item_count = items.len(),
+                    "Sent MUC admin query result"
+                );
+            }
+        } else {
+            // Handle SET - modify affiliations or roles
+            let mut room = room_data.write().await;
+
+            // Determine if this is a role change or affiliation change
+            let is_role_change = is_role_change_query(&query.items);
+
+            // Check permissions based on operation type
+            let sender_affiliation = room.get_affiliation(&sender_jid.to_bare());
+            let sender_occupant = room.find_occupant_by_real_jid(&sender_jid);
+            let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
+
+            // Collect presence updates to broadcast after processing
+            let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> = Vec::new();
+            // Collect occupants to remove (for kicks and bans)
+            let mut occupants_to_kick: Vec<String> = Vec::new();
+
+            if is_role_change {
+                // Handle role changes (kicks, granting/revoking voice)
+                for item in &query.items {
+                    let target_nick = match &item.nick {
+                        Some(nick) => nick.clone(),
+                        None => continue, // Skip items without nick
+                    };
+
+                    let new_role = match item.role {
+                        Some(role) => role,
+                        None => continue, // Skip items without role
+                    };
+
+                    // Find the target occupant
+                    let target_occupant = match room.get_occupant(&target_nick) {
+                        Some(occ) => occ.clone(),
+                        None => {
+                            let error = crate::generate_iq_error(
+                                &iq.id,
+                                iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                                iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                                crate::StanzaErrorCondition::ItemNotFound,
+                                crate::StanzaErrorType::Cancel,
+                                Some(&format!("Occupant '{}' not found in room", target_nick)),
+                            );
+                            self.stream.write_raw(&error).await?;
+                            return Ok(());
+                        }
+                    };
+
+                    // Permission check for role changes
+                    // Per XEP-0045 §8.2-8.5:
+                    // - Moderators can change roles of participants and visitors
+                    // - Admins can change roles of any non-owner
+                    // - Owners can change roles of anyone
+                    let can_modify = match (sender_affiliation, sender_role, target_occupant.affiliation, new_role) {
+                        // Owners can do anything
+                        (Affiliation::Owner, _, _, _) => true,
+                        // Admins can modify non-owners
+                        (Affiliation::Admin, _, target_aff, _) if target_aff != Affiliation::Owner => true,
+                        // Moderators can modify participants and visitors
+                        (_, Role::Moderator, target_aff, _) if !matches!(target_aff, Affiliation::Owner | Affiliation::Admin) => true,
+                        _ => false,
+                    };
+
+                    if !can_modify {
+                        let error = crate::generate_iq_error(
+                            &iq.id,
+                            iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                            iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                            crate::StanzaErrorCondition::NotAllowed,
+                            crate::StanzaErrorType::Cancel,
+                            Some("You don't have permission to change this user's role"),
+                        );
+                        self.stream.write_raw(&error).await?;
+                        return Ok(());
+                    }
+
+                    // Build the room JID with the target's nick
+                    let from_room_jid = match query.room_jid.with_resource_str(&target_nick) {
+                        Ok(jid) => jid,
+                        Err(_) => continue,
+                    };
+
+                    if new_role == Role::None {
+                        // This is a kick operation
+                        debug!(
+                            room = %query.room_jid,
+                            target = %target_nick,
+                            actor = %sender_jid.to_bare(),
+                            reason = ?item.reason,
+                            "Kicking occupant"
+                        );
+
+                        // Build kick presence for all occupants
+                        for (nick, occupant) in room.occupants.iter() {
+                            let is_self = nick == &target_nick;
+                            let presence = build_kick_presence(
+                                &from_room_jid,
+                                &occupant.real_jid,
+                                target_occupant.affiliation,
+                                is_self,
+                                item.reason.as_deref(),
+                                Some(&sender_jid.to_bare()),
+                            );
+                            presence_updates.push((occupant.real_jid.clone(), presence));
+                        }
+
+                        occupants_to_kick.push(target_nick);
+                    } else {
+                        // Role change (voice grant/revoke, moderator grant/revoke)
+                        debug!(
+                            room = %query.room_jid,
+                            target = %target_nick,
+                            old_role = ?target_occupant.role,
+                            new_role = ?new_role,
+                            "Changing occupant role"
+                        );
+
+                        // Update occupant's role
+                        if let Some(occ) = room.occupants.get_mut(&target_nick) {
+                            occ.role = new_role;
+                        }
+
+                        // Build role change presence for all occupants
+                        for (nick, occupant) in room.occupants.iter() {
+                            let is_self = nick == &target_nick;
+                            let presence = build_role_change_presence(
+                                &from_room_jid,
+                                &occupant.real_jid,
+                                target_occupant.affiliation,
+                                new_role,
+                                is_self,
+                                None,
+                            );
+                            presence_updates.push((occupant.real_jid.clone(), presence));
+                        }
+                    }
+                }
+            } else {
+                // Handle affiliation changes
+                for item in &query.items {
+                    let target_jid = match &item.jid {
+                        Some(jid) => jid.clone(),
+                        None => continue, // Skip items without JID
+                    };
+
+                    let new_affiliation = match item.affiliation {
+                        Some(aff) => aff,
+                        None => continue, // Skip items without affiliation
+                    };
+
+                    // Permission check: who can set what affiliation
+                    // Per XEP-0045 §10.6:
+                    // - Only owners can grant/revoke owner status
+                    // - Owners and admins can grant/revoke admin/member status
+                    // - Owners and admins can ban (outcast) users
+                    let can_modify = match new_affiliation {
+                        Affiliation::Owner => sender_affiliation == Affiliation::Owner,
+                        Affiliation::Admin | Affiliation::Member | Affiliation::None | Affiliation::Outcast => {
+                            matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
+                        }
+                    };
+
+                    if !can_modify {
+                        let error = crate::generate_iq_error(
+                            &iq.id,
+                            iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                            iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                            crate::StanzaErrorCondition::Forbidden,
+                            crate::StanzaErrorType::Auth,
+                            Some(&format!(
+                                "You don't have permission to set {} affiliation",
+                                crate::muc::admin::affiliation_to_str(new_affiliation)
+                            )),
+                        );
+                        self.stream.write_raw(&error).await?;
+                        return Ok(());
+                    }
+
+                    // Cannot demote the last owner
+                    if new_affiliation != Affiliation::Owner {
+                        let target_current_affiliation = room.get_affiliation(&target_jid);
+                        if target_current_affiliation == Affiliation::Owner {
+                            let owners = room.get_jids_by_affiliation(Affiliation::Owner);
+                            if owners.len() == 1 && owners.contains(&target_jid) {
+                                let error = crate::generate_iq_error(
+                                    &iq.id,
+                                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                                    crate::StanzaErrorCondition::Conflict,
+                                    crate::StanzaErrorType::Cancel,
+                                    Some("Cannot remove the last owner from a room"),
+                                );
+                                self.stream.write_raw(&error).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    // Set the affiliation
+                    let change = room.set_affiliation(target_jid.clone(), new_affiliation);
+
+                    if let Some(change) = change {
+                        debug!(
+                            room = %query.room_jid,
+                            target = %target_jid,
+                            old_affiliation = ?change.old_affiliation,
+                            new_affiliation = ?change.new_affiliation,
+                            "Affiliation changed"
+                        );
+
+                        // Find occupant with this JID if they are in the room
+                        let affected_occupant = room.occupants.values()
+                            .find(|o| o.real_jid.to_bare() == target_jid)
+                            .cloned();
+
+                        if let Some(occupant) = affected_occupant {
+                            let from_room_jid = match query.room_jid.with_resource_str(&occupant.nick) {
+                                Ok(jid) => jid,
+                                Err(_) => continue,
+                            };
+
+                            if new_affiliation == Affiliation::Outcast {
+                                // Ban - kick the user and send ban presence
+                                debug!(
+                                    room = %query.room_jid,
+                                    target = %occupant.nick,
+                                    actor = %sender_jid.to_bare(),
+                                    reason = ?item.reason,
+                                    "Banning occupant"
+                                );
+
+                                // Build ban presence for all occupants
+                                for (nick, occ) in room.occupants.iter() {
+                                    let is_self = nick == &occupant.nick;
+                                    let presence = build_ban_presence(
+                                        &from_room_jid,
+                                        &occ.real_jid,
+                                        is_self,
+                                        item.reason.as_deref(),
+                                        Some(&sender_jid.to_bare()),
+                                    );
+                                    presence_updates.push((occ.real_jid.clone(), presence));
+                                }
+
+                                occupants_to_kick.push(occupant.nick.clone());
+                            } else {
+                                // Regular affiliation change - send presence update
+                                for (nick, occ) in room.occupants.iter() {
+                                    let is_self = nick == &occupant.nick;
+                                    let presence = build_affiliation_change_presence(
+                                        &from_room_jid,
+                                        &occ.real_jid,
+                                        new_affiliation,
+                                        occupant.role,
+                                        is_self,
+                                        None,
+                                    );
+                                    presence_updates.push((occ.real_jid.clone(), presence));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Remove kicked/banned occupants from the room
+            for nick in occupants_to_kick {
+                room.remove_occupant(&nick);
+            }
+
+            // Drop the lock before sending presence updates
+            drop(room);
+
+            // Send all presence updates
+            for (to_jid, presence) in presence_updates {
+                match self.connection_registry.send_to(&to_jid, Stanza::Presence(presence)).await {
+                    SendResult::Sent => {
+                        debug!(to = %to_jid, "Sent admin presence update");
+                    }
+                    _ => {
+                        debug!(to = %to_jid, "Failed to send admin presence update (user may be offline)");
+                    }
+                }
+            }
+
+            // Send success response
+            let response = build_admin_set_result(
+                &query.iq_id,
+                &query.room_jid,
+                &query.from,
+            );
+            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+            debug!(
+                room = %query.room_jid,
+                "MUC admin set completed"
+            );
+        }
 
         Ok(())
     }
