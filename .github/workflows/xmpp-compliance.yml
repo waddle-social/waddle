@@ -125,9 +125,8 @@ jobs:
           adminAccountUsername: 'admin'
           adminAccountPassword: 'interop-test-password'
           # Disable S2S tests since we don't have federation setup in CI
-          # Disable MUC tests until we implement XEP-0045
           # Disable PubSub tests until we implement XEP-0060
-          disabledSpecifications: 'XEP-0220,XEP-0045,XEP-0060,XEP-0163'
+          disabledSpecifications: 'XEP-0220,XEP-0060,XEP-0163'
           logDir: './xmpp-interop-logs'
         continue-on-error: true  # Tests may fail initially - that's expected
 

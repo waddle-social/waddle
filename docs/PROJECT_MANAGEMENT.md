@@ -167,7 +167,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 | RFC 6121 XMPP IM (roster, presence) | ✅ Complete | P0 | Roster management ✅, presence subscription ✅ |
 | XEP-0054 vcard-temp | ✅ Complete | P0 | User profile information (get/set handlers, storage) |
 | XEP-0249 Direct MUC Invitations | ✅ Complete | P0 | Direct channel invites |
-| Complete XEP-0045 MUC | ⚠️ Partial | P0 | Finish MUC implementation (muc/) |
+| Complete XEP-0045 MUC | ✅ Complete | P0 | MUC implementation complete (muc/) |
 | Complete XEP-0280 Message Carbons | ✅ Complete | P0 | Integrated into chat message routing |
 | XEP-0363 HTTP File Upload | ✅ Complete | P0 | File sharing capability |
 
@@ -194,7 +194,6 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 
 **CI Currently Disabled (needs completion first):**
 - XEP-0220 (Server Dialback) - S2S federation
-- XEP-0045 (MUC) - partial implementation
 - XEP-0060 (PubSub) - not started
 - XEP-0163 (PEP) - not started
 
@@ -492,7 +491,7 @@ External integrations and bot platform.
 - [ ] Presence subscription flow complete
 - [x] XEP-0054 vcard-temp working
 - [x] XEP-0249 Direct MUC Invitations working
-- [ ] XEP-0045 MUC fully compliant
+- [x] XEP-0045 MUC fully compliant
 - [x] XEP-0280 Message Carbons integrated
 - [x] XEP-0363 HTTP File Upload working
 
