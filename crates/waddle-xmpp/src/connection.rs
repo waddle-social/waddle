@@ -3820,6 +3820,201 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         Ok(())
     }
+
+    /// Handle XEP-0191 Blocking Command IQ requests.
+    ///
+    /// Processes blocking operations:
+    /// - GET blocklist: Returns the user's blocked JID list
+    /// - SET block: Adds JIDs to the blocklist
+    /// - SET unblock: Removes JIDs from the blocklist (empty = unblock all)
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_blocking_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Blocking query received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        debug!(
+            from = %sender_jid,
+            "Processing blocking query"
+        );
+
+        // Parse the blocking request
+        let request = match parse_blocking_request(&iq) {
+            Ok(req) => req,
+            Err(e) => {
+                warn!(error = %e, "Failed to parse blocking request");
+                let error_response = build_blocking_error(&iq.id, &e);
+                self.stream.write_raw(&error_response).await?;
+                return Ok(());
+            }
+        };
+
+        let user_bare_jid = sender_jid.to_bare();
+
+        match request {
+            BlockingRequest::GetBlocklist => {
+                // Retrieve the user's blocklist
+                let blocked_jids = self.app_state.get_blocklist(&user_bare_jid).await?;
+
+                debug!(
+                    from = %sender_jid,
+                    count = blocked_jids.len(),
+                    "Returning blocklist"
+                );
+
+                let response = build_blocklist_response(&iq, &blocked_jids);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+            }
+
+            BlockingRequest::Block(jids_to_block) => {
+                // Add JIDs to the blocklist
+                let added = self.app_state.add_blocks(&user_bare_jid, &jids_to_block).await?;
+
+                debug!(
+                    from = %sender_jid,
+                    requested = jids_to_block.len(),
+                    added = added,
+                    "Added JIDs to blocklist"
+                );
+
+                // Send success response
+                let response = build_blocking_success(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                // Send push notifications to all user's connected resources
+                self.send_block_push(&jids_to_block).await;
+            }
+
+            BlockingRequest::Unblock(jids_to_unblock) => {
+                let (removed, unblocked_jids) = if jids_to_unblock.is_empty() {
+                    // Unblock all - first get the current blocklist for push notification
+                    let current_blocklist = self.app_state.get_blocklist(&user_bare_jid).await?;
+                    let removed = self.app_state.remove_all_blocks(&user_bare_jid).await?;
+                    (removed, current_blocklist)
+                } else {
+                    // Unblock specific JIDs
+                    let removed = self.app_state.remove_blocks(&user_bare_jid, &jids_to_unblock).await?;
+                    (removed, jids_to_unblock)
+                };
+
+                debug!(
+                    from = %sender_jid,
+                    requested = unblocked_jids.len(),
+                    removed = removed,
+                    "Removed JIDs from blocklist"
+                );
+
+                // Send success response
+                let response = build_blocking_success(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+                // Send push notifications to all user's connected resources
+                self.send_unblock_push(&unblocked_jids).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send block push notifications to all of the user's connected resources.
+    ///
+    /// Per XEP-0191, when a client blocks a JID, the server MUST send
+    /// a push notification to all of the user's connected resources.
+    async fn send_block_push(&self, blocked_jids: &[String]) {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid,
+            None => return,
+        };
+
+        let bare_jid = sender_jid.to_bare();
+
+        // Get all connected resources for this user
+        let resources = self
+            .connection_registry
+            .get_resources_for_user(&bare_jid);
+
+        if resources.is_empty() {
+            return;
+        }
+
+        debug!(
+            resource_count = resources.len(),
+            blocked_count = blocked_jids.len(),
+            "Sending block push to connected resources"
+        );
+
+        for resource_jid in resources {
+            let push = build_block_push(&resource_jid.to_string(), blocked_jids);
+
+            let stanza = Stanza::Iq(push);
+            let result = self.connection_registry.send_to(&resource_jid, stanza).await;
+
+            match result {
+                SendResult::Sent => {
+                    debug!(to = %resource_jid, "Block push sent");
+                }
+                SendResult::NotConnected => {
+                    debug!(to = %resource_jid, "Resource not connected for block push");
+                }
+                SendResult::ChannelFull | SendResult::ChannelClosed => {
+                    warn!(to = %resource_jid, "Failed to send block push");
+                }
+            }
+        }
+    }
+
+    /// Send unblock push notifications to all of the user's connected resources.
+    ///
+    /// Per XEP-0191, when a client unblocks a JID, the server MUST send
+    /// a push notification to all of the user's connected resources.
+    async fn send_unblock_push(&self, unblocked_jids: &[String]) {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid,
+            None => return,
+        };
+
+        let bare_jid = sender_jid.to_bare();
+
+        // Get all connected resources for this user
+        let resources = self
+            .connection_registry
+            .get_resources_for_user(&bare_jid);
+
+        if resources.is_empty() {
+            return;
+        }
+
+        debug!(
+            resource_count = resources.len(),
+            unblocked_count = unblocked_jids.len(),
+            "Sending unblock push to connected resources"
+        );
+
+        for resource_jid in resources {
+            let push = build_unblock_push(&resource_jid.to_string(), unblocked_jids);
+
+            let stanza = Stanza::Iq(push);
+            let result = self.connection_registry.send_to(&resource_jid, stanza).await;
+
+            match result {
+                SendResult::Sent => {
+                    debug!(to = %resource_jid, "Unblock push sent");
+                }
+                SendResult::NotConnected => {
+                    debug!(to = %resource_jid, "Resource not connected for unblock push");
+                }
+                SendResult::ChannelFull | SendResult::ChannelClosed => {
+                    warn!(to = %resource_jid, "Failed to send unblock push");
+                }
+            }
+        }
+    }
 }
 
 /// Parsed stanza types.

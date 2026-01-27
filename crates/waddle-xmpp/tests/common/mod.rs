@@ -298,6 +298,55 @@ impl AppState for MockAppState {
         // Mock returns empty list - no subscriptions in mock
         async { Ok(vec![]) }
     }
+
+    // =========================================================================
+    // XEP-0191 Blocking Command Methods (Mock implementations)
+    // =========================================================================
+
+    fn get_blocklist(
+        &self,
+        _user_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<Vec<String>, XmppError>> + Send {
+        // Mock returns empty blocklist
+        async { Ok(vec![]) }
+    }
+
+    fn is_blocked(
+        &self,
+        _user_jid: &jid::BareJid,
+        _blocked_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
+        // Mock returns false - no one is blocked in mock
+        async { Ok(false) }
+    }
+
+    fn add_blocks(
+        &self,
+        _user_jid: &jid::BareJid,
+        blocked_jids: &[String],
+    ) -> impl Future<Output = Result<usize, XmppError>> + Send {
+        // Mock returns the count of JIDs (simulating all were added)
+        let count = blocked_jids.len();
+        async move { Ok(count) }
+    }
+
+    fn remove_blocks(
+        &self,
+        _user_jid: &jid::BareJid,
+        blocked_jids: &[String],
+    ) -> impl Future<Output = Result<usize, XmppError>> + Send {
+        // Mock returns the count (simulating all were removed)
+        let count = blocked_jids.len();
+        async move { Ok(count) }
+    }
+
+    fn remove_all_blocks(
+        &self,
+        _user_jid: &jid::BareJid,
+    ) -> impl Future<Output = Result<usize, XmppError>> + Send {
+        // Mock returns 0 - nothing to remove in mock
+        async { Ok(0) }
+    }
 }
 
 /// Generated TLS credentials for testing.

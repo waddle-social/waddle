@@ -785,6 +785,98 @@ impl waddle_xmpp::AppState for XmppAppState {
             XmppError::internal(format!("JID parse error: {:?}", e))
         })
     }
+
+    // =========================================================================
+    // XEP-0191 Blocking Command Methods
+    // =========================================================================
+
+    /// Get all blocked JIDs for a user.
+    async fn get_blocklist(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> Result<Vec<String>, XmppError> {
+        use crate::db::blocking::DatabaseBlockingStorage;
+
+        debug!(jid = %user_jid, "Getting blocklist");
+
+        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+
+        storage.get_blocklist(user_jid).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to get blocklist");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
+
+    /// Check if a JID is blocked by a user.
+    async fn is_blocked(
+        &self,
+        user_jid: &jid::BareJid,
+        blocked_jid: &jid::BareJid,
+    ) -> Result<bool, XmppError> {
+        use crate::db::blocking::DatabaseBlockingStorage;
+
+        debug!(user = %user_jid, blocked = %blocked_jid, "Checking if JID is blocked");
+
+        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+
+        storage.is_blocked(user_jid, blocked_jid).await.map_err(|e| {
+            warn!(user = %user_jid, blocked = %blocked_jid, error = %e, "Failed to check if blocked");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
+
+    /// Add JIDs to a user's blocklist.
+    async fn add_blocks(
+        &self,
+        user_jid: &jid::BareJid,
+        blocked_jids: &[String],
+    ) -> Result<usize, XmppError> {
+        use crate::db::blocking::DatabaseBlockingStorage;
+
+        debug!(jid = %user_jid, count = blocked_jids.len(), "Adding blocks");
+
+        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+
+        storage.add_blocks(user_jid, blocked_jids).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to add blocks");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
+
+    /// Remove JIDs from a user's blocklist.
+    async fn remove_blocks(
+        &self,
+        user_jid: &jid::BareJid,
+        blocked_jids: &[String],
+    ) -> Result<usize, XmppError> {
+        use crate::db::blocking::DatabaseBlockingStorage;
+
+        debug!(jid = %user_jid, count = blocked_jids.len(), "Removing blocks");
+
+        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+
+        storage.remove_blocks(user_jid, blocked_jids).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to remove blocks");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
+
+    /// Remove all JIDs from a user's blocklist.
+    async fn remove_all_blocks(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> Result<usize, XmppError> {
+        use crate::db::blocking::DatabaseBlockingStorage;
+
+        debug!(jid = %user_jid, "Removing all blocks");
+
+        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+
+        storage.remove_all_blocks(user_jid).await.map_err(|e| {
+            warn!(jid = %user_jid, error = %e, "Failed to remove all blocks");
+            XmppError::internal(format!("Database error: {}", e))
+        })
+    }
 }
 
 // =========================================================================
