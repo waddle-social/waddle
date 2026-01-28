@@ -1,0 +1,16 @@
+[package]
+name = "waddle-xmpp-xep-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Waddle Social - Custom XEP for GitHub embeds"
+
+[dependencies]
+minidom = { workspace = true }
+xmpp-parsers = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+minidom = { workspace = true }
