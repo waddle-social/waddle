@@ -313,7 +313,11 @@ pub async fn create_waddle_handler(
     info!("Creating waddle: {}", request.name);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -360,8 +364,13 @@ pub async fn create_waddle_handler(
     }
 
     // Add owner as waddle member with owner role
-    if let Err(err) =
-        add_waddle_member(state.app_state.db_pool.global(), &waddle_id, user_id, "owner").await
+    if let Err(err) = add_waddle_member(
+        state.app_state.db_pool.global(),
+        &waddle_id,
+        user_id,
+        "owner",
+    )
+    .await
     {
         error!("Failed to add owner as member: {}", err);
         // Clean up: delete the waddle
@@ -436,7 +445,11 @@ pub async fn get_waddle_handler(
     debug!("Getting waddle: {}", waddle_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -502,7 +515,11 @@ pub async fn update_waddle_handler(
     info!("Updating waddle: {}", waddle_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -608,7 +625,11 @@ pub async fn delete_waddle_handler(
     info!("Deleting waddle: {}", waddle_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -681,7 +702,11 @@ pub async fn list_waddles_handler(
     debug!("Listing waddles for session: {}", params.session_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -707,11 +732,7 @@ pub async fn list_waddles_handler(
 
     let total = waddles.len();
 
-    (
-        StatusCode::OK,
-        Json(ListWaddlesResponse { waddles, total }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(ListWaddlesResponse { waddles, total })).into_response()
 }
 
 // === Member Management Handlers ===
@@ -728,7 +749,11 @@ pub async fn list_members_handler(
     debug!("Listing members for waddle: {}", waddle_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -781,11 +806,7 @@ pub async fn list_members_handler(
 
     let total = members.len();
 
-    (
-        StatusCode::OK,
-        Json(ListMembersResponse { members, total }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(ListMembersResponse { members, total })).into_response()
 }
 
 /// POST /v1/waddles/:id/members
@@ -801,7 +822,11 @@ pub async fn add_member_handler(
     info!("Adding member {} to waddle {}", request.did, waddle_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -855,26 +880,18 @@ pub async fn add_member_handler(
     }
 
     // Check if user being added exists and get their info
-    let new_member_user_id = match get_or_create_user_by_did(
-        state.app_state.db_pool.global(),
-        &request.did,
-    )
-    .await
-    {
-        Ok(user_id) => user_id,
-        Err(err) => {
-            error!("Failed to get/create user: {}", err);
-            return waddle_error_to_response(WaddleError::Database(err)).into_response();
-        }
-    };
+    let new_member_user_id =
+        match get_or_create_user_by_did(state.app_state.db_pool.global(), &request.did).await {
+            Ok(user_id) => user_id,
+            Err(err) => {
+                error!("Failed to get/create user: {}", err);
+                return waddle_error_to_response(WaddleError::Database(err)).into_response();
+            }
+        };
 
     // Check if member already exists in waddle
-    if let Ok(Some(_)) = get_member_role(
-        state.app_state.db_pool.global(),
-        &waddle_id,
-        &request.did,
-    )
-    .await
+    if let Ok(Some(_)) =
+        get_member_role(state.app_state.db_pool.global(), &waddle_id, &request.did).await
     {
         return waddle_error_to_response(WaddleError::InvalidInput(
             "User is already a member of this waddle".to_string(),
@@ -907,7 +924,8 @@ pub async fn add_member_handler(
     if let Err(err) = state.permission_service.write_tuple(member_tuple).await {
         error!("Failed to write member permission tuple: {}", err);
         // Clean up: remove the member from the database
-        let _ = remove_waddle_member(state.app_state.db_pool.global(), &waddle_id, &request.did).await;
+        let _ =
+            remove_waddle_member(state.app_state.db_pool.global(), &waddle_id, &request.did).await;
         return waddle_error_to_response(WaddleError::Permission(err)).into_response();
     }
 
@@ -949,7 +967,11 @@ pub async fn remove_member_handler(
     info!("Removing member {} from waddle {}", member_did, path.id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -1000,26 +1022,21 @@ pub async fn remove_member_handler(
     }
 
     // Get the member's current role to delete the correct permission tuple
-    let member_role = match get_member_role(
-        state.app_state.db_pool.global(),
-        &path.id,
-        &member_did,
-    )
-    .await
-    {
-        Ok(Some(role)) => role,
-        Ok(None) => {
-            return waddle_error_to_response(WaddleError::NotFound(format!(
-                "Member '{}' not found in waddle",
-                member_did
-            )))
-            .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get member role: {}", err);
-            return waddle_error_to_response(WaddleError::Database(err)).into_response();
-        }
-    };
+    let member_role =
+        match get_member_role(state.app_state.db_pool.global(), &path.id, &member_did).await {
+            Ok(Some(role)) => role,
+            Ok(None) => {
+                return waddle_error_to_response(WaddleError::NotFound(format!(
+                    "Member '{}' not found in waddle",
+                    member_did
+                )))
+                .into_response();
+            }
+            Err(err) => {
+                error!("Failed to get member role: {}", err);
+                return waddle_error_to_response(WaddleError::Database(err)).into_response();
+            }
+        };
 
     // Delete permission tuple for the member
     let member_tuple = Tuple::new(
@@ -1034,7 +1051,9 @@ pub async fn remove_member_handler(
     }
 
     // Remove member from waddle_members table
-    if let Err(err) = remove_waddle_member(state.app_state.db_pool.global(), &path.id, &member_did).await {
+    if let Err(err) =
+        remove_waddle_member(state.app_state.db_pool.global(), &path.id, &member_did).await
+    {
         error!("Failed to remove member: {}", err);
         return waddle_error_to_response(WaddleError::Database(err)).into_response();
     }
@@ -1176,7 +1195,10 @@ async fn add_waddle_member(
 }
 
 /// Get a waddle from the database
-async fn get_waddle_from_db(db: &Database, waddle_id: &str) -> Result<Option<WaddleResponse>, String> {
+async fn get_waddle_from_db(
+    db: &Database,
+    waddle_id: &str,
+) -> Result<Option<WaddleResponse>, String> {
     let query = r#"
         SELECT w.id, w.name, w.description, u.did as owner_did, w.icon_url, w.is_public, w.created_at, w.updated_at
         FROM waddles w
@@ -1211,9 +1233,7 @@ async fn get_waddle_from_db(db: &Database, waddle_id: &str) -> Result<Option<Wad
 
     match row {
         Some(row) => {
-            let id: String = row
-                .get(0)
-                .map_err(|e| format!("Failed to get id: {}", e))?;
+            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
             let name: String = row
                 .get(1)
                 .map_err(|e| format!("Failed to get name: {}", e))?;
@@ -1328,10 +1348,7 @@ async fn update_waddle_in_db(
 
     params.push(waddle_id.into());
 
-    let query = format!(
-        "UPDATE waddles SET {} WHERE id = ?",
-        updates.join(", ")
-    );
+    let query = format!("UPDATE waddles SET {} WHERE id = ?", updates.join(", "));
 
     if let Some(persistent) = db.persistent_connection() {
         let conn = persistent.lock().await;
@@ -1404,7 +1421,10 @@ async fn list_user_waddles(
     if let Some(persistent) = db.persistent_connection() {
         let conn = persistent.lock().await;
         let mut rows = conn
-            .query(query, libsql::params![user_did, limit as i64, offset as i64])
+            .query(
+                query,
+                libsql::params![user_did, limit as i64, offset as i64],
+            )
             .await
             .map_err(|e| format!("Failed to query waddles: {}", e))?;
 
@@ -1422,7 +1442,10 @@ async fn list_user_waddles(
             .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
         let mut rows = conn
-            .query(query, libsql::params![user_did, limit as i64, offset as i64])
+            .query(
+                query,
+                libsql::params![user_did, limit as i64, offset as i64],
+            )
             .await
             .map_err(|e| format!("Failed to query waddles: {}", e))?;
 
@@ -1441,9 +1464,7 @@ async fn list_user_waddles(
 
 /// Parse a waddle row from the list query
 fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
-    let id: String = row
-        .get(0)
-        .map_err(|e| format!("Failed to get id: {}", e))?;
+    let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
     let name: String = row
         .get(1)
         .map_err(|e| format!("Failed to get name: {}", e))?;
@@ -1504,7 +1525,10 @@ async fn list_waddle_members(
     if let Some(persistent) = db.persistent_connection() {
         let conn = persistent.lock().await;
         let mut rows = conn
-            .query(query, libsql::params![waddle_id, limit as i64, offset as i64])
+            .query(
+                query,
+                libsql::params![waddle_id, limit as i64, offset as i64],
+            )
             .await
             .map_err(|e| format!("Failed to query members: {}", e))?;
 
@@ -1522,7 +1546,10 @@ async fn list_waddle_members(
             .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
         let mut rows = conn
-            .query(query, libsql::params![waddle_id, limit as i64, offset as i64])
+            .query(
+                query,
+                libsql::params![waddle_id, limit as i64, offset as i64],
+            )
             .await
             .map_err(|e| format!("Failed to query members: {}", e))?;
 
@@ -1810,7 +1837,16 @@ async fn create_default_channel(waddle_db: &Database) -> Result<(), String> {
         let conn = persistent.lock().await;
         conn.execute(
             query,
-            libsql::params![channel_id, "general", "General discussion", "text", 0, 1, now.clone(), now],
+            libsql::params![
+                channel_id,
+                "general",
+                "General discussion",
+                "text",
+                0,
+                1,
+                now.clone(),
+                now
+            ],
         )
         .await
         .map_err(|e| format!("Failed to create default channel: {}", e))?;
@@ -1821,7 +1857,16 @@ async fn create_default_channel(waddle_db: &Database) -> Result<(), String> {
 
         conn.execute(
             query,
-            libsql::params![channel_id, "general", "General discussion", "text", 0, 1, now.clone(), now],
+            libsql::params![
+                channel_id,
+                "general",
+                "General discussion",
+                "text",
+                0,
+                1,
+                now.clone(),
+                now
+            ],
         )
         .await
         .map_err(|e| format!("Failed to create default channel: {}", e))?;
@@ -1850,7 +1895,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(db_pool, crate::config::ServerConfig::test_homeserver()));
+        let app_state = Arc::new(AppState::new(
+            db_pool,
+            crate::config::ServerConfig::test_homeserver(),
+        ));
         Arc::new(WaddleState::new(
             app_state,
             Some(b"test-encryption-key-32-bytes!!!"),
@@ -1860,7 +1908,10 @@ mod tests {
     async fn create_test_session(state: &WaddleState) -> Session {
         let session = Session {
             id: format!("test-session-{}", Uuid::new_v4()),
-            did: format!("did:plc:test{}", Uuid::new_v4().to_string().replace("-", "")[..16].to_string()),
+            did: format!(
+                "did:plc:test{}",
+                Uuid::new_v4().to_string().replace("-", "")[..16].to_string()
+            ),
             handle: "test.bsky.social".to_string(),
             access_token: "test-token".to_string(),
             refresh_token: None,
@@ -1987,7 +2038,12 @@ mod tests {
         let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         eprintln!("Create response status: {:?}", create_status);
         eprintln!("Create response body: {:?}", create_json);
-        assert_eq!(create_status, StatusCode::CREATED, "Create waddle failed: {:?}", create_json);
+        assert_eq!(
+            create_status,
+            StatusCode::CREATED,
+            "Create waddle failed: {:?}",
+            create_json
+        );
         let waddle_id = create_json["id"].as_str().unwrap();
 
         // Get the waddle
@@ -2024,10 +2080,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!(
-                        "/v1/waddles/nonexistent?session_id={}",
-                        session.id
-                    ))
+                    .uri(format!("/v1/waddles/nonexistent?session_id={}", session.id))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2076,7 +2129,9 @@ mod tests {
                         waddle_id, session.id
                     ))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "Updated Waddle", "description": "New description"}"#))
+                    .body(Body::from(
+                        r#"{"name": "Updated Waddle", "description": "New description"}"#,
+                    ))
                     .unwrap(),
             )
             .await

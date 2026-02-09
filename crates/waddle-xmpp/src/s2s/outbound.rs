@@ -214,7 +214,9 @@ impl S2sOutboundConnection {
 
         // Resolve target to socket addresses
         let resolver = SrvResolver::new().await?;
-        let addrs = resolver.resolve_host_to_addrs(target_host, target_port).await?;
+        let addrs = resolver
+            .resolve_host_to_addrs(target_host, target_port)
+            .await?;
 
         // Try to connect to each address
         let tcp_stream = conn.tcp_connect(&addrs).await?;
@@ -230,7 +232,8 @@ impl S2sOutboundConnection {
         conn.expect_starttls_feature().await?;
 
         // Perform STARTTLS upgrade
-        conn.upgrade_to_tls(&config.tls_connector, target_host).await?;
+        conn.upgrade_to_tls(&config.tls_connector, target_host)
+            .await?;
         conn.state = OutboundState::TlsConnected;
 
         // Perform stream negotiation (post-TLS)
@@ -310,13 +313,15 @@ impl S2sOutboundConnection {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            OutboundConnectionError::Config("No targets available".to_string())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| OutboundConnectionError::Config("No targets available".to_string())))
     }
 
     /// Attempt TCP connection to the first available address.
-    async fn tcp_connect(&self, addrs: &[SocketAddr]) -> Result<TcpStream, OutboundConnectionError> {
+    async fn tcp_connect(
+        &self,
+        addrs: &[SocketAddr],
+    ) -> Result<TcpStream, OutboundConnectionError> {
         let mut last_error = None;
 
         for addr in addrs {
@@ -408,9 +413,11 @@ impl S2sOutboundConnection {
             self.parser.feed(&buf[..n]);
 
             if self.parser.has_complete_stanza() {
-                if let Some(stanza) = self.parser.next_stanza().map_err(|e| {
-                    OutboundConnectionError::StreamNegotiation(e.to_string())
-                })? {
+                if let Some(stanza) = self
+                    .parser
+                    .next_stanza()
+                    .map_err(|e| OutboundConnectionError::StreamNegotiation(e.to_string()))?
+                {
                     match stanza {
                         ParsedStanza::Features { starttls, .. } => {
                             if starttls {
@@ -456,9 +463,11 @@ impl S2sOutboundConnection {
             self.parser.feed(&buf[..n]);
 
             if self.parser.has_complete_stanza() {
-                if let Some(stanza) = self.parser.next_stanza().map_err(|e| {
-                    OutboundConnectionError::TlsHandshake(e.to_string())
-                })? {
+                if let Some(stanza) = self
+                    .parser
+                    .next_stanza()
+                    .map_err(|e| OutboundConnectionError::TlsHandshake(e.to_string()))?
+                {
                     match stanza {
                         ParsedStanza::TlsProceed => {
                             debug!("Received TLS proceed");
@@ -491,12 +500,16 @@ impl S2sOutboundConnection {
 
         // Perform TLS handshake
         let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
-            .map_err(|e| OutboundConnectionError::TlsHandshake(format!("Invalid server name: {}", e)))?;
+            .map_err(|e| {
+                OutboundConnectionError::TlsHandshake(format!("Invalid server name: {}", e))
+            })?;
 
         let tls_stream = tls_connector
             .connect(server_name, tcp_stream)
             .await
-            .map_err(|e| OutboundConnectionError::TlsHandshake(format!("TLS handshake failed: {}", e)))?;
+            .map_err(|e| {
+                OutboundConnectionError::TlsHandshake(format!("TLS handshake failed: {}", e))
+            })?;
 
         self.stream = Some(OutboundStream::Tls(Box::new(tls_stream)));
         self.parser.reset();
@@ -519,9 +532,11 @@ impl S2sOutboundConnection {
             self.parser.feed(&buf[..n]);
 
             if self.parser.has_complete_stanza() {
-                if let Some(stanza) = self.parser.next_stanza().map_err(|e| {
-                    OutboundConnectionError::StreamNegotiation(e.to_string())
-                })? {
+                if let Some(stanza) = self
+                    .parser
+                    .next_stanza()
+                    .map_err(|e| OutboundConnectionError::StreamNegotiation(e.to_string()))?
+                {
                     match stanza {
                         ParsedStanza::Features { dialback, .. } => {
                             if dialback {
@@ -530,7 +545,9 @@ impl S2sOutboundConnection {
                             } else {
                                 // Some servers might not advertise dialback but still support it
                                 // We'll try anyway
-                                warn!("Remote server does not advertise dialback, attempting anyway");
+                                warn!(
+                                    "Remote server does not advertise dialback, attempting anyway"
+                                );
                                 return Ok(());
                             }
                         }
@@ -552,11 +569,9 @@ impl S2sOutboundConnection {
             OutboundConnectionError::DialbackFailed("No stream ID available".to_string())
         })?;
 
-        let key = self.dialback_key.generate(
-            stream_id,
-            &self.remote_domain,
-            &self.local_domain,
-        );
+        let key = self
+            .dialback_key
+            .generate(stream_id, &self.remote_domain, &self.local_domain);
 
         // Send db:result with key
         let db_result = build_db_result(&self.local_domain, &self.remote_domain, &key);
@@ -581,9 +596,11 @@ impl S2sOutboundConnection {
             self.parser.feed(&buf[..n]);
 
             while self.parser.has_complete_stanza() {
-                if let Some(stanza) = self.parser.next_stanza().map_err(|e| {
-                    OutboundConnectionError::DialbackFailed(e.to_string())
-                })? {
+                if let Some(stanza) = self
+                    .parser
+                    .next_stanza()
+                    .map_err(|e| OutboundConnectionError::DialbackFailed(e.to_string()))?
+                {
                     match stanza {
                         ParsedStanza::DialbackResult {
                             from,
@@ -616,9 +633,10 @@ impl S2sOutboundConnection {
                                     ));
                                 }
                                 other => {
-                                    return Err(OutboundConnectionError::DialbackFailed(
-                                        format!("Unexpected dialback result type: {:?}", other),
-                                    ));
+                                    return Err(OutboundConnectionError::DialbackFailed(format!(
+                                        "Unexpected dialback result type: {:?}",
+                                        other
+                                    )));
                                 }
                             }
                         }

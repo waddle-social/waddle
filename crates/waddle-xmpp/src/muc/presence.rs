@@ -6,7 +6,9 @@
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
 use tracing::debug;
-use xmpp_parsers::muc::user::{Affiliation as MucAffiliation, Item, MucUser, Role as MucRole, Status};
+use xmpp_parsers::muc::user::{
+    Affiliation as MucAffiliation, Item, MucUser, Role as MucRole, Status,
+};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 use crate::types::{Affiliation, Role};
@@ -48,13 +50,11 @@ impl HistoryRequest {
 
 /// Parse a <history/> element from a MUC join presence.
 fn parse_history_element(elem: &Element) -> HistoryRequest {
-    let maxstanzas = elem.attr("maxstanzas")
-        .and_then(|s| s.parse().ok());
-    let maxchars = elem.attr("maxchars")
-        .and_then(|s| s.parse().ok());
-    let seconds = elem.attr("seconds")
-        .and_then(|s| s.parse().ok());
-    let since = elem.attr("since")
+    let maxstanzas = elem.attr("maxstanzas").and_then(|s| s.parse().ok());
+    let maxchars = elem.attr("maxchars").and_then(|s| s.parse().ok());
+    let seconds = elem.attr("seconds").and_then(|s| s.parse().ok());
+    let since = elem
+        .attr("since")
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
@@ -145,11 +145,7 @@ pub fn parse_muc_presence(
     match presence.type_ {
         PresenceType::Unavailable => {
             // This is a leave request
-            let status = presence
-                .statuses
-                .values()
-                .next()
-                .cloned();
+            let status = presence.statuses.values().next().cloned();
 
             debug!(
                 room = %room_jid,
@@ -173,19 +169,21 @@ pub fn parse_muc_presence(
             });
 
             // Extract password and history from MUC element
-            let (password, history) = presence.payloads.iter().find_map(|payload| {
-                if payload.is("x", NS_MUC) {
-                    let password = payload
-                        .get_child("password", NS_MUC)
-                        .map(|p| p.text());
-                    let history = payload
-                        .get_child("history", NS_MUC)
-                        .map(parse_history_element);
-                    Some((password, history))
-                } else {
-                    None
-                }
-            }).unwrap_or((None, None));
+            let (password, history) = presence
+                .payloads
+                .iter()
+                .find_map(|payload| {
+                    if payload.is("x", NS_MUC) {
+                        let password = payload.get_child("password", NS_MUC).map(|p| p.text());
+                        let history = payload
+                            .get_child("history", NS_MUC)
+                            .map(parse_history_element);
+                        Some((password, history))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((None, None));
 
             if has_muc_element {
                 debug!(
@@ -251,11 +249,11 @@ impl OutboundMucPresence {
 /// Creates a presence stanza that includes the MUC user extension
 /// with the occupant's role, affiliation, and appropriate status codes.
 pub fn build_occupant_presence(
-    from_room_jid: &FullJid,    // room@domain/nick of the user being announced
-    to_jid: &FullJid,           // recipient's real JID
+    from_room_jid: &FullJid, // room@domain/nick of the user being announced
+    to_jid: &FullJid,        // recipient's real JID
     affiliation: Affiliation,
     role: Role,
-    is_self: bool,              // true if this is the joining user's own presence
+    is_self: bool, // true if this is the joining user's own presence
     occupant_real_jid: Option<&FullJid>, // real JID to include (semi-anonymous rooms)
 ) -> Presence {
     let mut presence = Presence::new(PresenceType::None);
@@ -295,8 +293,8 @@ pub fn build_occupant_presence(
 
 /// Build a MUC unavailable presence for when a user leaves.
 pub fn build_leave_presence(
-    from_room_jid: &FullJid,    // room@domain/nick of the user leaving
-    to_jid: &FullJid,           // recipient's real JID
+    from_room_jid: &FullJid, // room@domain/nick of the user leaving
+    to_jid: &FullJid,        // recipient's real JID
     affiliation: Affiliation,
     is_self: bool,
 ) -> Presence {
@@ -453,7 +451,7 @@ pub fn build_ban_presence(
 
     let item = Item {
         affiliation: MucAffiliation::Outcast, // Banned = outcast
-        role: MucRole::None, // Banned = role none
+        role: MucRole::None,                  // Banned = role none
         jid: None,
         nick: None,
         actor: actor_elem,
@@ -682,7 +680,7 @@ mod tests {
             &to,
             Affiliation::Member,
             Role::Participant,
-            true,  // is_self
+            true, // is_self
             None,
         );
 
@@ -697,12 +695,7 @@ mod tests {
         let from: FullJid = "room@muc.example.com/leaver".parse().unwrap();
         let to: FullJid = "user@example.com/resource".parse().unwrap();
 
-        let presence = build_leave_presence(
-            &from,
-            &to,
-            Affiliation::Member,
-            true,
-        );
+        let presence = build_leave_presence(&from, &to, Affiliation::Member, true);
 
         assert_eq!(presence.type_, PresenceType::Unavailable);
         assert!(!presence.payloads.is_empty());
@@ -719,9 +712,7 @@ mod tests {
             .attr("maxstanzas", "50")
             .attr("seconds", "3600")
             .build();
-        let muc_element = Element::builder("x", NS_MUC)
-            .append(history)
-            .build();
+        let muc_element = Element::builder("x", NS_MUC).append(history).build();
         presence.payloads.push(muc_element);
 
         let sender = make_sender_jid();
@@ -750,9 +741,7 @@ mod tests {
         let history = Element::builder("history", NS_MUC)
             .attr("maxchars", "0")
             .build();
-        let muc_element = Element::builder("x", NS_MUC)
-            .append(history)
-            .build();
+        let muc_element = Element::builder("x", NS_MUC).append(history).build();
         presence.payloads.push(muc_element);
 
         let sender = make_sender_jid();

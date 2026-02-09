@@ -220,7 +220,7 @@ impl ServerInfo {
             device_flow: config.mode.atproto_enabled(),
             xmpp_oauth: config.mode.atproto_enabled(),
             auth_page: config.mode.atproto_enabled(),
-            websocket: true, // Always available
+            websocket: true,   // Always available
             communities: true, // Always available
         };
 

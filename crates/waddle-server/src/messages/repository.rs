@@ -119,10 +119,9 @@ impl MessageRepository {
 
         let row = if let Some(persistent) = self.db.persistent_connection() {
             let conn = persistent.lock().await;
-            let mut rows = conn
-                .query(query, libsql::params![id])
-                .await
-                .map_err(|e| MessageError::DatabaseError(format!("Failed to query message: {}", e)))?;
+            let mut rows = conn.query(query, libsql::params![id]).await.map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to query message: {}", e))
+            })?;
 
             rows.next().await.map_err(|e| {
                 MessageError::DatabaseError(format!("Failed to read message row: {}", e))
@@ -131,10 +130,9 @@ impl MessageRepository {
             let conn = self.db.connect().map_err(|e| {
                 MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
             })?;
-            let mut rows = conn
-                .query(query, libsql::params![id])
-                .await
-                .map_err(|e| MessageError::DatabaseError(format!("Failed to query message: {}", e)))?;
+            let mut rows = conn.query(query, libsql::params![id]).await.map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to query message: {}", e))
+            })?;
 
             rows.next().await.map_err(|e| {
                 MessageError::DatabaseError(format!("Failed to read message row: {}", e))
@@ -354,16 +352,16 @@ impl MessageRepository {
 
         if let Some(persistent) = self.db.persistent_connection() {
             let conn = persistent.lock().await;
-            conn.execute(&query, params)
-                .await
-                .map_err(|e| MessageError::DatabaseError(format!("Failed to update message: {}", e)))?;
+            conn.execute(&query, params).await.map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to update message: {}", e))
+            })?;
         } else {
             let conn = self.db.connect().map_err(|e| {
                 MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
             })?;
-            conn.execute(&query, params)
-                .await
-                .map_err(|e| MessageError::DatabaseError(format!("Failed to update message: {}", e)))?;
+            conn.execute(&query, params).await.map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to update message: {}", e))
+            })?;
         }
 
         debug!("Updated message: {}", id);
@@ -382,7 +380,9 @@ impl MessageRepository {
             let rows_affected = conn
                 .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
                 .await
-                .map_err(|e| MessageError::DatabaseError(format!("Failed to delete message: {}", e)))?;
+                .map_err(|e| {
+                    MessageError::DatabaseError(format!("Failed to delete message: {}", e))
+                })?;
 
             if rows_affected == 0 {
                 return Err(MessageError::NotFound(id.to_string()));
@@ -394,7 +394,9 @@ impl MessageRepository {
             let rows_affected = conn
                 .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
                 .await
-                .map_err(|e| MessageError::DatabaseError(format!("Failed to delete message: {}", e)))?;
+                .map_err(|e| {
+                    MessageError::DatabaseError(format!("Failed to delete message: {}", e))
+                })?;
 
             if rows_affected == 0 {
                 return Err(MessageError::NotFound(id.to_string()));
@@ -407,17 +409,17 @@ impl MessageRepository {
 
     /// Convert a database row to a Message
     fn row_to_message(&self, row: &libsql::Row) -> Result<Message, MessageError> {
-        let id: String = row.get(0).map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to get message id: {}", e))
-        })?;
+        let id: String = row
+            .get(0)
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to get message id: {}", e)))?;
 
-        let channel_id: String = row.get(1).map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to get channel_id: {}", e))
-        })?;
+        let channel_id: String = row
+            .get(1)
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to get channel_id: {}", e)))?;
 
-        let author_did: String = row.get(2).map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to get author_did: {}", e))
-        })?;
+        let author_did: String = row
+            .get(2)
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to get author_did: {}", e)))?;
 
         let content: Option<String> = row.get(3).ok();
 
@@ -432,20 +434,26 @@ impl MessageRepository {
         let edited_at = edited_at_str
             .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
             .transpose()
-            .map_err(|e| MessageError::DatabaseError(format!("Failed to parse edited_at: {}", e)))?;
+            .map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to parse edited_at: {}", e))
+            })?;
 
-        let created_at_str: String = row.get(8).map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to get created_at: {}", e))
-        })?;
+        let created_at_str: String = row
+            .get(8)
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to get created_at: {}", e)))?;
         let created_at = DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| MessageError::DatabaseError(format!("Failed to parse created_at: {}", e)))?;
+            .map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to parse created_at: {}", e))
+            })?;
 
         let expires_at_str: Option<String> = row.get(9).ok();
         let expires_at = expires_at_str
             .map(|s| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)))
             .transpose()
-            .map_err(|e| MessageError::DatabaseError(format!("Failed to parse expires_at: {}", e)))?;
+            .map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to parse expires_at: {}", e))
+            })?;
 
         Ok(Message {
             id,

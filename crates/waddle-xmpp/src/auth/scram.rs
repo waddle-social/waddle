@@ -175,9 +175,14 @@ impl ScramServer {
     ///
     /// # Returns
     /// * `ServerFirstMessage` containing the message to send and the username for lookup
-    pub fn process_client_first(&mut self, client_first: &str) -> Result<ServerFirstMessage, XmppError> {
+    pub fn process_client_first(
+        &mut self,
+        client_first: &str,
+    ) -> Result<ServerFirstMessage, XmppError> {
         if self.state != ScramState::Initial {
-            return Err(XmppError::auth_failed("Invalid SCRAM state for client-first"));
+            return Err(XmppError::auth_failed(
+                "Invalid SCRAM state for client-first",
+            ));
         }
 
         // Parse client-first-message
@@ -229,7 +234,9 @@ impl ScramServer {
         server_key: &[u8],
     ) -> Result<ServerFinalMessage, XmppError> {
         if self.state != ScramState::WaitingForClientFinal {
-            return Err(XmppError::auth_failed("Invalid SCRAM state for client-final"));
+            return Err(XmppError::auth_failed(
+                "Invalid SCRAM state for client-final",
+            ));
         }
 
         // Parse client-final-message
@@ -244,9 +251,7 @@ impl ScramServer {
         // Compute AuthMessage = client-first-message-bare + "," + server-first-message + "," + client-final-message-without-proof
         let auth_message = format!(
             "{},{},{}",
-            self.client_first_message_bare,
-            self.server_first_message,
-            parsed.without_proof
+            self.client_first_message_bare, self.server_first_message, parsed.without_proof
         );
 
         // Verify client proof
@@ -369,7 +374,9 @@ fn parse_client_first(message: &str) -> Result<ClientFirstMessage, XmppError> {
     // Split by comma, but we need to handle the GS2 header specially
     let parts: Vec<&str> = message.splitn(3, ',').collect();
     if parts.len() < 3 {
-        return Err(XmppError::auth_failed("Invalid client-first-message format"));
+        return Err(XmppError::auth_failed(
+            "Invalid client-first-message format",
+        ));
     }
 
     // Parse GS2 header
@@ -404,8 +411,10 @@ fn parse_client_first(message: &str) -> Result<ClientFirstMessage, XmppError> {
         // Ignore other extensions
     }
 
-    let username = username.ok_or_else(|| XmppError::auth_failed("Missing username in client-first-message"))?;
-    let client_nonce = client_nonce.ok_or_else(|| XmppError::auth_failed("Missing nonce in client-first-message"))?;
+    let username = username
+        .ok_or_else(|| XmppError::auth_failed("Missing username in client-first-message"))?;
+    let client_nonce = client_nonce
+        .ok_or_else(|| XmppError::auth_failed("Missing nonce in client-first-message"))?;
 
     Ok(ClientFirstMessage {
         gs2_cbind_flag,
@@ -441,9 +450,12 @@ fn parse_client_final(message: &str) -> Result<ClientFinalMessage, XmppError> {
         }
     }
 
-    let channel_binding = channel_binding.ok_or_else(|| XmppError::auth_failed("Missing channel binding in client-final-message"))?;
-    let nonce = nonce.ok_or_else(|| XmppError::auth_failed("Missing nonce in client-final-message"))?;
-    let proof = proof.ok_or_else(|| XmppError::auth_failed("Missing proof in client-final-message"))?;
+    let channel_binding = channel_binding
+        .ok_or_else(|| XmppError::auth_failed("Missing channel binding in client-final-message"))?;
+    let nonce =
+        nonce.ok_or_else(|| XmppError::auth_failed("Missing nonce in client-final-message"))?;
+    let proof =
+        proof.ok_or_else(|| XmppError::auth_failed("Missing proof in client-final-message"))?;
 
     Ok(ClientFinalMessage {
         channel_binding,
@@ -466,7 +478,12 @@ fn decode_sasl_name(name: &str) -> Result<String, XmppError> {
             match escape.as_str() {
                 "2C" => result.push(','),
                 "3D" => result.push('='),
-                _ => return Err(XmppError::auth_failed(format!("Invalid SASL name escape: ={}", escape))),
+                _ => {
+                    return Err(XmppError::auth_failed(format!(
+                        "Invalid SASL name escape: ={}",
+                        escape
+                    )))
+                }
             }
         } else {
             result.push(c);
@@ -533,7 +550,9 @@ mod tests {
         // Server processes and generates server-first-message
         let server_first = server.process_client_first(&client_first).unwrap();
         assert_eq!(server_first.username, "testuser");
-        assert!(server_first.message.starts_with(&format!("r={}", client_nonce)));
+        assert!(server_first
+            .message
+            .starts_with(&format!("r={}", client_nonce)));
         assert!(server_first.message.contains(",s="));
         assert!(server_first.message.contains(",i=4096"));
 
@@ -552,9 +571,7 @@ mod tests {
         let client_final_without_proof = format!("c={},r={}", channel_binding, combined_nonce);
         let auth_message = format!(
             "n=testuser,r={},{},{}",
-            client_nonce,
-            server_first.message,
-            client_final_without_proof
+            client_nonce, server_first.message, client_final_without_proof
         );
         let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
 
@@ -605,14 +622,12 @@ mod tests {
     /// Test parsing client-final-message.
     #[test]
     fn test_parse_client_final() {
-        let msg = "c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,p=v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=";
+        let msg =
+            "c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,p=v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=";
         let parsed = parse_client_final(msg).unwrap();
 
         assert_eq!(parsed.channel_binding, "biws");
-        assert_eq!(
-            parsed.nonce,
-            "fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j"
-        );
+        assert_eq!(parsed.nonce, "fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j");
         assert_eq!(parsed.proof, "v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=");
         assert_eq!(
             parsed.without_proof,
@@ -728,12 +743,11 @@ mod tests {
         let wrong_stored_key = sha256(&wrong_client_key);
 
         let channel_binding = BASE64_STANDARD.encode("n,,");
-        let client_final_without_proof = format!("c={},r={}", channel_binding, server.combined_nonce);
+        let client_final_without_proof =
+            format!("c={},r={}", channel_binding, server.combined_nonce);
         let auth_message = format!(
             "n=user,r={},{},{}",
-            client_nonce,
-            server_first.message,
-            client_final_without_proof
+            client_nonce, server_first.message, client_final_without_proof
         );
         let wrong_client_signature = hmac_sha256(&wrong_stored_key, auth_message.as_bytes());
 

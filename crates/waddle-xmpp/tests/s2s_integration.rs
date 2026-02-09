@@ -69,8 +69,14 @@ fn test_dialback_key_uniqueness() {
     let key2 = key_gen.generate(stream_id, "beta.example.org", "gamma.example.com");
     let key3 = key_gen.generate(stream_id, "delta.example.org", "alpha.example.com");
 
-    assert_ne!(key1, key2, "Different originating domain should produce different key");
-    assert_ne!(key1, key3, "Different receiving domain should produce different key");
+    assert_ne!(
+        key1, key2,
+        "Different originating domain should produce different key"
+    );
+    assert_ne!(
+        key1, key3,
+        "Different receiving domain should produce different key"
+    );
 }
 
 /// Test dialback key verification.
@@ -107,7 +113,10 @@ fn test_dialback_key_verification() {
     // Different secret should also fail
     let wrong_key_gen = DialbackKey::new(b"wrong-secret");
     let wrong_key = wrong_key_gen.generate(stream_id, receiving, originating);
-    assert_ne!(key, wrong_key, "Different secret should produce different key");
+    assert_ne!(
+        key, wrong_key,
+        "Different secret should produce different key"
+    );
 }
 
 // =============================================================================
@@ -141,7 +150,10 @@ fn test_dialback_result_values() {
 
     // Test parsing
     assert_eq!(DialbackResult::parse("valid"), Some(DialbackResult::Valid));
-    assert_eq!(DialbackResult::parse("invalid"), Some(DialbackResult::Invalid));
+    assert_eq!(
+        DialbackResult::parse("invalid"),
+        Some(DialbackResult::Invalid)
+    );
     assert_eq!(DialbackResult::parse("unknown"), None);
 }
 
@@ -252,29 +264,68 @@ fn test_pool_metrics() {
     let metrics = S2sPoolMetrics::new();
 
     // Initial state
-    assert_eq!(metrics.active_connections.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(metrics.connections_created.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        metrics
+            .active_connections
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        metrics
+            .connections_created
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 
     // Record connection created
     metrics.record_connection_created();
-    assert_eq!(metrics.connections_created.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(metrics.active_connections.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics
+            .connections_created
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics
+            .active_connections
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 
     // Record connection closed
     metrics.record_connection_closed();
-    assert_eq!(metrics.connections_created.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(metrics.active_connections.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        metrics
+            .connections_created
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        metrics
+            .active_connections
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 /// Test pooled connection state values.
 #[test]
 fn test_pooled_connection_state() {
-    assert_eq!(PooledConnectionState::Connecting, PooledConnectionState::Connecting);
+    assert_eq!(
+        PooledConnectionState::Connecting,
+        PooledConnectionState::Connecting
+    );
     assert_eq!(PooledConnectionState::Ready, PooledConnectionState::Ready);
-    assert_eq!(PooledConnectionState::Unhealthy, PooledConnectionState::Unhealthy);
+    assert_eq!(
+        PooledConnectionState::Unhealthy,
+        PooledConnectionState::Unhealthy
+    );
     assert_eq!(PooledConnectionState::Closed, PooledConnectionState::Closed);
 
-    assert_ne!(PooledConnectionState::Ready, PooledConnectionState::Unhealthy);
+    assert_ne!(
+        PooledConnectionState::Ready,
+        PooledConnectionState::Unhealthy
+    );
 }
 
 // =============================================================================
@@ -298,13 +349,19 @@ fn test_build_db_result() {
 #[test]
 fn test_build_db_result_response() {
     // Valid result
-    let valid_xml = build_db_result_response("receiving.com", "originating.com", DialbackResult::Valid);
+    let valid_xml =
+        build_db_result_response("receiving.com", "originating.com", DialbackResult::Valid);
     assert!(valid_xml.contains("type='valid'") || valid_xml.contains("type=\"valid\""));
-    assert!(valid_xml.contains("from='receiving.com'") || valid_xml.contains("from=\"receiving.com\""));
-    assert!(valid_xml.contains("to='originating.com'") || valid_xml.contains("to=\"originating.com\""));
+    assert!(
+        valid_xml.contains("from='receiving.com'") || valid_xml.contains("from=\"receiving.com\"")
+    );
+    assert!(
+        valid_xml.contains("to='originating.com'") || valid_xml.contains("to=\"originating.com\"")
+    );
 
     // Invalid result
-    let invalid_xml = build_db_result_response("receiving.com", "originating.com", DialbackResult::Invalid);
+    let invalid_xml =
+        build_db_result_response("receiving.com", "originating.com", DialbackResult::Invalid);
     assert!(invalid_xml.contains("type='invalid'") || invalid_xml.contains("type=\"invalid\""));
 }
 
@@ -323,7 +380,12 @@ fn test_build_db_verify() {
 /// Test dialback verify response XML generation.
 #[test]
 fn test_build_db_verify_response() {
-    let valid_xml = build_db_verify_response("originating.com", "receiving.com", "stream-123", DialbackResult::Valid);
+    let valid_xml = build_db_verify_response(
+        "originating.com",
+        "receiving.com",
+        "stream-123",
+        DialbackResult::Valid,
+    );
     assert!(valid_xml.contains("<db:verify"));
     assert!(valid_xml.contains("type='valid'") || valid_xml.contains("type=\"valid\""));
     assert!(valid_xml.contains("id='stream-123'") || valid_xml.contains("id=\"stream-123\""));

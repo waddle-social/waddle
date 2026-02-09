@@ -64,7 +64,9 @@ pub fn did_to_jid_localpart(did: &str) -> Result<String, AuthError> {
     if let Some(identifier) = did.strip_prefix("did:plc:") {
         // did:plc:identifier → identifier
         if identifier.is_empty() {
-            return Err(AuthError::InvalidDid("Empty did:plc identifier".to_string()));
+            return Err(AuthError::InvalidDid(
+                "Empty did:plc identifier".to_string(),
+            ));
         }
         // Validate identifier (should be alphanumeric)
         if !identifier.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -282,7 +284,10 @@ mod tests {
 
     #[test]
     fn test_invalid_did_unsupported_method() {
-        let result = did_to_jid("did:key:z6Mkfriq1MqLBoPWecGoDLjguo1sB9brj6wT3qZ5BxkKpuP6", "waddle.social");
+        let result = did_to_jid(
+            "did:key:z6Mkfriq1MqLBoPWecGoDLjguo1sB9brj6wT3qZ5BxkKpuP6",
+            "waddle.social",
+        );
         assert!(result.is_err());
     }
 
@@ -295,14 +300,20 @@ mod tests {
     #[test]
     fn test_extract_jid_localpart() {
         assert_eq!(extract_jid_localpart("alice@example.com"), Some("alice"));
-        assert_eq!(extract_jid_localpart("alice@example.com/mobile"), Some("alice"));
+        assert_eq!(
+            extract_jid_localpart("alice@example.com/mobile"),
+            Some("alice")
+        );
         assert_eq!(extract_jid_localpart("alice"), Some("alice"));
     }
 
     #[test]
     fn test_extract_jid_domain() {
         assert_eq!(extract_jid_domain("alice@example.com"), Some("example.com"));
-        assert_eq!(extract_jid_domain("alice@example.com/mobile"), Some("example.com"));
+        assert_eq!(
+            extract_jid_domain("alice@example.com/mobile"),
+            Some("example.com")
+        );
         assert_eq!(extract_jid_domain("alice"), None);
     }
 }

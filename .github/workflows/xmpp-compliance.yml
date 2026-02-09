@@ -54,81 +54,35 @@ jobs:
   xmpp-interop:
     name: XMPP Interop Tests
     runs-on: ubuntu-latest
-    needs: build
-    services:
-      # Jaeger for trace collection during tests
-      jaeger:
-        image: jaegertracing/all-in-one:1.54
-        ports:
-          - 16686:16686
-          - 4317:4317
-        env:
-          COLLECTOR_OTLP_ENABLED: true
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download server binary
-        uses: actions/download-artifact@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          name: waddle-server
-          path: ./bin
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-xmpp-interop-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Make binary executable
-        run: chmod +x ./bin/waddle-server
-
-      - name: Generate test certificates
-        run: |
-          mkdir -p certs
-          openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt \
-            -days 365 -nodes -subj "/CN=localhost"
-
-      - name: Start Waddle server
-        run: |
-          ./bin/waddle-server &
-          echo "Waiting for server to start..."
-          sleep 5
-          # Verify server is accepting TCP connections on XMPP port
-          for i in {1..10}; do
-            if nc -z localhost 5222; then
-              echo "XMPP server is ready on port 5222"
-              break
-            fi
-            echo "Waiting for XMPP server... attempt $i"
-            sleep 2
-          done
+      - name: Run Rust Compliance Harness
+        run: cargo test --package waddle-xmpp --test xep0479_compliance -- --ignored --nocapture
         env:
-          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
-          OTEL_SERVICE_NAME: waddle-server-ci
-          RUST_LOG: debug
-          WADDLE_DOMAIN: localhost
-          WADDLE_TLS_CERT: ./certs/server.crt
-          WADDLE_TLS_KEY: ./certs/server.key
-          WADDLE_ADMIN_JID: admin@localhost
-          WADDLE_ADMIN_PASSWORD: interop-test-password
-
-      - name: Check server is running
-        run: |
-          curl -f http://localhost:3000/health || echo "Health endpoint not yet implemented"
-          # Verify XMPP port is listening
-          nc -z localhost 5222 && echo "XMPP port 5222 is open" || echo "Warning: XMPP port 5222 not open"
-
-      # XMPP Interop Testing Suite
-      # See: https://xmpp-interop-testing.github.io/
-      # Using the official GitHub Action for cleaner integration
-      - name: Run XMPP Interop Tests
-        uses: XMPP-Interop-Testing/xmpp-interop-tests-action@v1.7.2
-        with:
-          domain: 'localhost'
-          host: '127.0.0.1'
-          timeout: 10000
-          adminAccountUsername: 'admin'
-          adminAccountPassword: 'interop-test-password'
-          # Disable S2S tests since we don't have federation setup in CI
-          # Disable PubSub tests until we implement XEP-0060
-          disabledSpecifications: 'XEP-0220,XEP-0060,XEP-0163'
-          logDir: './xmpp-interop-logs'
-        continue-on-error: true  # Tests may fail initially - that's expected
+          WADDLE_COMPLIANCE_PROFILE: best_effort_full
+          WADDLE_COMPLIANCE_DOMAIN: localhost
+          WADDLE_COMPLIANCE_HOST: host.docker.internal
+          WADDLE_COMPLIANCE_TIMEOUT_MS: 10000
+          WADDLE_COMPLIANCE_ADMIN_USERNAME: admin
+          WADDLE_COMPLIANCE_ADMIN_PASSWORD: interop-test-password
+          WADDLE_COMPLIANCE_ARTIFACT_DIR: ./xmpp-interop-logs
+        continue-on-error: true
 
       - name: Upload XMPP Interop Test Results
         uses: actions/upload-artifact@v4
@@ -137,15 +91,6 @@ jobs:
           name: xmpp-interop-test-results
           path: ./xmpp-interop-logs/
           retention-days: 7
-
-      - name: Stop server
-        if: always()
-        run: pkill waddle-server || true
-
-      - name: Collect traces
-        if: always()
-        run: |
-          echo "Traces available at http://localhost:16686 during job execution"
 
   unit-tests:
     name: Unit Tests

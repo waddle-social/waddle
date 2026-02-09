@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub use query::{
-    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
-    MAM_NS, RSM_NS, STANZA_ID_NS,
+    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query, MAM_NS,
+    RSM_NS, STANZA_ID_NS,
 };
 pub use storage::{LibSqlMamStorage, MamStorage, MamStorageError};
 

@@ -17,36 +17,32 @@ pub mod owner;
 pub mod presence;
 pub mod room_registry;
 
+pub use admin::{
+    build_admin_result, build_admin_set_result, build_role_result, is_affiliation_change_query,
+    is_muc_admin_get, is_muc_admin_iq, is_muc_admin_set, is_muc_owner_get, is_muc_owner_set,
+    is_role_change_query, parse_admin_query, AdminItem, AdminQuery, AffiliationChangeResult,
+    KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
+};
+pub use federation::{
+    build_s2s_leave_presence, build_s2s_muc_message, build_s2s_occupant_presence, FederatedMessage,
+    FederatedMessageSet, FederatedPresence, FederatedPresenceSet, MessageDeliveryTarget,
+    PresenceDeliveryTarget,
+};
 pub use messages::{
     create_broadcast_message, create_subject_message, is_muc_groupchat, looks_like_muc_jid,
     MessageRouteResult, MucMessage, OutboundMucMessage,
 };
-pub use federation::{
-    build_s2s_leave_presence, build_s2s_muc_message, build_s2s_occupant_presence,
-    FederatedMessage, FederatedMessageSet, FederatedPresence, FederatedPresenceSet,
-    MessageDeliveryTarget, PresenceDeliveryTarget,
+pub use owner::{
+    apply_config_form, build_config_form, build_config_result, build_destroy_notification,
+    build_owner_set_result, parse_owner_query, ConfigFormData, DestroyRequest, OwnerAction,
+    OwnerQuery, DATA_FORMS_NS, MUC_ROOMCONFIG_NS,
 };
 pub use presence::{
-    build_leave_presence, build_occupant_presence, parse_muc_presence, HistoryRequest,
-    MucJoinRequest, MucLeaveRequest, MucPresenceAction, OutboundMucPresence,
-    build_kick_presence, build_ban_presence, build_affiliation_change_presence,
-    build_role_change_presence,
+    build_affiliation_change_presence, build_ban_presence, build_kick_presence,
+    build_leave_presence, build_occupant_presence, build_role_change_presence, parse_muc_presence,
+    HistoryRequest, MucJoinRequest, MucLeaveRequest, MucPresenceAction, OutboundMucPresence,
 };
 pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
-pub use admin::{
-    is_muc_admin_get, is_muc_admin_iq, is_muc_admin_set, is_muc_owner_get, is_muc_owner_set,
-    parse_admin_query, build_admin_result, build_admin_set_result, build_role_result,
-    is_role_change_query, is_affiliation_change_query,
-    AdminItem, AdminQuery, AffiliationChangeResult, RoleChangeResult,
-    MucStatusCode, KickBanInfo,
-    NS_MUC_ADMIN, NS_MUC_OWNER,
-};
-pub use owner::{
-    parse_owner_query, build_config_form, build_config_result, build_owner_set_result,
-    build_destroy_notification, apply_config_form,
-    OwnerQuery, OwnerAction, ConfigFormData, DestroyRequest,
-    DATA_FORMS_NS, MUC_ROOMCONFIG_NS,
-};
 
 use std::collections::HashMap;
 
@@ -57,7 +53,9 @@ use xmpp_parsers::message::{Message, MessageType};
 
 use crate::types::{Affiliation, Role};
 use crate::XmppError;
-use affiliation::{AffiliationChange, AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy};
+use affiliation::{
+    AffiliationChange, AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy,
+};
 
 /// Check if a JID is from a remote server.
 ///
@@ -452,8 +450,7 @@ impl MucRoom {
 
     /// Find the occupant's nick by their real JID.
     pub fn find_nick_by_real_jid(&self, jid: &FullJid) -> Option<&str> {
-        self.find_occupant_by_real_jid(jid)
-            .map(|o| o.nick.as_str())
+        self.find_occupant_by_real_jid(jid).map(|o| o.nick.as_str())
     }
 
     // === Remote Occupant Management (S2S Federation) ===
@@ -466,10 +463,7 @@ impl MucRoom {
     /// This is useful for routing presence updates and messages to remote
     /// servers during federation.
     pub fn get_remote_occupants(&self) -> Vec<&Occupant> {
-        self.occupants
-            .values()
-            .filter(|o| o.is_remote)
-            .collect()
+        self.occupants.values().filter(|o| o.is_remote).collect()
     }
 
     /// Get all occupants grouped by their home server domain.
@@ -609,7 +603,8 @@ impl MucRoom {
 
         // Add subject element (empty subject clears the topic)
         let subject_text = self.config.subject.clone().unwrap_or_default();
-        msg.subjects.insert(String::new(), xmpp_parsers::message::Subject(subject_text));
+        msg.subjects
+            .insert(String::new(), xmpp_parsers::message::Subject(subject_text));
 
         Ok(msg)
     }

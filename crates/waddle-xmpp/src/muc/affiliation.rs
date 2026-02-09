@@ -610,7 +610,10 @@ where
                 let resource = format!("waddle:{}", waddle_id);
                 let subject = format!("user:{}", user_did);
 
-                match app_state.check_permission(&resource, relation, &subject).await {
+                match app_state
+                    .check_permission(&resource, relation, &subject)
+                    .await
+                {
                     Ok(true) => {
                         debug!(
                             relation = %relation,
@@ -632,7 +635,10 @@ where
                 let resource = format!("channel:{}", channel_id);
                 let subject = format!("user:{}", user_did);
 
-                match app_state.check_permission(&resource, relation, &subject).await {
+                match app_state
+                    .check_permission(&resource, relation, &subject)
+                    .await
+                {
                     Ok(true) => {
                         let affiliation = mapper.map_relation(relation);
                         debug!(
@@ -675,7 +681,7 @@ where
                 Affiliation::Admin => vec!["admin", "moderator", "manager"],
                 Affiliation::Member => vec!["member", "writer", "viewer"],
                 Affiliation::None => return Ok(Vec::new()), // No-affiliation users aren't stored
-                Affiliation::Outcast => vec!["banned"], // Banned users if we track them
+                Affiliation::Outcast => vec!["banned"],     // Banned users if we track them
             };
 
             let mut entries = Vec::new();
@@ -689,7 +695,9 @@ where
                             // Parse the subject (expected format: "user:did:plc:...")
                             if let Some(did) = subject_str.strip_prefix("user:") {
                                 // Convert DID to JID
-                                if let Ok(jid) = format!("{}@{}", did.replace(':', "_"), domain).parse() {
+                                if let Ok(jid) =
+                                    format!("{}@{}", did.replace(':', "_"), domain).parse()
+                                {
                                     let aff = mapper.map_relation(relation);
                                     if aff == affiliation {
                                         entries.push(AffiliationEntry::new(jid, affiliation));
@@ -711,7 +719,9 @@ where
                     Ok(subjects) => {
                         for subject_str in subjects {
                             if let Some(did) = subject_str.strip_prefix("user:") {
-                                if let Ok(jid) = format!("{}@{}", did.replace(':', "_"), domain).parse::<BareJid>() {
+                                if let Ok(jid) = format!("{}@{}", did.replace(':', "_"), domain)
+                                    .parse::<BareJid>()
+                                {
                                     // Only add if not already present (channel-level takes precedence)
                                     if !entries.iter().any(|e| e.jid == jid) {
                                         let aff = mapper.map_relation(relation);
@@ -836,7 +846,10 @@ impl AffiliationList {
 
     /// Get the affiliation for a JID.
     pub fn get(&self, jid: &BareJid) -> Affiliation {
-        self.affiliations.get(jid).copied().unwrap_or(Affiliation::None)
+        self.affiliations
+            .get(jid)
+            .copied()
+            .unwrap_or(Affiliation::None)
     }
 
     /// Set the affiliation for a JID.
@@ -920,8 +933,7 @@ mod tests {
 
     #[test]
     fn test_permission_mapper_custom_mapping() {
-        let mapper =
-            PermissionMapper::new().with_mapping("super_admin", Affiliation::Owner);
+        let mapper = PermissionMapper::new().with_mapping("super_admin", Affiliation::Owner);
 
         assert_eq!(mapper.map_relation("super_admin"), Affiliation::Owner);
         assert_eq!(mapper.map_relation("admin"), Affiliation::Admin);
@@ -1161,18 +1173,39 @@ mod tests {
 
         // Check affiliation resolution priority:
         // 1. JID-specific override wins
-        assert_eq!(config.get_affiliation_for_jid(&admin_jid), Affiliation::Owner);
+        assert_eq!(
+            config.get_affiliation_for_jid(&admin_jid),
+            Affiliation::Owner
+        );
         // 2. Domain-specific override
-        assert_eq!(config.get_affiliation_for_jid(&user_jid), Affiliation::Admin);
+        assert_eq!(
+            config.get_affiliation_for_jid(&user_jid),
+            Affiliation::Admin
+        );
         // 3. Default affiliation
-        assert_eq!(config.get_affiliation_for_jid(&normal_jid), Affiliation::Member);
+        assert_eq!(
+            config.get_affiliation_for_jid(&normal_jid),
+            Affiliation::Member
+        );
 
         // Remove overrides
-        assert_eq!(config.remove_jid_affiliation(&admin_jid), Some(Affiliation::Owner));
-        assert_eq!(config.get_affiliation_for_jid(&admin_jid), Affiliation::Admin);
+        assert_eq!(
+            config.remove_jid_affiliation(&admin_jid),
+            Some(Affiliation::Owner)
+        );
+        assert_eq!(
+            config.get_affiliation_for_jid(&admin_jid),
+            Affiliation::Admin
+        );
 
-        assert_eq!(config.remove_domain_affiliation("partner.example.org"), Some(Affiliation::Admin));
-        assert_eq!(config.get_affiliation_for_jid(&user_jid), Affiliation::Member);
+        assert_eq!(
+            config.remove_domain_affiliation("partner.example.org"),
+            Some(Affiliation::Admin)
+        );
+        assert_eq!(
+            config.get_affiliation_for_jid(&user_jid),
+            Affiliation::Member
+        );
     }
 
     #[test]

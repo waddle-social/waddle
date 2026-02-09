@@ -46,23 +46,26 @@ pub struct DatabasePool {
 impl DatabasePool {
     /// Initialize the database pool with the global database
     #[instrument(skip_all)]
-    pub async fn new(config: DatabaseConfig, pool_config: PoolConfig) -> Result<Self, DatabaseError> {
+    pub async fn new(
+        config: DatabaseConfig,
+        pool_config: PoolConfig,
+    ) -> Result<Self, DatabaseError> {
         info!("Initializing database pool");
 
         // Create the global database
-        let global = match (&config.global_db_path, &config.turso_url, &config.turso_auth_token) {
+        let global = match (
+            &config.global_db_path,
+            &config.turso_url,
+            &config.turso_auth_token,
+        ) {
             // Turso sync enabled
             (Some(path), Some(url), Some(token)) => {
                 Database::open_with_sync("global", path, url, token).await?
             }
             // Local file-based
-            (Some(path), _, _) => {
-                Database::open_local("global", path).await?
-            }
+            (Some(path), _, _) => Database::open_local("global", path).await?,
             // In-memory (default for development)
-            _ => {
-                Database::in_memory("global").await?
-            }
+            _ => Database::in_memory("global").await?,
         };
 
         info!("Global database initialized");

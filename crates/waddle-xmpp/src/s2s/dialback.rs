@@ -142,8 +142,8 @@ impl DialbackKey {
         receiving_domain: &str,
         originating_domain: &str,
     ) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.secret)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.secret).expect("HMAC can take key of any size");
 
         // Concatenate the input data as specified in XEP-0220
         mac.update(stream_id.as_bytes());
@@ -262,7 +262,10 @@ pub fn build_db_result(from: &str, to: &str, key: &str) -> String {
 pub fn build_db_result_response(from: &str, to: &str, result: DialbackResult) -> String {
     format!(
         "<db:result xmlns:db='{}' from='{}' to='{}' type='{}'/>",
-        NS_DIALBACK, from, to, result.as_str()
+        NS_DIALBACK,
+        from,
+        to,
+        result.as_str()
     )
 }
 
@@ -282,7 +285,11 @@ pub fn build_db_verify(from: &str, to: &str, id: &str, key: &str) -> String {
 pub fn build_db_verify_response(from: &str, to: &str, id: &str, result: DialbackResult) -> String {
     format!(
         "<db:verify xmlns:db='{}' from='{}' to='{}' id='{}' type='{}'/>",
-        NS_DIALBACK, from, to, id, result.as_str()
+        NS_DIALBACK,
+        from,
+        to,
+        id,
+        result.as_str()
     )
 }
 
@@ -411,7 +418,10 @@ mod tests {
         assert_eq!(DialbackResult::Invalid.as_str(), "invalid");
 
         assert_eq!(DialbackResult::parse("valid"), Some(DialbackResult::Valid));
-        assert_eq!(DialbackResult::parse("invalid"), Some(DialbackResult::Invalid));
+        assert_eq!(
+            DialbackResult::parse("invalid"),
+            Some(DialbackResult::Invalid)
+        );
         assert_eq!(DialbackResult::parse("unknown"), None);
     }
 
@@ -426,17 +436,30 @@ mod tests {
 
     #[test]
     fn test_build_db_result_response() {
-        let xml = build_db_result_response("receiving.example", "originating.example", DialbackResult::Valid);
+        let xml = build_db_result_response(
+            "receiving.example",
+            "originating.example",
+            DialbackResult::Valid,
+        );
         assert!(xml.contains("db:result"));
         assert!(xml.contains("type='valid'"));
 
-        let xml = build_db_result_response("receiving.example", "originating.example", DialbackResult::Invalid);
+        let xml = build_db_result_response(
+            "receiving.example",
+            "originating.example",
+            DialbackResult::Invalid,
+        );
         assert!(xml.contains("type='invalid'"));
     }
 
     #[test]
     fn test_build_db_verify() {
-        let xml = build_db_verify("receiving.example", "originating.example", "stream-123", "key456");
+        let xml = build_db_verify(
+            "receiving.example",
+            "originating.example",
+            "stream-123",
+            "key456",
+        );
         assert!(xml.contains("db:verify"));
         assert!(xml.contains("from='receiving.example'"));
         assert!(xml.contains("to='originating.example'"));
@@ -446,7 +469,12 @@ mod tests {
 
     #[test]
     fn test_build_db_verify_response() {
-        let xml = build_db_verify_response("originating.example", "receiving.example", "stream-123", DialbackResult::Valid);
+        let xml = build_db_verify_response(
+            "originating.example",
+            "receiving.example",
+            "stream-123",
+            DialbackResult::Valid,
+        );
         assert!(xml.contains("db:verify"));
         assert!(xml.contains("id='stream-123'"));
         assert!(xml.contains("type='valid'"));

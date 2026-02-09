@@ -168,11 +168,9 @@ impl SrvResolver {
                 }
 
                 // Sort by priority (ascending), then by weight (descending)
-                targets.sort_by(|a, b| {
-                    match a.priority.cmp(&b.priority) {
-                        std::cmp::Ordering::Equal => b.weight.cmp(&a.weight),
-                        other => other,
-                    }
+                targets.sort_by(|a, b| match a.priority.cmp(&b.priority) {
+                    std::cmp::Ordering::Equal => b.weight.cmp(&a.weight),
+                    other => other,
                 });
 
                 debug!(
@@ -335,11 +333,9 @@ mod tests {
         ];
 
         // Sort by priority (ascending), then weight (descending)
-        targets.sort_by(|a, b| {
-            match a.priority.cmp(&b.priority) {
-                std::cmp::Ordering::Equal => b.weight.cmp(&a.weight),
-                other => other,
-            }
+        targets.sort_by(|a, b| match a.priority.cmp(&b.priority) {
+            std::cmp::Ordering::Equal => b.weight.cmp(&a.weight),
+            other => other,
         });
 
         // Priority 10 should come first, with higher weight first

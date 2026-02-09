@@ -131,7 +131,10 @@ pub fn record_connection_count(count: i64, transport: &str) {
 
 /// Record stanza processing latency in milliseconds.
 pub fn record_stanza_latency(latency_ms: f64, stanza_type: &str) {
-    stanza_latency().record(latency_ms, &[KeyValue::new("type", stanza_type.to_string())]);
+    stanza_latency().record(
+        latency_ms,
+        &[KeyValue::new("type", stanza_type.to_string())],
+    );
 }
 
 /// Record a MUC presence event (join or leave).

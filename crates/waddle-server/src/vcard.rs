@@ -45,7 +45,10 @@ impl VCardStore {
             let guard = persistent.lock().await;
             Ok(ConnectionGuard::Persistent(guard))
         } else {
-            let conn = self.db.connect().map_err(|e| VCardError::DatabaseError(e.to_string()))?;
+            let conn = self
+                .db
+                .connect()
+                .map_err(|e| VCardError::DatabaseError(e.to_string()))?;
             Ok(ConnectionGuard::Owned(conn))
         }
     }
@@ -59,7 +62,8 @@ impl VCardStore {
 
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.as_ref()
+        let mut rows = conn
+            .as_ref()
             .query(
                 "SELECT vcard_xml FROM vcard_storage WHERE jid = ?",
                 [jid_str.as_str()],
@@ -117,7 +121,8 @@ impl VCardStore {
 
         let conn = self.get_connection().await?;
 
-        let affected = conn.as_ref()
+        let affected = conn
+            .as_ref()
             .execute(
                 "DELETE FROM vcard_storage WHERE jid = ?",
                 [jid_str.as_str()],
@@ -189,7 +194,10 @@ mod tests {
         let vcard_xml = "<vCard xmlns='vcard-temp'><FN>Alice</FN></vCard>";
 
         // Store vCard
-        store.set(&jid, vcard_xml).await.expect("Failed to store vCard");
+        store
+            .set(&jid, vcard_xml)
+            .await
+            .expect("Failed to store vCard");
 
         // Retrieve vCard
         let retrieved = store.get(&jid).await.expect("Failed to get vCard");
@@ -217,10 +225,16 @@ mod tests {
         let vcard_xml_v2 = "<vCard xmlns='vcard-temp'><FN>Robert</FN></vCard>";
 
         // Store initial vCard
-        store.set(&jid, vcard_xml_v1).await.expect("Failed to store vCard");
+        store
+            .set(&jid, vcard_xml_v1)
+            .await
+            .expect("Failed to store vCard");
 
         // Update vCard
-        store.set(&jid, vcard_xml_v2).await.expect("Failed to update vCard");
+        store
+            .set(&jid, vcard_xml_v2)
+            .await
+            .expect("Failed to update vCard");
 
         // Retrieve should return updated version
         let retrieved = store.get(&jid).await.expect("Failed to get vCard");
@@ -236,7 +250,10 @@ mod tests {
         let vcard_xml = "<vCard xmlns='vcard-temp'><FN>Charlie</FN></vCard>";
 
         // Store vCard
-        store.set(&jid, vcard_xml).await.expect("Failed to store vCard");
+        store
+            .set(&jid, vcard_xml)
+            .await
+            .expect("Failed to store vCard");
 
         // Delete vCard
         let deleted = store.delete(&jid).await.expect("Failed to delete vCard");
@@ -262,8 +279,14 @@ mod tests {
         let vcard2 = "<vCard xmlns='vcard-temp'><FN>User Two</FN></vCard>";
 
         // Store vCards for different users
-        store.set(&jid1, vcard1).await.expect("Failed to store vCard 1");
-        store.set(&jid2, vcard2).await.expect("Failed to store vCard 2");
+        store
+            .set(&jid1, vcard1)
+            .await
+            .expect("Failed to store vCard 1");
+        store
+            .set(&jid2, vcard2)
+            .await
+            .expect("Failed to store vCard 2");
 
         // Each user should have their own vCard
         let retrieved1 = store.get(&jid1).await.expect("Failed to get vCard 1");

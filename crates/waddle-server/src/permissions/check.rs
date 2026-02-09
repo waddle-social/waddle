@@ -120,7 +120,13 @@ impl PermissionChecker {
         // Perform the check
         let mut visited = HashSet::new();
         let result = self
-            .check_internal(&request.subject, &request.permission, &request.object, 0, &mut visited)
+            .check_internal(
+                &request.subject,
+                &request.permission,
+                &request.object,
+                0,
+                &mut visited,
+            )
             .await?;
 
         // Update cache
@@ -160,12 +166,11 @@ impl PermissionChecker {
         );
 
         // 1. Check for direct relation (permission name equals relation name)
-        if self
-            .tuple_store
-            .exists(object, permission, subject)
-            .await?
-        {
-            debug!("Direct relation found: {} has {} on {}", subject, permission, object);
+        if self.tuple_store.exists(object, permission, subject).await? {
+            debug!(
+                "Direct relation found: {} has {} on {}",
+                subject, permission, object
+            );
             return Ok(CheckResponse::allowed(format!("direct:{}", permission)));
         }
 
@@ -225,7 +230,9 @@ impl PermissionChecker {
         object: &'a Object,
         depth: usize,
         visited: &'a mut HashSet<String>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CheckResponse, PermissionError>> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CheckResponse, PermissionError>> + Send + 'a>,
+    > {
         Box::pin(async move {
             match computation {
                 ComputedPermission::DirectRelation(relation) => {
@@ -316,7 +323,13 @@ impl PermissionChecker {
                         );
 
                         let result = self
-                            .check_internal(subject, target_permission, &parent_object, depth + 1, visited)
+                            .check_internal(
+                                subject,
+                                target_permission,
+                                &parent_object,
+                                depth + 1,
+                                visited,
+                            )
                             .await?;
 
                         if result.allowed {
@@ -457,7 +470,10 @@ mod tests {
             Object::new(ObjectType::Channel, "general"),
         );
         let response = checker.check(request).await.unwrap();
-        assert!(response.allowed, "Alice should be able to delete channel via arrow permission");
+        assert!(
+            response.allowed,
+            "Alice should be able to delete channel via arrow permission"
+        );
     }
 
     #[tokio::test]
@@ -532,7 +548,10 @@ mod tests {
             Object::new(ObjectType::Channel, "general"),
         );
         let response = checker.check(request).await.unwrap();
-        assert!(response.allowed, "Alice should have viewer via userset membership");
+        assert!(
+            response.allowed,
+            "Alice should have viewer via userset membership"
+        );
     }
 
     #[tokio::test]

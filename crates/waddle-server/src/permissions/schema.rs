@@ -126,7 +126,11 @@ impl PermissionSchema {
     }
 
     /// Get the permission computation for an object type
-    pub fn get_permission(&self, object_type: ObjectType, permission: &str) -> Option<&ComputedPermission> {
+    pub fn get_permission(
+        &self,
+        object_type: ObjectType,
+        permission: &str,
+    ) -> Option<&ComputedPermission> {
         self.schemas
             .get(&object_type)
             .and_then(|s| s.get_permission(permission))
@@ -154,10 +158,7 @@ fn waddle_schema() -> ObjectTypeSchema {
         .with_relation("moderator")
         .with_relation("member")
         // Permissions
-        .with_permission(
-            "delete",
-            ComputedPermission::direct("owner"),
-        )
+        .with_permission("delete", ComputedPermission::direct("owner"))
         .with_permission(
             "manage_settings",
             ComputedPermission::union(vec![
@@ -297,14 +298,9 @@ fn dm_schema() -> ObjectTypeSchema {
         .with_permission("send", ComputedPermission::direct("participant"))
         .with_permission(
             "manage",
-            ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
-            ]),
+            ComputedPermission::union(vec![ComputedPermission::direct("owner")]),
         )
-        .with_permission(
-            "add_participant",
-            ComputedPermission::direct("owner"),
-        )
+        .with_permission("add_participant", ComputedPermission::direct("owner"))
         .with_permission("leave", ComputedPermission::direct("participant"))
 }
 

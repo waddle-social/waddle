@@ -105,12 +105,18 @@ pub trait SmSessionRegistry: Send + Sync {
     ///
     /// Returns the session if found and not expired, removing it from storage.
     /// This prevents the same session from being resumed twice.
-    async fn take_session(&self, stream_id: &str) -> Result<Option<DetachedSession>, SmRegistryError>;
+    async fn take_session(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<DetachedSession>, SmRegistryError>;
 
     /// Peek at a session without removing it.
     ///
     /// Useful for checking if a session exists before attempting resume.
-    async fn peek_session(&self, stream_id: &str) -> Result<Option<DetachedSession>, SmRegistryError>;
+    async fn peek_session(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<DetachedSession>, SmRegistryError>;
 
     /// Clean up expired sessions.
     ///
@@ -188,7 +194,10 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         Ok(())
     }
 
-    async fn take_session(&self, stream_id: &str) -> Result<Option<DetachedSession>, SmRegistryError> {
+    async fn take_session(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<DetachedSession>, SmRegistryError> {
         let mut sessions = self
             .sessions
             .write()
@@ -211,7 +220,10 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         }
     }
 
-    async fn peek_session(&self, stream_id: &str) -> Result<Option<DetachedSession>, SmRegistryError> {
+    async fn peek_session(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<DetachedSession>, SmRegistryError> {
         let sessions = self
             .sessions
             .read()
@@ -240,10 +252,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     }
 
     async fn session_count(&self) -> usize {
-        self.sessions
-            .read()
-            .map(|s| s.len())
-            .unwrap_or(0)
+        self.sessions.read().map(|s| s.len()).unwrap_or(0)
     }
 }
 
@@ -254,7 +263,11 @@ fn cleanup_expired_internal(sessions: &mut HashMap<String, DetachedSession>) -> 
     let removed = initial_count - sessions.len();
 
     if removed > 0 {
-        debug!(removed = removed, remaining = sessions.len(), "Cleaned up expired SM sessions");
+        debug!(
+            removed = removed,
+            remaining = sessions.len(),
+            "Cleaned up expired SM sessions"
+        );
     }
 
     removed

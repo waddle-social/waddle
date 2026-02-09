@@ -87,19 +87,24 @@ pub struct DestroyRequest {
 #[instrument(skip(iq), fields(iq_id = %iq.id))]
 pub fn parse_owner_query(iq: &Iq, muc_domain: &str) -> Result<OwnerQuery, XmppError> {
     // Get the room JID from the 'to' attribute
-    let room_jid = iq.to.as_ref()
+    let room_jid = iq
+        .to
+        .as_ref()
         .ok_or_else(|| XmppError::bad_request(Some("Missing 'to' attribute".into())))?
         .to_bare();
 
     // Verify it's a MUC room JID
     if room_jid.domain().as_str() != muc_domain {
         return Err(XmppError::bad_request(Some(format!(
-            "IQ to {} is not a MUC room", room_jid
+            "IQ to {} is not a MUC room",
+            room_jid
         ))));
     }
 
     // Get the sender's JID
-    let from = iq.from.clone()
+    let from = iq
+        .from
+        .clone()
         .ok_or_else(|| XmppError::bad_request(Some("Missing 'from' attribute".into())))?;
 
     // Determine the action based on IQ type and contents
@@ -127,7 +132,11 @@ pub fn parse_owner_query(iq: &Iq, muc_domain: &str) -> Result<OwnerQuery, XmppEr
                 OwnerAction::SetConfig(ConfigFormData::default())
             }
         }
-        _ => return Err(XmppError::bad_request(Some("Expected get or set IQ".into()))),
+        _ => {
+            return Err(XmppError::bad_request(Some(
+                "Expected get or set IQ".into(),
+            )))
+        }
     };
 
     Ok(OwnerQuery {
@@ -230,8 +239,7 @@ fn parse_boolean(s: &str) -> bool {
 ///
 /// Creates a data form with the current room settings for the owner to modify.
 pub fn build_config_form(room: &MucRoom) -> Element {
-    let mut form = Element::builder("x", DATA_FORMS_NS)
-        .attr("type", "form");
+    let mut form = Element::builder("x", DATA_FORMS_NS).attr("type", "form");
 
     // FORM_TYPE field (required, hidden)
     form = form.append(build_field_hidden("FORM_TYPE", MUC_ROOMCONFIG_NS));
@@ -296,7 +304,7 @@ fn build_field_hidden(var: &str, value: &str) -> Element {
         .append(
             Element::builder("value", DATA_FORMS_NS)
                 .append(value)
-                .build()
+                .build(),
         )
         .build()
 }
@@ -310,7 +318,7 @@ fn build_field_text_single(var: &str, label: &str, value: &str) -> Element {
         .append(
             Element::builder("value", DATA_FORMS_NS)
                 .append(value)
-                .build()
+                .build(),
         )
         .build()
 }
@@ -324,7 +332,7 @@ fn build_field_boolean(var: &str, label: &str, value: bool) -> Element {
         .append(
             Element::builder("value", DATA_FORMS_NS)
                 .append(if value { "1" } else { "0" })
-                .build()
+                .build(),
         )
         .build()
 }
@@ -353,11 +361,7 @@ pub fn build_config_result(
 /// Build an empty owner set result (success).
 ///
 /// Used when room configuration is successfully updated.
-pub fn build_owner_set_result(
-    iq_id: &str,
-    from_room_jid: &BareJid,
-    to_jid: &Jid,
-) -> Iq {
+pub fn build_owner_set_result(iq_id: &str, from_room_jid: &BareJid, to_jid: &Jid) -> Iq {
     Iq {
         from: Some(Jid::from(from_room_jid.clone())),
         to: Some(to_jid.clone()),
@@ -401,7 +405,7 @@ pub fn build_destroy_notification(
         destroy_elem = destroy_elem.append(
             Element::builder("reason", "http://jabber.org/protocol/muc#user")
                 .append(reason.as_str())
-                .build()
+                .build(),
         );
     }
 
@@ -410,7 +414,7 @@ pub fn build_destroy_notification(
         destroy_elem = destroy_elem.append(
             Element::builder("password", "http://jabber.org/protocol/muc#user")
                 .append(password.as_str())
-                .build()
+                .build(),
         );
     }
 
@@ -420,7 +424,7 @@ pub fn build_destroy_notification(
             Element::builder("item", "http://jabber.org/protocol/muc#user")
                 .attr("affiliation", "none")
                 .attr("role", "none")
-                .build()
+                .build(),
         )
         .append(destroy_elem.build());
 
@@ -429,7 +433,7 @@ pub fn build_destroy_notification(
         x_elem = x_elem.append(
             Element::builder("status", "http://jabber.org/protocol/muc#user")
                 .attr("code", "110")
-                .build()
+                .build(),
         );
     }
 
@@ -483,9 +487,7 @@ mod tests {
     }
 
     fn make_owner_set_iq(room_jid: &str, form: Element) -> Iq {
-        let query = Element::builder("query", NS_MUC_OWNER)
-            .append(form)
-            .build();
+        let query = Element::builder("query", NS_MUC_OWNER).append(form).build();
 
         Iq {
             from: Some("owner@example.com/res".parse().unwrap()),
@@ -503,11 +505,7 @@ mod tests {
         }
 
         if let Some(r) = reason {
-            destroy = destroy.append(
-                Element::builder("reason", NS_MUC_OWNER)
-                    .append(r)
-                    .build()
-            );
+            destroy = destroy.append(Element::builder("reason", NS_MUC_OWNER).append(r).build());
         }
 
         let query = Element::builder("query", NS_MUC_OWNER)
@@ -526,13 +524,41 @@ mod tests {
         Element::builder("x", DATA_FORMS_NS)
             .attr("type", "submit")
             .append(build_field_hidden("FORM_TYPE", MUC_ROOMCONFIG_NS))
-            .append(build_field_text_single("muc#roomconfig_roomname", "Room Name", "Test Room"))
-            .append(build_field_text_single("muc#roomconfig_roomdesc", "Description", "A test room"))
-            .append(build_field_boolean("muc#roomconfig_persistentroom", "Persistent", true))
-            .append(build_field_boolean("muc#roomconfig_membersonly", "Members Only", false))
-            .append(build_field_boolean("muc#roomconfig_moderatedroom", "Moderated", true))
-            .append(build_field_text_single("muc#roomconfig_maxusers", "Max Users", "50"))
-            .append(build_field_boolean("muc#roomconfig_enablelogging", "Logging", true))
+            .append(build_field_text_single(
+                "muc#roomconfig_roomname",
+                "Room Name",
+                "Test Room",
+            ))
+            .append(build_field_text_single(
+                "muc#roomconfig_roomdesc",
+                "Description",
+                "A test room",
+            ))
+            .append(build_field_boolean(
+                "muc#roomconfig_persistentroom",
+                "Persistent",
+                true,
+            ))
+            .append(build_field_boolean(
+                "muc#roomconfig_membersonly",
+                "Members Only",
+                false,
+            ))
+            .append(build_field_boolean(
+                "muc#roomconfig_moderatedroom",
+                "Moderated",
+                true,
+            ))
+            .append(build_field_text_single(
+                "muc#roomconfig_maxusers",
+                "Max Users",
+                "50",
+            ))
+            .append(build_field_boolean(
+                "muc#roomconfig_enablelogging",
+                "Logging",
+                true,
+            ))
             .build()
     }
 
@@ -646,7 +672,8 @@ mod tests {
         assert_eq!(form.attr("type"), Some("form"));
 
         // Verify FORM_TYPE field exists
-        let form_type = form.children()
+        let form_type = form
+            .children()
             .find(|c| c.attr("var") == Some("FORM_TYPE"))
             .expect("FORM_TYPE field should exist");
         assert_eq!(form_type.attr("type"), Some("hidden"));
@@ -686,28 +713,29 @@ mod tests {
             password: None,
         };
 
-        let presence = build_destroy_notification(
-            &room_jid,
-            "user",
-            &occupant_jid,
-            &request,
-            true,
-        );
+        let presence = build_destroy_notification(&room_jid, "user", &occupant_jid, &request, true);
 
-        assert!(matches!(presence.type_, xmpp_parsers::presence::Type::Unavailable));
+        assert!(matches!(
+            presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        ));
         assert!(presence.from.is_some());
         assert!(presence.to.is_some());
 
         // Verify the x element contains destroy
-        let x_elem = presence.payloads.iter()
+        let x_elem = presence
+            .payloads
+            .iter()
             .find(|p| p.name() == "x" && p.ns() == "http://jabber.org/protocol/muc#user")
             .expect("Should have muc#user x element");
 
-        let destroy = x_elem.get_child("destroy", "http://jabber.org/protocol/muc#user")
+        let destroy = x_elem
+            .get_child("destroy", "http://jabber.org/protocol/muc#user")
             .expect("Should have destroy element");
         assert_eq!(destroy.attr("jid"), Some("newroom@muc.example.com"));
 
-        let reason = destroy.get_child("reason", "http://jabber.org/protocol/muc#user")
+        let reason = destroy
+            .get_child("reason", "http://jabber.org/protocol/muc#user")
             .expect("Should have reason element");
         assert_eq!(reason.text(), "Room closed");
     }

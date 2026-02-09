@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    encode_sasl_plain, extract_bound_jid, validate_stream_header,
-    MockAppState, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
+    encode_sasl_plain, extract_bound_jid, validate_stream_header, MockAppState, RawXmppClient,
+    TestServer, DEFAULT_TIMEOUT,
 };
 
 /// Initialize tracing and crypto provider for tests (only once).
@@ -50,22 +50,36 @@ async fn test_stream_header_required_attributes() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Send client stream header
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream \
         xmlns='jabber:client' \
         xmlns:stream='http://etherx.jabber.org/streams' \
         to='localhost' \
-        version='1.0'>").await.unwrap();
+        version='1.0'>",
+        )
+        .await
+        .unwrap();
 
     // Read server response
-    let response = client.read_until("<stream:stream", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("<stream:stream", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     // Validate required attributes per RFC 6120
     validate_stream_header(&response).expect("Stream header validation failed");
 
     // Also verify stream:features is sent
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
-    assert!(response.contains("<stream:features>"), "Server must send stream:features");
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
+    assert!(
+        response.contains("<stream:features>"),
+        "Server must send stream:features"
+    );
 }
 
 /// Test: Stream header version attribute is "1.0".
@@ -78,11 +92,19 @@ async fn test_stream_header_version() {
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let response = client.read_until("version=", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("version=", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     assert!(
         response.contains("version='1.0'") || response.contains("version=\"1.0\""),
@@ -101,11 +123,19 @@ async fn test_stream_header_has_id() {
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let response = client.read_until("<stream:stream", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("<stream:stream", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     assert!(
         response.contains("id='") || response.contains("id=\""),
@@ -123,11 +153,19 @@ async fn test_stream_header_from_attribute() {
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let response = client.read_until("<stream:stream", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("<stream:stream", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     assert!(
         response.contains("from='localhost'") || response.contains("from=\"localhost\""),
@@ -150,11 +188,19 @@ async fn test_starttls_advertised_as_required() {
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     assert!(
         response.contains("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'"),
@@ -177,15 +223,26 @@ async fn test_starttls_upgrade_succeeds() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Initial stream
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     // Request STARTTLS
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
 
     let response = client.read_until(">", DEFAULT_TIMEOUT).await.unwrap();
     assert!(
@@ -196,17 +253,28 @@ async fn test_starttls_upgrade_succeeds() {
 
     // Upgrade to TLS
     let connector = server.tls_connector();
-    client.upgrade_tls(connector, "localhost").await.expect("TLS upgrade should succeed");
+    client
+        .upgrade_tls(connector, "localhost")
+        .await
+        .expect("TLS upgrade should succeed");
 
     assert!(client.is_tls(), "Client should now be using TLS");
 
     // Send new stream header over TLS
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
     // Should get new stream header and features
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     assert!(
         response.contains("<stream:stream"),
         "Server must send new stream header after TLS"
@@ -228,25 +296,47 @@ async fn test_sasl_mechanisms_advertised() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete STARTTLS negotiation
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
     // Send new stream header
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     assert!(
         response.contains("<mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'"),
@@ -270,32 +360,57 @@ async fn test_sasl_plain_auth_success() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete STARTTLS
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
     // New stream after TLS
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     // Send SASL PLAIN auth
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
 
     let response = client.read_until(">", DEFAULT_TIMEOUT).await.unwrap();
     assert!(
@@ -322,32 +437,57 @@ async fn test_sasl_auth_failure() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete STARTTLS
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
     // New stream after TLS
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     // Send SASL auth (will be rejected by MockAppState)
     let auth_data = encode_sasl_plain("baduser@localhost", "badtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
 
     // Current behavior: Server sends <success/> but then closes connection after
     // validate_session fails. This is a known limitation - ideally the server
@@ -359,9 +499,14 @@ async fn test_sasl_auth_failure() {
     let initial_response = client.read(Duration::from_secs(1)).await.unwrap();
 
     // Try to continue the protocol - should fail because connection is closed
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.ok(); // May fail
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .ok(); // May fail
 
     // Give server time to close connection
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -400,39 +545,75 @@ async fn test_bind_feature_advertised() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete full auth flow
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     // Send new stream header after auth
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
 
     assert!(
         response.contains("<bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'"),
@@ -452,43 +633,84 @@ async fn test_resource_binding_returns_full_jid() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete full auth flow
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     // Send bind request
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
 
     let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
 
@@ -507,7 +729,11 @@ async fn test_resource_binding_returns_full_jid() {
     if let Some(jid) = extract_bound_jid(&response) {
         assert!(jid.contains('@'), "JID must have @ for bare JID: {}", jid);
         assert!(jid.contains('/'), "JID must have / for resource: {}", jid);
-        assert!(jid.contains("localhost"), "JID should contain domain: {}", jid);
+        assert!(
+            jid.contains("localhost"),
+            "JID should contain domain: {}",
+            jid
+        );
     } else {
         panic!("Could not extract JID from response: {}", response);
     }
@@ -524,45 +750,86 @@ async fn test_resource_binding_with_requested_resource() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete auth flow (abbreviated for this test)
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     // Request specific resource
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
             <resource>my-test-resource</resource>\
         </bind>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
 
     let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
 
@@ -592,50 +859,107 @@ async fn test_feature_negotiation_order() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Initial features should only have STARTTLS
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let features1 = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
-    assert!(features1.contains("<starttls"), "Phase 1: Should have STARTTLS");
-    assert!(!features1.contains("<mechanisms"), "Phase 1: Should NOT have SASL yet");
-    assert!(!features1.contains("<bind"), "Phase 1: Should NOT have bind yet");
+    let features1 = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
+    assert!(
+        features1.contains("<starttls"),
+        "Phase 1: Should have STARTTLS"
+    );
+    assert!(
+        !features1.contains("<mechanisms"),
+        "Phase 1: Should NOT have SASL yet"
+    );
+    assert!(
+        !features1.contains("<bind"),
+        "Phase 1: Should NOT have bind yet"
+    );
     client.clear();
 
     // After STARTTLS, should have SASL
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let features2 = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
-    assert!(features2.contains("<mechanisms"), "Phase 2: Should have SASL");
-    assert!(!features2.contains("<bind"), "Phase 2: Should NOT have bind yet");
+    let features2 = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
+    assert!(
+        features2.contains("<mechanisms"),
+        "Phase 2: Should have SASL"
+    );
+    assert!(
+        !features2.contains("<bind"),
+        "Phase 2: Should NOT have bind yet"
+    );
     client.clear();
 
     // After SASL, should have bind
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
 
-    let features3 = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+    let features3 = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     assert!(features3.contains("<bind"), "Phase 3: Should have bind");
-    assert!(!features3.contains("<starttls"), "Phase 3: Should NOT have STARTTLS anymore");
-    assert!(!features3.contains("<mechanisms"), "Phase 3: Should NOT have SASL anymore");
+    assert!(
+        !features3.contains("<starttls"),
+        "Phase 3: Should NOT have STARTTLS anymore"
+    );
+    assert!(
+        !features3.contains("<mechanisms"),
+        "Phase 3: Should NOT have SASL anymore"
+    );
 }
 
 // =============================================================================
@@ -651,42 +975,83 @@ async fn test_graceful_stream_close() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete full session setup
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
     client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
     client.clear();
 
@@ -717,8 +1082,15 @@ async fn test_concurrent_connections() {
                 <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
                 to='localhost' version='1.0'>").await.unwrap();
 
-            let response = client.read_until("<stream:stream", DEFAULT_TIMEOUT).await.unwrap();
-            assert!(response.contains("<stream:stream"), "Client {} should get stream header", i);
+            let response = client
+                .read_until("<stream:stream", DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            assert!(
+                response.contains("<stream:stream"),
+                "Client {} should get stream header",
+                i
+            );
 
             Ok::<_, std::io::Error>(())
         });
@@ -746,49 +1118,95 @@ async fn test_disco_info_server() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete full session establishment
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
     client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
     client.clear();
 
     // Now send disco#info query to server
-    client.send("<iq type='get' id='disco-info-1' to='localhost' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='get' id='disco-info-1' to='localhost' xmlns='jabber:client'>\
         <query xmlns='http://jabber.org/protocol/disco#info'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
 
     let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
 
@@ -801,23 +1219,24 @@ async fn test_disco_info_server() {
 
     // Verify identity is present
     assert!(
-        response.contains("<identity") && (response.contains("category='server'") || response.contains("category=\"server\"")),
+        response.contains("<identity")
+            && (response.contains("category='server'") || response.contains("category=\"server\"")),
         "Response should contain server identity, got: {}",
         response
     );
 
     // Verify disco#info feature is advertised
     assert!(
-        response.contains("var='http://jabber.org/protocol/disco#info'") ||
-        response.contains("var=\"http://jabber.org/protocol/disco#info\""),
+        response.contains("var='http://jabber.org/protocol/disco#info'")
+            || response.contains("var=\"http://jabber.org/protocol/disco#info\""),
         "Response should contain disco#info feature, got: {}",
         response
     );
 
     // Verify disco#items feature is advertised
     assert!(
-        response.contains("var='http://jabber.org/protocol/disco#items'") ||
-        response.contains("var=\"http://jabber.org/protocol/disco#items\""),
+        response.contains("var='http://jabber.org/protocol/disco#items'")
+            || response.contains("var=\"http://jabber.org/protocol/disco#items\""),
         "Response should contain disco#items feature, got: {}",
         response
     );
@@ -841,49 +1260,95 @@ async fn test_disco_items_server() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete full session establishment (abbreviated)
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
     client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
     client.clear();
 
     // Now send disco#items query to server
-    client.send("<iq type='get' id='disco-items-1' to='localhost' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='get' id='disco-items-1' to='localhost' xmlns='jabber:client'>\
         <query xmlns='http://jabber.org/protocol/disco#items'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
 
     let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
 
@@ -913,49 +1378,95 @@ async fn test_disco_info_muc_service() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Complete full session establishment
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.unwrap();
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .unwrap();
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let connector = server.tls_connector();
     client.upgrade_tls(connector, "localhost").await.unwrap();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
     let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.unwrap();
-    client.read_until("<success", DEFAULT_TIMEOUT).await.unwrap();
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .unwrap();
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.unwrap();
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.unwrap();
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .unwrap();
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
     client.clear();
 
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
     client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
     client.clear();
 
     // Now send disco#info query to MUC service
-    client.send("<iq type='get' id='disco-info-muc' to='muc.localhost' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='get' id='disco-info-muc' to='muc.localhost' xmlns='jabber:client'>\
         <query xmlns='http://jabber.org/protocol/disco#info'/>\
-    </iq>").await.unwrap();
+    </iq>",
+        )
+        .await
+        .unwrap();
 
     let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.unwrap();
 
@@ -975,8 +1486,8 @@ async fn test_disco_info_muc_service() {
 
     // Verify MUC feature is advertised
     assert!(
-        response.contains("var='http://jabber.org/protocol/muc'") ||
-        response.contains("var=\"http://jabber.org/protocol/muc\""),
+        response.contains("var='http://jabber.org/protocol/muc'")
+            || response.contains("var=\"http://jabber.org/protocol/muc\""),
         "Response should contain MUC feature, got: {}",
         response
     );
@@ -997,64 +1508,114 @@ async fn test_complete_session_establishment() {
     let mut client = RawXmppClient::connect(server.addr).await.unwrap();
 
     // Step 1: Initial stream negotiation
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.expect("Send stream header");
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .expect("Send stream header");
 
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read features");
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read features");
     validate_stream_header(&response).expect("Valid stream header");
     assert!(response.contains("<starttls"), "Should offer STARTTLS");
     client.clear();
 
     // Step 2: STARTTLS negotiation
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.expect("Send STARTTLS");
-    let response = client.read_until(">", DEFAULT_TIMEOUT).await.expect("Read proceed");
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .expect("Send STARTTLS");
+    let response = client
+        .read_until(">", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read proceed");
     assert!(response.contains("<proceed"), "Should get proceed");
     client.clear();
 
     // Step 3: TLS upgrade
     let connector = server.tls_connector();
-    client.upgrade_tls(connector, "localhost").await.expect("TLS upgrade");
+    client
+        .upgrade_tls(connector, "localhost")
+        .await
+        .expect("TLS upgrade");
     assert!(client.is_tls(), "Should be using TLS");
 
     // Step 4: Post-TLS stream restart
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.expect("Send post-TLS stream");
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .expect("Send post-TLS stream");
 
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read SASL features");
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read SASL features");
     assert!(response.contains("<mechanisms"), "Should offer SASL");
     client.clear();
 
     // Step 5: SASL authentication
     let auth_data = encode_sasl_plain("user@localhost", "token123");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.expect("Send auth");
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .expect("Send auth");
 
-    let response = client.read_until(">", DEFAULT_TIMEOUT).await.expect("Read auth response");
+    let response = client
+        .read_until(">", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read auth response");
     assert!(response.contains("<success"), "Auth should succeed");
     client.clear();
 
     // Step 6: Post-SASL stream restart
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.expect("Send post-auth stream");
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .expect("Send post-auth stream");
 
-    let response = client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read bind features");
+    let response = client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read bind features");
     assert!(response.contains("<bind"), "Should offer bind");
     client.clear();
 
     // Step 7: Resource binding
-    client.send("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
             <resource>test-client</resource>\
         </bind>\
-    </iq>").await.expect("Send bind");
+    </iq>",
+        )
+        .await
+        .expect("Send bind");
 
-    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read bind result");
-    assert!(response.contains("type='result'") || response.contains("type=\"result\""), "Bind should succeed");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read bind result");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Bind should succeed"
+    );
 
     let jid = extract_bound_jid(&response).expect("Should have JID in response");
     assert!(jid.contains("user@localhost"), "JID should have local part");
@@ -1080,50 +1641,98 @@ async fn establish_session(
     resource: &str,
 ) -> String {
     // Initial stream
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.expect("Send stream header");
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read features");
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .expect("Send stream header");
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read features");
     client.clear();
 
     // STARTTLS
-    client.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await.expect("Send STARTTLS");
-    client.read_until("<proceed", DEFAULT_TIMEOUT).await.expect("Read proceed");
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await
+        .expect("Send STARTTLS");
+    client
+        .read_until("<proceed", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read proceed");
     client.clear();
 
     let connector = server.tls_connector();
-    client.upgrade_tls(connector, "localhost").await.expect("TLS upgrade");
+    client
+        .upgrade_tls(connector, "localhost")
+        .await
+        .expect("TLS upgrade");
 
     // Post-TLS stream
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.expect("Send post-TLS stream");
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read SASL features");
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .expect("Send post-TLS stream");
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read SASL features");
     client.clear();
 
     // SASL PLAIN auth
     let auth_data = encode_sasl_plain(&format!("{}@localhost", username), "token123");
-    client.send(&format!(
-        "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-        auth_data
-    )).await.expect("Send auth");
-    client.read_until("<success", DEFAULT_TIMEOUT).await.expect("Auth success");
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await
+        .expect("Send auth");
+    client
+        .read_until("<success", DEFAULT_TIMEOUT)
+        .await
+        .expect("Auth success");
     client.clear();
 
     // Post-SASL stream
-    client.send("<?xml version='1.0'?>\
+    client
+        .send(
+            "<?xml version='1.0'?>\
         <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
-        to='localhost' version='1.0'>").await.expect("Send post-auth stream");
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await.expect("Read bind features");
+        to='localhost' version='1.0'>",
+        )
+        .await
+        .expect("Send post-auth stream");
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read bind features");
     client.clear();
 
     // Resource bind
-    client.send(&format!("<iq type='set' id='bind_1' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
         <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
             <resource>{}</resource>\
         </bind>\
-    </iq>", resource)).await.expect("Send bind");
-    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read bind result");
+    </iq>",
+            resource
+        ))
+        .await
+        .expect("Send bind");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read bind result");
     client.clear();
 
     extract_bound_jid(&response).expect("Should have JID in response")
@@ -1148,19 +1757,27 @@ async fn test_muc_join_room() {
 
     // Join MUC room
     // Per XEP-0045, send presence to room@muc.domain/nickname with <x xmlns='http://jabber.org/protocol/muc'/>
-    client.send("<presence to='testroom@muc.localhost/Alice' xmlns='jabber:client'>\
+    client
+        .send(
+            "<presence to='testroom@muc.localhost/Alice' xmlns='jabber:client'>\
         <x xmlns='http://jabber.org/protocol/muc'/>\
-    </presence>").await.expect("Send MUC join");
+    </presence>",
+        )
+        .await
+        .expect("Send MUC join");
 
     // Read self-presence response
     // Should receive presence from testroom@muc.localhost/Alice with:
     // - <x xmlns='http://jabber.org/protocol/muc#user'> containing <item> and <status code='110'/>
-    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read MUC presence");
+    let response = client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read MUC presence");
 
     // Verify it's from the room
     assert!(
-        response.contains("from='testroom@muc.localhost/Alice'") ||
-        response.contains("from=\"testroom@muc.localhost/Alice\""),
+        response.contains("from='testroom@muc.localhost/Alice'")
+            || response.contains("from=\"testroom@muc.localhost/Alice\""),
         "Presence should be from room/nick, got: {}",
         response
     );
@@ -1199,18 +1816,33 @@ async fn test_muc_leave_room() {
     let _jid = establish_session(&mut client, &server, "bob", "client1").await;
 
     // Join MUC room first
-    client.send("<presence to='leavetest@muc.localhost/Bob' xmlns='jabber:client'>\
+    client
+        .send(
+            "<presence to='leavetest@muc.localhost/Bob' xmlns='jabber:client'>\
         <x xmlns='http://jabber.org/protocol/muc'/>\
-    </presence>").await.expect("Send MUC join");
-    client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    </presence>",
+        )
+        .await
+        .expect("Send MUC join");
+    client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read join presence");
     client.clear();
 
     // Now leave the room
-    client.send("<presence to='leavetest@muc.localhost/Bob' type='unavailable' xmlns='jabber:client'/>"
-    ).await.expect("Send MUC leave");
+    client
+        .send(
+            "<presence to='leavetest@muc.localhost/Bob' type='unavailable' xmlns='jabber:client'/>",
+        )
+        .await
+        .expect("Send MUC leave");
 
     // Should receive unavailable presence back
-    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read leave presence");
+    let response = client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read leave presence");
 
     assert!(
         response.contains("type='unavailable'") || response.contains("type=\"unavailable\""),
@@ -1244,10 +1876,18 @@ async fn test_muc_send_groupchat_message() {
     let _jid = establish_session(&mut client, &server, "charlie", "client1").await;
 
     // Join MUC room
-    client.send("<presence to='msgtest@muc.localhost/Charlie' xmlns='jabber:client'>\
+    client
+        .send(
+            "<presence to='msgtest@muc.localhost/Charlie' xmlns='jabber:client'>\
         <x xmlns='http://jabber.org/protocol/muc'/>\
-    </presence>").await.expect("Send MUC join");
-    client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    </presence>",
+        )
+        .await
+        .expect("Send MUC join");
+    client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read join presence");
     client.clear();
 
     // Send a groupchat message to the room
@@ -1256,7 +1896,10 @@ async fn test_muc_send_groupchat_message() {
     </message>").await.expect("Send groupchat message");
 
     // Should receive the message echoed back (from room/nick)
-    let response = client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read message echo");
+    let response = client
+        .read_until("</message>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read message echo");
 
     // Verify it's a groupchat message
     assert!(
@@ -1267,8 +1910,8 @@ async fn test_muc_send_groupchat_message() {
 
     // Verify 'from' is room/nick
     assert!(
-        response.contains("from='msgtest@muc.localhost/Charlie'") ||
-        response.contains("from=\"msgtest@muc.localhost/Charlie\""),
+        response.contains("from='msgtest@muc.localhost/Charlie'")
+            || response.contains("from=\"msgtest@muc.localhost/Charlie\""),
         "Message should be from room/nick, got: {}",
         response
     );
@@ -1301,11 +1944,19 @@ async fn test_muc_complete_lifecycle() {
     println!("Step 1: Session established with JID: {}", jid);
 
     // === Step 2: Discover MUC service via disco#items ===
-    client.send("<iq type='get' id='disco-items-1' to='localhost' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='get' id='disco-items-1' to='localhost' xmlns='jabber:client'>\
         <query xmlns='http://jabber.org/protocol/disco#items'/>\
-    </iq>").await.expect("Send disco#items");
+    </iq>",
+        )
+        .await
+        .expect("Send disco#items");
 
-    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read disco#items response");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read disco#items response");
     client.clear();
 
     assert!(
@@ -1316,11 +1967,19 @@ async fn test_muc_complete_lifecycle() {
     println!("Step 2: Discovered MUC service at muc.localhost");
 
     // === Step 3: Query MUC service capabilities ===
-    client.send("<iq type='get' id='disco-info-muc' to='muc.localhost' xmlns='jabber:client'>\
+    client
+        .send(
+            "<iq type='get' id='disco-info-muc' to='muc.localhost' xmlns='jabber:client'>\
         <query xmlns='http://jabber.org/protocol/disco#info'/>\
-    </iq>").await.expect("Send disco#info to MUC");
+    </iq>",
+        )
+        .await
+        .expect("Send disco#info to MUC");
 
-    let response = client.read_until("</iq>", DEFAULT_TIMEOUT).await.expect("Read MUC disco#info");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read MUC disco#info");
     client.clear();
 
     assert!(
@@ -1334,13 +1993,22 @@ async fn test_muc_complete_lifecycle() {
     let room_jid = "lifecycle-room@muc.localhost";
     let nick = "Dave";
 
-    client.send(&format!("<presence to='{}/{}' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<presence to='{}/{}' xmlns='jabber:client'>\
         <x xmlns='http://jabber.org/protocol/muc'>\
             <history maxstanzas='0'/>\
         </x>\
-    </presence>", room_jid, nick)).await.expect("Send MUC join");
+    </presence>",
+            room_jid, nick
+        ))
+        .await
+        .expect("Send MUC join");
 
-    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    let response = client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read join presence");
     client.clear();
 
     assert!(
@@ -1352,11 +2020,20 @@ async fn test_muc_complete_lifecycle() {
 
     // === Step 5: Send groupchat message ===
     let test_message = "Hello from the lifecycle test!";
-    client.send(&format!("<message to='{}' type='groupchat' id='lifecycle-msg-1' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<message to='{}' type='groupchat' id='lifecycle-msg-1' xmlns='jabber:client'>\
         <body>{}</body>\
-    </message>", room_jid, test_message)).await.expect("Send message");
+    </message>",
+            room_jid, test_message
+        ))
+        .await
+        .expect("Send message");
 
-    let response = client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read message echo");
+    let response = client
+        .read_until("</message>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read message echo");
     client.clear();
 
     assert!(
@@ -1365,18 +2042,26 @@ async fn test_muc_complete_lifecycle() {
         response
     );
     assert!(
-        response.contains(&format!("from='{}/{}'", room_jid, nick)) ||
-        response.contains(&format!("from=\"{}/{}\"", room_jid, nick)),
+        response.contains(&format!("from='{}/{}'", room_jid, nick))
+            || response.contains(&format!("from=\"{}/{}\"", room_jid, nick)),
         "Message should be from room/nick, got: {}",
         response
     );
     println!("Step 5: Message sent and echoed successfully");
 
     // === Step 6: Leave room ===
-    client.send(&format!("<presence to='{}/{}' type='unavailable' xmlns='jabber:client'/>",
-        room_jid, nick)).await.expect("Send leave presence");
+    client
+        .send(&format!(
+            "<presence to='{}/{}' type='unavailable' xmlns='jabber:client'/>",
+            room_jid, nick
+        ))
+        .await
+        .expect("Send leave presence");
 
-    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read leave presence");
+    let response = client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read leave presence");
 
     assert!(
         response.contains("type='unavailable'") || response.contains("type=\"unavailable\""),
@@ -1424,13 +2109,22 @@ async fn test_mam_query_basic() {
     let room_jid = "mam-test-room@muc.localhost";
     let nick = "MamTester";
 
-    client.send(&format!("<presence to='{}/{}' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<presence to='{}/{}' xmlns='jabber:client'>\
         <x xmlns='http://jabber.org/protocol/muc'>\
             <history maxstanzas='0'/>\
         </x>\
-    </presence>", room_jid, nick)).await.expect("Send MUC join");
+    </presence>",
+            room_jid, nick
+        ))
+        .await
+        .expect("Send MUC join");
 
-    let response = client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    let response = client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read join presence");
     client.clear();
 
     assert!(
@@ -1448,21 +2142,28 @@ async fn test_mam_query_basic() {
     ];
 
     for (i, body) in test_messages.iter().enumerate() {
-        client.send(&format!(
-            "<message to='{}' type='groupchat' id='mam-msg-{}' xmlns='jabber:client'>\
+        client
+            .send(&format!(
+                "<message to='{}' type='groupchat' id='mam-msg-{}' xmlns='jabber:client'>\
                 <body>{}</body>\
             </message>",
-            room_jid, i, body
-        )).await.expect("Send message");
+                room_jid, i, body
+            ))
+            .await
+            .expect("Send message");
 
         // Wait for message echo (confirms message was processed)
-        let echo = client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read message echo");
+        let echo = client
+            .read_until("</message>", DEFAULT_TIMEOUT)
+            .await
+            .expect("Read message echo");
         client.clear();
 
         assert!(
             echo.contains(body),
             "Should receive echo for message {}, got: {}",
-            i, echo
+            i,
+            echo
         );
     }
 
@@ -1472,8 +2173,9 @@ async fn test_mam_query_basic() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // === Step 4: Query MAM archive ===
-    client.send(&format!(
-        "<iq type='set' id='mam-query-1' to='{}' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<iq type='set' id='mam-query-1' to='{}' xmlns='jabber:client'>\
             <query xmlns='urn:xmpp:mam:2' queryid='q1'>\
                 <x xmlns='jabber:x:data' type='submit'>\
                     <field var='FORM_TYPE' type='hidden'>\
@@ -1482,8 +2184,10 @@ async fn test_mam_query_basic() {
                 </x>\
             </query>\
         </iq>",
-        room_jid
-    )).await.expect("Send MAM query");
+            room_jid
+        ))
+        .await
+        .expect("Send MAM query");
 
     // === Step 5: Collect MAM results ===
     // MAM returns multiple <message> stanzas with <result> elements, then a final <iq type='result'>
@@ -1534,14 +2238,14 @@ async fn test_mam_query_basic() {
     }
 
     // === Step 6: Verify results ===
-    assert!(
-        fin_received,
-        "Should receive MAM fin IQ response"
-    );
+    assert!(fin_received, "Should receive MAM fin IQ response");
 
     // We should have received at least our test messages
     // Note: The result count depends on how we're counting - we look for forwarded messages
-    println!("MAM query returned {} result stanzas", result_messages.len());
+    println!(
+        "MAM query returned {} result stanzas",
+        result_messages.len()
+    );
 
     // Verify that result messages contain forwarded elements with delay
     for result in &result_messages {
@@ -1582,27 +2286,42 @@ async fn test_mam_query_with_rsm() {
     let room_jid = "rsm-test-room@muc.localhost";
     let nick = "RsmTester";
 
-    client.send(&format!("<presence to='{}/{}' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<presence to='{}/{}' xmlns='jabber:client'>\
         <x xmlns='http://jabber.org/protocol/muc'>\
             <history maxstanzas='0'/>\
         </x>\
-    </presence>", room_jid, nick)).await.expect("Send MUC join");
+    </presence>",
+            room_jid, nick
+        ))
+        .await
+        .expect("Send MUC join");
 
-    client.read_until("</presence>", DEFAULT_TIMEOUT).await.expect("Read join presence");
+    client
+        .read_until("</presence>", DEFAULT_TIMEOUT)
+        .await
+        .expect("Read join presence");
     client.clear();
 
     // === Step 3: Send enough messages to test pagination ===
     // Send 5 messages, then query with max=2 to test pagination
     for i in 0..5 {
-        client.send(&format!(
-            "<message to='{}' type='groupchat' id='rsm-msg-{}' xmlns='jabber:client'>\
+        client
+            .send(&format!(
+                "<message to='{}' type='groupchat' id='rsm-msg-{}' xmlns='jabber:client'>\
                 <body>RSM test message {}</body>\
             </message>",
-            room_jid, i, i
-        )).await.expect("Send message");
+                room_jid, i, i
+            ))
+            .await
+            .expect("Send message");
 
         // Wait for echo
-        client.read_until("</message>", DEFAULT_TIMEOUT).await.expect("Read echo");
+        client
+            .read_until("</message>", DEFAULT_TIMEOUT)
+            .await
+            .expect("Read echo");
         client.clear();
     }
 
@@ -1610,16 +2329,19 @@ async fn test_mam_query_with_rsm() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // === Step 4: Query with RSM max=2 ===
-    client.send(&format!(
-        "<iq type='set' id='rsm-query-1' to='{}' xmlns='jabber:client'>\
+    client
+        .send(&format!(
+            "<iq type='set' id='rsm-query-1' to='{}' xmlns='jabber:client'>\
             <query xmlns='urn:xmpp:mam:2' queryid='rsm1'>\
                 <set xmlns='http://jabber.org/protocol/rsm'>\
                     <max>2</max>\
                 </set>\
             </query>\
         </iq>",
-        room_jid
-    )).await.expect("Send RSM MAM query");
+            room_jid
+        ))
+        .await
+        .expect("Send RSM MAM query");
 
     // === Step 5: Read response ===
     let mut result_count = 0;
@@ -1653,8 +2375,10 @@ async fn test_mam_query_with_rsm() {
                     has_last = true;
                 }
 
-                println!("RSM fin response: complete_false={}, has_first={}, has_last={}",
-                    complete_false, has_first, has_last);
+                println!(
+                    "RSM fin response: complete_false={}, has_first={}, has_last={}",
+                    complete_false, has_first, has_last
+                );
                 break;
             }
         }

@@ -241,15 +241,15 @@ impl XmlParser {
             ("<stream:features", parse_stream_features),
             ("<stream:error", parse_stream_error),
             ("<auth", parse_auth),
-            ("<response", parse_sasl_response),  // SASL response for SCRAM
+            ("<response", parse_sasl_response), // SASL response for SCRAM
             ("<iq", parse_iq_stanza),
             ("<message", parse_message_stanza),
             ("<presence", parse_presence_stanza),
             // XEP-0198 Stream Management stanzas (order matters!)
             ("<enable", parse_sm_enable),
-            ("<resume", parse_sm_resume),  // Must come before <r
+            ("<resume", parse_sm_resume), // Must come before <r
             ("<r", parse_sm_request),
-            ("<a ", parse_sm_ack),  // Note: space to avoid matching <auth
+            ("<a ", parse_sm_ack), // Note: space to avoid matching <auth
             // XEP-0220 Server Dialback stanzas
             ("<db:result", parse_dialback_result),
             ("<db:verify", parse_dialback_verify),
@@ -542,17 +542,17 @@ fn parse_sasl_response(data: &str) -> Result<ParsedStanza, XmppError> {
 }
 
 fn parse_iq_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
-    let element = parse_element(data)?;
+    let element = parse_client_element(data)?;
     Ok(ParsedStanza::Iq(element))
 }
 
 fn parse_message_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
-    let element = parse_element(data)?;
+    let element = parse_client_element(data)?;
     Ok(ParsedStanza::Message(element))
 }
 
 fn parse_presence_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
-    let element = parse_element(data)?;
+    let element = parse_client_element(data)?;
     Ok(ParsedStanza::Presence(element))
 }
 
@@ -572,7 +572,9 @@ fn parse_sm_enable(data: &str) -> Result<ParsedStanza, XmppError> {
 /// Parse XEP-0198 Stream Management request (<r/>).
 fn parse_sm_request(data: &str) -> Result<ParsedStanza, XmppError> {
     // Accept both with namespace and bare <r/>
-    if data.contains("<r") && (data.contains(ns::SM) || data.trim() == "<r/>" || data.contains("<r/>")) {
+    if data.contains("<r")
+        && (data.contains(ns::SM) || data.trim() == "<r/>" || data.contains("<r/>"))
+    {
         Ok(ParsedStanza::SmRequest)
     } else {
         Err(XmppError::xml_parse("Invalid SM request"))
@@ -704,9 +706,58 @@ fn parse_csi_inactive(data: &str) -> Result<ParsedStanza, XmppError> {
 }
 
 /// Parse a string into a minidom Element.
+#[cfg(test)]
 fn parse_element(data: &str) -> Result<Element, XmppError> {
     data.parse::<Element>()
         .map_err(|e| XmppError::xml_parse(format!("Failed to parse element: {}", e)))
+}
+
+/// Parse a client stanza, tolerating omitted default namespace declarations.
+///
+/// Some clients rely on stream-level namespace inheritance and send top-level
+/// `<iq/>`, `<message/>`, or `<presence/>` without `xmlns='jabber:client'`.
+/// Since we parse stanzas as standalone fragments, we inject the default ns.
+fn parse_client_element(data: &str) -> Result<Element, XmppError> {
+    let patched = add_default_namespace_if_missing(data, ns::JABBER_CLIENT);
+    patched
+        .parse::<Element>()
+        .map_err(|e| XmppError::xml_parse(format!("Failed to parse element: {}", e)))
+}
+
+fn add_default_namespace_if_missing(data: &str, default_ns: &str) -> String {
+    let trimmed = data.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    if !(trimmed.starts_with("<iq")
+        || trimmed.starts_with("<message")
+        || trimmed.starts_with("<presence"))
+    {
+        return trimmed.to_string();
+    }
+
+    let open_end = match trimmed.find('>') {
+        Some(idx) => idx,
+        None => return trimmed.to_string(),
+    };
+    let open_tag = &trimmed[..open_end];
+
+    if open_tag.contains("xmlns=") {
+        return trimmed.to_string();
+    }
+
+    let tag_end = trimmed[1..]
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .map(|idx| idx + 1)
+        .unwrap_or(open_end);
+
+    format!(
+        "{} xmlns='{}'{}",
+        &trimmed[..tag_end],
+        default_ns,
+        &trimmed[tag_end..]
+    )
 }
 
 /// Convert a minidom Element back to an XML string.
@@ -798,6 +849,25 @@ mod tests {
 
         let stanza = parser.next_stanza().unwrap();
         assert!(matches!(stanza, Some(ParsedStanza::Iq(_))));
+    }
+
+    #[test]
+    fn test_parser_iq_without_namespace_declaration() {
+        let mut parser = XmlParser::new();
+        parser.feed(
+            b"<iq type='set' id='bind_1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>",
+        );
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        match stanza {
+            Some(ParsedStanza::Iq(element)) => {
+                assert_eq!(element.name(), "iq");
+                assert_eq!(element.ns(), ns::JABBER_CLIENT);
+            }
+            _ => panic!("Expected IQ stanza"),
+        }
     }
 
     #[test]

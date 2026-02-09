@@ -197,7 +197,11 @@ impl Subject {
 
     /// Create a userset subject (e.g., all members of a waddle)
     #[allow(dead_code)]
-    pub fn userset(subject_type: SubjectType, id: impl Into<String>, relation: impl Into<String>) -> Self {
+    pub fn userset(
+        subject_type: SubjectType,
+        id: impl Into<String>,
+        relation: impl Into<String>,
+    ) -> Self {
         Self {
             subject_type,
             id: id.into(),
@@ -475,7 +479,11 @@ impl TupleStore {
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
-        Ok(rows.next().await.map_err(|e| PermissionError::DatabaseError(e.to_string()))?.is_some())
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
+            .is_some())
     }
 
     /// List all relations a subject has on an object
@@ -510,8 +518,14 @@ impl TupleStore {
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
         let mut relations = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| PermissionError::DatabaseError(e.to_string()))? {
-            let relation: String = row.get(0).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
+        {
+            let relation: String = row
+                .get(0)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
             relations.push(relation);
         }
 
@@ -539,12 +553,20 @@ impl TupleStore {
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
         let mut subjects = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| PermissionError::DatabaseError(e.to_string()))? {
-            let subject_type_str: String =
-                row.get(0).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_id: String = row.get(1).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_relation: Option<String> =
-                row.get(2).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
+        {
+            let subject_type_str: String = row
+                .get(0)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let subject_id: String = row
+                .get(1)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let subject_relation: Option<String> = row
+                .get(2)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
             let subject_type = SubjectType::from_str(&subject_type_str)?;
 
@@ -630,19 +652,35 @@ impl TupleStore {
     async fn rows_to_tuples(&self, rows: &mut libsql::Rows) -> Result<Vec<Tuple>, PermissionError> {
         let mut tuples = Vec::new();
 
-        while let Some(row) = rows.next().await.map_err(|e| PermissionError::DatabaseError(e.to_string()))? {
-            let id: String = row.get(0).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let object_type_str: String =
-                row.get(1).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let object_id: String = row.get(2).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let relation: String = row.get(3).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_type_str: String =
-                row.get(4).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_id: String = row.get(5).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let subject_relation: Option<String> =
-                row.get(6).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            let created_at: Option<String> =
-                row.get(7).map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let object_type_str: String = row
+                .get(1)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let object_id: String = row
+                .get(2)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let relation: String = row
+                .get(3)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let subject_type_str: String = row
+                .get(4)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let subject_id: String = row
+                .get(5)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let subject_relation: Option<String> = row
+                .get(6)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+            let created_at: Option<String> = row
+                .get(7)
+                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
 
             let object_type = ObjectType::from_str(&object_type_str)?;
             let subject_type = SubjectType::from_str(&subject_type_str)?;
@@ -664,7 +702,9 @@ impl TupleStore {
     }
 
     /// Get database connection, using persistent connection for in-memory databases
-    async fn get_connection(&self) -> Result<tokio::sync::MutexGuard<'_, libsql::Connection>, PermissionError> {
+    async fn get_connection(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, libsql::Connection>, PermissionError> {
         if let Some(persistent) = self.db.persistent_connection() {
             Ok(persistent.lock().await)
         } else {
@@ -771,7 +811,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_tuple_store_delete() {
-        let db = Database::in_memory("test-tuple-store-delete").await.unwrap();
+        let db = Database::in_memory("test-tuple-store-delete")
+            .await
+            .unwrap();
         let db = Arc::new(db);
 
         // Run migrations

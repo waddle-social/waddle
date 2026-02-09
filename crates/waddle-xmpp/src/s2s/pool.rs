@@ -38,7 +38,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
 use crate::s2s::dns::{DnsError, SrvResolver};
-use crate::s2s::outbound::{OutboundConnectionError, S2sOutboundConnection, S2sOutboundConfig};
+use crate::s2s::outbound::{OutboundConnectionError, S2sOutboundConfig, S2sOutboundConnection};
 
 /// Default maximum connections per domain.
 pub const DEFAULT_MAX_CONNECTIONS_PER_DOMAIN: usize = 2;
@@ -281,7 +281,9 @@ impl DomainPoolEntry {
         }
 
         let delay = config.initial_delay.as_secs_f64()
-            * config.backoff_multiplier.powi(self.consecutive_failures as i32 - 1);
+            * config
+                .backoff_multiplier
+                .powi(self.consecutive_failures as i32 - 1);
         Duration::from_secs_f64(delay.min(config.max_delay.as_secs_f64()))
     }
 
@@ -540,7 +542,9 @@ impl S2sConnectionPool {
         let targets = if self.config.use_dns_srv {
             self.resolver.resolve_xmpp_server(domain).await?
         } else {
-            vec![crate::s2s::dns::ResolvedTarget::fallback(domain.to_string())]
+            vec![crate::s2s::dns::ResolvedTarget::fallback(
+                domain.to_string(),
+            )]
         };
 
         debug!(
@@ -603,9 +607,9 @@ impl S2sConnectionPool {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| S2sPoolError::Internal(
-            format!("No targets available for domain: {}", domain),
-        )))
+        Err(last_error.unwrap_or_else(|| {
+            S2sPoolError::Internal(format!("No targets available for domain: {}", domain))
+        }))
     }
 
     /// Clean up idle and unhealthy connections.
@@ -688,10 +692,8 @@ impl S2sConnectionPool {
         let shutdown = Arc::clone(&self.shutdown);
 
         let handle = tokio::spawn(async move {
-            let mut cleanup_interval =
-                tokio::time::interval(config.idle_timeout / 2);
-            let mut health_check_interval =
-                tokio::time::interval(config.health_check_interval);
+            let mut cleanup_interval = tokio::time::interval(config.idle_timeout / 2);
+            let mut health_check_interval = tokio::time::interval(config.health_check_interval);
 
             loop {
                 tokio::select! {

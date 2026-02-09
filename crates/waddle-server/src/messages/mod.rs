@@ -123,7 +123,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_pagination() {
-        let db = Database::in_memory("test-messages-pagination").await.unwrap();
+        let db = Database::in_memory("test-messages-pagination")
+            .await
+            .unwrap();
         let db = Arc::new(db);
 
         // Run per-waddle migrations
@@ -146,10 +148,7 @@ mod tests {
         }
 
         // Get first page
-        let (messages, cursor) = repo
-            .get_by_channel("channel-test", 5, None)
-            .await
-            .unwrap();
+        let (messages, cursor) = repo.get_by_channel("channel-test", 5, None).await.unwrap();
         assert_eq!(messages.len(), 5);
         assert!(cursor.is_some());
 

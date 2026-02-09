@@ -196,7 +196,11 @@ impl ConnectionRegistry {
     /// Send a stanza to multiple recipients.
     ///
     /// Returns a vector of (jid, result) pairs for each recipient.
-    pub async fn send_to_many<'a, I>(&self, recipients: I, stanza: Stanza) -> Vec<(FullJid, SendResult)>
+    pub async fn send_to_many<'a, I>(
+        &self,
+        recipients: I,
+        stanza: Stanza,
+    ) -> Vec<(FullJid, SendResult)>
     where
         I: IntoIterator<Item = &'a FullJid>,
     {
@@ -294,8 +298,8 @@ impl fmt::Debug for ConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::{Message, MessageType};
     use jid::Jid;
+    use xmpp_parsers::message::{Message, MessageType};
 
     fn test_jid(user: &str) -> FullJid {
         format!("{}@example.com/resource", user).parse().unwrap()
@@ -497,7 +501,10 @@ mod tests {
         let result_map: std::collections::HashMap<_, _> = results.into_iter().collect();
         assert!(matches!(result_map.get(&jid1), Some(SendResult::Sent)));
         assert!(matches!(result_map.get(&jid2), Some(SendResult::Sent)));
-        assert!(matches!(result_map.get(&jid3), Some(SendResult::NotConnected)));
+        assert!(matches!(
+            result_map.get(&jid3),
+            Some(SendResult::NotConnected)
+        ));
 
         // Verify messages were received
         assert!(rx1.recv().await.is_some());

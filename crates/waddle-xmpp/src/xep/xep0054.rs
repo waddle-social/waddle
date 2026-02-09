@@ -459,11 +459,7 @@ mod tests {
     #[test]
     fn test_is_vcard_query_set() {
         let vcard_elem = Element::builder("vCard", NS_VCARD)
-            .append(
-                Element::builder("FN", NS_VCARD)
-                    .append("John Doe")
-                    .build(),
-            )
+            .append(Element::builder("FN", NS_VCARD).append("John Doe").build())
             .build();
         let iq = Iq {
             from: None,
@@ -506,11 +502,7 @@ mod tests {
     #[test]
     fn test_parse_vcard_full() {
         let vcard_elem = Element::builder("vCard", NS_VCARD)
-            .append(
-                Element::builder("FN", NS_VCARD)
-                    .append("John Doe")
-                    .build(),
-            )
+            .append(Element::builder("FN", NS_VCARD).append("John Doe").build())
             .append(
                 Element::builder("NICKNAME", NS_VCARD)
                     .append("johnd")
@@ -689,8 +681,10 @@ mod tests {
 
     #[test]
     fn test_build_vcard_error() {
-        let error_response =
-            build_vcard_error("error-1", &VCardError::BadRequest("Invalid data".to_string()));
+        let error_response = build_vcard_error(
+            "error-1",
+            &VCardError::BadRequest("Invalid data".to_string()),
+        );
 
         assert!(error_response.contains("type='error'"));
         assert!(error_response.contains("id='error-1'"));

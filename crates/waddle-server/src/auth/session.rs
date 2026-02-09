@@ -216,18 +216,15 @@ impl SessionManager {
         debug!("Creating session for DID: {}", session.did);
 
         // First, ensure the user exists
-        let user_id = self.ensure_user_exists(&session.did, &session.handle).await?;
+        let user_id = self
+            .ensure_user_exists(&session.did, &session.handle)
+            .await?;
 
         // Encrypt tokens
         let encrypted_access = self.encrypt(&session.access_token);
-        let encrypted_refresh = session
-            .refresh_token
-            .as_ref()
-            .map(|t| self.encrypt(t));
+        let encrypted_refresh = session.refresh_token.as_ref().map(|t| self.encrypt(t));
 
-        let expires_at = session
-            .expires_at
-            .map(|dt| dt.to_rfc3339());
+        let expires_at = session.expires_at.map(|dt| dt.to_rfc3339());
 
         // Use persistent connection for in-memory databases
         if let Some(persistent) = self.db.persistent_connection() {
@@ -297,9 +294,11 @@ impl SessionManager {
                 .await
                 .map_err(|e| AuthError::DatabaseError(format!("Failed to query user: {}", e)))?;
 
-            if let Some(row) = rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read user row: {}", e))
-            })? {
+            if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to read user row: {}", e)))?
+            {
                 let id: i64 = row.get(0).map_err(|e| {
                     AuthError::DatabaseError(format!("Failed to get user id: {}", e))
                 })?;
@@ -318,13 +317,19 @@ impl SessionManager {
             let mut rows = conn
                 .query("SELECT id FROM users WHERE did = ?", libsql::params![did])
                 .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to query new user: {}", e)))?;
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to query new user: {}", e))
+                })?;
 
             let row = rows
                 .next()
                 .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to read new user row: {}", e)))?
-                .ok_or_else(|| AuthError::DatabaseError("User not found after insert".to_string()))?;
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to read new user row: {}", e))
+                })?
+                .ok_or_else(|| {
+                    AuthError::DatabaseError("User not found after insert".to_string())
+                })?;
 
             let id: i64 = row.get(0).map_err(|e| {
                 AuthError::DatabaseError(format!("Failed to get new user id: {}", e))
@@ -342,9 +347,11 @@ impl SessionManager {
                 .await
                 .map_err(|e| AuthError::DatabaseError(format!("Failed to query user: {}", e)))?;
 
-            if let Some(row) = rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read user row: {}", e))
-            })? {
+            if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to read user row: {}", e)))?
+            {
                 let id: i64 = row.get(0).map_err(|e| {
                     AuthError::DatabaseError(format!("Failed to get user id: {}", e))
                 })?;
@@ -363,13 +370,19 @@ impl SessionManager {
             let mut rows = conn
                 .query("SELECT id FROM users WHERE did = ?", libsql::params![did])
                 .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to query new user: {}", e)))?;
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to query new user: {}", e))
+                })?;
 
             let row = rows
                 .next()
                 .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to read new user row: {}", e)))?
-                .ok_or_else(|| AuthError::DatabaseError("User not found after insert".to_string()))?;
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to read new user row: {}", e))
+                })?
+                .ok_or_else(|| {
+                    AuthError::DatabaseError("User not found after insert".to_string())
+                })?;
 
             let id: i64 = row.get(0).map_err(|e| {
                 AuthError::DatabaseError(format!("Failed to get new user id: {}", e))
@@ -444,30 +457,29 @@ impl SessionManager {
             LIMIT 1
         "#;
 
-        let row = if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn
-                .query(query, libsql::params![did])
-                .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
+        let row =
+            if let Some(persistent) = self.db.persistent_connection() {
+                let conn = persistent.lock().await;
+                let mut rows = conn.query(query, libsql::params![did]).await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to query session: {}", e))
+                })?;
 
-            rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read session row: {}", e))
-            })?
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect to database: {}", e))
-            })?;
+                rows.next().await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to read session row: {}", e))
+                })?
+            } else {
+                let conn = self.db.connect().map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to connect to database: {}", e))
+                })?;
 
-            let mut rows = conn
-                .query(query, libsql::params![did])
-                .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
+                let mut rows = conn.query(query, libsql::params![did]).await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to query session: {}", e))
+                })?;
 
-            rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read session row: {}", e))
-            })?
-        };
+                rows.next().await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to read session row: {}", e))
+                })?
+            };
 
         match row {
             Some(row) => {
@@ -480,30 +492,30 @@ impl SessionManager {
 
     /// Convert a database row to a Session
     fn row_to_session(&self, row: &libsql::Row) -> Result<Session, AuthError> {
-        let id: String = row.get(0).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get session id: {}", e))
-        })?;
+        let id: String = row
+            .get(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get session id: {}", e)))?;
 
-        let encrypted_access: String = row.get(1).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get access token: {}", e))
-        })?;
+        let encrypted_access: String = row
+            .get(1)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get access token: {}", e)))?;
 
         let encrypted_refresh: Option<String> = row.get(2).ok();
 
         let expires_at_str: Option<String> = row.get(3).ok();
-        let created_at_str: String = row.get(4).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get created_at: {}", e))
-        })?;
-        let last_used_at_str: String = row.get(5).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get last_used_at: {}", e))
-        })?;
+        let created_at_str: String = row
+            .get(4)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get created_at: {}", e)))?;
+        let last_used_at_str: String = row
+            .get(5)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get last_used_at: {}", e)))?;
 
-        let did: String = row.get(6).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get DID: {}", e))
-        })?;
-        let handle: String = row.get(7).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get handle: {}", e))
-        })?;
+        let did: String = row
+            .get(6)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get DID: {}", e)))?;
+        let handle: String = row
+            .get(7)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get handle: {}", e)))?;
 
         // Get token_endpoint and pds_url (may be NULL for older sessions)
         let token_endpoint: String = row.get(8).unwrap_or_default();
@@ -528,7 +540,9 @@ impl SessionManager {
 
         let last_used_at = DateTime::parse_from_rfc3339(&last_used_at_str)
             .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse last_used_at: {}", e)))?;
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to parse last_used_at: {}", e))
+            })?;
 
         Ok(Session {
             id,
@@ -609,7 +623,9 @@ impl SessionManager {
                 ],
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to update session tokens: {}", e)))?;
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to update session tokens: {}", e))
+            })?;
         } else {
             let conn = self.db.connect().map_err(|e| {
                 AuthError::DatabaseError(format!("Failed to connect to database: {}", e))
@@ -631,7 +647,9 @@ impl SessionManager {
                 ],
             )
             .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to update session tokens: {}", e)))?;
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to update session tokens: {}", e))
+            })?;
         }
 
         debug!("Updated tokens for session: {}", session_id);
@@ -720,15 +738,24 @@ impl SessionManager {
 
         // Check if session needs refresh (expires within 5 minutes)
         if session.needs_refresh() {
-            debug!("Session {} needs refresh, attempting automatic refresh", session_id);
+            debug!(
+                "Session {} needs refresh, attempting automatic refresh",
+                session_id
+            );
 
             if let Some(ref oauth_client) = self.oauth_client {
                 // Check if we have the necessary info for refresh
                 if let Some(ref refresh_token) = session.refresh_token {
                     if !session.token_endpoint.is_empty() {
-                        match oauth_client.refresh_token(&session.token_endpoint, refresh_token).await {
+                        match oauth_client
+                            .refresh_token(&session.token_endpoint, refresh_token)
+                            .await
+                        {
                             Ok(tokens) => {
-                                debug!("Automatic token refresh successful for session {}", session_id);
+                                debug!(
+                                    "Automatic token refresh successful for session {}",
+                                    session_id
+                                );
                                 // Update session in database
                                 self.update_session_tokens(session_id, &tokens).await?;
                                 // Update local session object
@@ -736,17 +763,29 @@ impl SessionManager {
                             }
                             Err(err) => {
                                 // Log the error but don't fail - the session is still valid
-                                warn!("Automatic token refresh failed for session {}: {}", session_id, err);
+                                warn!(
+                                    "Automatic token refresh failed for session {}: {}",
+                                    session_id, err
+                                );
                             }
                         }
                     } else {
-                        debug!("Session {} needs refresh but has no token_endpoint configured", session_id);
+                        debug!(
+                            "Session {} needs refresh but has no token_endpoint configured",
+                            session_id
+                        );
                     }
                 } else {
-                    debug!("Session {} needs refresh but has no refresh_token", session_id);
+                    debug!(
+                        "Session {} needs refresh but has no refresh_token",
+                        session_id
+                    );
                 }
             } else {
-                debug!("Session {} needs refresh but no OAuth client configured", session_id);
+                debug!(
+                    "Session {} needs refresh but no OAuth client configured",
+                    session_id
+                );
             }
         }
 
@@ -790,9 +829,7 @@ pub struct PendingAuthorization {
 
 impl PendingAuthorization {
     /// Create a new pending authorization from an authorization request
-    pub fn from_authorization_request(
-        request: &super::atproto::AuthorizationRequest,
-    ) -> Self {
+    pub fn from_authorization_request(request: &super::atproto::AuthorizationRequest) -> Self {
         Self {
             state: request.state.clone(),
             code_verifier: request.code_verifier.clone(),
@@ -907,10 +944,8 @@ mod tests {
         use crate::db::Database;
 
         let key = b"test-encryption-key-32-bytes!!!";
-        let oauth_client = super::super::AtprotoOAuth::new(
-            "https://test.com/client",
-            "https://test.com/callback",
-        );
+        let oauth_client =
+            super::super::AtprotoOAuth::new("https://test.com/client", "https://test.com/callback");
 
         let manager = futures::executor::block_on(async {
             SessionManager::with_oauth_client(

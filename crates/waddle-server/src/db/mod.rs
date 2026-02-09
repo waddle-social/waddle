@@ -16,9 +16,9 @@
 //! - Independent scaling per waddle
 //! - Easy data export/backup per community
 
+pub mod blocking;
 mod migrations;
 mod pool;
-pub mod blocking;
 pub mod roster;
 
 use libsql::{Connection, Database as LibSqlDatabase};
@@ -81,11 +81,7 @@ impl DatabaseConfig {
 
     /// Create a production configuration with Turso sync
     #[allow(dead_code)] // API function for production use
-    pub fn production(
-        base_path: &str,
-        turso_url: String,
-        turso_auth_token: String,
-    ) -> Self {
+    pub fn production(base_path: &str, turso_url: String, turso_auth_token: String) -> Self {
         Self {
             global_db_path: Some(format!("{}/global.db", base_path)),
             waddle_db_base_path: Some(format!("{}/waddles", base_path)),
@@ -120,9 +116,7 @@ impl Database {
     #[instrument(skip_all)]
     pub async fn in_memory(name: &str) -> Result<Self, DatabaseError> {
         debug!("Creating in-memory database: {}", name);
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await?;
+        let db = libsql::Builder::new_local(":memory:").build().await?;
 
         // Create a persistent connection for in-memory databases
         let conn = db.connect()?;
@@ -143,13 +137,14 @@ impl Database {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                DatabaseError::ConnectionFailed(format!("Failed to create database directory: {}", e))
+                DatabaseError::ConnectionFailed(format!(
+                    "Failed to create database directory: {}",
+                    e
+                ))
             })?;
         }
 
-        let db = libsql::Builder::new_local(path)
-            .build()
-            .await?;
+        let db = libsql::Builder::new_local(path).build().await?;
 
         info!("Opened database '{}' at {:?}", name, path);
         Ok(Self {
@@ -173,7 +168,10 @@ impl Database {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                DatabaseError::ConnectionFailed(format!("Failed to create database directory: {}", e))
+                DatabaseError::ConnectionFailed(format!(
+                    "Failed to create database directory: {}",
+                    e
+                ))
             })?;
         }
 
@@ -307,10 +305,14 @@ mod tests {
         let db = Database::in_memory("test").await.unwrap();
 
         // Create a test table
-        db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
+        db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
 
         // Insert a row
-        db.execute("INSERT INTO test (name) VALUES ('hello')").await.unwrap();
+        db.execute("INSERT INTO test (name) VALUES ('hello')")
+            .await
+            .unwrap();
 
         // Query should succeed - use persistent connection for in-memory database
         let conn = db.persistent_connection().unwrap();

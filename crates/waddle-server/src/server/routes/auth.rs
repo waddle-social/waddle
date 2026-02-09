@@ -5,9 +5,7 @@
 //! - GET /v1/auth/atproto/callback - Handle OAuth redirect callback
 
 use crate::auth::{
-    AtprotoOAuth, AuthError, Session, SessionManager,
-    did_to_jid,
-    session::PendingAuthorization,
+    did_to_jid, session::PendingAuthorization, AtprotoOAuth, AuthError, Session, SessionManager,
 };
 use crate::server::AppState;
 use axum::{
@@ -43,14 +41,16 @@ pub struct AuthState {
 
 impl AuthState {
     /// Create new auth state
-    pub fn new(
-        app_state: Arc<AppState>,
-        base_url: &str,
-        encryption_key: Option<&[u8]>,
-    ) -> Self {
+    pub fn new(app_state: Arc<AppState>, base_url: &str, encryption_key: Option<&[u8]>) -> Self {
         // client_id is the URL to our OAuth client metadata endpoint
-        let client_id = format!("{}/oauth/client-metadata.json", base_url.trim_end_matches('/'));
-        let redirect_uri = format!("{}/v1/auth/atproto/callback", base_url.trim_end_matches('/'));
+        let client_id = format!(
+            "{}/oauth/client-metadata.json",
+            base_url.trim_end_matches('/')
+        );
+        let redirect_uri = format!(
+            "{}/v1/auth/atproto/callback",
+            base_url.trim_end_matches('/')
+        );
 
         let oauth_client = AtprotoOAuth::new(&client_id, &redirect_uri);
         // Create session manager with OAuth client for automatic token refresh
@@ -197,7 +197,10 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
         AuthError::RegistrationDisabled => (StatusCode::FORBIDDEN, "registration_disabled"),
     };
 
-    (status, Json(ErrorResponse::new(error_code, &err.to_string())))
+    (
+        status,
+        Json(ErrorResponse::new(error_code, &err.to_string())),
+    )
 }
 
 /// OAuth client metadata document for ATProto OAuth
@@ -221,9 +224,7 @@ struct OAuthClientMetadata {
 /// This endpoint is required by ATProto OAuth - the authorization server
 /// fetches this document to verify the client.
 #[instrument(skip(state))]
-pub async fn client_metadata_handler(
-    State(state): State<Arc<AuthState>>,
-) -> impl IntoResponse {
+pub async fn client_metadata_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     let client_id = format!("{}/oauth/client-metadata.json", state.base_url);
     let auth_redirect_uri = format!("{}/v1/auth/atproto/callback", state.base_url);
     let device_redirect_uri = format!("{}/v1/auth/device/callback", state.base_url);
@@ -233,7 +234,11 @@ pub async fn client_metadata_handler(
         client_id,
         client_name: "Waddle".to_string(),
         client_uri: state.base_url.clone(),
-        redirect_uris: vec![auth_redirect_uri, device_redirect_uri, web_auth_redirect_uri],
+        redirect_uris: vec![
+            auth_redirect_uri,
+            device_redirect_uri,
+            web_auth_redirect_uri,
+        ],
         grant_types: vec![
             "authorization_code".to_string(),
             "refresh_token".to_string(),
@@ -259,16 +264,19 @@ pub async fn authorize_handler(
 ) -> impl IntoResponse {
     info!("Starting authorization for handle: {}", request.handle);
 
-    match state.oauth_client.start_authorization(&request.handle).await {
+    match state
+        .oauth_client
+        .start_authorization(&request.handle)
+        .await
+    {
         Ok(auth_request) => {
             // Store pending authorization
             let pending = PendingAuthorization::from_authorization_request(&auth_request);
-            state.pending_auths.insert(auth_request.state.clone(), pending);
+            state
+                .pending_auths
+                .insert(auth_request.state.clone(), pending);
 
-            info!(
-                "Authorization URL generated for handle: {}",
-                request.handle
-            );
+            info!("Authorization URL generated for handle: {}", request.handle);
 
             (
                 StatusCode::OK,
@@ -316,7 +324,13 @@ pub async fn callback_handler(
     // Exchange code for tokens (with DPoP)
     match state
         .oauth_client
-        .exchange_code(&pending.token_endpoint, &query.code, &pending.code_verifier, &pending.dpop_keypair, &pending.redirect_uri)
+        .exchange_code(
+            &pending.token_endpoint,
+            &query.code,
+            &pending.code_verifier,
+            &pending.dpop_keypair,
+            &pending.redirect_uri,
+        )
         .await
     {
         Ok(tokens) => {
@@ -353,10 +367,7 @@ pub async fn callback_handler(
             }
         }
         Err(err) => {
-            error!(
-                "Token exchange failed for DID {}: {}",
-                pending.did, err
-            );
+            error!("Token exchange failed for DID {}: {}", pending.did, err);
             auth_error_to_response(err).into_response()
         }
     }
@@ -445,7 +456,11 @@ pub async fn logout_handler(
 ) -> impl IntoResponse {
     info!("Logout request for session: {}", request.session_id);
 
-    match state.session_manager.delete_session(&request.session_id).await {
+    match state
+        .session_manager
+        .delete_session(&request.session_id)
+        .await
+    {
         Ok(()) => {
             info!("Session deleted: {}", request.session_id);
             StatusCode::NO_CONTENT.into_response()
@@ -473,7 +488,8 @@ pub async fn refresh_handler(
         Ok(Some(session)) => session,
         Ok(None) => {
             warn!("Session not found for refresh: {}", request.session_id);
-            return auth_error_to_response(AuthError::SessionNotFound(request.session_id)).into_response();
+            return auth_error_to_response(AuthError::SessionNotFound(request.session_id))
+                .into_response();
         }
         Err(err) => {
             error!("Failed to get session for refresh: {}", err);
@@ -485,14 +501,18 @@ pub async fn refresh_handler(
     let refresh_token = match &session.refresh_token {
         Some(token) => token,
         None => {
-            warn!("No refresh token available for session: {}", request.session_id);
+            warn!(
+                "No refresh token available for session: {}",
+                request.session_id
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
                     "no_refresh_token",
                     "Session does not have a refresh token",
                 )),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -505,16 +525,28 @@ pub async fn refresh_handler(
                 "no_token_endpoint",
                 "Session does not have a token endpoint configured",
             )),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Perform the token refresh
-    match state.oauth_client.refresh_token(&session.token_endpoint, refresh_token).await {
+    match state
+        .oauth_client
+        .refresh_token(&session.token_endpoint, refresh_token)
+        .await
+    {
         Ok(tokens) => {
-            info!("Token refresh successful for session: {}", request.session_id);
+            info!(
+                "Token refresh successful for session: {}",
+                request.session_id
+            );
 
             // Update the session in the database
-            if let Err(err) = state.session_manager.update_session_tokens(&request.session_id, &tokens).await {
+            if let Err(err) = state
+                .session_manager
+                .update_session_tokens(&request.session_id, &tokens)
+                .await
+            {
                 error!("Failed to update session tokens: {}", err);
                 return auth_error_to_response(err).into_response();
             }
@@ -532,10 +564,14 @@ pub async fn refresh_handler(
                     handle: session.handle,
                     expires_at,
                 }),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(err) => {
-            error!("Token refresh failed for session {}: {}", request.session_id, err);
+            error!(
+                "Token refresh failed for session {}: {}",
+                request.session_id, err
+            );
             auth_error_to_response(err).into_response()
         }
     }
@@ -564,7 +600,11 @@ pub async fn xmpp_token_handler(
     info!("XMPP token request for session: {}", params.session_id);
 
     // Validate the session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Failed to validate session for XMPP token: {}", err);
@@ -635,7 +675,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(db_pool, crate::config::ServerConfig::test_homeserver()));
+        let app_state = Arc::new(AppState::new(
+            db_pool,
+            crate::config::ServerConfig::test_homeserver(),
+        ));
         Arc::new(AuthState::new(
             app_state,
             "https://waddle.social",

@@ -116,8 +116,10 @@ impl DpopKeyPair {
         }
 
         // Encode header and claims
-        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_string(&header).expect("serialize header"));
-        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).expect("serialize claims"));
+        let header_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_string(&header).expect("serialize header"));
+        let claims_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims).expect("serialize claims"));
 
         // Create signing input
         let signing_input = format!("{}.{}", header_b64, claims_b64);
@@ -203,7 +205,12 @@ mod tests {
     #[test]
     fn test_proof_with_nonce() {
         let kp = DpopKeyPair::generate();
-        let proof = kp.create_proof("POST", "https://example.com/token", Some("test-nonce"), None);
+        let proof = kp.create_proof(
+            "POST",
+            "https://example.com/token",
+            Some("test-nonce"),
+            None,
+        );
 
         let parts: Vec<&str> = proof.split('.').collect();
         let claims_json = URL_SAFE_NO_PAD.decode(parts[1]).expect("decode claims");
@@ -215,7 +222,12 @@ mod tests {
     #[test]
     fn test_proof_with_access_token() {
         let kp = DpopKeyPair::generate();
-        let proof = kp.create_proof("GET", "https://pds.example.com/xrpc/foo", None, Some("test-token"));
+        let proof = kp.create_proof(
+            "GET",
+            "https://pds.example.com/xrpc/foo",
+            None,
+            Some("test-token"),
+        );
 
         let parts: Vec<&str> = proof.split('.').collect();
         let claims_json = URL_SAFE_NO_PAD.decode(parts[1]).expect("decode claims");

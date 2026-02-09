@@ -41,7 +41,10 @@ impl<'a> MessagesWidget<'a> {
 
         // Format timestamp
         let timestamp = if self.config.ui.show_timestamps {
-            let formatted = msg.timestamp.format(&self.config.ui.time_format).to_string();
+            let formatted = msg
+                .timestamp
+                .format(&self.config.ui.time_format)
+                .to_string();
             format!("[{}] ", formatted)
         } else {
             String::new()

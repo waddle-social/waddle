@@ -62,7 +62,11 @@ impl DirectInvite {
     }
 
     /// Create a new direct invite with all fields.
-    pub fn with_password(jid: BareJid, reason: Option<String>, password: impl Into<String>) -> Self {
+    pub fn with_password(
+        jid: BareJid,
+        reason: Option<String>,
+        password: impl Into<String>,
+    ) -> Self {
         Self {
             jid,
             reason,
@@ -90,7 +94,9 @@ pub fn is_direct_invite(element: &Element) -> bool {
 
 /// Check if a parsed Message contains a direct MUC invitation.
 pub fn message_has_direct_invite(msg: &xmpp_parsers::message::Message) -> bool {
-    msg.payloads.iter().any(|p| p.name() == "x" && p.ns() == NS_CONFERENCE)
+    msg.payloads
+        .iter()
+        .any(|p| p.name() == "x" && p.ns() == NS_CONFERENCE)
 }
 
 /// Parse a direct MUC invitation from a message element.
@@ -103,7 +109,9 @@ pub fn parse_direct_invite(element: &Element) -> Option<DirectInvite> {
 }
 
 /// Parse a direct MUC invitation from a Message.
-pub fn parse_direct_invite_from_message(msg: &xmpp_parsers::message::Message) -> Option<DirectInvite> {
+pub fn parse_direct_invite_from_message(
+    msg: &xmpp_parsers::message::Message,
+) -> Option<DirectInvite> {
     for payload in &msg.payloads {
         if payload.name() == "x" && payload.ns() == NS_CONFERENCE {
             return parse_invite_element(payload);
@@ -119,10 +127,12 @@ fn parse_invite_element(x_elem: &Element) -> Option<DirectInvite> {
     let jid: BareJid = jid_str.parse().ok()?;
 
     // Reason and password are optional
-    let reason = x_elem.attr("reason")
+    let reason = x_elem
+        .attr("reason")
         .filter(|s| !s.is_empty())
         .map(String::from);
-    let password = x_elem.attr("password")
+    let password = x_elem
+        .attr("password")
         .filter(|s| !s.is_empty())
         .map(String::from);
 
@@ -133,15 +143,18 @@ fn parse_invite_element(x_elem: &Element) -> Option<DirectInvite> {
         "Parsed direct MUC invitation"
     );
 
-    Some(DirectInvite { jid, reason, password })
+    Some(DirectInvite {
+        jid,
+        reason,
+        password,
+    })
 }
 
 /// Build a direct invite `<x>` element from a DirectInvite struct.
 ///
 /// The resulting element can be added to a message stanza.
 pub fn build_direct_invite(invite: &DirectInvite) -> Element {
-    let mut builder = Element::builder("x", NS_CONFERENCE)
-        .attr("jid", invite.jid.to_string());
+    let mut builder = Element::builder("x", NS_CONFERENCE).attr("jid", invite.jid.to_string());
 
     if let Some(ref reason) = invite.reason {
         builder = builder.attr("reason", reason.as_str());
@@ -378,7 +391,12 @@ mod tests {
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
         let invite = DirectInvite::new(jid);
 
-        let msg = build_invite_message(&from, &to, &invite, Some("You've been invited to join a room!"));
+        let msg = build_invite_message(
+            &from,
+            &to,
+            &invite,
+            Some("You've been invited to join a room!"),
+        );
 
         assert!(msg.contains("<body>You&apos;ve been invited to join a room!</body>"));
         assert!(msg.contains("xmlns='jabber:x:conference'"));
@@ -402,11 +420,8 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
-        let original = DirectInvite::with_password(
-            jid,
-            Some("Test roundtrip".to_string()),
-            "testpass",
-        );
+        let original =
+            DirectInvite::with_password(jid, Some("Test roundtrip".to_string()), "testpass");
 
         // Build the element
         let elem = build_direct_invite(&original);

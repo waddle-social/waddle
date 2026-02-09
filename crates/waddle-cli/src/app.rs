@@ -263,8 +263,8 @@ impl App {
     /// Populate sidebar with waddles and channels from the API
     pub fn set_waddles_and_channels(
         &mut self,
-        waddles: Vec<(String, String)>,     // (id, name)
-        channels: Vec<(String, String)>,    // (id, name)
+        waddles: Vec<(String, String)>,  // (id, name)
+        channels: Vec<(String, String)>, // (id, name)
     ) {
         let mut items = vec![SidebarItem::WaddleHeader];
 
@@ -289,7 +289,8 @@ impl App {
         self.sidebar_items = items;
 
         // Select first non-header item if available
-        self.sidebar_selected = self.sidebar_items
+        self.sidebar_selected = self
+            .sidebar_items
             .iter()
             .position(|item| !item.is_header())
             .unwrap_or(0);
@@ -315,8 +316,7 @@ impl App {
         if self.sidebar_selected > 0 {
             self.sidebar_selected -= 1;
             // Skip headers
-            while self.sidebar_selected > 0
-                && self.sidebar_items[self.sidebar_selected].is_header()
+            while self.sidebar_selected > 0 && self.sidebar_items[self.sidebar_selected].is_header()
             {
                 self.sidebar_selected -= 1;
             }

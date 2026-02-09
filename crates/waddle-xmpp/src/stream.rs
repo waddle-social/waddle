@@ -21,10 +21,7 @@ use crate::XmppError;
 #[derive(Debug)]
 pub enum SaslAuthResult {
     /// PLAIN mechanism: JID and token extracted from credentials
-    Plain {
-        jid: BareJid,
-        token: String,
-    },
+    Plain { jid: BareJid, token: String },
     /// OAUTHBEARER mechanism: token extracted from bearer credentials
     OAuthBearer {
         token: String,
@@ -295,7 +292,10 @@ impl XmppStream {
     /// When `registration_enabled` is true, includes the XEP-0077 registration
     /// feature advertisement allowing clients to register before authentication.
     #[instrument(skip(self), name = "xmpp.stream.send_features_sasl")]
-    pub async fn send_features_sasl_with_registration(&mut self, registration_enabled: bool) -> Result<(), XmppError> {
+    pub async fn send_features_sasl_with_registration(
+        &mut self,
+        registration_enabled: bool,
+    ) -> Result<(), XmppError> {
         let registration_feature = if registration_enabled {
             crate::xep::xep0077::build_registration_feature()
         } else {
@@ -312,14 +312,18 @@ impl XmppStream {
                 <isr xmlns='{}'/>\
                 {}\
             </stream:features>",
-            ns::SASL, ns::ISR, registration_feature
+            ns::SASL,
+            ns::ISR,
+            registration_feature
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
         if registration_enabled {
-            debug!("Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR and registration");
+            debug!(
+                "Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR and registration"
+            );
         } else {
             debug!("Sent SASL features (SCRAM-SHA-256, PLAIN, OAUTHBEARER) with ISR");
         }
@@ -360,41 +364,53 @@ impl XmppStream {
             self.parser.feed(&buf[..n]);
 
             if self.parser.has_complete_stanza() {
-                if let Some(ParsedStanza::SaslAuth { mechanism, data }) =
-                    self.parser.next_stanza()?
-                {
-                    debug!(mechanism = %mechanism, "Received SASL auth");
+                let stanza = match self.parser.next_stanza()? {
+                    Some(stanza) => stanza,
+                    None => continue,
+                };
 
-                    let mech = SaslMechanism::parse(&mechanism).ok_or_else(|| {
-                        XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
-                    })?;
+                match stanza {
+                    ParsedStanza::SaslAuth { mechanism, data } => {
+                        debug!(mechanism = %mechanism, "Received SASL auth");
 
-                    match mech {
-                        SaslMechanism::Plain => {
-                            let (jid, token) = self.parse_sasl_plain(&data)?;
-                            return Ok(SaslAuthResult::Plain { jid, token });
-                        }
-                        SaslMechanism::OAuthBearer => {
-                            let result = self.parse_sasl_oauthbearer(&data)?;
+                        let mech = SaslMechanism::parse(&mechanism).ok_or_else(|| {
+                            XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
+                        })?;
 
-                            match result {
-                                OAuthBearerResult::DiscoveryRequest => {
-                                    // Don't send success - caller should send discovery response
-                                    debug!("OAUTHBEARER discovery request received");
-                                    return Ok(SaslAuthResult::OAuthBearerDiscovery);
-                                }
-                                OAuthBearerResult::Credentials(creds) => {
-                                    return Ok(SaslAuthResult::OAuthBearer {
-                                        token: creds.token,
-                                        authzid: creds.authzid,
-                                    });
+                        match mech {
+                            SaslMechanism::Plain => {
+                                let (jid, token) = self.parse_sasl_plain(&data)?;
+                                return Ok(SaslAuthResult::Plain { jid, token });
+                            }
+                            SaslMechanism::OAuthBearer => {
+                                let result = self.parse_sasl_oauthbearer(&data)?;
+
+                                match result {
+                                    OAuthBearerResult::DiscoveryRequest => {
+                                        // Don't send success - caller should send discovery response
+                                        debug!("OAUTHBEARER discovery request received");
+                                        return Ok(SaslAuthResult::OAuthBearerDiscovery);
+                                    }
+                                    OAuthBearerResult::Credentials(creds) => {
+                                        return Ok(SaslAuthResult::OAuthBearer {
+                                            token: creds.token,
+                                            authzid: creds.authzid,
+                                        });
+                                    }
                                 }
                             }
-                        }
-                        SaslMechanism::ScramSha256 => {
-                            return self.handle_scram_client_first(&data);
+                            SaslMechanism::ScramSha256 => {
+                                return self.handle_scram_client_first(&data);
+                            }
                         }
                     }
+                    ParsedStanza::Message(_) | ParsedStanza::Presence(_) | ParsedStanza::Iq(_) => {
+                        self.send_stream_not_authorized_and_close().await?;
+                        return Err(XmppError::stream(
+                            "Stanza received before SASL authentication",
+                        ));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -438,10 +454,14 @@ impl XmppStream {
     ///
     /// Call this after receiving `SaslAuthResult::ScramSha256Challenge` and looking up
     /// the user's stored keys.
-    pub async fn send_scram_challenge(&mut self, server_first_message_b64: &str) -> Result<(), XmppError> {
+    pub async fn send_scram_challenge(
+        &mut self,
+        server_first_message_b64: &str,
+    ) -> Result<(), XmppError> {
         let challenge = format!(
             "<challenge xmlns='{}'>{}</challenge>",
-            ns::SASL, server_first_message_b64
+            ns::SASL,
+            server_first_message_b64
         );
         self.write_all(challenge.as_bytes()).await?;
         self.flush().await?;
@@ -492,17 +512,16 @@ impl XmppStream {
                     debug!(client_final = %client_final, "SCRAM client-final-message");
 
                     // Verify the client proof
-                    let server_final = scram_server.process_client_final(
-                        &client_final,
-                        stored_key,
-                        server_key,
-                    )?;
+                    let server_final =
+                        scram_server.process_client_final(&client_final, stored_key, server_key)?;
 
                     // Send success with server signature
-                    let server_signature_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
+                    let server_signature_b64 =
+                        BASE64_STANDARD.encode(server_final.message.as_bytes());
                     let success = format!(
                         "<success xmlns='{}'>{}</success>",
-                        ns::SASL, server_signature_b64
+                        ns::SASL,
+                        server_signature_b64
                     );
                     self.write_all(success.as_bytes()).await?;
                     self.flush().await?;
@@ -587,11 +606,11 @@ impl XmppStream {
     ///   <token xmlns='urn:xmpp:isr:0' expiry='ISO8601'>TOKEN</token>
     /// </success>
     /// ```
-    pub async fn send_sasl_success_with_isr(&mut self, isr_token_xml: &str) -> Result<(), XmppError> {
-        let success = format!(
-            "<success xmlns='{}'>{}</success>",
-            ns::SASL, isr_token_xml
-        );
+    pub async fn send_sasl_success_with_isr(
+        &mut self,
+        isr_token_xml: &str,
+    ) -> Result<(), XmppError> {
+        let success = format!("<success xmlns='{}'>{}</success>", ns::SASL, isr_token_xml);
         self.write_all(success.as_bytes()).await?;
         self.flush().await?;
         debug!("Sent SASL success with ISR token");
@@ -600,10 +619,7 @@ impl XmppStream {
 
     /// Send SASL failure response.
     pub async fn send_sasl_failure(&mut self, condition: &str) -> Result<(), XmppError> {
-        let failure = format!(
-            "<failure xmlns='{}'><{}/></failure>",
-            ns::SASL, condition
-        );
+        let failure = format!("<failure xmlns='{}'><{}/></failure>", ns::SASL, condition);
         self.write_all(failure.as_bytes()).await?;
         self.flush().await?;
         Ok(())
@@ -622,13 +638,17 @@ impl XmppStream {
     ///   <openid-configuration>https://example.com/.well-known/oauth-authorization-server</openid-configuration>
     /// </failure>
     /// ```
-    pub async fn send_oauthbearer_discovery(&mut self, discovery_url: &str) -> Result<(), XmppError> {
+    pub async fn send_oauthbearer_discovery(
+        &mut self,
+        discovery_url: &str,
+    ) -> Result<(), XmppError> {
         let response = format!(
             "<failure xmlns='{}'>\
                 <not-authorized/>\
                 <openid-configuration>{}</openid-configuration>\
             </failure>",
-            ns::SASL, discovery_url
+            ns::SASL,
+            discovery_url
         );
         self.write_all(response.as_bytes()).await?;
         self.flush().await?;
@@ -698,7 +718,10 @@ impl XmppStream {
                 <isr xmlns='{}'/>\
                 <csi xmlns='urn:xmpp:csi:0'/>\
             </stream:features>",
-            ns::BIND, ns::SESSION, ns::SM, ns::ISR
+            ns::BIND,
+            ns::SESSION,
+            ns::SM,
+            ns::ISR
         );
 
         self.write_all(features.as_bytes()).await?;
@@ -726,7 +749,12 @@ impl XmppStream {
     }
 
     /// Send XEP-0198 Stream Management enabled response.
-    pub async fn send_sm_enabled(&mut self, stream_id: &str, resume: bool, max_seconds: Option<u32>) -> Result<(), XmppError> {
+    pub async fn send_sm_enabled(
+        &mut self,
+        stream_id: &str,
+        resume: bool,
+        max_seconds: Option<u32>,
+    ) -> Result<(), XmppError> {
         let mut attrs = format!("id='{}'", stream_id);
         if resume {
             attrs.push_str(" resume='true'");
@@ -764,17 +792,22 @@ impl XmppStream {
     }
 
     /// Send XEP-0198 Stream Management failed response.
-    pub async fn send_sm_failed(&mut self, condition: Option<&str>, h: Option<u32>) -> Result<(), XmppError> {
+    pub async fn send_sm_failed(
+        &mut self,
+        condition: Option<&str>,
+        h: Option<u32>,
+    ) -> Result<(), XmppError> {
         let h_attr = h.map(|h| format!(" h='{}'", h)).unwrap_or_default();
 
-        let response = if let Some(cond) = condition {
-            format!(
+        let response =
+            if let Some(cond) = condition {
+                format!(
                 "<failed xmlns='{}'{}><{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></failed>",
                 ns::SM, h_attr, cond
             )
-        } else {
-            format!("<failed xmlns='{}'{}/>", ns::SM, h_attr)
-        };
+            } else {
+                format!("<failed xmlns='{}'{}/>", ns::SM, h_attr)
+            };
 
         self.write_all(response.as_bytes()).await?;
         self.flush().await?;
@@ -789,7 +822,9 @@ impl XmppStream {
     pub async fn send_sm_resumed(&mut self, previd: &str, h: u32) -> Result<(), XmppError> {
         let response = format!(
             "<resumed xmlns='{}' previd='{}' h='{}'/>",
-            ns::SM, previd, h
+            ns::SM,
+            previd,
+            h
         );
 
         self.write_all(response.as_bytes()).await?;
@@ -810,10 +845,18 @@ impl XmppStream {
     ///   <token xmlns='urn:xmpp:isr:0' expiry='ISO8601'>NEW_TOKEN</token>
     /// </resumed>
     /// ```
-    pub async fn send_sm_resumed_with_isr(&mut self, previd: &str, h: u32, isr_token_xml: &str) -> Result<(), XmppError> {
+    pub async fn send_sm_resumed_with_isr(
+        &mut self,
+        previd: &str,
+        h: u32,
+        isr_token_xml: &str,
+    ) -> Result<(), XmppError> {
         let response = format!(
             "<resumed xmlns='{}' previd='{}' h='{}'>{}</resumed>",
-            ns::SM, previd, h, isr_token_xml
+            ns::SM,
+            previd,
+            h,
+            isr_token_xml
         );
 
         self.write_all(response.as_bytes()).await?;
@@ -838,48 +881,95 @@ impl XmppStream {
             self.parser.feed(&buf[..n]);
 
             if self.parser.has_complete_stanza() {
-                if let Some(ParsedStanza::Iq(element)) = self.parser.next_stanza()? {
-                    debug!("Received bind request");
+                let stanza = match self.parser.next_stanza()? {
+                    Some(stanza) => stanza,
+                    None => continue,
+                };
 
-                    // Extract IQ attributes
-                    let id = element.attr("id").unwrap_or("bind_1").to_string();
-                    let iq_type = element.attr("type").unwrap_or("");
+                match stanza {
+                    ParsedStanza::Iq(element) => {
+                        // RFC 6120 §7.1: pre-bind stanzas sent to entities other than
+                        // the server or the authenticated account are not authorized.
+                        if pre_bind_target_is_unauthorized(
+                            element.attr("to"),
+                            bare_jid,
+                            &self.domain,
+                        ) {
+                            self.send_stream_not_authorized_and_close().await?;
+                            return Err(XmppError::stream(
+                                "Stanza to unauthorized entity before resource binding",
+                            ));
+                        }
 
-                    if iq_type != "set" {
-                        return Err(XmppError::stream("Bind must be an IQ set"));
+                        debug!("Received bind request");
+
+                        // Extract IQ attributes
+                        let id = element.attr("id").unwrap_or("bind_1").to_string();
+                        let iq_type = element.attr("type").unwrap_or("");
+
+                        if iq_type != "set" {
+                            return Err(XmppError::stream("Bind must be an IQ set"));
+                        }
+
+                        // Ignore non-bind IQs until bind arrives.
+                        if element.get_child("bind", ns::BIND).is_none() {
+                            continue;
+                        }
+
+                        // Look for bind element and optional resource
+                        let resource = element
+                            .get_child("bind", ns::BIND)
+                            .and_then(|bind| bind.get_child("resource", ns::BIND))
+                            .map(|r| r.text())
+                            .unwrap_or_else(|| {
+                                format!("waddle-{}", &uuid::Uuid::new_v4().to_string()[..8])
+                            });
+
+                        let full_jid = bare_jid
+                            .with_resource_str(&resource)
+                            .map_err(|e| XmppError::stream(format!("Invalid resource: {}", e)))?;
+
+                        // Send bind result
+                        let result = format!(
+                            "<iq type='result' id='{}'>\
+                                <bind xmlns='{}'>\
+                                    <jid>{}</jid>\
+                                </bind>\
+                            </iq>",
+                            id,
+                            ns::BIND,
+                            full_jid
+                        );
+
+                        self.write_all(result.as_bytes()).await?;
+                        self.flush().await?;
+
+                        debug!(jid = %full_jid, "Resource bound");
+                        return Ok(full_jid);
                     }
-
-                    // Look for bind element and optional resource
-                    let resource = element
-                        .get_child("bind", ns::BIND)
-                        .and_then(|bind| bind.get_child("resource", ns::BIND))
-                        .map(|r| r.text())
-                        .unwrap_or_else(|| {
-                            format!("waddle-{}", &uuid::Uuid::new_v4().to_string()[..8])
-                        });
-
-                    let full_jid = bare_jid
-                        .with_resource_str(&resource)
-                        .map_err(|e| XmppError::stream(format!("Invalid resource: {}", e)))?;
-
-                    // Send bind result
-                    let result = format!(
-                        "<iq type='result' id='{}'>\
-                            <bind xmlns='{}'>\
-                                <jid>{}</jid>\
-                            </bind>\
-                        </iq>",
-                        id, ns::BIND, full_jid
-                    );
-
-                    self.write_all(result.as_bytes()).await?;
-                    self.flush().await?;
-
-                    debug!(jid = %full_jid, "Resource bound");
-                    return Ok(full_jid);
+                    ParsedStanza::Message(element) | ParsedStanza::Presence(element) => {
+                        if pre_bind_target_is_unauthorized(
+                            element.attr("to"),
+                            bare_jid,
+                            &self.domain,
+                        ) {
+                            self.send_stream_not_authorized_and_close().await?;
+                            return Err(XmppError::stream(
+                                "Stanza to unauthorized entity before resource binding",
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
+    }
+
+    async fn send_stream_not_authorized_and_close(&mut self) -> Result<(), XmppError> {
+        let stream_error =
+            crate::error::generate_stream_error(crate::error::stream_errors::NOT_AUTHORIZED, None);
+        self.write_all(stream_error.as_bytes()).await?;
+        self.flush().await
     }
 
     /// Read the next stanza from the stream.
@@ -1010,13 +1100,13 @@ impl XmppStream {
             self.parser.feed(&buf[..n]);
 
             if self.parser.has_complete_stanza() {
-                // Check buffer content to determine stanza type
-                let buffer_str = self.parser.buffer_str();
+                let stanza = match self.parser.next_stanza()? {
+                    Some(stanza) => stanza,
+                    None => continue,
+                };
 
-                // Check for registration IQ before consuming the stanza
-                if buffer_str.contains("<iq") && buffer_str.contains("jabber:iq:register") {
-                    // Parse as IQ element
-                    if let Some(crate::parser::ParsedStanza::Iq(element)) = self.parser.next_stanza()? {
+                match stanza {
+                    ParsedStanza::Iq(element) => {
                         if is_registration_query_element(&element) {
                             let id = element.attr("id").unwrap_or("").to_string();
                             match parse_registration_element(&element, &id) {
@@ -1031,45 +1121,51 @@ impl XmppStream {
                                 }
                             }
                         }
+
+                        self.send_stream_not_authorized_and_close().await?;
+                        return Err(XmppError::stream(
+                            "Stanza received before SASL authentication",
+                        ));
                     }
-                }
+                    ParsedStanza::SaslAuth { mechanism, data } => {
+                        debug!(mechanism = %mechanism, "Received SASL auth");
 
-                // Otherwise, check for SASL auth
-                if let Some(crate::parser::ParsedStanza::SaslAuth { mechanism, data }) =
-                    self.parser.next_stanza()?
-                {
-                    debug!(mechanism = %mechanism, "Received SASL auth");
+                        let mech = SaslMechanism::parse(&mechanism).ok_or_else(|| {
+                            XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
+                        })?;
 
-                    let mech = SaslMechanism::parse(&mechanism).ok_or_else(|| {
-                        XmppError::auth_failed(format!("Unsupported mechanism: {}", mechanism))
-                    })?;
+                        let sasl_result = match mech {
+                            SaslMechanism::Plain => {
+                                let (jid, token) = self.parse_sasl_plain(&data)?;
+                                SaslAuthResult::Plain { jid, token }
+                            }
+                            SaslMechanism::OAuthBearer => {
+                                let result = self.parse_sasl_oauthbearer(&data)?;
 
-                    let sasl_result = match mech {
-                        SaslMechanism::Plain => {
-                            let (jid, token) = self.parse_sasl_plain(&data)?;
-                            SaslAuthResult::Plain { jid, token }
-                        }
-                        SaslMechanism::OAuthBearer => {
-                            let result = self.parse_sasl_oauthbearer(&data)?;
-
-                            match result {
-                                OAuthBearerResult::DiscoveryRequest => {
-                                    SaslAuthResult::OAuthBearerDiscovery
-                                }
-                                OAuthBearerResult::Credentials(creds) => {
-                                    SaslAuthResult::OAuthBearer {
-                                        token: creds.token,
-                                        authzid: creds.authzid,
+                                match result {
+                                    OAuthBearerResult::DiscoveryRequest => {
+                                        SaslAuthResult::OAuthBearerDiscovery
+                                    }
+                                    OAuthBearerResult::Credentials(creds) => {
+                                        SaslAuthResult::OAuthBearer {
+                                            token: creds.token,
+                                            authzid: creds.authzid,
+                                        }
                                     }
                                 }
                             }
-                        }
-                        SaslMechanism::ScramSha256 => {
-                            self.handle_scram_client_first(&data)?
-                        }
-                    };
+                            SaslMechanism::ScramSha256 => self.handle_scram_client_first(&data)?,
+                        };
 
-                    return Ok(PreAuthResult::SaslAuth(sasl_result));
+                        return Ok(PreAuthResult::SaslAuth(sasl_result));
+                    }
+                    ParsedStanza::Message(_) | ParsedStanza::Presence(_) => {
+                        self.send_stream_not_authorized_and_close().await?;
+                        return Err(XmppError::stream(
+                            "Stanza received before SASL authentication",
+                        ));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1079,8 +1175,13 @@ impl XmppStream {
     ///
     /// Sends the registration fields form to the client in response to a
     /// registration 'get' IQ.
-    pub async fn send_registration_form(&mut self, id: &str, instructions: Option<&str>) -> Result<(), XmppError> {
-        let response = crate::xep::xep0077::build_registration_fields_response(id, instructions, true);
+    pub async fn send_registration_form(
+        &mut self,
+        id: &str,
+        instructions: Option<&str>,
+    ) -> Result<(), XmppError> {
+        let response =
+            crate::xep::xep0077::build_registration_fields_response(id, instructions, true);
         self.write_all(response.as_bytes()).await?;
         self.flush().await?;
         debug!(id = %id, "Sent registration form");
@@ -1097,7 +1198,11 @@ impl XmppStream {
     }
 
     /// Send XEP-0077 registration error response.
-    pub async fn send_registration_error(&mut self, id: &str, error: &crate::xep::xep0077::RegistrationError) -> Result<(), XmppError> {
+    pub async fn send_registration_error(
+        &mut self,
+        id: &str,
+        error: &crate::xep::xep0077::RegistrationError,
+    ) -> Result<(), XmppError> {
         let response = crate::xep::xep0077::build_registration_error(id, error);
         self.write_all(response.as_bytes()).await?;
         self.flush().await?;
@@ -1106,9 +1211,36 @@ impl XmppStream {
     }
 }
 
+fn pre_bind_target_is_unauthorized(
+    to: Option<&str>,
+    bare_jid: &BareJid,
+    server_domain: &str,
+) -> bool {
+    let Some(to) = to.map(str::trim).filter(|to| !to.is_empty()) else {
+        return false;
+    };
+
+    if to == server_domain || to == bare_jid.to_string() {
+        return false;
+    }
+
+    if let Ok(jid) = to.parse::<jid::Jid>() {
+        let target_bare = jid.to_bare();
+        if target_bare == *bare_jid {
+            return false;
+        }
+        if target_bare.node().is_none() && target_bare.domain().as_str() == server_domain {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Convert a minidom Element to an xmpp_parsers Message.
 fn element_to_message(element: Element) -> Result<Message, XmppError> {
-    Message::try_from(element).map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))
+    Message::try_from(element)
+        .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))
 }
 
 /// Convert a minidom Element to an xmpp_parsers Presence.

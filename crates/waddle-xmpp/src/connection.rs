@@ -3,12 +3,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::Utc;
 use jid::FullJid;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
+use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
 
 use crate::carbons::{
@@ -74,7 +77,6 @@ use crate::xep::xep0054::{
     build_empty_vcard_response, build_vcard_response, build_vcard_success, is_vcard_get,
     is_vcard_set, parse_vcard_from_iq,
 };
-use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0077::RegistrationError;
 use crate::xep::xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
@@ -86,6 +88,7 @@ use crate::xep::xep0363::{
     build_upload_error, build_upload_slot_response, is_upload_request, parse_upload_request,
     UploadError, UploadSlot,
 };
+use crate::xep::xep0398::AvatarConversion;
 use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.
@@ -142,6 +145,9 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
     /// XEP-0153 vCard avatar hash (SHA-1 hex) for inclusion in presence stanzas
     avatar_hash: Option<String>,
+    /// Most recent available presence stanza sent by this resource.
+    /// Used to replay "current presence" after subscription approval (RFC 6121).
+    last_available_presence: Option<xmpp_parsers::presence::Presence>,
     /// XEP-0398 guard flag to prevent infinite avatar conversion loops
     converting_avatar: bool,
 }
@@ -192,6 +198,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             csi_buffer: Vec::new(), // XEP-0352: stanza buffer for inactive clients
             pubsub_storage,      // XEP-0060/0163 PubSub/PEP storage (shared across connections)
             avatar_hash: None,   // XEP-0153: computed on bind from stored vCard
+            last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
         };
 
@@ -324,6 +331,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             match auth_result {
                 SaslAuthResult::Plain { jid, token } => {
+                    let jid = self.normalize_plain_jid(&jid);
                     // PLAIN: Validate session with JID and token
                     match self
                         .app_state
@@ -336,6 +344,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             return Ok((jid, session));
                         }
                         Err(e) => {
+                            if let Ok(Some(session)) =
+                                self.try_native_plain_fallback(&jid, &token).await
+                            {
+                                self.send_sasl_success_with_isr(&session, &jid).await?;
+                                return Ok((jid, session));
+                            }
+
                             // Send SASL failure before returning error
                             warn!(error = %e, jid = %jid, "PLAIN authentication failed");
                             self.stream.send_sasl_failure("not-authorized").await?;
@@ -540,6 +555,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ) -> Result<(jid::BareJid, Session), XmppError> {
         match sasl_result {
             SaslAuthResult::Plain { jid, token } => {
+                let jid = self.normalize_plain_jid(&jid);
                 // PLAIN: Validate session with JID and token
                 match self
                     .app_state
@@ -552,6 +568,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         Ok((jid, session))
                     }
                     Err(e) => {
+                        if let Ok(Some(session)) =
+                            self.try_native_plain_fallback(&jid, &token).await
+                        {
+                            self.send_sasl_success_with_isr(&session, &jid).await?;
+                            return Ok((jid, session));
+                        }
+
                         // Send SASL failure before returning error
                         warn!(error = %e, jid = %jid, "PLAIN authentication failed");
                         self.stream.send_sasl_failure("not-authorized").await?;
@@ -648,6 +671,60 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
     }
 
+    fn normalize_plain_jid(&self, jid: &jid::BareJid) -> jid::BareJid {
+        if jid.node().is_some() {
+            return jid.clone();
+        }
+
+        format!("{}@{}", jid.domain(), self.domain)
+            .parse()
+            .unwrap_or_else(|_| jid.clone())
+    }
+
+    async fn try_native_plain_fallback(
+        &self,
+        jid: &jid::BareJid,
+        token: &str,
+    ) -> Result<Option<Session>, XmppError> {
+        // Some clients provide only "username" in SASL PLAIN authcid. In that case
+        // the parser treats it as a domain-only BareJid, so derive the username from
+        // the domain part.
+        let username = jid
+            .node()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| jid.domain().to_string());
+
+        let creds = match self.app_state.lookup_scram_credentials(&username).await {
+            Ok(Some(creds)) => creds,
+            Ok(None) => return Ok(None),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    username = %username,
+                    "Failed to lookup SCRAM credentials during PLAIN fallback"
+                );
+                return Ok(None);
+            }
+        };
+
+        let salt = match BASE64_STANDARD.decode(creds.salt_b64) {
+            Ok(salt) => salt,
+            Err(_) => return Ok(None),
+        };
+        let (stored_key, server_key) =
+            crate::auth::scram::generate_scram_keys(token, &salt, creds.iterations);
+        if stored_key != creds.stored_key || server_key != creds.server_key {
+            return Ok(None);
+        }
+
+        Ok(Some(Session {
+            did: jid.to_string(),
+            jid: jid.clone(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(24),
+        }))
+    }
+
     /// Handle a XEP-0077 registration request.
     ///
     /// Validates the registration data and creates the user via AppState.
@@ -726,6 +803,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         session: &Session,
         jid: &jid::BareJid,
     ) -> Result<(), XmppError> {
+        if !isr_token_in_sasl_success_enabled() {
+            self.current_isr_token = None;
+            self.stream.send_sasl_success().await?;
+            debug!(
+                did = %session.did,
+                jid = %jid,
+                "Sent SASL success without ISR token (compat mode)"
+            );
+            return Ok(());
+        }
+
         // Create an ISR token for this session
         let isr_token = self
             .isr_token_store
@@ -842,14 +930,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.handle_stanza(Stanza::Presence(pres)).await
             }
             ParsedStanza::Iq(element) => {
-                let iq = element
+                let iq: xmpp_parsers::iq::Iq = element
                     .try_into()
                     .map_err(|e| XmppError::xml_parse(format!("Invalid iq: {:?}", e)))?;
                 // Increment inbound count for SM
                 if self.sm_state.enabled {
                     self.sm_state.increment_inbound();
                 }
-                self.handle_stanza(Stanza::Iq(iq)).await
+                match self.handle_stanza(Stanza::Iq(iq.clone())).await {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        self.send_iq_error_from_xmpp_error(&iq, &e).await?;
+                        Ok(())
+                    }
+                }
             }
             // XEP-0198 Stream Management stanzas
             ParsedStanza::SmEnable { resume, max } => self.handle_sm_enable(resume, max).await,
@@ -864,6 +958,62 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 Ok(())
             }
         }
+    }
+
+    /// Convert an `XmppError` from IQ handling into an IQ error response.
+    async fn send_iq_error_from_xmpp_error(
+        &mut self,
+        iq: &xmpp_parsers::iq::Iq,
+        error: &XmppError,
+    ) -> Result<(), XmppError> {
+        let (condition, error_type, text) = match error {
+            XmppError::Stanza {
+                condition,
+                error_type,
+                text,
+            } => (*condition, *error_type, text.clone()),
+            XmppError::XmlParse(msg) => (
+                crate::StanzaErrorCondition::BadRequest,
+                crate::StanzaErrorType::Modify,
+                Some(msg.clone()),
+            ),
+            XmppError::PermissionDenied(msg) => (
+                crate::StanzaErrorCondition::Forbidden,
+                crate::StanzaErrorType::Auth,
+                Some(msg.clone()),
+            ),
+            XmppError::AuthFailed(msg) => (
+                crate::StanzaErrorCondition::NotAuthorized,
+                crate::StanzaErrorType::Auth,
+                Some(msg.clone()),
+            ),
+            _ => (
+                crate::StanzaErrorCondition::InternalServerError,
+                crate::StanzaErrorType::Wait,
+                Some(error.to_string()),
+            ),
+        };
+
+        let error_to = iq
+            .from
+            .as_ref()
+            .map(|j| j.to_string())
+            .or_else(|| self.jid.as_ref().map(|j| j.to_string()));
+        let error_from = iq
+            .to
+            .as_ref()
+            .map(|j| j.to_string())
+            .unwrap_or_else(|| self.domain.clone());
+
+        let error_xml = crate::generate_iq_error(
+            &iq.id,
+            error_to.as_deref(),
+            Some(error_from.as_str()),
+            condition,
+            error_type,
+            text.as_deref(),
+        );
+        self.stream.write_raw(&error_xml).await
     }
 
     /// Handle XEP-0198 Stream Management enable request.
@@ -2190,12 +2340,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing outbound subscribe request"
         );
 
-        // Create or update roster item for the contact
-        let mut item = RosterItem::new(contact_jid.clone());
+        // Create or update roster item for the contact while preserving metadata
+        // such as existing display name and groups.
+        let mut item = self
+            .app_state
+            .get_roster_item(&user_jid, &contact_jid)
+            .await?
+            .unwrap_or_else(|| RosterItem::new(contact_jid.clone()));
         SubscriptionStateMachine::apply_outbound_subscribe(&mut item);
+        let _ = self.app_state.set_roster_item(&user_jid, &item).await?;
 
         // Send roster push to user's connected resources
-        self.send_roster_push(&item).await;
+        self.send_roster_push_for_user(&user_jid, &item).await;
 
         // Build and route the subscribe presence to the contact
         let subscribe_pres = build_subscription_presence(
@@ -2203,6 +2359,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             &user_jid,
             &contact_jid,
             request.status.as_deref(),
+            &request.payloads,
         );
 
         // Route to contact (local or remote)
@@ -2239,12 +2396,31 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing outbound subscribed response"
         );
 
-        // Update roster item with new subscription state
-        let mut item = RosterItem::new(contact_jid.clone());
+        // Update approver's roster (contact receives approver's presence).
+        let mut item = self
+            .app_state
+            .get_roster_item(&user_jid, &contact_jid)
+            .await?
+            .unwrap_or_else(|| RosterItem::new(contact_jid.clone()));
         SubscriptionStateMachine::apply_outbound_subscribed(&mut item);
+        let _ = self.app_state.set_roster_item(&user_jid, &item).await?;
 
         // Send roster push to user's connected resources
-        self.send_roster_push(&item).await;
+        self.send_roster_push_for_user(&user_jid, &item).await;
+
+        // Update requester's roster as inbound approved subscription and push.
+        let mut contact_item = self
+            .app_state
+            .get_roster_item(&contact_jid, &user_jid)
+            .await?
+            .unwrap_or_else(|| RosterItem::new(user_jid.clone()));
+        SubscriptionStateMachine::apply_inbound_subscribed(&mut contact_item);
+        let _ = self
+            .app_state
+            .set_roster_item(&contact_jid, &contact_item)
+            .await?;
+        self.send_roster_push_for_user(&contact_jid, &contact_item)
+            .await;
 
         // Build and route the subscribed presence to the contact
         let subscribed_pres = build_subscription_presence(
@@ -2252,6 +2428,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             &user_jid,
             &contact_jid,
             None,
+            &request.payloads,
         );
 
         let stanza = Stanza::Presence(subscribed_pres);
@@ -2260,16 +2437,30 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Send current presence to the newly subscribed contact
         // (they're now allowed to receive our presence)
         if let Some(ref jid) = self.jid {
-            let available_pres = build_available_presence(
-                jid,
-                &contact_jid,
-                None, // show
-                None, // status
-                0,    // priority
-            );
+            let available_pres = if let Some(mut current) = self.last_available_presence.clone() {
+                current.from = Some(jid.clone().into());
+                current.to = Some(contact_jid.clone().into());
+                current
+            } else {
+                build_available_presence(
+                    jid,
+                    &contact_jid,
+                    None, // show
+                    None, // status
+                    0,    // priority
+                )
+            };
             let stanza = Stanza::Presence(available_pres);
             self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
         }
+
+        // Request the requester's latest presence state so the approver receives
+        // current availability/status immediately after approval.
+        let mut probe = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Probe);
+        probe.from = Some(user_jid.clone().into());
+        probe.to = Some(contact_jid.clone().into());
+        self.route_stanza_to_bare_jid(&contact_jid, Stanza::Presence(probe))
+            .await?;
 
         info!(
             user = %user_jid,
@@ -2300,12 +2491,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing outbound unsubscribe request"
         );
 
-        // Update roster item with new subscription state
-        let mut item = RosterItem::new(contact_jid.clone());
+        // Update roster item with new subscription state, preserving metadata.
+        let mut item = self
+            .app_state
+            .get_roster_item(&user_jid, &contact_jid)
+            .await?
+            .unwrap_or_else(|| RosterItem::new(contact_jid.clone()));
         SubscriptionStateMachine::apply_outbound_unsubscribe(&mut item);
+        let _ = self.app_state.set_roster_item(&user_jid, &item).await?;
 
         // Send roster push to user's connected resources
-        self.send_roster_push(&item).await;
+        self.send_roster_push_for_user(&user_jid, &item).await;
 
         // Build and route the unsubscribe presence to the contact
         let unsubscribe_pres = build_subscription_presence(
@@ -2313,6 +2509,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             &user_jid,
             &contact_jid,
             None,
+            &request.payloads,
         );
 
         let stanza = Stanza::Presence(unsubscribe_pres);
@@ -2348,12 +2545,31 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing outbound unsubscribed response"
         );
 
-        // Update roster item with new subscription state
-        let mut item = RosterItem::new(contact_jid.clone());
+        // Update sender-side roster item with new subscription state.
+        let mut item = self
+            .app_state
+            .get_roster_item(&user_jid, &contact_jid)
+            .await?
+            .unwrap_or_else(|| RosterItem::new(contact_jid.clone()));
         SubscriptionStateMachine::apply_outbound_unsubscribed(&mut item);
+        let _ = self.app_state.set_roster_item(&user_jid, &item).await?;
 
         // Send roster push to user's connected resources
-        self.send_roster_push(&item).await;
+        self.send_roster_push_for_user(&user_jid, &item).await;
+
+        // Update contact-side roster item as inbound unsubscribed and push.
+        let mut contact_item = self
+            .app_state
+            .get_roster_item(&contact_jid, &user_jid)
+            .await?
+            .unwrap_or_else(|| RosterItem::new(user_jid.clone()));
+        SubscriptionStateMachine::apply_inbound_unsubscribed(&mut contact_item);
+        let _ = self
+            .app_state
+            .set_roster_item(&contact_jid, &contact_item)
+            .await?;
+        self.send_roster_push_for_user(&contact_jid, &contact_item)
+            .await;
 
         // Build and route the unsubscribed presence to the contact
         let unsubscribed_pres = build_subscription_presence(
@@ -2361,6 +2577,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             &user_jid,
             &contact_jid,
             None,
+            &request.payloads,
         );
 
         let stanza = Stanza::Presence(unsubscribed_pres);
@@ -2465,13 +2682,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // XEP-0153: Append vCard avatar hash to presence stanza
         // Build a modified presence with the vCard update element
         let mut pres_clone = pres.clone();
-        let vcard_update = crate::xep::xep0153::build_vcard_update_element(
-            self.avatar_hash.as_deref(),
-        );
+        let vcard_update =
+            crate::xep::xep0153::build_vcard_update_element(self.avatar_hash.as_deref());
         pres_clone.payloads.push(vcard_update);
+        if let Some(ref sender_full) = self.jid {
+            pres_clone.from = Some(sender_full.clone().into());
+        }
 
         // Log initial presence for now
         if matches!(pres.type_, xmpp_parsers::presence::Type::None) {
+            self.last_available_presence = Some(pres_clone);
             // Available presence (no type = available)
             info!(
                 sender = %sender_bare,
@@ -2479,6 +2699,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 "User sent initial available presence"
             );
         } else if matches!(pres.type_, xmpp_parsers::presence::Type::Unavailable) {
+            self.last_available_presence = None;
             info!(
                 sender = %sender_bare,
                 "User sent unavailable presence"
@@ -2520,6 +2741,72 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
+    /// Route an IQ addressed to a local full JID.
+    ///
+    /// Per RFC 6121 Section 8.5, IQ requests to an unavailable full JID MUST
+    /// receive a `service-unavailable` error from the addressed full JID.
+    async fn route_local_full_jid_iq(
+        &mut self,
+        mut iq: xmpp_parsers::iq::Iq,
+        target_full_jid: FullJid,
+    ) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("IQ received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        // Enforce sender identity from the authenticated stream.
+        iq.from = Some(sender_jid.clone().into());
+        iq.to = Some(target_full_jid.clone().into());
+
+        let stanza = Stanza::Iq(iq.clone());
+        match self
+            .connection_registry
+            .send_to(&target_full_jid, stanza)
+            .await
+        {
+            SendResult::Sent => {
+                debug!(
+                    from = %sender_jid,
+                    to = %target_full_jid,
+                    iq_id = %iq.id,
+                    "Routed IQ stanza to local full JID"
+                );
+                Ok(())
+            }
+            SendResult::NotConnected | SendResult::ChannelClosed | SendResult::ChannelFull => {
+                match &iq.payload {
+                    IqType::Get(_) | IqType::Set(_) => {
+                        let error_to = sender_jid.to_string();
+                        let error_from = target_full_jid.to_string();
+                        let error = crate::generate_iq_error(
+                            &iq.id,
+                            Some(error_to.as_str()),
+                            Some(error_from.as_str()),
+                            crate::StanzaErrorCondition::ServiceUnavailable,
+                            crate::StanzaErrorType::Cancel,
+                            None,
+                        );
+                        self.stream.write_raw(&error).await?;
+                    }
+                    IqType::Result(_) | IqType::Error(_) => {
+                        debug!(
+                            to = %target_full_jid,
+                            iq_id = %iq.id,
+                            "Dropping IQ result/error for unavailable local full JID"
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Handle an IQ stanza.
     ///
     /// Currently supports:
@@ -2528,6 +2815,26 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// - MAM queries (XEP-0313)
     #[instrument(skip(self, iq), fields(iq_type = ?iq.payload, iq_id = %iq.id))]
     async fn handle_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        // Route IQ stanzas addressed to a local full JID (user@domain/resource).
+        // These are client-to-client IQs and must not be handled as server IQs.
+        if let Some(to_jid) = &iq.to {
+            if to_jid.domain().as_str() == self.domain
+                && to_jid.node().is_some()
+                && to_jid.resource().is_some()
+            {
+                if let Ok(full_jid) = to_jid.clone().try_into_full() {
+                    return self.route_local_full_jid_iq(iq, full_jid).await;
+                }
+            }
+        }
+
+        // IQ result/error stanzas addressed to the server are terminal and should
+        // not trigger additional error responses.
+        if matches!(&iq.payload, IqType::Result(_) | IqType::Error(_)) {
+            debug!(iq_id = %iq.id, to = ?iq.to, "Ignoring IQ result/error stanza");
+            return Ok(());
+        }
+
         // Check if this is a disco#info query
         if is_disco_info_query(&iq) {
             return self.handle_disco_info_query(iq).await;
@@ -2637,10 +2944,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Unhandled IQ get/set - RFC 6120 §8.2.3 requires an error response
         debug!("Received unhandled IQ stanza, returning service-unavailable");
+        let error_to = iq
+            .from
+            .as_ref()
+            .map(|j| j.to_string())
+            .or_else(|| self.jid.as_ref().map(|j| j.to_string()));
+        let error_from = iq
+            .to
+            .as_ref()
+            .map(|j| j.to_string())
+            .unwrap_or_else(|| self.domain.clone());
         let error = crate::generate_iq_error(
             &iq.id,
-            iq.from.as_ref().map(|j| j.to_string()).as_deref(),
-            Some(&self.domain),
+            error_to.as_deref(),
+            Some(error_from.as_str()),
             crate::StanzaErrorCondition::ServiceUnavailable,
             crate::StanzaErrorType::Cancel,
             None,
@@ -3178,7 +3495,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                                                                 ..Default::default()
                                                             };
                                                             let vcard_elem = crate::xep::xep0054::build_vcard_element(&vcard);
-                                                            let vcard_xml = String::from(&vcard_elem);
+                                                            let vcard_xml =
+                                                                String::from(&vcard_elem);
                                                             let _ = self
                                                                 .app_state
                                                                 .set_vcard(&user_jid, &vcard_xml)
@@ -3762,19 +4080,37 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Parse the roster query (mainly for version tracking)
         let query = parse_roster_get(&iq)?;
+        let sender_bare = sender_jid.to_bare();
 
-        // TODO: Integrate with AppState for actual roster storage
-        // For now, return an empty roster as a stub implementation.
-        // The roster items would come from the application's storage layer.
-        let items: Vec<RosterItem> = Vec::new();
+        // RFC 6121: roster retrieval only for the requester's own roster.
+        if let Some(to) = &iq.to {
+            let to_bare = to.to_bare();
+            if to_bare != sender_bare {
+                return Err(XmppError::not_authorized(Some(
+                    "Cannot retrieve another user's roster".to_string(),
+                )));
+            }
+            if to.resource().is_some() {
+                return Err(XmppError::bad_request(Some(
+                    "Roster get target MUST be a bare JID".to_string(),
+                )));
+            }
+        }
+
+        let items = self.app_state.get_roster(&sender_bare).await?;
+        let roster_version = self.app_state.get_roster_version(&sender_bare).await?;
 
         // Build and send the roster result
-        let response = build_roster_result(&iq, &items, query.ver.as_deref());
+        let response = build_roster_result(
+            &iq,
+            &items,
+            roster_version.as_deref().or(query.ver.as_deref()),
+        );
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
         debug!(
             item_count = items.len(),
-            ver = ?query.ver,
+            ver = ?roster_version,
             "Sent roster get response"
         );
 
@@ -3803,13 +4139,33 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         debug!(jid = %sender_jid, "Processing roster set request");
 
+        let sender_bare = sender_jid.to_bare();
+
+        // RFC 6121: roster updates only for the requester's own roster.
+        if let Some(to) = &iq.to {
+            let to_bare = to.to_bare();
+            if to_bare != sender_bare {
+                return Err(XmppError::forbidden(Some(
+                    "Cannot update another user's roster".to_string(),
+                )));
+            }
+            if to.resource().is_some() {
+                return Err(XmppError::bad_request(Some(
+                    "Roster set target MUST be a bare JID".to_string(),
+                )));
+            }
+        }
+
         // Parse the roster set query
         let query = parse_roster_set(&iq)?;
 
-        // Per RFC 6121, roster set should have exactly one item
-        let item = query.items.first().ok_or_else(|| {
-            XmppError::bad_request(Some("Roster set must contain an item".to_string()))
-        })?;
+        // Per RFC 6121, roster set MUST contain exactly one item.
+        if query.items.len() != 1 {
+            return Err(XmppError::bad_request(Some(
+                "Roster set must contain exactly one item".to_string(),
+            )));
+        }
+        let item = query.items.first().expect("checked len above");
 
         debug!(
             contact_jid = %item.jid,
@@ -3818,8 +4174,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing roster item"
         );
 
-        // TODO: Integrate with AppState for actual roster storage
-        // For now, acknowledge the request without persisting changes.
+        if item.subscription.is_remove() {
+            let _ = self
+                .app_state
+                .remove_roster_item(&sender_bare, &item.jid)
+                .await?;
+        } else {
+            let _ = self.app_state.set_roster_item(&sender_bare, item).await?;
+        }
 
         // Send empty result to acknowledge the roster set
         let response = build_roster_result_empty(&iq);
@@ -3848,11 +4210,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Some(jid) => jid,
             None => return,
         };
+        self.send_roster_push_for_user(&sender_jid.to_bare(), item)
+            .await;
+    }
 
-        let bare_jid = sender_jid.to_bare();
-
+    /// Send roster push to all connected resources for an arbitrary bare JID.
+    async fn send_roster_push_for_user(&self, bare_jid: &jid::BareJid, item: &RosterItem) {
         // Get all connected resources for this user (including self)
-        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
+        let resources = self.connection_registry.get_resources_for_user(bare_jid);
 
         if resources.is_empty() {
             return;
@@ -4015,10 +4380,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 {
                     // Publish avatar data to PEP
                     let data_elem = crate::xep::xep0084::build_avatar_data(&avatar_data_b64);
-                    let data_item = PubSubItem::new(
-                        Some(avatar_info.id.clone()),
-                        Some(data_elem),
-                    );
+                    let data_item = PubSubItem::new(Some(avatar_info.id.clone()), Some(data_elem));
                     let _ = self
                         .pubsub_storage
                         .publish_item(
@@ -4032,10 +4394,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                     // Publish avatar metadata to PEP
                     let metadata_elem = crate::xep::xep0084::build_avatar_metadata(&avatar_info);
-                    let metadata_item = PubSubItem::new(
-                        Some(avatar_info.id.clone()),
-                        Some(metadata_elem),
-                    );
+                    let metadata_item =
+                        PubSubItem::new(Some(avatar_info.id.clone()), Some(metadata_elem));
                     let _ = self
                         .pubsub_storage
                         .publish_item(
@@ -4819,10 +5179,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Also intercepts `storage:bookmarks` namespace queries and delegates
     /// to XEP-0048 legacy bookmark compatibility.
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_private_storage(
-        &mut self,
-        iq: xmpp_parsers::iq::Iq,
-    ) -> Result<(), XmppError> {
+    async fn handle_private_storage(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let sender_jid = match &self.jid {
             Some(jid) => jid.clone(),
             None => {
@@ -4866,11 +5223,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .map(crate::xep::xep0048::from_native_bookmark)
                     .collect();
 
-                let bookmarks_elem =
-                    crate::xep::xep0048::build_legacy_bookmarks_element(&legacy);
+                let bookmarks_elem = crate::xep::xep0048::build_legacy_bookmarks_element(&legacy);
                 let bookmarks_xml = String::from(&bookmarks_elem);
-                let response =
-                    build_private_storage_result(&iq, Some(&bookmarks_xml), &key);
+                let response = build_private_storage_result(&iq, Some(&bookmarks_xml), &key);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
                 return Ok(());
             }
@@ -4881,8 +5236,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 .get_private_xml(&bare_jid, &key.namespace)
                 .await?;
 
-            let response =
-                build_private_storage_result(&iq, stored.as_deref(), &key);
+            let response = build_private_storage_result(&iq, stored.as_deref(), &key);
             self.stream.write_stanza(&Stanza::Iq(response)).await?;
             return Ok(());
         }
@@ -4904,10 +5258,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         if let Some(native) = crate::xep::xep0048::to_native_bookmark(lb) {
                             let bookmark_elem =
                                 crate::xep::xep0402::build_bookmark_element(&native);
-                            let item = PubSubItem::new(
-                                Some(native.jid.to_string()),
-                                Some(bookmark_elem),
-                            );
+                            let item =
+                                PubSubItem::new(Some(native.jid.to_string()), Some(bookmark_elem));
                             let _ = self
                                 .pubsub_storage
                                 .publish_item(
@@ -5152,6 +5504,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
     }
+}
+
+fn isr_token_in_sasl_success_enabled() -> bool {
+    let value = match std::env::var("WADDLE_XMPP_ISR_IN_SASL_SUCCESS") {
+        Ok(value) => value,
+        Err(_) => return true,
+    };
+
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 /// Parsed stanza types.

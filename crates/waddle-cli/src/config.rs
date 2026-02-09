@@ -31,7 +31,7 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            accent: "#ff6b6b".into(),      // Waddle coral
+            accent: "#ff6b6b".into(), // Waddle coral
             background: "default".into(),
             foreground: "default".into(),
             border: "#444444".into(),
@@ -157,8 +157,7 @@ impl Config {
                 .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
         }
 
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize configuration")?;
+        let content = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
         std::fs::write(&config_path, content)
             .with_context(|| format!("Failed to write config file: {:?}", config_path))?;
 
@@ -174,8 +173,7 @@ impl Config {
 
     /// Get the config directory path (~/.config/waddle/)
     pub fn config_dir() -> Result<PathBuf> {
-        let base = dirs::config_dir()
-            .context("Failed to determine config directory")?;
+        let base = dirs::config_dir().context("Failed to determine config directory")?;
         let path = base.join("waddle");
         std::fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create config directory: {:?}", path))?;
@@ -184,8 +182,7 @@ impl Config {
 
     /// Get the data directory path (~/.local/share/waddle/)
     pub fn data_dir() -> Result<PathBuf> {
-        let base = dirs::data_dir()
-            .context("Failed to determine data directory")?;
+        let base = dirs::data_dir().context("Failed to determine data directory")?;
         let path = base.join("waddle");
         std::fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create data directory: {:?}", path))?;
@@ -194,8 +191,7 @@ impl Config {
 
     /// Get the cache directory path (~/.cache/waddle/)
     pub fn cache_dir() -> Result<PathBuf> {
-        let base = dirs::cache_dir()
-            .context("Failed to determine cache directory")?;
+        let base = dirs::cache_dir().context("Failed to determine cache directory")?;
         let path = base.join("waddle");
         std::fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create cache directory: {:?}", path))?;

@@ -203,10 +203,7 @@ pub fn router(auth_state: Arc<AuthState>, device_store: DeviceAuthStore) -> Rout
         .route("/v1/auth/device/poll", post(device_poll_handler))
         .route("/v1/auth/device/verify", get(verify_page_handler))
         .route("/v1/auth/device/verify", post(verify_submit_handler))
-        .route(
-            "/v1/auth/device/callback",
-            get(device_callback_handler),
-        )
+        .route("/v1/auth/device/callback", get(device_callback_handler))
         .with_state((auth_state, device_store))
 }
 
@@ -294,7 +291,10 @@ pub async fn device_poll_handler(
         device_store.remove(&request.device_code);
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("expired_token", "Device code has expired")),
+            Json(ErrorResponse::new(
+                "expired_token",
+                "Device code has expired",
+            )),
         )
             .into_response();
     }
@@ -372,7 +372,10 @@ pub async fn device_poll_handler(
             device_store.remove(&request.device_code);
             (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new("expired_token", "Device code has expired")),
+                Json(ErrorResponse::new(
+                    "expired_token",
+                    "Device code has expired",
+                )),
             )
                 .into_response()
         }
@@ -621,7 +624,11 @@ pub async fn verify_submit_handler(
 
     // Start OAuth flow for the handle with device-specific callback URL
     let device_callback_url = format!("{}/v1/auth/device/callback", auth_state.base_url);
-    match auth_state.oauth_client.start_authorization_with_redirect(&auth.handle, Some(&device_callback_url)).await {
+    match auth_state
+        .oauth_client
+        .start_authorization_with_redirect(&auth.handle, Some(&device_callback_url))
+        .await
+    {
         Ok(oauth_request) => {
             // Store the OAuth state to link callback to device code
             auth.status = DeviceAuthStatus::InProgress;
@@ -699,7 +706,8 @@ pub async fn device_callback_handler(
         Some((_, pending)) => {
             if pending.is_expired() {
                 warn!("Pending authorization expired");
-                return Html(error_page("Authorization expired. Please try again.")).into_response();
+                return Html(error_page("Authorization expired. Please try again."))
+                    .into_response();
             }
             pending
         }
@@ -736,7 +744,13 @@ pub async fn device_callback_handler(
     // Exchange code for tokens (with DPoP)
     match auth_state
         .oauth_client
-        .exchange_code(&pending.token_endpoint, &query.code, &pending.code_verifier, &pending.dpop_keypair, &pending.redirect_uri)
+        .exchange_code(
+            &pending.token_endpoint,
+            &query.code,
+            &pending.code_verifier,
+            &pending.dpop_keypair,
+            &pending.redirect_uri,
+        )
         .await
     {
         Ok(tokens) => {

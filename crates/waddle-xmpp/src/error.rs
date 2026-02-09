@@ -455,10 +455,8 @@ mod tests {
 
     #[test]
     fn test_stream_error_generation() {
-        let error = generate_stream_error(
-            stream_errors::NOT_AUTHORIZED,
-            Some("Invalid credentials"),
-        );
+        let error =
+            generate_stream_error(stream_errors::NOT_AUTHORIZED, Some("Invalid credentials"));
 
         assert!(error.contains("<stream:error>"));
         assert!(error.contains("<not-authorized"));
@@ -469,7 +467,13 @@ mod tests {
     #[test]
     fn test_stanza_error_conditions() {
         assert_eq!(StanzaErrorCondition::BadRequest.as_str(), "bad-request");
-        assert_eq!(StanzaErrorCondition::NotAuthorized.as_str(), "not-authorized");
-        assert_eq!(StanzaErrorCondition::ItemNotFound.as_str(), "item-not-found");
+        assert_eq!(
+            StanzaErrorCondition::NotAuthorized.as_str(),
+            "not-authorized"
+        );
+        assert_eq!(
+            StanzaErrorCondition::ItemNotFound.as_str(),
+            "item-not-found"
+        );
     }
 }

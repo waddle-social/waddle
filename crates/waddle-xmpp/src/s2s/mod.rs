@@ -60,7 +60,9 @@ pub use connection::S2sConnectionActor;
 pub use dialback::{DialbackKey, DialbackResult, DialbackState, NS_DIALBACK, NS_DIALBACK_FEATURES};
 pub use dns::{DnsError, ResolvedTarget, SrvResolver, DEFAULT_S2S_PORT};
 pub use listener::{S2sListener, S2sListenerConfig};
-pub use outbound::{OutboundConnectionError, OutboundState, S2sOutboundConfig, S2sOutboundConnection};
+pub use outbound::{
+    OutboundConnectionError, OutboundState, S2sOutboundConfig, S2sOutboundConnection,
+};
 pub use pool::{
     PoolConnectionHandle, PooledConnectionState, RetryConfig, S2sConnectionPool, S2sPoolConfig,
     S2sPoolError, S2sPoolMetrics,

@@ -153,10 +153,7 @@ impl MucRoomRegistry {
         config: RoomConfig,
     ) -> Result<RoomHandle, XmppError> {
         if self.rooms.contains_key(&room_jid) {
-            return Err(XmppError::muc(format!(
-                "Room {} already exists",
-                room_jid
-            )));
+            return Err(XmppError::muc(format!("Room {} already exists", room_jid)));
         }
 
         self.get_or_create_room(room_jid, waddle_id, channel_id, config)
@@ -171,10 +168,7 @@ impl MucRoomRegistry {
     /// This is used for testing and scenarios where rooms are created dynamically
     /// without going through the Waddle/Channel API.
     #[instrument(skip(self), fields(room = %room_jid))]
-    pub fn create_instant_room(
-        &self,
-        room_jid: BareJid,
-    ) -> Result<RoomHandle, XmppError> {
+    pub fn create_instant_room(&self, room_jid: BareJid) -> Result<RoomHandle, XmppError> {
         // Check if room already exists
         if let Some(handle) = self.rooms.get(&room_jid) {
             debug!("Room already exists");
@@ -183,7 +177,10 @@ impl MucRoomRegistry {
 
         // Derive waddle_id and channel_id from room JID for instant rooms
         // Format: use the room local part as both
-        let room_local = room_jid.node().map(|n| n.to_string()).unwrap_or_else(|| "instant".to_string());
+        let room_local = room_jid
+            .node()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "instant".to_string());
         let waddle_id = format!("instant:{}", room_local);
         let channel_id = room_local.clone();
 
@@ -191,7 +188,7 @@ impl MucRoomRegistry {
         let mut config = RoomConfig::default();
         config.name = room_local;
         config.members_only = false; // Instant rooms are open by default
-        config.persistent = false;   // Instant rooms are not persistent
+        config.persistent = false; // Instant rooms are not persistent
 
         // Create new room
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);

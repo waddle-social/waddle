@@ -60,9 +60,7 @@ pub struct StoredItem {
 impl StoredItem {
     /// Convert to a PubSubItem for responses.
     pub fn to_pubsub_item(&self) -> PubSubItem {
-        let payload = self.payload_xml.as_ref().and_then(|xml| {
-            xml.parse().ok()
-        });
+        let payload = self.payload_xml.as_ref().and_then(|xml| xml.parse().ok());
 
         PubSubItem {
             id: Some(self.id.clone()),
@@ -110,11 +108,7 @@ pub trait PubSubStorage: Send + Sync + 'static {
     /// Delete a node and all its items.
     ///
     /// Returns true if the node was deleted, false if it didn't exist.
-    async fn delete_node(
-        &self,
-        owner: &BareJid,
-        node_name: &str,
-    ) -> Result<bool, XmppError>;
+    async fn delete_node(&self, owner: &BareJid, node_name: &str) -> Result<bool, XmppError>;
 
     /// Publish an item to a node.
     ///
@@ -154,10 +148,7 @@ pub trait PubSubStorage: Send + Sync + 'static {
     ) -> Result<bool, XmppError>;
 
     /// List all nodes owned by a JID.
-    async fn list_nodes(
-        &self,
-        owner: &BareJid,
-    ) -> Result<Vec<String>, XmppError>;
+    async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError>;
 
     /// Update node configuration.
     async fn update_node_config(
@@ -237,11 +228,7 @@ impl PubSubStorage for InMemoryPubSubStorage {
         Ok(self.nodes.get(&key).map(|n| n.clone()))
     }
 
-    async fn delete_node(
-        &self,
-        owner: &BareJid,
-        node_name: &str,
-    ) -> Result<bool, XmppError> {
+    async fn delete_node(&self, owner: &BareJid, node_name: &str) -> Result<bool, XmppError> {
         let key = Self::key(owner, node_name);
 
         let node_existed = self.nodes.remove(&key).is_some();
@@ -369,10 +356,7 @@ impl PubSubStorage for InMemoryPubSubStorage {
         Ok(items.len() < original_len)
     }
 
-    async fn list_nodes(
-        &self,
-        owner: &BareJid,
-    ) -> Result<Vec<String>, XmppError> {
+    async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError> {
         let owner_str = owner.to_string();
         let nodes: Vec<String> = self
             .nodes
@@ -392,13 +376,9 @@ impl PubSubStorage for InMemoryPubSubStorage {
     ) -> Result<(), XmppError> {
         let key = Self::key(owner, node_name);
 
-        let mut node = self
-            .nodes
-            .get_mut(&key)
-            .ok_or_else(|| XmppError::item_not_found(Some(format!(
-                "Node '{}' does not exist",
-                node_name
-            ))))?;
+        let mut node = self.nodes.get_mut(&key).ok_or_else(|| {
+            XmppError::item_not_found(Some(format!("Node '{}' does not exist", node_name)))
+        })?;
 
         node.config = config.clone();
 
@@ -616,10 +596,7 @@ mod tests {
             .expect("should succeed");
 
         // List user's nodes
-        let nodes = storage
-            .list_nodes(&owner)
-            .await
-            .expect("should succeed");
+        let nodes = storage.list_nodes(&owner).await.expect("should succeed");
 
         assert_eq!(nodes.len(), 2);
         assert!(nodes.contains(&"node-1".to_string()));

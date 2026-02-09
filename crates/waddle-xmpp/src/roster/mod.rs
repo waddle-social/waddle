@@ -52,6 +52,7 @@ pub use storage::RosterStorage;
 use jid::BareJid;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
@@ -141,13 +142,27 @@ impl RosterItem {
         // Ask is optional
         let ask = elem.attr("ask").map(AskType::from_str).transpose()?;
 
-        // Groups are child elements
-        let groups = elem
+        // Groups are child elements. RFC 6121 does not allow empty or duplicate
+        // group names within a roster item.
+        let mut groups = Vec::new();
+        let mut seen_groups = HashSet::new();
+        for group_elem in elem
             .children()
             .filter(|c| c.name() == "group" && c.ns() == ROSTER_NS)
-            .map(|c| c.text())
-            .filter(|s| !s.is_empty())
-            .collect();
+        {
+            let group = group_elem.text();
+            if group.trim().is_empty() {
+                return Err(XmppError::not_acceptable(Some(
+                    "Roster group name must not be empty".to_string(),
+                )));
+            }
+            if !seen_groups.insert(group.clone()) {
+                return Err(XmppError::bad_request(Some(
+                    "Roster group names must be unique".to_string(),
+                )));
+            }
+            groups.push(group);
+        }
 
         Ok(Self {
             jid,
@@ -318,9 +333,7 @@ impl RosterQuery {
 /// ```
 pub fn is_roster_get(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
-            elem.name() == "query" && elem.ns() == ROSTER_NS
-        }
+        xmpp_parsers::iq::IqType::Get(elem) => elem.name() == "query" && elem.ns() == ROSTER_NS,
         _ => false,
     }
 }
@@ -337,9 +350,7 @@ pub fn is_roster_get(iq: &Iq) -> bool {
 /// ```
 pub fn is_roster_set(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
-            elem.name() == "query" && elem.ns() == ROSTER_NS
-        }
+        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "query" && elem.ns() == ROSTER_NS,
         _ => false,
     }
 }
@@ -483,12 +494,7 @@ pub fn build_roster_result_empty(original_iq: &Iq) -> Iq {
 ///   </query>
 /// </iq>
 /// ```
-pub fn build_roster_push(
-    push_id: &str,
-    to_jid: &str,
-    item: &RosterItem,
-    ver: Option<&str>,
-) -> Iq {
+pub fn build_roster_push(push_id: &str, to_jid: &str, item: &RosterItem, ver: Option<&str>) -> Iq {
     let mut query_builder = Element::builder("query", ROSTER_NS);
 
     if let Some(v) = ver {
@@ -586,7 +592,10 @@ mod tests {
         assert_eq!(Subscription::from_str("to").unwrap(), Subscription::To);
         assert_eq!(Subscription::from_str("from").unwrap(), Subscription::From);
         assert_eq!(Subscription::from_str("both").unwrap(), Subscription::Both);
-        assert_eq!(Subscription::from_str("remove").unwrap(), Subscription::Remove);
+        assert_eq!(
+            Subscription::from_str("remove").unwrap(),
+            Subscription::Remove
+        );
         assert!(Subscription::from_str("invalid").is_err());
     }
 
@@ -809,6 +818,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_roster_set_duplicate_groups_rejected() {
+        let query_elem = Element::builder("query", ROSTER_NS)
+            .append(
+                Element::builder("item", ROSTER_NS)
+                    .attr("jid", "contact@example.com")
+                    .append(Element::builder("group", ROSTER_NS).append("Friends").build())
+                    .append(Element::builder("group", ROSTER_NS).append("Friends").build())
+                    .build(),
+            )
+            .build();
+        let iq = Iq {
+            from: Some("user@example.com".parse().unwrap()),
+            to: Some("example.com".parse().unwrap()),
+            id: "roster-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        };
+
+        let result = parse_roster_set(&iq);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_roster_set_empty_group_rejected() {
+        let query_elem = Element::builder("query", ROSTER_NS)
+            .append(
+                Element::builder("item", ROSTER_NS)
+                    .attr("jid", "contact@example.com")
+                    .append(Element::builder("group", ROSTER_NS).append("").build())
+                    .build(),
+            )
+            .build();
+        let iq = Iq {
+            from: Some("user@example.com".parse().unwrap()),
+            to: Some("example.com".parse().unwrap()),
+            id: "roster-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        };
+
+        let result = parse_roster_set(&iq);
+        assert!(matches!(
+            result,
+            Err(crate::XmppError::Stanza {
+                condition: crate::error::StanzaErrorCondition::NotAcceptable,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn test_build_roster_result() {
         let query_elem = Element::builder("query", ROSTER_NS).build();
         let original_iq = Iq {
@@ -867,7 +925,10 @@ mod tests {
         let push = build_roster_push("push-1", "user@example.com/resource", &item, Some("ver456"));
 
         assert_eq!(push.id, "push-1");
-        assert_eq!(push.to.as_ref().unwrap().to_string(), "user@example.com/resource");
+        assert_eq!(
+            push.to.as_ref().unwrap().to_string(),
+            "user@example.com/resource"
+        );
         assert!(push.from.is_none());
 
         if let xmpp_parsers::iq::IqType::Set(elem) = push.payload {

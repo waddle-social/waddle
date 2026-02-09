@@ -64,7 +64,8 @@ impl UnackedQueue {
             self.stanzas.pop_front();
         }
 
-        self.stanzas.push_back(UnackedStanza::new(sequence, stanza_xml));
+        self.stanzas
+            .push_back(UnackedStanza::new(sequence, stanza_xml));
     }
 
     /// Remove all stanzas with sequence <= h (they've been acknowledged).
@@ -106,7 +107,8 @@ impl UnackedQueue {
         self.stanzas.clear();
         for (seq, xml) in stanzas {
             if self.stanzas.len() < self.max_size {
-                self.stanzas.push_back(UnackedStanza::new(*seq, xml.clone()));
+                self.stanzas
+                    .push_back(UnackedStanza::new(*seq, xml.clone()));
             }
         }
     }

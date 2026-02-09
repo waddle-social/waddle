@@ -182,9 +182,7 @@ pub fn parse_bookmark(item_id: &str, payload: &Element) -> Result<Bookmark, Book
         .unwrap_or(false);
 
     // Parse child elements
-    let nick = payload
-        .get_child("nick", NS_BOOKMARKS2)
-        .map(|e| e.text());
+    let nick = payload.get_child("nick", NS_BOOKMARKS2).map(|e| e.text());
     let password = payload
         .get_child("password", NS_BOOKMARKS2)
         .map(|e| e.text());
@@ -281,12 +279,13 @@ mod tests {
 
     #[test]
     fn test_parse_bookmark_full() {
-        let elem: Element = r#"<conference xmlns='urn:xmpp:bookmarks:1' name='The Room' autojoin='true'>
+        let elem: Element =
+            r#"<conference xmlns='urn:xmpp:bookmarks:1' name='The Room' autojoin='true'>
             <nick>MyNick</nick>
             <password>secret</password>
         </conference>"#
-            .parse()
-            .expect("valid xml");
+                .parse()
+                .expect("valid xml");
 
         let bookmark = parse_bookmark("room@conference.example.com", &elem).expect("should parse");
 
@@ -299,9 +298,7 @@ mod tests {
 
     #[test]
     fn test_parse_bookmark_wrong_namespace() {
-        let elem: Element = r#"<conference xmlns='wrong:ns'/>"#
-            .parse()
-            .expect("valid xml");
+        let elem: Element = r#"<conference xmlns='wrong:ns'/>"#.parse().expect("valid xml");
 
         let result = parse_bookmark("room@conference.example.com", &elem);
         assert!(matches!(result, Err(BookmarkError::WrongNamespace(_))));

@@ -32,7 +32,13 @@
       "Bash(tee:*)",
       "Bash(docker run:*)",
       "Bash(# Let''s create a simple test to print out the exact XML that gets sent # Looking at the namespace constants first grep -n \"\"NS_ISR\\\\|NS_SASL\\\\|NS_REGISTER_FEATURE\"\" crates/waddle-xmpp/src/**/*.rs)",
-      "Bash(timeout 3 nc:*)"
+      "Bash(timeout 3 nc:*)",
+      "Bash(git -C /Users/rawkode/Code/src/github.com/waddle-social/ws log --oneline -20)",
+      "Bash(git -C /Users/rawkode/Code/src/github.com/waddle-social/ws show 74a540c --stat)",
+      "Bash(find:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git add:*)"
     ]
   }
 }

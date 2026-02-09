@@ -5,7 +5,7 @@
 //!
 //! A decentralized social platform built on XMPP federation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -14,6 +14,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Level};
@@ -28,12 +29,12 @@ mod login;
 mod ui;
 mod xmpp;
 
+use crate::xmpp::{XmppClient, XmppClientEvent};
+use ::xmpp::BareJid;
 use app::{App, ConnectionState, Focus};
 use config::Config;
 use event::{key_to_action, Event, EventHandler, KeyAction};
 use ui::render_layout;
-use crate::xmpp::{XmppClient, XmppClientEvent};
-use ::xmpp::BareJid;
 
 /// Waddle CLI - Terminal client for Waddle Social
 #[derive(Parser)]
@@ -73,6 +74,48 @@ enum Commands {
         /// Make the waddle private (default is public)
         #[arg(long)]
         private: bool,
+    },
+    /// Run XMPP compliance suite via the managed testcontainers harness
+    Compliance {
+        /// Compliance profile: best_effort_full | core_strict | full_strict
+        #[arg(long, default_value = "best_effort_full")]
+        profile: String,
+
+        /// XMPP domain advertised by the server under test
+        #[arg(short = 'd', long, default_value = "localhost")]
+        domain: String,
+
+        /// Hostname/IP used by interop clients to connect
+        #[arg(short = 'H', long, default_value = "host.docker.internal")]
+        host: String,
+
+        /// Reply timeout for interop tests in milliseconds
+        #[arg(short = 't', long, default_value_t = 10_000)]
+        timeout_ms: u32,
+
+        /// Optional admin username to force service-administration account mode
+        #[arg(short = 'u', long, default_value = "")]
+        admin_username: String,
+
+        /// Optional admin password to force service-administration account mode
+        #[arg(short = 'P', long, default_value = "")]
+        admin_password: String,
+
+        /// Comma-separated enabled specifications (e.g. RFC6120,RFC6121,XEP-0030)
+        #[arg(short = 'e', long)]
+        enabled_specs: Option<String>,
+
+        /// Comma-separated disabled specifications
+        #[arg(short = 'D', long)]
+        disabled_specs: Option<String>,
+
+        /// Directory for logs/artifacts written by the harness
+        #[arg(short = 'l', long, default_value = "./test-logs")]
+        artifact_dir: String,
+
+        /// Keep interop container after run (for debugging)
+        #[arg(long)]
+        keep_containers: bool,
     },
 }
 
@@ -132,13 +175,14 @@ async fn run_app(
     }
 
     // Spawn XMPP event polling task if client was created
-    let _xmpp_poll_handle: Option<tokio::task::JoinHandle<()>> = if let Some(ref mut _client) = xmpp_client {
-        // We need to move the client into a task, but we also need to send commands to it
-        // For simplicity, we'll poll in the main loop using tokio::select!
-        None
-    } else {
-        None
-    };
+    let _xmpp_poll_handle: Option<tokio::task::JoinHandle<()>> =
+        if let Some(ref mut _client) = xmpp_client {
+            // We need to move the client into a task, but we also need to send commands to it
+            // For simplicity, we'll poll in the main loop using tokio::select!
+            None
+        } else {
+            None
+        };
 
     loop {
         // Check quit flag first, before any blocking operations
@@ -192,10 +236,8 @@ async fn run_app(
     // Clean shutdown of XMPP client (with timeout to avoid hanging)
     if let Some(ref mut client) = xmpp_client {
         info!("Disconnecting XMPP client...");
-        let disconnect_timeout = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            client.disconnect()
-        );
+        let disconnect_timeout =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.disconnect());
         if disconnect_timeout.await.is_err() {
             warn!("XMPP disconnect timed out, forcing exit");
         }
@@ -370,7 +412,8 @@ fn handle_xmpp_event(app: &mut App, event: XmppClientEvent) {
         XmppClientEvent::ChatMessage { from, body, id: _ } => {
             // Show direct messages if we're viewing that conversation
             if app.current_dm_jid.as_ref() == Some(&from) {
-                let sender_name = from.node()
+                let sender_name = from
+                    .node()
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| from.to_string());
                 app.add_message(sender_name, body);
@@ -464,8 +507,37 @@ async fn main() -> Result<()> {
         Some(Commands::Logout) => {
             return run_logout().await;
         }
-        Some(Commands::Create { name, description, private }) => {
+        Some(Commands::Create {
+            name,
+            description,
+            private,
+        }) => {
             return run_create(&name, description.as_deref(), !private).await;
+        }
+        Some(Commands::Compliance {
+            profile,
+            domain,
+            host,
+            timeout_ms,
+            admin_username,
+            admin_password,
+            enabled_specs,
+            disabled_specs,
+            artifact_dir,
+            keep_containers,
+        }) => {
+            return run_compliance(
+                &profile,
+                &domain,
+                &host,
+                timeout_ms,
+                &admin_username,
+                &admin_password,
+                enabled_specs.as_deref(),
+                disabled_specs.as_deref(),
+                &artifact_dir,
+                keep_containers,
+            );
         }
         None => {
             // No subcommand - run TUI
@@ -512,19 +584,22 @@ async fn main() -> Result<()> {
         let api_client = api::ApiClient::new(&creds.server_url, &creds.token);
         match api_client.fetch_all().await {
             Ok((waddles, channels)) => {
-                info!("Fetched {} waddles and {} channels", waddles.len(), channels.len());
-                let waddle_data: Vec<(String, String)> = waddles
-                    .into_iter()
-                    .map(|w| (w.id, w.name))
-                    .collect();
-                let channel_data: Vec<(String, String)> = channels
-                    .into_iter()
-                    .map(|c| (c.id, c.name))
-                    .collect();
+                info!(
+                    "Fetched {} waddles and {} channels",
+                    waddles.len(),
+                    channels.len()
+                );
+                let waddle_data: Vec<(String, String)> =
+                    waddles.into_iter().map(|w| (w.id, w.name)).collect();
+                let channel_data: Vec<(String, String)> =
+                    channels.into_iter().map(|c| (c.id, c.name)).collect();
                 app.set_waddles_and_channels(waddle_data, channel_data);
             }
             Err(e) => {
-                warn!("Failed to fetch data from server: {}. Running in offline mode.", e);
+                warn!(
+                    "Failed to fetch data from server: {}. Running in offline mode.",
+                    e
+                );
             }
         }
     } else {
@@ -548,6 +623,104 @@ async fn main() -> Result<()> {
 
     info!("Waddle CLI exiting normally");
     Ok(())
+}
+
+fn run_compliance(
+    profile: &str,
+    domain: &str,
+    host: &str,
+    timeout_ms: u32,
+    admin_username: &str,
+    admin_password: &str,
+    enabled_specs: Option<&str>,
+    disabled_specs: Option<&str>,
+    artifact_dir: &str,
+    keep_containers: bool,
+) -> Result<()> {
+    let workspace = workspace_root();
+    let resolved_artifact_dir = resolve_artifact_dir(artifact_dir)?;
+
+    println!("Running XMPP compliance harness...");
+    println!("  Profile:      {}", profile);
+    println!("  Domain:       {}", domain);
+    println!("  Host:         {}", host);
+    println!("  Timeout (ms): {}", timeout_ms);
+    println!(
+        "  Registration: {}",
+        if !admin_username.trim().is_empty() && !admin_password.trim().is_empty() {
+            "service administration"
+        } else {
+            "in-band registration"
+        }
+    );
+    println!("  Artifacts:    {}", resolved_artifact_dir.display());
+
+    let mut command = std::process::Command::new("cargo");
+    command
+        .current_dir(&workspace)
+        .arg("test")
+        .arg("--package")
+        .arg("waddle-xmpp")
+        .arg("--test")
+        .arg("xep0479_compliance")
+        .arg("--")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("WADDLE_COMPLIANCE_PROFILE", profile)
+        .env("WADDLE_COMPLIANCE_DOMAIN", domain)
+        .env("WADDLE_COMPLIANCE_HOST", host)
+        .env("WADDLE_COMPLIANCE_TIMEOUT_MS", timeout_ms.to_string())
+        .env(
+            "WADDLE_COMPLIANCE_ARTIFACT_DIR",
+            resolved_artifact_dir.to_string_lossy().to_string(),
+        )
+        .env(
+            "WADDLE_COMPLIANCE_KEEP_CONTAINERS",
+            if keep_containers { "true" } else { "false" },
+        );
+
+    if !admin_username.trim().is_empty() {
+        command.env("WADDLE_COMPLIANCE_ADMIN_USERNAME", admin_username);
+    }
+    if !admin_password.trim().is_empty() {
+        command.env("WADDLE_COMPLIANCE_ADMIN_PASSWORD", admin_password);
+    }
+
+    if let Some(value) = enabled_specs {
+        command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", value);
+    }
+    if let Some(value) = disabled_specs {
+        command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", value);
+    }
+
+    let status = command
+        .status()
+        .context("Running compliance harness command")?;
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "Compliance harness exited with status {status}"
+    ))
+}
+
+fn resolve_artifact_dir(path: &str) -> Result<PathBuf> {
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+
+    let cwd = std::env::current_dir().context("Resolving current working directory")?;
+    Ok(cwd.join(candidate))
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf()
 }
 
 /// Show current login status
@@ -585,9 +758,8 @@ async fn run_logout() -> Result<()> {
 /// Create a new waddle
 async fn run_create(name: &str, description: Option<&str>, is_public: bool) -> Result<()> {
     // Load credentials
-    let creds = login::load_credentials().map_err(|_| {
-        anyhow::anyhow!("Not logged in. Run 'waddle login -u <handle>' first.")
-    })?;
+    let creds = login::load_credentials()
+        .map_err(|_| anyhow::anyhow!("Not logged in. Run 'waddle login -u <handle>' first."))?;
 
     println!("Creating waddle \"{}\"...", name);
 

@@ -82,7 +82,10 @@ pub fn parse_registration_iq(iq: &Iq) -> Result<Option<RegistrationRequest>, Reg
 }
 
 /// Parse a registration element (for pre-auth parsing where we have raw Element).
-pub fn parse_registration_element(element: &Element, id: &str) -> Result<Option<RegistrationRequest>, RegistrationError> {
+pub fn parse_registration_element(
+    element: &Element,
+    id: &str,
+) -> Result<Option<RegistrationRequest>, RegistrationError> {
     let iq_type = element.attr("type").unwrap_or("");
 
     let query = element
@@ -172,10 +175,7 @@ pub fn build_registration_fields_response(
 
 /// Build a registration success response.
 pub fn build_registration_success(request_id: &str) -> String {
-    format!(
-        "<iq type='result' id='{}'/>",
-        escape_xml(request_id)
-    )
+    format!("<iq type='result' id='{}'/>", escape_xml(request_id))
 }
 
 /// Build a registration error response.
@@ -189,8 +189,13 @@ pub fn build_registration_error(request_id: &str, error: &RegistrationError) -> 
     };
 
     let text = match error {
-        RegistrationError::NotAcceptable(msg) | RegistrationError::BadRequest(msg) | RegistrationError::InternalError(msg) => {
-            format!("<text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>{}</text>", escape_xml(msg))
+        RegistrationError::NotAcceptable(msg)
+        | RegistrationError::BadRequest(msg)
+        | RegistrationError::InternalError(msg) => {
+            format!(
+                "<text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>{}</text>",
+                escape_xml(msg)
+            )
         }
         _ => String::new(),
     };
@@ -306,7 +311,11 @@ mod tests {
 
     #[test]
     fn test_build_registration_fields_response() {
-        let response = build_registration_fields_response("reg1", Some("Choose a username and password."), true);
+        let response = build_registration_fields_response(
+            "reg1",
+            Some("Choose a username and password."),
+            true,
+        );
 
         assert!(response.contains("type='result'"));
         assert!(response.contains("id='reg1'"));
@@ -354,7 +363,10 @@ mod tests {
 
     #[test]
     fn test_build_registration_error_with_text() {
-        let response = build_registration_error("reg5", &RegistrationError::NotAcceptable("Username is required".to_string()));
+        let response = build_registration_error(
+            "reg5",
+            &RegistrationError::NotAcceptable("Username is required".to_string()),
+        );
 
         assert!(response.contains("type='error'"));
         assert!(response.contains("<not-acceptable"));

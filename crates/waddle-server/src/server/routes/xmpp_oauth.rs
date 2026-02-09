@@ -8,8 +8,8 @@
 //! This enables standard XMPP clients (Conversations, Gajim, Dino, etc.) to
 //! authenticate via OAuth with ATProto as the identity provider.
 
-use crate::auth::session::PendingAuthorization;
 use super::auth::AuthState;
+use crate::auth::session::PendingAuthorization;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -67,9 +67,7 @@ struct OAuthServerMetadata {
 /// RFC 8414 OAuth Authorization Server Metadata endpoint.
 /// XMPP clients (per XEP-0493) fetch this to discover OAuth endpoints.
 #[instrument(skip(state))]
-pub async fn oauth_discovery_handler(
-    State(state): State<Arc<AuthState>>,
-) -> impl IntoResponse {
+pub async fn oauth_discovery_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     let base_url = &state.base_url;
 
     let metadata = OAuthServerMetadata {
@@ -189,7 +187,9 @@ pub async fn xmpp_authorize_handler(
             };
 
             // Store both the ATProto pending auth and XMPP client info
-            state.pending_auths.insert(auth_request.state.clone(), pending);
+            state
+                .pending_auths
+                .insert(auth_request.state.clone(), pending);
 
             // Store XMPP state separately (keyed by ATProto state)
             // In production, use a proper store; for now we use a simple approach
@@ -263,7 +263,11 @@ pub async fn xmpp_callback_handler(
     );
 
     // Validate the session exists
-    match state.session_manager.validate_session(&params.session_id).await {
+    match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => {
             // Build redirect URL to XMPP client
             let mut redirect_url = params.redirect_uri.clone();
@@ -272,11 +276,13 @@ pub async fn xmpp_callback_handler(
             let separator = if redirect_url.contains('?') { "&" } else { "?" };
             redirect_url.push_str(separator);
             redirect_url.push_str("code=");
-            redirect_url.push_str(&utf8_percent_encode(&params.session_id, NON_ALPHANUMERIC).to_string());
+            redirect_url
+                .push_str(&utf8_percent_encode(&params.session_id, NON_ALPHANUMERIC).to_string());
 
             if let Some(client_state) = &params.state {
                 redirect_url.push_str("&state=");
-                redirect_url.push_str(&utf8_percent_encode(client_state, NON_ALPHANUMERIC).to_string());
+                redirect_url
+                    .push_str(&utf8_percent_encode(client_state, NON_ALPHANUMERIC).to_string());
             }
 
             info!(
@@ -296,11 +302,14 @@ pub async fn xmpp_callback_handler(
             redirect_url.push_str(separator);
             redirect_url.push_str("error=access_denied");
             redirect_url.push_str("&error_description=");
-            redirect_url.push_str(&utf8_percent_encode("Session validation failed", NON_ALPHANUMERIC).to_string());
+            redirect_url.push_str(
+                &utf8_percent_encode("Session validation failed", NON_ALPHANUMERIC).to_string(),
+            );
 
             if let Some(client_state) = &params.state {
                 redirect_url.push_str("&state=");
-                redirect_url.push_str(&utf8_percent_encode(client_state, NON_ALPHANUMERIC).to_string());
+                redirect_url
+                    .push_str(&utf8_percent_encode(client_state, NON_ALPHANUMERIC).to_string());
             }
 
             Redirect::temporary(&redirect_url).into_response()
@@ -333,7 +342,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(crate::server::AppState::new(db_pool, crate::config::ServerConfig::test_homeserver()));
+        let app_state = Arc::new(crate::server::AppState::new(
+            db_pool,
+            crate::config::ServerConfig::test_homeserver(),
+        ));
         Arc::new(AuthState::new(
             app_state,
             "https://waddle.social",

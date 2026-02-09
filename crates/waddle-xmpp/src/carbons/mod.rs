@@ -52,9 +52,7 @@ pub const DELAY_NS: &str = "urn:xmpp:delay";
 /// ```
 pub fn is_carbons_enable(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
-            elem.name() == "enable" && elem.ns() == CARBONS_NS
-        }
+        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "enable" && elem.ns() == CARBONS_NS,
         _ => false,
     }
 }
@@ -69,9 +67,7 @@ pub fn is_carbons_enable(iq: &Iq) -> bool {
 /// ```
 pub fn is_carbons_disable(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
-            elem.name() == "disable" && elem.ns() == CARBONS_NS
-        }
+        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "disable" && elem.ns() == CARBONS_NS,
         _ => false,
     }
 }
@@ -144,11 +140,7 @@ pub fn should_copy_message(msg: &Message) -> bool {
 ///   </sent>
 /// </message>
 /// ```
-pub fn build_sent_carbon(
-    original_msg: &Message,
-    from_jid: &str,
-    to_jid: &str,
-) -> Message {
+pub fn build_sent_carbon(original_msg: &Message, from_jid: &str, to_jid: &str) -> Message {
     let forwarded = build_forwarded_element(original_msg);
 
     let sent = Element::builder("sent", CARBONS_NS)
@@ -175,11 +167,7 @@ pub fn build_sent_carbon(
 ///   </received>
 /// </message>
 /// ```
-pub fn build_received_carbon(
-    original_msg: &Message,
-    from_jid: &str,
-    to_jid: &str,
-) -> Message {
+pub fn build_received_carbon(original_msg: &Message, from_jid: &str, to_jid: &str) -> Message {
     let forwarded = build_forwarded_element(original_msg);
 
     let received = Element::builder("received", CARBONS_NS)
@@ -275,7 +263,10 @@ mod tests {
     fn test_should_copy_message_normal_chat() {
         let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(String::new(), xmpp_parsers::message::Body("Hello".to_string()));
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
+        );
 
         assert!(should_copy_message(&msg));
     }
@@ -284,7 +275,10 @@ mod tests {
     fn test_should_not_copy_groupchat() {
         let mut msg = Message::new(Some("room@muc.example.com".parse().unwrap()));
         msg.type_ = MessageType::Groupchat;
-        msg.bodies.insert(String::new(), xmpp_parsers::message::Body("Hello".to_string()));
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
+        );
 
         assert!(!should_copy_message(&msg));
     }
@@ -301,7 +295,10 @@ mod tests {
     fn test_should_not_copy_with_private_element() {
         let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(String::new(), xmpp_parsers::message::Body("Hello".to_string()));
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
+        );
 
         // Add <private/> element
         let private = Element::builder("private", CARBONS_NS).build();
@@ -314,7 +311,10 @@ mod tests {
     fn test_should_not_copy_with_no_copy_hint() {
         let mut msg = Message::new(Some("recipient@example.com".parse().unwrap()));
         msg.type_ = MessageType::Chat;
-        msg.bodies.insert(String::new(), xmpp_parsers::message::Body("Hello".to_string()));
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
+        );
 
         // Add <no-copy/> hint
         let no_copy = Element::builder("no-copy", "urn:xmpp:hints").build();
@@ -336,7 +336,10 @@ mod tests {
         let result = build_carbons_result(&iq);
 
         assert_eq!(result.id, "enable-1");
-        assert!(matches!(result.payload, xmpp_parsers::iq::IqType::Result(None)));
+        assert!(matches!(
+            result.payload,
+            xmpp_parsers::iq::IqType::Result(None)
+        ));
     }
 
     #[test]
@@ -344,7 +347,10 @@ mod tests {
         let mut original = Message::new(Some("recipient@example.com".parse().unwrap()));
         original.from = Some("sender@example.com/resource1".parse().unwrap());
         original.type_ = MessageType::Chat;
-        original.bodies.insert(String::new(), xmpp_parsers::message::Body("Hello".to_string()));
+        original.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
+        );
 
         let carbon = build_sent_carbon(
             &original,
@@ -362,11 +368,17 @@ mod tests {
         );
 
         // Check for sent element
-        let sent = carbon.payloads.iter().find(|p| p.name() == "sent" && p.ns() == CARBONS_NS);
+        let sent = carbon
+            .payloads
+            .iter()
+            .find(|p| p.name() == "sent" && p.ns() == CARBONS_NS);
         assert!(sent.is_some());
 
         // Check for forwarded element
-        let forwarded = sent.unwrap().children().find(|c| c.name() == "forwarded" && c.ns() == FORWARDED_NS);
+        let forwarded = sent
+            .unwrap()
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARDED_NS);
         assert!(forwarded.is_some());
     }
 
@@ -375,13 +387,13 @@ mod tests {
         let mut original = Message::new(Some("user@example.com/resource1".parse().unwrap()));
         original.from = Some("sender@example.com".parse().unwrap());
         original.type_ = MessageType::Chat;
-        original.bodies.insert(String::new(), xmpp_parsers::message::Body("Hello".to_string()));
-
-        let carbon = build_received_carbon(
-            &original,
-            "user@example.com",
-            "user@example.com/resource2",
+        original.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".to_string()),
         );
+
+        let carbon =
+            build_received_carbon(&original, "user@example.com", "user@example.com/resource2");
 
         assert_eq!(
             carbon.to.as_ref().unwrap().to_string(),
@@ -389,7 +401,10 @@ mod tests {
         );
 
         // Check for received element
-        let received = carbon.payloads.iter().find(|p| p.name() == "received" && p.ns() == CARBONS_NS);
+        let received = carbon
+            .payloads
+            .iter()
+            .find(|p| p.name() == "received" && p.ns() == CARBONS_NS);
         assert!(received.is_some());
     }
 }

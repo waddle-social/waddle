@@ -57,7 +57,10 @@ pub fn router(channel_state: Arc<ChannelState>) -> Router {
             "/v1/waddles/:waddle_id/channels",
             post(create_channel_handler),
         )
-        .route("/v1/waddles/:waddle_id/channels", get(list_channels_handler))
+        .route(
+            "/v1/waddles/:waddle_id/channels",
+            get(list_channels_handler),
+        )
         // Channel-scoped routes (require waddle_id in query params)
         .route("/v1/channels/:id", get(get_channel_handler))
         .route("/v1/channels/:id", patch(update_channel_handler))
@@ -251,10 +254,17 @@ pub async fn create_channel_handler(
     Query(params): Query<SessionQuery>,
     Json(request): Json<CreateChannelRequest>,
 ) -> impl IntoResponse {
-    info!("Creating channel '{}' in waddle {}", request.name, waddle_id);
+    info!(
+        "Creating channel '{}' in waddle {}",
+        request.name, waddle_id
+    );
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -375,7 +385,11 @@ pub async fn list_channels_handler(
     debug!("Listing channels in waddle: {}", waddle_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -415,19 +429,22 @@ pub async fn list_channels_handler(
     };
 
     // List channels from database
-    let channels = match list_channels_from_db(&waddle_db, &waddle_id, params.limit, params.offset)
-        .await
-    {
-        Ok(channels) => channels,
-        Err(err) => {
-            error!("Failed to list channels: {}", err);
-            return channel_error_to_response(ChannelError::Database(err)).into_response();
-        }
-    };
+    let channels =
+        match list_channels_from_db(&waddle_db, &waddle_id, params.limit, params.offset).await {
+            Ok(channels) => channels,
+            Err(err) => {
+                error!("Failed to list channels: {}", err);
+                return channel_error_to_response(ChannelError::Database(err)).into_response();
+            }
+        };
 
     let total = channels.len();
 
-    (StatusCode::OK, Json(ListChannelsResponse { channels, total })).into_response()
+    (
+        StatusCode::OK,
+        Json(ListChannelsResponse { channels, total }),
+    )
+        .into_response()
 }
 
 /// GET /v1/channels/:id
@@ -442,7 +459,11 @@ pub async fn get_channel_handler(
     debug!("Getting channel: {}", channel_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -516,7 +537,11 @@ pub async fn update_channel_handler(
     info!("Updating channel: {}", channel_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -615,7 +640,11 @@ pub async fn delete_channel_handler(
     info!("Deleting channel: {}", channel_id);
 
     // Validate session
-    let session = match state.session_manager.validate_session(&params.session_id).await {
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
         Ok(session) => session,
         Err(err) => {
             warn!("Session validation failed: {}", err);
@@ -807,9 +836,7 @@ async fn get_channel_from_db(
 
     match row {
         Some(row) => {
-            let id: String = row
-                .get(0)
-                .map_err(|e| format!("Failed to get id: {}", e))?;
+            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
             let name: String = row
                 .get(1)
                 .map_err(|e| format!("Failed to get name: {}", e))?;
@@ -900,9 +927,7 @@ async fn list_channels_from_db(
 
 /// Parse a channel row from the database
 fn parse_channel_row(row: &libsql::Row, waddle_id: &str) -> Result<ChannelResponse, String> {
-    let id: String = row
-        .get(0)
-        .map_err(|e| format!("Failed to get id: {}", e))?;
+    let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
     let name: String = row
         .get(1)
         .map_err(|e| format!("Failed to get name: {}", e))?;
@@ -1026,7 +1051,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(db_pool, crate::config::ServerConfig::test_homeserver()));
+        let app_state = Arc::new(AppState::new(
+            db_pool,
+            crate::config::ServerConfig::test_homeserver(),
+        ));
         Arc::new(ChannelState::new(
             app_state,
             Some(b"test-encryption-key-32-bytes!!!"),
@@ -1071,7 +1099,11 @@ mod tests {
             Relation::new("owner"),
             Subject::user(&session.did),
         );
-        state.permission_service.write_tuple(owner_tuple).await.unwrap();
+        state
+            .permission_service
+            .write_tuple(owner_tuple)
+            .await
+            .unwrap();
 
         // Create admin permission tuple (for delete channel permission)
         let admin_tuple = Tuple::new(
@@ -1079,7 +1111,11 @@ mod tests {
             Relation::new("admin"),
             Subject::user(&session.did),
         );
-        state.permission_service.write_tuple(admin_tuple).await.unwrap();
+        state
+            .permission_service
+            .write_tuple(admin_tuple)
+            .await
+            .unwrap();
 
         // Create member permission tuple (for view permission)
         let member_tuple = Tuple::new(
@@ -1087,7 +1123,11 @@ mod tests {
             Relation::new("member"),
             Subject::user(&session.did),
         );
-        state.permission_service.write_tuple(member_tuple).await.unwrap();
+        state
+            .permission_service
+            .write_tuple(member_tuple)
+            .await
+            .unwrap();
 
         // Create the waddle database and run migrations
         let waddle_db = state
@@ -1106,8 +1146,7 @@ mod tests {
     async fn test_create_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state);
 
         let response = app
@@ -1143,8 +1182,7 @@ mod tests {
     async fn test_create_channel_empty_name() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state);
 
         let response = app
@@ -1199,8 +1237,7 @@ mod tests {
     async fn test_list_channels() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
         // Create two channels
@@ -1262,8 +1299,7 @@ mod tests {
     async fn test_get_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
         // Create a channel
@@ -1320,8 +1356,7 @@ mod tests {
     async fn test_get_channel_not_found() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state);
 
         let response = app
@@ -1345,8 +1380,7 @@ mod tests {
     async fn test_update_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
         // Create a channel
@@ -1406,8 +1440,7 @@ mod tests {
     async fn test_delete_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
-            setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
         // Create a channel

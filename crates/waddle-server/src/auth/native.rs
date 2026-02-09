@@ -92,7 +92,10 @@ impl NativeUserStore {
             let guard = persistent.lock().await;
             Ok(ConnectionGuard::Persistent(guard))
         } else {
-            let conn = self.db.connect().map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+            let conn = self
+                .db
+                .connect()
+                .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
             Ok(ConnectionGuard::Owned(conn))
         }
     }
@@ -125,8 +128,11 @@ impl NativeUserStore {
         // Generate SCRAM salt and keys
         let scram_salt = generate_scram_salt();
         let scram_salt_b64 = BASE64_STANDARD.encode(&scram_salt);
-        let (stored_key, server_key) =
-            waddle_xmpp::auth::scram::generate_scram_keys(&request.password, &scram_salt, DEFAULT_SCRAM_ITERATIONS);
+        let (stored_key, server_key) = waddle_xmpp::auth::scram::generate_scram_keys(
+            &request.password,
+            &scram_salt,
+            DEFAULT_SCRAM_ITERATIONS,
+        );
 
         // Insert into database
         let conn = self.get_connection().await?;
@@ -168,7 +174,8 @@ impl NativeUserStore {
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.as_ref()
+        let mut rows = conn
+            .as_ref()
             .query(
                 "SELECT 1 FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
@@ -187,7 +194,8 @@ impl NativeUserStore {
     ) -> Result<Option<ScramCredentials>, AuthError> {
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.as_ref()
+        let mut rows = conn
+            .as_ref()
             .query(
                 r#"
                 SELECT salt, iterations, stored_key, server_key
@@ -222,7 +230,8 @@ impl NativeUserStore {
     ) -> Result<bool, AuthError> {
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.as_ref()
+        let mut rows = conn
+            .as_ref()
             .query(
                 "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
@@ -235,14 +244,20 @@ impl NativeUserStore {
                 let hash_str: String = row.get(0).map_err(db_err)?;
                 let parsed_hash = PasswordHash::new(&hash_str)
                     .map_err(|e| AuthError::CryptoError(format!("Invalid password hash: {}", e)))?;
-                Ok(Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok())
+                Ok(Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed_hash)
+                    .is_ok())
             }
             None => Ok(false),
         }
     }
 
     /// Get a native user by username and domain.
-    pub async fn get_user(&self, username: &str, domain: &str) -> Result<Option<NativeUser>, AuthError> {
+    pub async fn get_user(
+        &self,
+        username: &str,
+        domain: &str,
+    ) -> Result<Option<NativeUser>, AuthError> {
         let conn = self.get_connection().await?;
 
         let mut rows = conn.as_ref()
@@ -299,8 +314,11 @@ impl NativeUserStore {
         // Generate new SCRAM salt and keys
         let scram_salt = generate_scram_salt();
         let scram_salt_b64 = BASE64_STANDARD.encode(&scram_salt);
-        let (stored_key, server_key) =
-            waddle_xmpp::auth::scram::generate_scram_keys(new_password, &scram_salt, DEFAULT_SCRAM_ITERATIONS);
+        let (stored_key, server_key) = waddle_xmpp::auth::scram::generate_scram_keys(
+            new_password,
+            &scram_salt,
+            DEFAULT_SCRAM_ITERATIONS,
+        );
 
         let conn = self.get_connection().await?;
 
@@ -335,7 +353,8 @@ impl NativeUserStore {
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let conn = self.get_connection().await?;
 
-        let affected = conn.as_ref()
+        let affected = conn
+            .as_ref()
             .execute(
                 "DELETE FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
@@ -395,7 +414,9 @@ fn db_err<E: std::fmt::Display>(e: E) -> AuthError {
 /// - Not contain prohibited characters
 fn validate_username(username: &str) -> Result<(), AuthError> {
     if username.is_empty() {
-        return Err(AuthError::InvalidUsername("Username cannot be empty".to_string()));
+        return Err(AuthError::InvalidUsername(
+            "Username cannot be empty".to_string(),
+        ));
     }
 
     if username.len() > 1023 {
@@ -455,7 +476,10 @@ mod tests {
             email: Some("alice@email.com".to_string()),
         };
 
-        let user_id = store.register(request).await.expect("Failed to register user");
+        let user_id = store
+            .register(request)
+            .await
+            .expect("Failed to register user");
         assert!(user_id > 0);
 
         // Verify user exists
@@ -475,7 +499,10 @@ mod tests {
             email: None,
         };
 
-        store.register(request.clone()).await.expect("First registration should succeed");
+        store
+            .register(request.clone())
+            .await
+            .expect("First registration should succeed");
 
         // Second registration should fail
         let result = store.register(request).await;

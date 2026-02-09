@@ -166,12 +166,14 @@ pub fn parse_upload_request(iq: &Iq) -> Result<UploadRequest, UploadError> {
         .attr("size")
         .ok_or_else(|| UploadError::BadRequest("Missing 'size' attribute".to_string()))?;
 
-    let size: u64 = size_str.parse().map_err(|_| {
-        UploadError::BadRequest(format!("Invalid 'size' attribute: {}", size_str))
-    })?;
+    let size: u64 = size_str
+        .parse()
+        .map_err(|_| UploadError::BadRequest(format!("Invalid 'size' attribute: {}", size_str)))?;
 
     if size == 0 {
-        return Err(UploadError::BadRequest("File size cannot be zero".to_string()));
+        return Err(UploadError::BadRequest(
+            "File size cannot be zero".to_string(),
+        ));
     }
 
     // Parse optional 'content-type' attribute
@@ -286,10 +288,7 @@ fn escape_xml(s: &str) -> String {
 /// Removes path components, replaces unsafe characters, and limits length.
 pub fn sanitize_filename(filename: &str) -> String {
     // Extract just the filename (remove any path components)
-    let name = filename
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(filename);
+    let name = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
 
     // Replace problematic characters with underscores
     let sanitized: String = name
@@ -569,12 +568,8 @@ mod tests {
 
     #[test]
     fn test_build_upload_error_file_too_large() {
-        let error_response = build_upload_error(
-            "error-1",
-            &UploadError::FileTooLarge {
-                max_size: 10485760,
-            },
-        );
+        let error_response =
+            build_upload_error("error-1", &UploadError::FileTooLarge { max_size: 10485760 });
 
         assert!(error_response.contains("type='error'"));
         assert!(error_response.contains("id='error-1'"));
@@ -644,15 +639,15 @@ mod tests {
         assert_eq!(sanitize_filename(".."), "file");
 
         // Valid characters preserved
-        assert_eq!(sanitize_filename("test-file_v2.0.jpg"), "test-file_v2.0.jpg");
+        assert_eq!(
+            sanitize_filename("test-file_v2.0.jpg"),
+            "test-file_v2.0.jpg"
+        );
     }
 
     #[test]
     fn test_effective_content_type() {
         assert_eq!(effective_content_type(Some("image/jpeg")), "image/jpeg");
-        assert_eq!(
-            effective_content_type(None),
-            "application/octet-stream"
-        );
+        assert_eq!(effective_content_type(None), "application/octet-stream");
     }
 }

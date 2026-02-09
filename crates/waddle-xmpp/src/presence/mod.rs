@@ -8,8 +8,8 @@ pub mod subscription;
 
 pub use subscription::{
     build_available_presence, build_subscription_presence, build_unavailable_presence,
-    parse_subscription_presence, PendingSubscription, PresenceAction,
-    PresenceSubscriptionRequest, SubscriptionStateMachine, SubscriptionType,
+    parse_subscription_presence, PendingSubscription, PresenceAction, PresenceSubscriptionRequest,
+    SubscriptionStateMachine, SubscriptionType,
 };
 
 use chrono::{DateTime, Utc};

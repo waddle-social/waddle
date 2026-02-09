@@ -108,21 +108,20 @@ pub struct PresenceSubscriptionRequest {
     pub status: Option<String>,
     /// Stanza ID for tracking.
     pub id: Option<String>,
+    /// Arbitrary extension payloads that MUST be preserved when routing.
+    pub payloads: Vec<minidom::Element>,
 }
 
 impl PresenceSubscriptionRequest {
     /// Create a new subscription request.
-    pub fn new(
-        subscription_type: SubscriptionType,
-        from: BareJid,
-        to: BareJid,
-    ) -> Self {
+    pub fn new(subscription_type: SubscriptionType, from: BareJid, to: BareJid) -> Self {
         Self {
             subscription_type,
             from,
             to,
             status: None,
             id: None,
+            payloads: Vec::new(),
         }
     }
 
@@ -161,8 +160,9 @@ pub fn parse_subscription_presence(
 ) -> Result<PresenceAction, XmppError> {
     // Check for probe first
     if matches!(pres.type_, PresenceType::Probe) {
-        let to = pres.to.as_ref()
-            .ok_or_else(|| XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string())))?;
+        let to = pres.to.as_ref().ok_or_else(|| {
+            XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string()))
+        })?;
         let to_bare = match to.clone().try_into_full() {
             Ok(full) => full.to_bare(),
             Err(bare) => bare,
@@ -175,8 +175,11 @@ pub fn parse_subscription_presence(
 
     // Check for subscription types
     if let Some(sub_type) = SubscriptionType::from_presence_type(&pres.type_) {
-        let to = pres.to.as_ref()
-            .ok_or_else(|| XmppError::bad_request(Some("Subscription presence must have 'to' attribute".to_string())))?;
+        let to = pres.to.as_ref().ok_or_else(|| {
+            XmppError::bad_request(Some(
+                "Subscription presence must have 'to' attribute".to_string(),
+            ))
+        })?;
 
         let to_bare = match to.clone().try_into_full() {
             Ok(full) => full.to_bare(),
@@ -191,6 +194,7 @@ pub fn parse_subscription_presence(
             to: to_bare,
             status,
             id: pres.id.clone(),
+            payloads: pres.payloads.clone(),
         };
 
         debug!(
@@ -213,6 +217,7 @@ pub fn build_subscription_presence(
     from: &BareJid,
     to: &BareJid,
     status: Option<&str>,
+    payloads: &[minidom::Element],
 ) -> Presence {
     let mut pres = Presence::new(subscription_type.to_presence_type());
     pres.from = Some(Jid::from(from.clone()));
@@ -222,14 +227,13 @@ pub fn build_subscription_presence(
         pres.statuses.insert(String::new(), status_text.to_string());
     }
 
+    pres.payloads.extend(payloads.iter().cloned());
+
     pres
 }
 
 /// Build an unavailable presence stanza for broadcasting to subscribers.
-pub fn build_unavailable_presence(
-    from: &BareJid,
-    to: &BareJid,
-) -> Presence {
+pub fn build_unavailable_presence(from: &BareJid, to: &BareJid) -> Presence {
     let mut pres = Presence::new(PresenceType::Unavailable);
     pres.from = Some(Jid::from(from.clone()));
     pres.to = Some(Jid::from(to.clone()));
@@ -497,7 +501,11 @@ mod tests {
 
     #[test]
     fn test_inbound_subscribed_none_to_to() {
-        let mut item = make_item("contact@example.com", Subscription::None, Some(AskType::Subscribe));
+        let mut item = make_item(
+            "contact@example.com",
+            Subscription::None,
+            Some(AskType::Subscribe),
+        );
         SubscriptionStateMachine::apply_inbound_subscribed(&mut item);
         assert_eq!(item.subscription, Subscription::To);
         assert_eq!(item.ask, None);
@@ -505,7 +513,11 @@ mod tests {
 
     #[test]
     fn test_inbound_subscribed_from_to_both() {
-        let mut item = make_item("contact@example.com", Subscription::From, Some(AskType::Subscribe));
+        let mut item = make_item(
+            "contact@example.com",
+            Subscription::From,
+            Some(AskType::Subscribe),
+        );
         SubscriptionStateMachine::apply_inbound_subscribed(&mut item);
         assert_eq!(item.subscription, Subscription::Both);
         assert_eq!(item.ask, None);
@@ -569,18 +581,34 @@ mod tests {
 
     #[test]
     fn test_should_receive_presence() {
-        assert!(!SubscriptionStateMachine::should_receive_presence(Subscription::None));
-        assert!(SubscriptionStateMachine::should_receive_presence(Subscription::To));
-        assert!(!SubscriptionStateMachine::should_receive_presence(Subscription::From));
-        assert!(SubscriptionStateMachine::should_receive_presence(Subscription::Both));
+        assert!(!SubscriptionStateMachine::should_receive_presence(
+            Subscription::None
+        ));
+        assert!(SubscriptionStateMachine::should_receive_presence(
+            Subscription::To
+        ));
+        assert!(!SubscriptionStateMachine::should_receive_presence(
+            Subscription::From
+        ));
+        assert!(SubscriptionStateMachine::should_receive_presence(
+            Subscription::Both
+        ));
     }
 
     #[test]
     fn test_should_send_presence() {
-        assert!(!SubscriptionStateMachine::should_send_presence(Subscription::None));
-        assert!(!SubscriptionStateMachine::should_send_presence(Subscription::To));
-        assert!(SubscriptionStateMachine::should_send_presence(Subscription::From));
-        assert!(SubscriptionStateMachine::should_send_presence(Subscription::Both));
+        assert!(!SubscriptionStateMachine::should_send_presence(
+            Subscription::None
+        ));
+        assert!(!SubscriptionStateMachine::should_send_presence(
+            Subscription::To
+        ));
+        assert!(SubscriptionStateMachine::should_send_presence(
+            Subscription::From
+        ));
+        assert!(SubscriptionStateMachine::should_send_presence(
+            Subscription::Both
+        ));
     }
 
     #[test]
@@ -593,12 +621,16 @@ mod tests {
             &from,
             &to,
             Some("Please add me"),
+            &[],
         );
 
         assert_eq!(pres.type_, PresenceType::Subscribe);
         assert_eq!(pres.from, Some(Jid::from(from)));
         assert_eq!(pres.to, Some(Jid::from(to)));
-        assert_eq!(pres.statuses.values().next(), Some(&"Please add me".to_string()));
+        assert_eq!(
+            pres.statuses.values().next(),
+            Some(&"Please add me".to_string())
+        );
     }
 
     #[test]

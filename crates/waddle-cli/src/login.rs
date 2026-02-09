@@ -93,7 +93,11 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
         .context("Failed to connect to server")?
         .error_for_status()
         .map_err(|e| {
-            anyhow::anyhow!("Server error: {}. Is the server running at {}?", e, server_url)
+            anyhow::anyhow!(
+                "Server error: {}. Is the server running at {}?",
+                e,
+                server_url
+            )
         })?
         .json()
         .await
@@ -105,7 +109,10 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
     // Step 2: Show user the code and URL
     println!("  +-----------------------------------------+");
     println!("  |                                         |");
-    println!("  |   Go to: {}   ", format_url(&device_auth.verification_uri));
+    println!(
+        "  |   Go to: {}   ",
+        format_url(&device_auth.verification_uri)
+    );
     println!("  |                                         |");
     println!("  |   Enter code:  {}            |", device_auth.user_code);
     println!("  |                                         |");
@@ -129,7 +136,9 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
     loop {
         attempts += 1;
         if attempts > max_attempts {
-            return Err(anyhow::anyhow!("Authorization timed out. Please try again."));
+            return Err(anyhow::anyhow!(
+                "Authorization timed out. Please try again."
+            ));
         }
 
         tokio::time::sleep(poll_interval).await;
@@ -189,12 +198,11 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
             return Err(anyhow::anyhow!("Unexpected response from server: {}", text));
         } else if status.as_u16() == 400 {
             // Could be expired or invalid
-            let error: ErrorResponse = serde_json::from_str(
-                &response.text().await?
-            ).unwrap_or(ErrorResponse {
-                error: "unknown".to_string(),
-                message: "Unknown error".to_string(),
-            });
+            let error: ErrorResponse =
+                serde_json::from_str(&response.text().await?).unwrap_or(ErrorResponse {
+                    error: "unknown".to_string(),
+                    message: "Unknown error".to_string(),
+                });
 
             if error.error == "expired_token" {
                 println!();
@@ -241,8 +249,8 @@ pub fn load_credentials() -> Result<SavedCredentials> {
     let path = credentials_path()?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("No credentials found at {:?}", path))?;
-    let creds: SavedCredentials = serde_json::from_str(&content)
-        .context("Failed to parse credentials file")?;
+    let creds: SavedCredentials =
+        serde_json::from_str(&content).context("Failed to parse credentials file")?;
     Ok(creds)
 }
 
@@ -259,10 +267,7 @@ pub fn clear_credentials() -> Result<()> {
 fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .is_ok()
+        std::process::Command::new("open").arg(url).spawn().is_ok()
     }
 
     #[cfg(target_os = "linux")]

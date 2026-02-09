@@ -205,9 +205,15 @@ mod tests {
     #[test]
     fn test_access_model_parse() {
         assert_eq!(AccessModel::from_str("open"), Some(AccessModel::Open));
-        assert_eq!(AccessModel::from_str("presence"), Some(AccessModel::Presence));
+        assert_eq!(
+            AccessModel::from_str("presence"),
+            Some(AccessModel::Presence)
+        );
         assert_eq!(AccessModel::from_str("roster"), Some(AccessModel::Roster));
-        assert_eq!(AccessModel::from_str("whitelist"), Some(AccessModel::Whitelist));
+        assert_eq!(
+            AccessModel::from_str("whitelist"),
+            Some(AccessModel::Whitelist)
+        );
         assert_eq!(AccessModel::from_str("invalid"), None);
     }
 
@@ -219,7 +225,10 @@ mod tests {
 
     #[test]
     fn test_publish_model_parse() {
-        assert_eq!(PublishModel::from_str("publishers"), Some(PublishModel::Publishers));
+        assert_eq!(
+            PublishModel::from_str("publishers"),
+            Some(PublishModel::Publishers)
+        );
         assert_eq!(PublishModel::from_str("open"), Some(PublishModel::Open));
         assert_eq!(PublishModel::from_str("invalid"), None);
     }

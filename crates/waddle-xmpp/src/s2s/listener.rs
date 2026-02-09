@@ -53,10 +53,7 @@ pub struct S2sListener {
 
 impl S2sListener {
     /// Create a new S2S listener with the given configuration.
-    pub fn new(
-        config: S2sListenerConfig,
-        tls_acceptor: TlsAcceptor,
-    ) -> Self {
+    pub fn new(config: S2sListenerConfig, tls_acceptor: TlsAcceptor) -> Self {
         Self {
             config,
             tls_acceptor,

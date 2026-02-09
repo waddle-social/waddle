@@ -37,9 +37,11 @@ impl DatabaseBlockingStorage {
             .await?;
 
         let mut blocked_jids = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| {
-            BlockingStorageError::QueryFailed(format!("Failed to read row: {}", e))
-        })? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BlockingStorageError::QueryFailed(format!("Failed to read row: {}", e)))?
+        {
             let blocked_jid: String = row.get(0).map_err(|e| {
                 BlockingStorageError::QueryFailed(format!("Failed to get blocked_jid: {}", e))
             })?;
@@ -64,9 +66,11 @@ impl DatabaseBlockingStorage {
             )
             .await?;
 
-        let is_blocked = rows.next().await.map_err(|e| {
-            BlockingStorageError::QueryFailed(format!("Failed to read row: {}", e))
-        })?.is_some();
+        let is_blocked = rows
+            .next()
+            .await
+            .map_err(|e| BlockingStorageError::QueryFailed(format!("Failed to read row: {}", e)))?
+            .is_some();
 
         debug!(is_blocked, "Checked if JID is blocked");
         Ok(is_blocked)

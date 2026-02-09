@@ -136,9 +136,11 @@ fn test_federated_presence_set() {
 
     // Add local presence
     let local_to: FullJid = "local@example.com/desktop".parse().unwrap();
-    let local_presence =
-        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
-    set.add_local(OutboundMucPresence::new(local_to.clone(), local_presence.clone()));
+    let local_presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    set.add_local(OutboundMucPresence::new(
+        local_to.clone(),
+        local_presence.clone(),
+    ));
 
     assert_eq!(set.local_count(), 1);
     assert_eq!(set.total_count(), 1);
@@ -287,7 +289,12 @@ fn test_broadcast_message_remote_only() {
     init_test();
 
     let mut room = create_test_room();
-    add_remote_occupant(&mut room, "charlie", "charlie@remote1.org/client", "remote1.org");
+    add_remote_occupant(
+        &mut room,
+        "charlie",
+        "charlie@remote1.org/client",
+        "remote1.org",
+    );
     add_remote_occupant(&mut room, "diana", "diana@remote2.org/app", "remote2.org");
 
     let message = make_test_message("Hello remote occupants!");
@@ -311,7 +318,12 @@ fn test_broadcast_message_mixed() {
     add_local_occupant(&mut room, "bob", "bob@example.com/mobile");
 
     // Remote occupants (some on same domain)
-    add_remote_occupant(&mut room, "charlie", "charlie@remote.org/client1", "remote.org");
+    add_remote_occupant(
+        &mut room,
+        "charlie",
+        "charlie@remote.org/client1",
+        "remote.org",
+    );
     add_remote_occupant(&mut room, "diana", "diana@remote.org/client2", "remote.org");
     add_remote_occupant(&mut room, "eve", "eve@other.org/app", "other.org");
 
@@ -394,7 +406,12 @@ fn test_broadcast_leave_presence() {
 
     add_local_occupant(&mut room, "alice", "alice@example.com/desktop");
     add_local_occupant(&mut room, "bob", "bob@example.com/mobile");
-    add_remote_occupant(&mut room, "charlie", "charlie@remote.org/client", "remote.org");
+    add_remote_occupant(
+        &mut room,
+        "charlie",
+        "charlie@remote.org/client",
+        "remote.org",
+    );
 
     // Alice is leaving - broadcast to bob and charlie (not alice herself)
     let result = room.broadcast_leave_presence_federated("alice", Affiliation::Member);
@@ -508,7 +525,12 @@ fn test_room_remote_occupant_queries() {
 
     add_local_occupant(&mut room, "alice", "alice@example.com/desktop");
     add_local_occupant(&mut room, "bob", "bob@example.com/mobile");
-    add_remote_occupant(&mut room, "charlie", "charlie@remote1.org/client", "remote1.org");
+    add_remote_occupant(
+        &mut room,
+        "charlie",
+        "charlie@remote1.org/client",
+        "remote1.org",
+    );
     add_remote_occupant(&mut room, "diana", "diana@remote2.org/app", "remote2.org");
     add_remote_occupant(&mut room, "eve", "eve@remote1.org/phone", "remote1.org");
 
@@ -546,7 +568,12 @@ fn test_room_occupants_by_domain() {
 
     add_local_occupant(&mut room, "alice", "alice@example.com/desktop");
     add_remote_occupant(&mut room, "bob", "bob@remote.org/client", "remote.org");
-    add_remote_occupant(&mut room, "charlie", "charlie@remote.org/mobile", "remote.org");
+    add_remote_occupant(
+        &mut room,
+        "charlie",
+        "charlie@remote.org/mobile",
+        "remote.org",
+    );
 
     let by_domain = room.get_occupants_by_domain();
 

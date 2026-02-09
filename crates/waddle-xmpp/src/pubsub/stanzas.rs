@@ -127,9 +127,7 @@ pub fn is_pubsub_iq(iq: &Iq) -> bool {
 pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, XmppError> {
     let pubsub_elem = match &iq.payload {
         IqType::Get(elem) | IqType::Set(elem) => {
-            if elem.name() == "pubsub"
-                && (elem.ns() == NS_PUBSUB || elem.ns() == NS_PUBSUB_OWNER)
-            {
+            if elem.name() == "pubsub" && (elem.ns() == NS_PUBSUB || elem.ns() == NS_PUBSUB_OWNER) {
                 elem
             } else {
                 return Err(XmppError::bad_request(Some(
@@ -165,7 +163,10 @@ pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, XmppError> {
             .ok_or_else(|| XmppError::bad_request(Some("Missing node attribute".to_string())))?
             .to_string();
 
-        let notify = retract.attr("notify").map(|v| v == "true" || v == "1").unwrap_or(false);
+        let notify = retract
+            .attr("notify")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         let item_id = retract
             .get_child("item", NS_PUBSUB)
@@ -257,14 +258,8 @@ pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, XmppError> {
 /// Build a PubSub event notification message.
 ///
 /// Used to notify subscribers of published items.
-pub fn build_pubsub_event(
-    from: &str,
-    to: &str,
-    node: &str,
-    items: &[PubSubItem],
-) -> Element {
-    let mut items_elem = Element::builder("items", NS_PUBSUB_EVENT)
-        .attr("node", node);
+pub fn build_pubsub_event(from: &str, to: &str, node: &str, items: &[PubSubItem]) -> Element {
+    let mut items_elem = Element::builder("items", NS_PUBSUB_EVENT).attr("node", node);
 
     for item in items {
         items_elem = items_elem.append(item.to_element(NS_PUBSUB_EVENT));
@@ -282,13 +277,8 @@ pub fn build_pubsub_event(
 }
 
 /// Build a PubSub items result IQ.
-pub fn build_pubsub_items_result(
-    original_iq: &Iq,
-    node: &str,
-    items: &[PubSubItem],
-) -> Iq {
-    let mut items_elem = Element::builder("items", NS_PUBSUB)
-        .attr("node", node);
+pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubItem]) -> Iq {
+    let mut items_elem = Element::builder("items", NS_PUBSUB).attr("node", node);
 
     for item in items {
         items_elem = items_elem.append(item.to_element(NS_PUBSUB));
@@ -427,7 +417,12 @@ mod tests {
 
         let request = parse_pubsub_iq(&iq).expect("should parse");
 
-        if let PubSubRequest::Items { node, max_items, item_ids } = request {
+        if let PubSubRequest::Items {
+            node,
+            max_items,
+            item_ids,
+        } = request
+        {
             assert_eq!(node, "urn:xmpp:bookmarks:1");
             assert!(max_items.is_none());
             assert!(item_ids.is_empty());

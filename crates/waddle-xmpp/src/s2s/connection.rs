@@ -471,7 +471,8 @@ impl S2sConnectionActor {
                 "Dialback result 'to' domain mismatch"
             );
             // Send invalid response
-            let response = build_db_result_response(&self.local_domain, from, DialbackResult::Invalid);
+            let response =
+                build_db_result_response(&self.local_domain, from, DialbackResult::Invalid);
             self.write_all(response.as_bytes()).await?;
             self.flush().await?;
             return Ok(());
@@ -512,12 +513,9 @@ impl S2sConnectionActor {
             // For simplicity in this implementation, we verify locally using our
             // dialback key generator. The remote server should have generated the
             // key using the same algorithm with the stream ID we sent.
-            let is_valid = self.dialback_key.verify(
-                dialback_key,
-                &self.stream_id,
-                &self.local_domain,
-                from,
-            );
+            let is_valid =
+                self.dialback_key
+                    .verify(dialback_key, &self.stream_id, &self.local_domain, from);
 
             let result = if is_valid {
                 info!(from = %from, "Dialback key verified successfully");
@@ -631,7 +629,8 @@ impl S2sConnectionActor {
     /// Handle an inbound message from a remote server.
     #[instrument(skip(self, element), name = "xmpp.s2s.handle_message")]
     async fn handle_inbound_message(&mut self, element: Element) -> Result<(), XmppError> {
-        let message: Message = element.try_into()
+        let message: Message = element
+            .try_into()
             .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
 
         // Validate the 'from' domain matches the authenticated remote domain
@@ -639,7 +638,9 @@ impl S2sConnectionActor {
             self.validate_from_domain(from)?;
         } else {
             warn!("S2S message has no 'from' attribute - rejecting");
-            return Err(XmppError::bad_request(Some("Message missing 'from' attribute".to_string())));
+            return Err(XmppError::bad_request(Some(
+                "Message missing 'from' attribute".to_string(),
+            )));
         }
 
         // Route to local users via StanzaRouter
@@ -656,7 +657,8 @@ impl S2sConnectionActor {
     /// Handle an inbound presence from a remote server.
     #[instrument(skip(self, element), name = "xmpp.s2s.handle_presence")]
     async fn handle_inbound_presence(&mut self, element: Element) -> Result<(), XmppError> {
-        let presence: Presence = element.try_into()
+        let presence: Presence = element
+            .try_into()
             .map_err(|e| XmppError::xml_parse(format!("Invalid presence: {:?}", e)))?;
 
         // Validate the 'from' domain matches the authenticated remote domain
@@ -665,7 +667,9 @@ impl S2sConnectionActor {
         } else {
             // Presence without 'from' in S2S is suspicious
             warn!("S2S presence has no 'from' attribute - rejecting");
-            return Err(XmppError::bad_request(Some("Presence missing 'from' attribute".to_string())));
+            return Err(XmppError::bad_request(Some(
+                "Presence missing 'from' attribute".to_string(),
+            )));
         }
 
         // Route to local users via StanzaRouter
@@ -682,7 +686,8 @@ impl S2sConnectionActor {
     /// Handle an inbound IQ from a remote server.
     #[instrument(skip(self, element), name = "xmpp.s2s.handle_iq")]
     async fn handle_inbound_iq(&mut self, element: Element) -> Result<(), XmppError> {
-        let iq: Iq = element.try_into()
+        let iq: Iq = element
+            .try_into()
             .map_err(|e| XmppError::xml_parse(format!("Invalid IQ: {:?}", e)))?;
 
         // Validate the 'from' domain matches the authenticated remote domain
@@ -690,7 +695,9 @@ impl S2sConnectionActor {
             self.validate_from_domain(from)?;
         } else {
             warn!("S2S IQ has no 'from' attribute - rejecting");
-            return Err(XmppError::bad_request(Some("IQ missing 'from' attribute".to_string())));
+            return Err(XmppError::bad_request(Some(
+                "IQ missing 'from' attribute".to_string(),
+            )));
         }
 
         // Route to local users via StanzaRouter

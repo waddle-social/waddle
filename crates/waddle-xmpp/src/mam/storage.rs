@@ -57,7 +57,10 @@ pub trait MamStorage: Send + Sync {
     ) -> Result<MamResult, MamStorageError>;
 
     /// Get a single message by its archive ID.
-    async fn get_message(&self, archive_id: &str) -> Result<Option<ArchivedMessage>, MamStorageError>;
+    async fn get_message(
+        &self,
+        archive_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError>;
 
     /// Get the total count of messages in an archive (for RSM).
     async fn count_messages(&self, room_jid: &str) -> Result<u32, MamStorageError>;
@@ -65,7 +68,11 @@ pub trait MamStorage: Send + Sync {
     /// Delete messages older than a given timestamp.
     ///
     /// Used for archive maintenance/cleanup.
-    async fn delete_before(&self, room_jid: &str, before: DateTime<Utc>) -> Result<u64, MamStorageError>;
+    async fn delete_before(
+        &self,
+        room_jid: &str,
+        before: DateTime<Utc>,
+    ) -> Result<u64, MamStorageError>;
 }
 
 /// libSQL-based MAM storage implementation.
@@ -110,7 +117,8 @@ impl LibSqlMamStorage {
         // Create the message archive table
         conn.execute_batch(MAM_SCHEMA).await?;
 
-        self.initialized.store(true, std::sync::atomic::Ordering::Release);
+        self.initialized
+            .store(true, std::sync::atomic::Ordering::Release);
         debug!("MAM storage schema initialized");
 
         Ok(())
@@ -278,11 +286,54 @@ impl MamStorage for LibSqlMamStorage {
         let mut rows = match params_refs.len() {
             1 => conn.query(&sql, [params_refs[0]]).await?,
             2 => conn.query(&sql, [params_refs[0], params_refs[1]]).await?,
-            3 => conn.query(&sql, [params_refs[0], params_refs[1], params_refs[2]]).await?,
-            4 => conn.query(&sql, [params_refs[0], params_refs[1], params_refs[2], params_refs[3]]).await?,
-            5 => conn.query(&sql, [params_refs[0], params_refs[1], params_refs[2], params_refs[3], params_refs[4]]).await?,
-            6 => conn.query(&sql, [params_refs[0], params_refs[1], params_refs[2], params_refs[3], params_refs[4], params_refs[5]]).await?,
-            _ => return Err(MamStorageError::InvalidQuery("Too many query parameters".to_string())),
+            3 => {
+                conn.query(&sql, [params_refs[0], params_refs[1], params_refs[2]])
+                    .await?
+            }
+            4 => {
+                conn.query(
+                    &sql,
+                    [
+                        params_refs[0],
+                        params_refs[1],
+                        params_refs[2],
+                        params_refs[3],
+                    ],
+                )
+                .await?
+            }
+            5 => {
+                conn.query(
+                    &sql,
+                    [
+                        params_refs[0],
+                        params_refs[1],
+                        params_refs[2],
+                        params_refs[3],
+                        params_refs[4],
+                    ],
+                )
+                .await?
+            }
+            6 => {
+                conn.query(
+                    &sql,
+                    [
+                        params_refs[0],
+                        params_refs[1],
+                        params_refs[2],
+                        params_refs[3],
+                        params_refs[4],
+                        params_refs[5],
+                    ],
+                )
+                .await?
+            }
+            _ => {
+                return Err(MamStorageError::InvalidQuery(
+                    "Too many query parameters".to_string(),
+                ))
+            }
         };
 
         let mut messages = Vec::new();
@@ -342,7 +393,10 @@ impl MamStorage for LibSqlMamStorage {
     }
 
     #[instrument(skip(self))]
-    async fn get_message(&self, archive_id: &str) -> Result<Option<ArchivedMessage>, MamStorageError> {
+    async fn get_message(
+        &self,
+        archive_id: &str,
+    ) -> Result<Option<ArchivedMessage>, MamStorageError> {
         self.initialize().await?;
 
         let conn = self.conn.lock().await;
@@ -487,7 +541,10 @@ mod tests {
         }
 
         // Query all messages
-        let result = storage.query_messages(room, &MamQuery::default()).await.unwrap();
+        let result = storage
+            .query_messages(room, &MamQuery::default())
+            .await
+            .unwrap();
         assert_eq!(result.messages.len(), 5);
         assert!(result.complete);
     }

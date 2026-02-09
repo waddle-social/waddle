@@ -14,7 +14,6 @@ use routes::permissions::PermissionState;
 use routes::uploads::UploadState;
 use routes::waddles::WaddleState;
 use routes::websocket::WebSocketState;
-use waddle_xmpp::{muc::MucRoomRegistry, registry::ConnectionRegistry};
 use serde::Serialize;
 use serde_json::json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
@@ -25,6 +24,7 @@ use tower_http::{
 };
 use tracing::{info, warn, Level};
 use waddle_xmpp::XmppServerConfig;
+use waddle_xmpp::{muc::MucRoomRegistry, registry::ConnectionRegistry};
 
 mod routes;
 pub mod xmpp_state;
@@ -41,7 +41,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db_pool: DatabasePool, server_config: ServerConfig) -> Self {
-        Self { db_pool, server_config }
+        Self {
+            db_pool,
+            server_config,
+        }
     }
 }
 
@@ -97,8 +100,8 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
 
-        let domain = std::env::var("WADDLE_XMPP_DOMAIN")
-            .unwrap_or_else(|_| "localhost".to_string());
+        let domain =
+            std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
         let c2s_addr = std::env::var("WADDLE_XMPP_C2S_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:5222".to_string())
@@ -108,12 +111,10 @@ impl XmppConfig {
         let tls_cert_path = std::env::var("WADDLE_XMPP_TLS_CERT")
             .unwrap_or_else(|_| "certs/server.crt".to_string());
 
-        let tls_key_path = std::env::var("WADDLE_XMPP_TLS_KEY")
-            .unwrap_or_else(|_| "certs/server.key".to_string());
+        let tls_key_path =
+            std::env::var("WADDLE_XMPP_TLS_KEY").unwrap_or_else(|_| "certs/server.key".to_string());
 
-        let mam_db_path = std::env::var("WADDLE_XMPP_MAM_DB")
-            .ok()
-            .map(PathBuf::from);
+        let mam_db_path = std::env::var("WADDLE_XMPP_MAM_DB").ok().map(PathBuf::from);
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
             .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -150,7 +151,11 @@ impl XmppConfig {
     pub fn to_xmpp_server_config(&self) -> XmppServerConfig {
         XmppServerConfig {
             c2s_addr: self.c2s_addr,
-            s2s_addr: if self.s2s_enabled { Some(self.s2s_addr) } else { None },
+            s2s_addr: if self.s2s_enabled {
+                Some(self.s2s_addr)
+            } else {
+                None
+            },
             s2s_enabled: self.s2s_enabled,
             tls_cert_path: self.tls_cert_path.clone(),
             tls_key_path: self.tls_key_path.clone(),
@@ -256,10 +261,7 @@ async fn start_http_server(
 }
 
 /// Start the XMPP server.
-async fn start_xmpp_server(
-    config: XmppServerConfig,
-    app_state: Arc<XmppAppState>,
-) -> Result<()> {
+async fn start_xmpp_server(config: XmppServerConfig, app_state: Arc<XmppAppState>) -> Result<()> {
     info!(
         addr = %config.c2s_addr,
         domain = %config.domain,
@@ -437,7 +439,12 @@ struct DatabaseHealthStatus {
 impl From<PoolHealth> for DatabaseHealthStatus {
     fn from(health: PoolHealth) -> Self {
         Self {
-            status: if health.is_healthy() { "healthy" } else { "unhealthy" }.to_string(),
+            status: if health.is_healthy() {
+                "healthy"
+            } else {
+                "unhealthy"
+            }
+            .to_string(),
             global_healthy: health.global_healthy,
             waddle_dbs_healthy: health.waddle_dbs_healthy,
             loaded_waddle_count: health.loaded_waddle_count,
@@ -489,7 +496,11 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
 async fn detailed_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.db_pool.health_check().await {
         Ok(health) => {
-            let status = if health.is_healthy() { "healthy" } else { "degraded" };
+            let status = if health.is_healthy() {
+                "healthy"
+            } else {
+                "degraded"
+            };
             let status_code = if health.is_healthy() {
                 StatusCode::OK
             } else {
@@ -556,7 +567,12 @@ mod tests {
         let app = create_router(state, server_config, true);
 
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 

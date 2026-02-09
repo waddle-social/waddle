@@ -347,8 +347,7 @@ mod tests {
 
         let to: Jid = "user@example.com".parse().unwrap();
         let mut msg = Message::new(Some(to));
-        msg.bodies
-            .insert(String::new(), Body("Hello!".to_string()));
+        msg.bodies.insert(String::new(), Body("Hello!".to_string()));
 
         assert_eq!(classify_message_urgency(&msg), StanzaUrgency::Urgent);
     }

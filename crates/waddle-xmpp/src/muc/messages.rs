@@ -35,7 +35,9 @@ impl MucMessage {
         let room_jid = msg
             .to
             .as_ref()
-            .ok_or_else(|| XmppError::bad_request(Some("Message missing 'to' attribute".to_string())))?
+            .ok_or_else(|| {
+                XmppError::bad_request(Some("Message missing 'to' attribute".to_string()))
+            })?
             .clone();
 
         // Convert to bare JID (strip resource if present)
@@ -64,7 +66,7 @@ impl MucMessage {
 
     /// Get the message body text (first body if multiple languages).
     pub fn body_text(&self) -> Option<&str> {
-        self.message.bodies.iter().next().map(|b| b.1.0.as_str())
+        self.message.bodies.iter().next().map(|b| b.1 .0.as_str())
     }
 
     /// Get the message ID.
@@ -84,7 +86,7 @@ impl MucMessage {
     ///
     /// Returns the subject text, or None if no subject is present.
     pub fn subject_text(&self) -> Option<&str> {
-        self.message.subjects.iter().next().map(|s| s.1.0.as_str())
+        self.message.subjects.iter().next().map(|s| s.1 .0.as_str())
     }
 
     /// Check if this message is a subject-only message (no body, has subject).
@@ -199,7 +201,10 @@ pub fn create_subject_message(
     let mut msg = Message::new(Some(Jid::from(to_occupant)));
     msg.type_ = MessageType::Groupchat;
     msg.from = Some(Jid::from(from_room_jid));
-    msg.subjects.insert(String::new(), xmpp_parsers::message::Subject(subject.to_string()));
+    msg.subjects.insert(
+        String::new(),
+        xmpp_parsers::message::Subject(subject.to_string()),
+    );
 
     Ok(msg)
 }

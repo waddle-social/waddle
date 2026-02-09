@@ -1,85 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# XMPP Compliance Testing Script
-# Uses the XMPP Interop Testing framework (933+ tests) to verify
-# XEP-0479 (XMPP Compliance Suites 2023) compliance.
+# XMPP Compliance Test Runner (Rust orchestrated)
 #
-# See: https://xmpp-interop-testing.github.io/
+# This wrapper delegates to:
+#   cargo test -p waddle-xmpp --test xep0479_compliance -- --ignored --nocapture
+#
+# The Rust harness manages:
+# - TLS cert generation (x509),
+# - waddle-server lifecycle,
+# - interop container execution (testcontainers-rs),
+# - artifact collection and summary output.
 
-# Configuration (can be overridden via environment variables)
-XMPP_DOMAIN="${XMPP_DOMAIN:-localhost}"
-XMPP_HOST="${XMPP_HOST:-127.0.0.1}"
-XMPP_PORT="${XMPP_PORT:-5222}"
-ADMIN_USER="${ADMIN_USER:-admin}"
-ADMIN_PASS="${ADMIN_PASS:-interop-test-password}"
-SECURITY_MODE="${SECURITY_MODE:-disabled}"  # "disabled" or "required" for TLS
-TIMEOUT="${TIMEOUT:-10000}"
-LOG_DIR="${LOG_DIR:-$(pwd)/test-logs}"
+PROFILE="${WADDLE_COMPLIANCE_PROFILE:-best_effort_full}"
+DOMAIN="${WADDLE_COMPLIANCE_DOMAIN:-localhost}"
+HOST="${WADDLE_COMPLIANCE_HOST:-host.docker.internal}"
+TIMEOUT_MS="${WADDLE_COMPLIANCE_TIMEOUT_MS:-10000}"
+ADMIN_USER="${WADDLE_COMPLIANCE_ADMIN_USERNAME:-admin}"
+ADMIN_PASS="${WADDLE_COMPLIANCE_ADMIN_PASSWORD:-interop-test-password}"
+ENABLED_SPECS="${WADDLE_COMPLIANCE_ENABLED_SPECS:-}"
+DISABLED_SPECS="${WADDLE_COMPLIANCE_DISABLED_SPECS:-}"
+ARTIFACT_DIR="${WADDLE_COMPLIANCE_ARTIFACT_DIR:-$(pwd)/test-logs}"
+KEEP_CONTAINERS="${WADDLE_COMPLIANCE_KEEP_CONTAINERS:-false}"
 
-# Default disabled specifications (not yet implemented)
-DEFAULT_DISABLED_SPECS="XEP-0220,XEP-0060,XEP-0163,XEP-0363,XEP-0054,XEP-0191"
-DISABLED_SPECS="${DISABLED_SPECS:-$DEFAULT_DISABLED_SPECS}"
+# Legacy options kept for compatibility with older script callers.
+LEGACY_PORT=""
+LEGACY_SECURITY_MODE=""
+LEGACY_START_SERVER=false
 
-# Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 print_usage() {
-    echo "Usage: $0 [OPTIONS]"
-    echo ""
-    echo "Run XMPP Interop Tests against the Waddle XMPP server."
-    echo ""
-    echo "Options:"
-    echo "  -h, --help              Show this help message"
-    echo "  -d, --domain DOMAIN     XMPP domain (default: localhost)"
-    echo "  -H, --host HOST         Server hostname (default: 127.0.0.1)"
-    echo "  -p, --port PORT         XMPP port (default: 5222)"
-    echo "  -u, --user USER         Admin username (default: admin)"
-    echo "  -P, --password PASS     Admin password (default: interop-test-password)"
-    echo "  -s, --security MODE     Security mode: disabled or required (default: disabled)"
-    echo "  -e, --enabled SPECS     Only run specific XEPs (comma-separated)"
-    echo "  -D, --disabled SPECS    Skip specific XEPs (comma-separated)"
-    echo "  -l, --log-dir DIR       Log directory (default: ./test-logs)"
-    echo "  --start-server          Start the Waddle server before testing"
-    echo ""
-    echo "Environment Variables:"
-    echo "  XMPP_DOMAIN, XMPP_HOST, XMPP_PORT, ADMIN_USER, ADMIN_PASS"
-    echo "  SECURITY_MODE, DISABLED_SPECS, ENABLED_SPECS, LOG_DIR"
-    echo ""
-    echo "Examples:"
-    echo "  # Run all tests with defaults"
-    echo "  $0"
-    echo ""
-    echo "  # Test only specific XEPs"
-    echo "  $0 -e 'XEP-0030,XEP-0198,XEP-0280'"
-    echo ""
-    echo "  # Start server and run tests"
-    echo "  $0 --start-server"
+    cat <<EOF
+Usage: $0 [OPTIONS]
+
+Run XMPP compliance tests through the Rust testcontainers harness.
+
+Options:
+  -h, --help                Show this help message
+  -d, --domain DOMAIN       XMPP domain (default: $DOMAIN)
+  -H, --host HOST           Interop host (default: $HOST)
+  -u, --user USER           Admin username (default: $ADMIN_USER)
+  -P, --password PASS       Admin password (default: ********)
+  -t, --timeout MS          Interop timeout in ms (default: $TIMEOUT_MS)
+  -e, --enabled SPECS       Enabled specifications CSV
+  -D, --disabled SPECS      Disabled specifications CSV
+  -l, --log-dir DIR         Artifact directory (default: $ARTIFACT_DIR)
+  --profile PROFILE         best_effort_full | core_strict | full_strict
+  --keep-containers         Keep interop container after run
+
+Legacy options (ignored, printed as warnings):
+  -p, --port PORT
+  -s, --security MODE
+  --start-server
+
+Examples:
+  $0
+  $0 -e 'RFC6120,RFC6121,XEP-0030'
+  $0 --profile core_strict
+EOF
 }
 
-START_SERVER=false
-ENABLED_SPECS=""
-
-# Parse command line arguments
 while [[ $# -gt 0 ]]; do
-    case $1 in
+    case "$1" in
         -h|--help)
             print_usage
             exit 0
             ;;
         -d|--domain)
-            XMPP_DOMAIN="$2"
+            DOMAIN="$2"
             shift 2
             ;;
         -H|--host)
-            XMPP_HOST="$2"
-            shift 2
-            ;;
-        -p|--port)
-            XMPP_PORT="$2"
+            HOST="$2"
             shift 2
             ;;
         -u|--user)
@@ -90,8 +86,8 @@ while [[ $# -gt 0 ]]; do
             ADMIN_PASS="$2"
             shift 2
             ;;
-        -s|--security)
-            SECURITY_MODE="$2"
+        -t|--timeout)
+            TIMEOUT_MS="$2"
             shift 2
             ;;
         -e|--enabled)
@@ -103,11 +99,27 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -l|--log-dir)
-            LOG_DIR="$2"
+            ARTIFACT_DIR="$2"
+            shift 2
+            ;;
+        --profile)
+            PROFILE="$2"
+            shift 2
+            ;;
+        --keep-containers)
+            KEEP_CONTAINERS=true
+            shift
+            ;;
+        -p|--port)
+            LEGACY_PORT="$2"
+            shift 2
+            ;;
+        -s|--security)
+            LEGACY_SECURITY_MODE="$2"
             shift 2
             ;;
         --start-server)
-            START_SERVER=true
+            LEGACY_START_SERVER=true
             shift
             ;;
         *)
@@ -118,116 +130,44 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Ensure log directory exists
-mkdir -p "$LOG_DIR"
+mkdir -p "$ARTIFACT_DIR"
 
-echo -e "${GREEN}XMPP Compliance Testing${NC}"
-echo "================================"
-echo "Domain:        $XMPP_DOMAIN"
-echo "Host:          $XMPP_HOST"
-echo "Port:          $XMPP_PORT"
-echo "Admin User:    $ADMIN_USER"
-echo "Security Mode: $SECURITY_MODE"
-echo "Log Directory: $LOG_DIR"
-echo ""
-
-# Check if Docker is available
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}Error: Docker is not installed or not in PATH${NC}"
-    exit 1
+if [[ -n "$LEGACY_PORT" ]]; then
+    echo -e "${YELLOW}Warning: --port is ignored by the Rust harness (fixed XMPP port 5222).${NC}"
+fi
+if [[ -n "$LEGACY_SECURITY_MODE" ]]; then
+    echo -e "${YELLOW}Warning: --security is ignored; harness always enforces TLS-required mode.${NC}"
+fi
+if [[ "$LEGACY_START_SERVER" == "true" ]]; then
+    echo -e "${YELLOW}Warning: --start-server is ignored; harness manages server lifecycle automatically.${NC}"
 fi
 
-# Start server if requested
-SERVER_PID=""
-cleanup() {
-    if [[ -n "$SERVER_PID" ]]; then
-        echo -e "${YELLOW}Stopping server (PID: $SERVER_PID)...${NC}"
-        kill "$SERVER_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT
-
-if [[ "$START_SERVER" == "true" ]]; then
-    echo -e "${YELLOW}Starting Waddle server...${NC}"
-
-    # Build if necessary
-    if [[ ! -f "target/release/waddle-server" ]]; then
-        echo "Building server..."
-        cargo build --release --package waddle-server
-    fi
-
-    # Generate test certificates if needed
-    if [[ ! -f "certs/server.crt" ]]; then
-        echo "Generating test certificates..."
-        mkdir -p certs
-        openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt \
-            -days 365 -nodes -subj "/CN=localhost" 2>/dev/null
-    fi
-
-    # Start server
-    RUST_LOG=debug \
-    WADDLE_DOMAIN="$XMPP_DOMAIN" \
-    WADDLE_TLS_CERT="./certs/server.crt" \
-    WADDLE_TLS_KEY="./certs/server.key" \
-    WADDLE_ADMIN_JID="$ADMIN_USER@$XMPP_DOMAIN" \
-    WADDLE_ADMIN_PASSWORD="$ADMIN_PASS" \
-    ./target/release/waddle-server &
-    SERVER_PID=$!
-
-    echo "Waiting for server to start..."
-    for i in {1..20}; do
-        if nc -z "$XMPP_HOST" "$XMPP_PORT" 2>/dev/null; then
-            echo -e "${GREEN}Server is ready on port $XMPP_PORT${NC}"
-            break
-        fi
-        if [[ $i -eq 20 ]]; then
-            echo -e "${RED}Server failed to start within timeout${NC}"
-            exit 1
-        fi
-        echo "Waiting... attempt $i/20"
-        sleep 1
-    done
-    echo ""
-fi
-
-# Build Docker run command
-DOCKER_CMD=(
-    docker run --rm --network=host
-    -v "$LOG_DIR:/logs"
-    ghcr.io/xmpp-interop-testing/xmpp_interop_tests:latest
-    "--domain=$XMPP_DOMAIN"
-    "--host=$XMPP_HOST"
-    "--timeout=$TIMEOUT"
-    "--adminAccountUsername=$ADMIN_USER"
-    "--adminAccountPassword=$ADMIN_PASS"
-    "--securityMode=$SECURITY_MODE"
-    "--logDir=/logs"
-)
-
-# Add enabled/disabled specifications
+echo -e "${GREEN}XMPP Compliance Test (Rust Harness)${NC}"
+echo "======================================="
+echo "Profile:        $PROFILE"
+echo "Domain:         $DOMAIN"
+echo "Host:           $HOST"
+echo "Timeout (ms):   $TIMEOUT_MS"
+echo "Admin User:     $ADMIN_USER"
+echo "Artifacts:      $ARTIFACT_DIR"
+echo "Keep Container: $KEEP_CONTAINERS"
 if [[ -n "$ENABLED_SPECS" ]]; then
-    DOCKER_CMD+=("--enabledSpecifications=$ENABLED_SPECS")
-elif [[ -n "$DISABLED_SPECS" ]]; then
-    DOCKER_CMD+=("--disabledSpecifications=$DISABLED_SPECS")
+    echo "Enabled Specs:  $ENABLED_SPECS"
 fi
-
-echo -e "${YELLOW}Running XMPP Interop Tests...${NC}"
-echo "Command: ${DOCKER_CMD[*]}"
-echo ""
-
-# Run tests
-if "${DOCKER_CMD[@]}"; then
-    echo ""
-    echo -e "${GREEN}Tests completed successfully!${NC}"
-    EXIT_CODE=0
-else
-    echo ""
-    echo -e "${YELLOW}Tests completed with failures (expected for unimplemented features)${NC}"
-    EXIT_CODE=1
+if [[ -n "$DISABLED_SPECS" ]]; then
+    echo "Disabled Specs: $DISABLED_SPECS"
 fi
-
-echo ""
-echo "Test logs available at: $LOG_DIR"
 echo ""
 
-exit $EXIT_CODE
+export WADDLE_COMPLIANCE_PROFILE="$PROFILE"
+export WADDLE_COMPLIANCE_DOMAIN="$DOMAIN"
+export WADDLE_COMPLIANCE_HOST="$HOST"
+export WADDLE_COMPLIANCE_TIMEOUT_MS="$TIMEOUT_MS"
+export WADDLE_COMPLIANCE_ADMIN_USERNAME="$ADMIN_USER"
+export WADDLE_COMPLIANCE_ADMIN_PASSWORD="$ADMIN_PASS"
+export WADDLE_COMPLIANCE_ENABLED_SPECS="$ENABLED_SPECS"
+export WADDLE_COMPLIANCE_DISABLED_SPECS="$DISABLED_SPECS"
+export WADDLE_COMPLIANCE_ARTIFACT_DIR="$ARTIFACT_DIR"
+export WADDLE_COMPLIANCE_KEEP_CONTAINERS="$KEEP_CONTAINERS"
+
+cargo test -p waddle-xmpp --test xep0479_compliance -- --ignored --nocapture

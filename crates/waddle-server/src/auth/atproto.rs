@@ -144,23 +144,27 @@ impl AtprotoOAuth {
         debug!("Generated DPoP keypair");
 
         // Step 7: Get PAR endpoint (required for Bluesky)
-        let par_endpoint = auth_server.pushed_authorization_request_endpoint.as_ref()
+        let par_endpoint = auth_server
+            .pushed_authorization_request_endpoint
+            .as_ref()
             .ok_or_else(|| {
                 AuthError::OAuthDiscoveryFailed(
-                    "Authorization server does not support PAR (required for Bluesky)".to_string()
+                    "Authorization server does not support PAR (required for Bluesky)".to_string(),
                 )
             })?;
 
         // Step 8: Make PAR request with DPoP
-        let authorization_url = self.make_par_request(
-            par_endpoint,
-            &auth_server.authorization_endpoint,
-            &code_challenge,
-            &state,
-            &did,
-            &dpop_keypair,
-            redirect_uri,
-        ).await?;
+        let authorization_url = self
+            .make_par_request(
+                par_endpoint,
+                &auth_server.authorization_endpoint,
+                &code_challenge,
+                &state,
+                &did,
+                &dpop_keypair,
+                redirect_uri,
+            )
+            .await?;
 
         Ok(AuthorizationRequest {
             authorization_url,
@@ -224,7 +228,8 @@ impl AtprotoOAuth {
                 debug!("Got DPoP nonce: {}", nonce_str);
 
                 // Retry with nonce
-                let dpop_proof_with_nonce = dpop_keypair.create_proof("POST", par_endpoint, Some(nonce_str), None);
+                let dpop_proof_with_nonce =
+                    dpop_keypair.create_proof("POST", par_endpoint, Some(nonce_str), None);
 
                 let retry_response = self
                     .http_client
@@ -234,14 +239,20 @@ impl AtprotoOAuth {
                     .send()
                     .await
                     .map_err(|e| {
-                        AuthError::OAuthAuthorizationFailed(format!("PAR retry request failed: {}", e))
+                        AuthError::OAuthAuthorizationFailed(format!(
+                            "PAR retry request failed: {}",
+                            e
+                        ))
                     })?;
 
-                return self.handle_par_response(retry_response, authorization_endpoint).await;
+                return self
+                    .handle_par_response(retry_response, authorization_endpoint)
+                    .await;
             }
         }
 
-        self.handle_par_response(response, authorization_endpoint).await
+        self.handle_par_response(response, authorization_endpoint)
+            .await
     }
 
     /// Handle PAR response and build authorization URL
@@ -264,14 +275,18 @@ impl AtprotoOAuth {
             AuthError::OAuthAuthorizationFailed(format!("Failed to parse PAR response: {}", e))
         })?;
 
-        info!("PAR successful, got request_uri: {}", par_response.request_uri);
+        info!(
+            "PAR successful, got request_uri: {}",
+            par_response.request_uri
+        );
 
         // Build authorization URL with request_uri
         let mut auth_url = Url::parse(authorization_endpoint).map_err(|e| {
             AuthError::OAuthAuthorizationFailed(format!("Invalid authorization endpoint: {}", e))
         })?;
 
-        auth_url.query_pairs_mut()
+        auth_url
+            .query_pairs_mut()
             .append_pair("client_id", &self.client_id)
             .append_pair("request_uri", &par_response.request_uri);
 
@@ -293,7 +308,10 @@ impl AtprotoOAuth {
 
         // Step 1: Fetch Protected Resource metadata from the PDS
         let resource_url = format!("{}/.well-known/oauth-protected-resource", pds_base);
-        debug!("Fetching protected resource metadata from: {}", resource_url);
+        debug!(
+            "Fetching protected resource metadata from: {}",
+            resource_url
+        );
 
         let response = self
             .http_client
@@ -322,14 +340,11 @@ impl AtprotoOAuth {
         })?;
 
         // Step 2: Get the Authorization Server URL
-        let auth_server_url = resource_meta
-            .authorization_servers
-            .first()
-            .ok_or_else(|| {
-                AuthError::OAuthDiscoveryFailed(
-                    "No authorization servers found in protected resource metadata".to_string(),
-                )
-            })?;
+        let auth_server_url = resource_meta.authorization_servers.first().ok_or_else(|| {
+            AuthError::OAuthDiscoveryFailed(
+                "No authorization servers found in protected resource metadata".to_string(),
+            )
+        })?;
 
         debug!("Found authorization server: {}", auth_server_url);
 
@@ -406,9 +421,7 @@ impl AtprotoOAuth {
             .form(&params)
             .send()
             .await
-            .map_err(|e| {
-                AuthError::TokenExchangeFailed(format!("Token request failed: {}", e))
-            })?;
+            .map_err(|e| AuthError::TokenExchangeFailed(format!("Token request failed: {}", e)))?;
 
         // Check for DPoP nonce error
         if response.status().as_u16() == 400 || response.status().as_u16() == 401 {
@@ -417,7 +430,8 @@ impl AtprotoOAuth {
                 debug!("Got DPoP nonce for token exchange: {}", nonce_str);
 
                 // Retry with nonce
-                let dpop_proof_with_nonce = dpop_keypair.create_proof("POST", token_endpoint, Some(nonce_str), None);
+                let dpop_proof_with_nonce =
+                    dpop_keypair.create_proof("POST", token_endpoint, Some(nonce_str), None);
 
                 let retry_response = self
                     .http_client
@@ -480,9 +494,7 @@ impl AtprotoOAuth {
             .form(&params)
             .send()
             .await
-            .map_err(|e| {
-                AuthError::TokenExchangeFailed(format!("Token refresh failed: {}", e))
-            })?;
+            .map_err(|e| AuthError::TokenExchangeFailed(format!("Token refresh failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();

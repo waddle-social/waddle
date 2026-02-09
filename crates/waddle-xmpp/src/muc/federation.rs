@@ -392,8 +392,14 @@ pub fn build_s2s_occupant_presence(
         .with_resource_str(from_nick)
         .expect("Nick should be valid resource");
 
-    let presence =
-        build_occupant_presence(&from_room_jid, &to_occupant.real_jid, affiliation, role, is_self, real_jid);
+    let presence = build_occupant_presence(
+        &from_room_jid,
+        &to_occupant.real_jid,
+        affiliation,
+        role,
+        is_self,
+        real_jid,
+    );
 
     OutboundMucPresence::new(to_occupant.real_jid.clone(), presence)
 }
@@ -740,7 +746,9 @@ mod tests {
         assert_eq!(set.local_count(), 0);
         assert_eq!(set.remote_count(), 1);
         assert_eq!(set.remote_domain_count(), 1);
-        assert!(set.remote_domains().contains(&&"remote.example.com".to_string()));
+        assert!(set
+            .remote_domains()
+            .contains(&&"remote.example.com".to_string()));
     }
 
     #[test]
@@ -749,29 +757,44 @@ mod tests {
 
         // Add local
         let local_to: FullJid = "user1@local.example.com/res".parse().unwrap();
-        set.add_local(OutboundMucPresence::new(local_to, Presence::new(PresenceType::None)));
+        set.add_local(OutboundMucPresence::new(
+            local_to,
+            Presence::new(PresenceType::None),
+        ));
 
         // Add remote from domain A
         let remote_a: FullJid = "user2@remote-a.example.com/res".parse().unwrap();
-        set.add_remote("remote-a.example.com".to_string(),
-            OutboundMucPresence::new(remote_a, Presence::new(PresenceType::None)));
+        set.add_remote(
+            "remote-a.example.com".to_string(),
+            OutboundMucPresence::new(remote_a, Presence::new(PresenceType::None)),
+        );
 
         // Add remote from domain B
         let remote_b: FullJid = "user3@remote-b.example.com/res".parse().unwrap();
-        set.add_remote("remote-b.example.com".to_string(),
-            OutboundMucPresence::new(remote_b, Presence::new(PresenceType::None)));
+        set.add_remote(
+            "remote-b.example.com".to_string(),
+            OutboundMucPresence::new(remote_b, Presence::new(PresenceType::None)),
+        );
 
         // Add another from domain A
         let remote_a2: FullJid = "user4@remote-a.example.com/res".parse().unwrap();
-        set.add_remote("remote-a.example.com".to_string(),
-            OutboundMucPresence::new(remote_a2, Presence::new(PresenceType::None)));
+        set.add_remote(
+            "remote-a.example.com".to_string(),
+            OutboundMucPresence::new(remote_a2, Presence::new(PresenceType::None)),
+        );
 
         assert_eq!(set.total_count(), 4);
         assert_eq!(set.local_count(), 1);
         assert_eq!(set.remote_count(), 3);
         assert_eq!(set.remote_domain_count(), 2);
-        assert_eq!(set.get_remote("remote-a.example.com").map(|v| v.len()), Some(2));
-        assert_eq!(set.get_remote("remote-b.example.com").map(|v| v.len()), Some(1));
+        assert_eq!(
+            set.get_remote("remote-a.example.com").map(|v| v.len()),
+            Some(2)
+        );
+        assert_eq!(
+            set.get_remote("remote-b.example.com").map(|v| v.len()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -798,9 +821,24 @@ mod tests {
         let mut room = create_test_room();
         add_local_occupant(&mut room, "alice", "alice@example.com/desktop");
         add_local_occupant(&mut room, "bob", "bob@example.com/mobile");
-        add_remote_occupant(&mut room, "charlie", "charlie@remote.example.org/client", "remote.example.org");
-        add_remote_occupant(&mut room, "diana", "diana@other.example.net/app", "other.example.net");
-        add_remote_occupant(&mut room, "eve", "eve@remote.example.org/phone", "remote.example.org");
+        add_remote_occupant(
+            &mut room,
+            "charlie",
+            "charlie@remote.example.org/client",
+            "remote.example.org",
+        );
+        add_remote_occupant(
+            &mut room,
+            "diana",
+            "diana@other.example.net/app",
+            "other.example.net",
+        );
+        add_remote_occupant(
+            &mut room,
+            "eve",
+            "eve@remote.example.org/phone",
+            "remote.example.org",
+        );
 
         let result = room.broadcast_presence_federated(
             "alice",
@@ -817,9 +855,15 @@ mod tests {
         assert_eq!(result.remote_count(), 3);
         assert_eq!(result.remote_domain_count(), 2);
         // 2 occupants on remote.example.org (charlie and eve)
-        assert_eq!(result.get_remote("remote.example.org").map(|v| v.len()), Some(2));
+        assert_eq!(
+            result.get_remote("remote.example.org").map(|v| v.len()),
+            Some(2)
+        );
         // 1 occupant on other.example.net (diana)
-        assert_eq!(result.get_remote("other.example.net").map(|v| v.len()), Some(1));
+        assert_eq!(
+            result.get_remote("other.example.net").map(|v| v.len()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -827,7 +871,12 @@ mod tests {
         let mut room = create_test_room();
         add_local_occupant(&mut room, "alice", "alice@example.com/desktop");
         add_local_occupant(&mut room, "bob", "bob@example.com/mobile");
-        add_remote_occupant(&mut room, "charlie", "charlie@remote.example.org/client", "remote.example.org");
+        add_remote_occupant(
+            &mut room,
+            "charlie",
+            "charlie@remote.example.org/client",
+            "remote.example.org",
+        );
 
         let result = room.broadcast_leave_presence_federated("alice", Affiliation::Member);
 
@@ -869,11 +918,16 @@ mod tests {
         let mut set = FederatedPresenceSet::new();
 
         let local_to: FullJid = "local@example.com/res".parse().unwrap();
-        set.add_local(OutboundMucPresence::new(local_to.clone(), Presence::new(PresenceType::None)));
+        set.add_local(OutboundMucPresence::new(
+            local_to.clone(),
+            Presence::new(PresenceType::None),
+        ));
 
         let remote_to: FullJid = "remote@other.com/res".parse().unwrap();
-        set.add_remote("other.com".to_string(),
-            OutboundMucPresence::new(remote_to.clone(), Presence::new(PresenceType::None)));
+        set.add_remote(
+            "other.com".to_string(),
+            OutboundMucPresence::new(remote_to.clone(), Presence::new(PresenceType::None)),
+        );
 
         let items: Vec<_> = set.iter().collect();
         assert_eq!(items.len(), 2);
@@ -1001,7 +1055,9 @@ mod tests {
         assert_eq!(set.local_count(), 0);
         assert_eq!(set.remote_count(), 1);
         assert_eq!(set.remote_domain_count(), 1);
-        assert!(set.remote_domains().contains(&&"remote.example.com".to_string()));
+        assert!(set
+            .remote_domains()
+            .contains(&&"remote.example.com".to_string()));
     }
 
     #[test]
@@ -1214,7 +1270,8 @@ mod tests {
         };
         let original_message = make_test_message("Hello from sender!");
 
-        let result = build_s2s_muc_message(&room_jid, "sender_nick", &to_occupant, &original_message);
+        let result =
+            build_s2s_muc_message(&room_jid, "sender_nick", &to_occupant, &original_message);
 
         assert_eq!(result.to, to_occupant.real_jid);
         assert_eq!(result.message.type_, MessageType::Groupchat);

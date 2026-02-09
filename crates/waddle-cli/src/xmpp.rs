@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use xmpp::{Agent, BareJid, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent, Jid};
 use xmpp::parsers::message::MessageType;
+use xmpp::{Agent, BareJid, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent, Jid};
 
 use crate::config::XmppConfig;
 
@@ -175,9 +175,7 @@ impl XmppClient {
                 let body_str = body.0.clone();
                 debug!(
                     "Room message in {}: {}: {}",
-                    room_jid,
-                    sender_nick,
-                    body_str
+                    room_jid, sender_nick, body_str
                 );
                 let _ = self.event_tx.send(XmppClientEvent::RoomMessage {
                     room_jid,
@@ -199,9 +197,7 @@ impl XmppClient {
                 let body_str = body.0.clone();
                 debug!(
                     "Private message in {} from {}: {}",
-                    room_jid,
-                    sender_nick,
-                    body_str
+                    room_jid, sender_nick, body_str
                 );
                 // Treat room private messages as regular chat messages
                 let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
@@ -279,10 +275,7 @@ impl XmppClient {
         // The xmpp crate doesn't have a direct leave_room method in Agent
         // We need to send unavailable presence
         // For now, we'll just log it
-        warn!(
-            "leave_room not fully implemented yet for {}",
-            room_jid
-        );
+        warn!("leave_room not fully implemented yet for {}", room_jid);
     }
 
     /// Send a message to a MUC room

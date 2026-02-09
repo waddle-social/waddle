@@ -25,9 +25,9 @@ use ratatui::{
     Frame,
 };
 
+use super::{InputWidget, MessagesWidget, SidebarWidget};
 use crate::app::{App, ConnectionState, Focus};
 use crate::config::Config;
-use super::{InputWidget, MessagesWidget, SidebarWidget};
 
 /// Layout areas for the three panels
 pub struct LayoutAreas {
@@ -41,19 +41,13 @@ pub fn calculate_layout(area: Rect, sidebar_width: u16) -> LayoutAreas {
     // Split horizontally: sidebar | main content
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(sidebar_width),
-            Constraint::Min(30),
-        ])
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(30)])
         .split(area);
 
     // Split main content vertically: messages | input
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
         .split(horizontal[1]);
 
     LayoutAreas {
@@ -97,8 +91,7 @@ pub fn render_layout(frame: &mut Frame, app: &App, config: &Config) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == Focus::Sidebar));
 
-    let sidebar_widget = SidebarWidget::new(app)
-        .block(sidebar_block);
+    let sidebar_widget = SidebarWidget::new(app).block(sidebar_block);
     frame.render_widget(sidebar_widget, areas.sidebar);
 
     // Render messages
@@ -108,8 +101,7 @@ pub fn render_layout(frame: &mut Frame, app: &App, config: &Config) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == Focus::Messages));
 
-    let messages_widget = MessagesWidget::new(app, config)
-        .block(messages_block);
+    let messages_widget = MessagesWidget::new(app, config).block(messages_block);
     frame.render_widget(messages_widget, areas.messages);
 
     // Render input
@@ -118,14 +110,16 @@ pub fn render_layout(frame: &mut Frame, app: &App, config: &Config) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == Focus::Input));
 
-    let input_widget = InputWidget::new(app)
-        .block(input_block);
+    let input_widget = InputWidget::new(app).block(input_block);
     frame.render_widget(input_widget, areas.input);
 
     // Show cursor in input area when focused
     if app.focus == Focus::Input {
         // Calculate cursor position within input area
-        let inner = areas.input.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let inner = areas.input.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
         let cursor_x = inner.x + app.input_cursor as u16;
         let cursor_y = inner.y;
 

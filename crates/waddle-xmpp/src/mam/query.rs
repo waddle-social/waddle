@@ -59,10 +59,16 @@ pub fn parse_mam_query(iq: &Iq) -> Result<(String, MamQuery), XmppError> {
             if elem.name() == "query" && elem.ns() == MAM_NS {
                 elem
             } else {
-                return Err(XmppError::bad_request(Some("Missing MAM query element".to_string())));
+                return Err(XmppError::bad_request(Some(
+                    "Missing MAM query element".to_string(),
+                )));
             }
         }
-        _ => return Err(XmppError::bad_request(Some("Invalid IQ type for MAM query".to_string()))),
+        _ => {
+            return Err(XmppError::bad_request(Some(
+                "Invalid IQ type for MAM query".to_string(),
+            )))
+        }
     };
 
     // Get the query ID (optional but recommended)
@@ -229,9 +235,10 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
 
     // Build the outer message
     let msg_id = Uuid::now_v7().to_string();
-    let mut msg = Message::new(Some(to_jid.parse().unwrap_or_else(|_| {
-        jid::Jid::from(jid::BareJid::new("unknown").unwrap())
-    })));
+    let mut msg =
+        Message::new(Some(to_jid.parse().unwrap_or_else(|_| {
+            jid::Jid::from(jid::BareJid::new("unknown").unwrap())
+        })));
     msg.id = Some(msg_id);
     msg.type_ = MessageType::Normal;
     msg.payloads.push(result);
@@ -252,10 +259,7 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
 ///   </fin>
 /// </iq>
 /// ```
-pub fn build_fin_iq(
-    original_iq: &Iq,
-    result: &MamResult,
-) -> Iq {
+pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     let mut set_builder = Element::builder("set", RSM_NS);
 
     if let Some(ref first) = result.first_id {
@@ -359,6 +363,9 @@ mod tests {
         };
 
         let msg = build_result_message("query-1", "user@example.com", &archived);
-        assert!(msg.payloads.iter().any(|p| p.name() == "result" && p.ns() == MAM_NS));
+        assert!(msg
+            .payloads
+            .iter()
+            .any(|p| p.name() == "result" && p.ns() == MAM_NS));
     }
 }

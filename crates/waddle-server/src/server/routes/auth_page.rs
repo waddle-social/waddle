@@ -94,11 +94,19 @@ pub async fn start_auth_handler(
     // Use our web callback URL
     let redirect_uri = format!("{}/auth/callback", state.base_url);
 
-    match state.oauth_client.start_authorization_with_redirect(&params.handle, Some(&redirect_uri)).await {
+    match state
+        .oauth_client
+        .start_authorization_with_redirect(&params.handle, Some(&redirect_uri))
+        .await
+    {
         Ok(auth_request) => {
             // Store pending authorization
-            let pending = crate::auth::session::PendingAuthorization::from_authorization_request(&auth_request);
-            state.pending_auths.insert(auth_request.state.clone(), pending);
+            let pending = crate::auth::session::PendingAuthorization::from_authorization_request(
+                &auth_request,
+            );
+            state
+                .pending_auths
+                .insert(auth_request.state.clone(), pending);
 
             // Redirect to authorization URL
             Redirect::temporary(&auth_request.authorization_url).into_response()
@@ -134,7 +142,8 @@ pub async fn auth_callback_handler(
         Some(code) => code,
         None => {
             warn!("No authorization code in callback");
-            return Redirect::temporary("/auth?error=No%20authorization%20code%20received").into_response();
+            return Redirect::temporary("/auth?error=No%20authorization%20code%20received")
+                .into_response();
         }
     };
 

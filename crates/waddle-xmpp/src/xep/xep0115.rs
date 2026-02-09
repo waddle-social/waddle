@@ -212,10 +212,8 @@ fn build_verification_string(identities: &[Identity], features: &[Feature]) -> S
     // Sort and add identities
     // Format: category/type/lang/name<
     let mut sorted_identities: Vec<_> = identities.iter().collect();
-    sorted_identities.sort_by(|a, b| {
-        (&a.category, &a.type_, &a.name)
-            .cmp(&(&b.category, &b.type_, &b.name))
-    });
+    sorted_identities
+        .sort_by(|a, b| (&a.category, &a.type_, &a.name).cmp(&(&b.category, &b.type_, &b.name)));
 
     for id in sorted_identities {
         s.push_str(&id.category);
@@ -260,11 +258,7 @@ fn hash_verification_string(verification_string: &str) -> String {
 /// ## Returns
 ///
 /// A minidom Element containing the `<c>` element with computed hash.
-pub fn build_caps_element(
-    node: &str,
-    identities: &[Identity],
-    features: &[Feature],
-) -> Element {
+pub fn build_caps_element(node: &str, identities: &[Identity], features: &[Feature]) -> Element {
     let ver = compute_caps_hash(identities, features);
     Caps::new(node, &ver).build_element()
 }
@@ -465,7 +459,10 @@ mod tests {
         ];
         let s = build_verification_string(&[], &features);
         // Features should be sorted alphabetically
-        assert_eq!(s, "http://jabber.org/protocol/disco#info<http://jabber.org/protocol/disco#items<");
+        assert_eq!(
+            s,
+            "http://jabber.org/protocol/disco#info<http://jabber.org/protocol/disco#items<"
+        );
     }
 
     #[test]
@@ -485,10 +482,7 @@ mod tests {
             Identity::server(Some("Test")),
             Identity::new("client", "pc", Some("MyClient")),
         ];
-        let features = vec![
-            Feature::new("feature2"),
-            Feature::new("feature1"),
-        ];
+        let features = vec![Feature::new("feature2"), Feature::new("feature1")];
         let s = build_verification_string(&identities, &features);
         // Identities sorted by category/type/name, then features sorted
         assert_eq!(s, "client/pc//MyClient<server/im//Test<feature1<feature2<");
@@ -587,7 +581,9 @@ mod tests {
 
     #[test]
     fn test_is_caps_node_query() {
-        assert!(is_caps_node_query(Some("https://waddle.social/caps#abc123")));
+        assert!(is_caps_node_query(Some(
+            "https://waddle.social/caps#abc123"
+        )));
         assert!(is_caps_node_query(Some("node#ver")));
         assert!(!is_caps_node_query(Some("plain-node")));
         assert!(!is_caps_node_query(None));

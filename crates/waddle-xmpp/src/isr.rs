@@ -65,11 +65,7 @@ pub struct IsrToken {
 
 impl IsrToken {
     /// Create a new ISR token.
-    pub fn new(
-        did: String,
-        jid: jid::BareJid,
-        validity_secs: u64,
-    ) -> Self {
+    pub fn new(did: String, jid: jid::BareJid, validity_secs: u64) -> Self {
         let validity = validity_secs.min(MAX_TOKEN_VALIDITY_SECS);
         let token = generate_token();
         let expiry = Utc::now() + chrono::Duration::seconds(validity as i64);
@@ -144,7 +140,10 @@ fn generate_token() -> String {
 
     // Create a base64-encoded token
     let combined = format!("{}-{:x}", uuid, ts);
-    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, combined.as_bytes())
+    base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        combined.as_bytes(),
+    )
 }
 
 /// ISR token store for managing resumption tokens.
@@ -375,7 +374,10 @@ impl IsrTokenStore {
 
     /// Get the number of active tokens.
     pub fn token_count(&self) -> usize {
-        self.tokens.read().expect("ISR token store lock poisoned").len()
+        self.tokens
+            .read()
+            .expect("ISR token store lock poisoned")
+            .len()
     }
 }
 
@@ -434,7 +436,10 @@ pub fn create_shared_store() -> SharedIsrTokenStore {
 }
 
 /// Create a shared store with custom configuration.
-pub fn create_shared_store_with_config(validity_secs: u64, max_tokens: usize) -> SharedIsrTokenStore {
+pub fn create_shared_store_with_config(
+    validity_secs: u64,
+    max_tokens: usize,
+) -> SharedIsrTokenStore {
     Arc::new(IsrTokenStore::with_config(validity_secs, max_tokens))
 }
 
@@ -466,7 +471,10 @@ pub fn is_isr_token_request(iq: &xmpp_parsers::iq::Iq) -> bool {
 ///   <token xmlns='urn:xmpp:isr:0' expiry='ISO8601'>NEW_TOKEN</token>
 /// </iq>
 /// ```
-pub fn build_isr_token_result(original_iq: &xmpp_parsers::iq::Iq, token: &IsrToken) -> xmpp_parsers::iq::Iq {
+pub fn build_isr_token_result(
+    original_iq: &xmpp_parsers::iq::Iq,
+    token: &IsrToken,
+) -> xmpp_parsers::iq::Iq {
     use minidom::Element;
 
     let token_elem = Element::builder("token", ISR_NS)
@@ -489,7 +497,10 @@ pub fn build_isr_token_result(original_iq: &xmpp_parsers::iq::Iq, token: &IsrTok
 /// Supports the following conditions:
 /// - "not-authorized": Session not established or JID not bound
 /// - "service-unavailable": Token refresh not available
-pub fn build_isr_token_error(original_iq: &xmpp_parsers::iq::Iq, condition: &str) -> xmpp_parsers::iq::Iq {
+pub fn build_isr_token_error(
+    original_iq: &xmpp_parsers::iq::Iq,
+    condition: &str,
+) -> xmpp_parsers::iq::Iq {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     let (error_type, defined_condition) = match condition {
@@ -503,7 +514,7 @@ pub fn build_isr_token_error(original_iq: &xmpp_parsers::iq::Iq, condition: &str
         error_type,
         defined_condition,
         "en",
-        "",  // Empty text
+        "", // Empty text
     );
 
     xmpp_parsers::iq::Iq {
@@ -652,7 +663,8 @@ mod tests {
 
     #[test]
     fn test_parse_isr_token() {
-        let xml = "<token xmlns='urn:xmpp:isr:0' expiry='2024-01-01T12:00:00Z'>test-token-123</token>";
+        let xml =
+            "<token xmlns='urn:xmpp:isr:0' expiry='2024-01-01T12:00:00Z'>test-token-123</token>";
 
         let result = parse_isr_token(xml);
         assert!(result.is_some());
@@ -834,7 +846,10 @@ mod tests {
         // Check the payload is an Error with the correct condition
         if let IqType::Error(stanza_error) = &error.payload {
             assert_eq!(stanza_error.type_, ErrorType::Auth);
-            assert_eq!(stanza_error.defined_condition, DefinedCondition::NotAuthorized);
+            assert_eq!(
+                stanza_error.defined_condition,
+                DefinedCondition::NotAuthorized
+            );
         } else {
             panic!("Expected IqType::Error");
         }
@@ -859,7 +874,10 @@ mod tests {
         // Check the payload is an Error with service-unavailable condition
         if let IqType::Error(stanza_error) = &error.payload {
             assert_eq!(stanza_error.type_, ErrorType::Cancel);
-            assert_eq!(stanza_error.defined_condition, DefinedCondition::ServiceUnavailable);
+            assert_eq!(
+                stanza_error.defined_condition,
+                DefinedCondition::ServiceUnavailable
+            );
         } else {
             panic!("Expected IqType::Error");
         }

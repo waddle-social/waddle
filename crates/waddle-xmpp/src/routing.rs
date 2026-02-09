@@ -229,9 +229,7 @@ impl StanzaRouter {
         };
 
         match self.get_destination(to_jid) {
-            RoutingDestination::Local => {
-                self.route_message_local(message).await
-            }
+            RoutingDestination::Local => self.route_message_local(message).await,
             RoutingDestination::LocalMuc => {
                 // MUC messages should be handled by the MUC room registry,
                 // not by this router directly. Return as local.
@@ -279,7 +277,11 @@ impl StanzaRouter {
 
         // Send to all connected resources
         for resource_jid in &resources {
-            match self.connection_registry.send_to(resource_jid, stanza.clone()).await {
+            match self
+                .connection_registry
+                .send_to(resource_jid, stanza.clone())
+                .await
+            {
                 SendResult::Sent => {
                     debug!(to = %resource_jid, "Message delivered to local user");
                     delivered_count += 1;
@@ -312,9 +314,10 @@ impl StanzaRouter {
             return Ok(RoutingResult::FederationDisabled);
         }
 
-        let pool = self.s2s_pool.as_ref().ok_or_else(|| {
-            XmppError::internal("S2S pool not available".to_string())
-        })?;
+        let pool = self
+            .s2s_pool
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("S2S pool not available".to_string()))?;
 
         // Serialize the message to XML
         let xml = message_to_xml(&message)?;
@@ -360,9 +363,7 @@ impl StanzaRouter {
         };
 
         match self.get_destination(to_jid) {
-            RoutingDestination::Local => {
-                self.route_presence_local(presence).await
-            }
+            RoutingDestination::Local => self.route_presence_local(presence).await,
             RoutingDestination::LocalMuc => {
                 // MUC presence should be handled by the MUC room registry
                 debug!("Presence to MUC should be handled by room registry");
@@ -381,7 +382,10 @@ impl StanzaRouter {
     ///
     /// This is also used by the S2S listener to route inbound presence
     /// from remote servers to local recipients.
-    pub async fn route_presence_local(&self, presence: Presence) -> Result<RoutingResult, XmppError> {
+    pub async fn route_presence_local(
+        &self,
+        presence: Presence,
+    ) -> Result<RoutingResult, XmppError> {
         // Clone the destination JID before moving presence into the stanza
         let to_jid = presence.to.clone().ok_or_else(|| {
             XmppError::bad_request(Some("Presence has no destination".to_string()))
@@ -394,18 +398,14 @@ impl StanzaRouter {
             Ok(full_jid) => {
                 // Send to specific resource
                 match self.connection_registry.send_to(&full_jid, stanza).await {
-                    SendResult::Sent => {
-                        Ok(RoutingResult::DeliveredLocal {
-                            delivered_count: 1,
-                            offline_count: 0,
-                        })
-                    }
-                    _ => {
-                        Ok(RoutingResult::DeliveredLocal {
-                            delivered_count: 0,
-                            offline_count: 1,
-                        })
-                    }
+                    SendResult::Sent => Ok(RoutingResult::DeliveredLocal {
+                        delivered_count: 1,
+                        offline_count: 0,
+                    }),
+                    _ => Ok(RoutingResult::DeliveredLocal {
+                        delivered_count: 0,
+                        offline_count: 1,
+                    }),
                 }
             }
             Err(bare_jid) => {
@@ -415,7 +415,11 @@ impl StanzaRouter {
                 let mut offline = 0;
 
                 for resource_jid in resources {
-                    match self.connection_registry.send_to(&resource_jid, stanza.clone()).await {
+                    match self
+                        .connection_registry
+                        .send_to(&resource_jid, stanza.clone())
+                        .await
+                    {
                         SendResult::Sent => delivered += 1,
                         _ => offline += 1,
                     }
@@ -439,9 +443,10 @@ impl StanzaRouter {
             return Ok(RoutingResult::FederationDisabled);
         }
 
-        let pool = self.s2s_pool.as_ref().ok_or_else(|| {
-            XmppError::internal("S2S pool not available".to_string())
-        })?;
+        let pool = self
+            .s2s_pool
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("S2S pool not available".to_string()))?;
 
         // Serialize the presence to XML
         let xml = presence_to_xml(&presence)?;
@@ -487,9 +492,7 @@ impl StanzaRouter {
         };
 
         match self.get_destination(to_jid) {
-            RoutingDestination::Local => {
-                self.route_iq_local(iq).await
-            }
+            RoutingDestination::Local => self.route_iq_local(iq).await,
             RoutingDestination::LocalMuc => {
                 // MUC IQs should be handled by the MUC room registry
                 debug!("IQ to MUC should be handled by room registry");
@@ -498,9 +501,7 @@ impl StanzaRouter {
                     offline_count: 0,
                 })
             }
-            RoutingDestination::Remote { domain } => {
-                self.route_iq_remote(iq, &domain).await
-            }
+            RoutingDestination::Remote { domain } => self.route_iq_remote(iq, &domain).await,
         }
     }
 
@@ -510,47 +511,38 @@ impl StanzaRouter {
     /// from remote servers to local recipients.
     pub async fn route_iq_local(&self, iq: Iq) -> Result<RoutingResult, XmppError> {
         // Clone the destination JID before moving iq into the stanza
-        let to_jid = iq.to.clone().ok_or_else(|| {
-            XmppError::bad_request(Some("IQ has no destination".to_string()))
-        })?;
+        let to_jid = iq
+            .to
+            .clone()
+            .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
 
         let stanza = Stanza::Iq(iq);
 
         match to_jid.try_into_full() {
-            Ok(full_jid) => {
-                match self.connection_registry.send_to(&full_jid, stanza).await {
-                    SendResult::Sent => {
-                        Ok(RoutingResult::DeliveredLocal {
-                            delivered_count: 1,
-                            offline_count: 0,
-                        })
-                    }
-                    _ => {
-                        Ok(RoutingResult::DeliveredLocal {
-                            delivered_count: 0,
-                            offline_count: 1,
-                        })
-                    }
-                }
-            }
+            Ok(full_jid) => match self.connection_registry.send_to(&full_jid, stanza).await {
+                SendResult::Sent => Ok(RoutingResult::DeliveredLocal {
+                    delivered_count: 1,
+                    offline_count: 0,
+                }),
+                _ => Ok(RoutingResult::DeliveredLocal {
+                    delivered_count: 0,
+                    offline_count: 1,
+                }),
+            },
             Err(bare_jid) => {
                 // For bare JID, send to first available resource
                 let resources = self.connection_registry.get_resources_for_user(&bare_jid);
 
                 if let Some(resource_jid) = resources.first() {
                     match self.connection_registry.send_to(resource_jid, stanza).await {
-                        SendResult::Sent => {
-                            Ok(RoutingResult::DeliveredLocal {
-                                delivered_count: 1,
-                                offline_count: 0,
-                            })
-                        }
-                        _ => {
-                            Ok(RoutingResult::DeliveredLocal {
-                                delivered_count: 0,
-                                offline_count: 1,
-                            })
-                        }
+                        SendResult::Sent => Ok(RoutingResult::DeliveredLocal {
+                            delivered_count: 1,
+                            offline_count: 0,
+                        }),
+                        _ => Ok(RoutingResult::DeliveredLocal {
+                            delivered_count: 0,
+                            offline_count: 1,
+                        }),
                     }
                 } else {
                     Ok(RoutingResult::DeliveredLocal {
@@ -563,18 +555,15 @@ impl StanzaRouter {
     }
 
     /// Route IQ to a remote server via S2S.
-    async fn route_iq_remote(
-        &self,
-        iq: Iq,
-        domain: &str,
-    ) -> Result<RoutingResult, XmppError> {
+    async fn route_iq_remote(&self, iq: Iq, domain: &str) -> Result<RoutingResult, XmppError> {
         if !self.is_federation_enabled() {
             return Ok(RoutingResult::FederationDisabled);
         }
 
-        let pool = self.s2s_pool.as_ref().ok_or_else(|| {
-            XmppError::internal("S2S pool not available".to_string())
-        })?;
+        let pool = self
+            .s2s_pool
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("S2S pool not available".to_string()))?;
 
         // Serialize the IQ to XML
         let xml = iq_to_xml(&iq)?;
@@ -749,13 +738,18 @@ mod tests {
         let router = StanzaRouter::new(config, registry, None);
 
         let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let mut message = Message::new(Some(Jid::from("user@waddle.social".parse::<BareJid>().unwrap())));
+        let mut message = Message::new(Some(Jid::from(
+            "user@waddle.social".parse::<BareJid>().unwrap(),
+        )));
         message.id = Some("test-123".to_string());
 
         let result = router.route_message(message, &sender_jid).await.unwrap();
 
         match result {
-            RoutingResult::DeliveredLocal { delivered_count, offline_count } => {
+            RoutingResult::DeliveredLocal {
+                delivered_count,
+                offline_count,
+            } => {
                 assert_eq!(delivered_count, 0);
                 assert_eq!(offline_count, 1);
             }
@@ -784,7 +778,9 @@ mod tests {
         let router = StanzaRouter::new(config, registry, None);
 
         let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let message = Message::new(Some(Jid::from("user@example.com".parse::<BareJid>().unwrap())));
+        let message = Message::new(Some(Jid::from(
+            "user@example.com".parse::<BareJid>().unwrap(),
+        )));
 
         let result = router.route_message(message, &sender_jid).await.unwrap();
 

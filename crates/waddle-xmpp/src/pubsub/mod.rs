@@ -36,8 +36,8 @@ pub mod storage;
 pub use node::{AccessModel, NodeConfig, PublishModel};
 pub use pep::{is_pep_request, PepHandler};
 pub use stanzas::{
-    is_pubsub_iq, parse_pubsub_iq, build_pubsub_event, build_pubsub_items_result,
-    build_pubsub_publish_result, build_pubsub_error, build_pubsub_success,
-    PubSubError, PubSubItem, PubSubRequest, NS_PUBSUB, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
+    build_pubsub_error, build_pubsub_event, build_pubsub_items_result, build_pubsub_publish_result,
+    build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem, PubSubRequest,
+    NS_PUBSUB, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
 };
 pub use storage::{InMemoryPubSubStorage, PubSubNode, PubSubStorage, PublishResult, StoredItem};

@@ -232,10 +232,7 @@ pub async fn list_handler(
     State(state): State<Arc<PermissionState>>,
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> impl IntoResponse {
-    debug!(
-        "List relations: {} on {}",
-        query.subject, query.object
-    );
+    debug!("List relations: {} on {}", query.subject, query.object);
 
     // Parse subject
     let subject = match Subject::parse(&query.subject) {
@@ -393,7 +390,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(db_pool, crate::config::ServerConfig::test_homeserver()));
+        let app_state = Arc::new(AppState::new(
+            db_pool,
+            crate::config::ServerConfig::test_homeserver(),
+        ));
         Arc::new(PermissionState::new(app_state))
     }
 

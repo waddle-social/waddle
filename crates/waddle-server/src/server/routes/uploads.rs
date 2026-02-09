@@ -198,9 +198,7 @@ async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSl
 
     match row {
         Some(row) => {
-            let id: String = row
-                .get(0)
-                .map_err(|e| format!("Failed to get id: {}", e))?;
+            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
             let filename: String = row
                 .get(1)
                 .map_err(|e| format!("Failed to get filename: {}", e))?;
@@ -233,11 +231,7 @@ async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSl
 }
 
 /// Update slot status to 'uploaded' and set storage_key
-async fn mark_slot_uploaded(
-    db: &Database,
-    slot_id: &str,
-    storage_key: &str,
-) -> Result<(), String> {
+async fn mark_slot_uploaded(db: &Database, slot_id: &str, storage_key: &str) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     let query = r#"
         UPDATE upload_slots
@@ -470,7 +464,10 @@ pub async fn download_handler(
     State(state): State<Arc<UploadState>>,
     Path((slot_id, filename)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    debug!("Download request for slot: {}, filename: {}", slot_id, filename);
+    debug!(
+        "Download request for slot: {}, filename: {}",
+        slot_id, filename
+    );
 
     // Get upload slot from database
     let slot = match get_upload_slot(state.global_db(), &slot_id).await {
@@ -605,10 +602,7 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(
-            db_pool,
-            ServerConfig::test_homeserver(),
-        ));
+        let app_state = Arc::new(AppState::new(db_pool, ServerConfig::test_homeserver()));
 
         // Create upload state with temp directory
         let upload_dir = std::env::temp_dir().join(format!("waddle-test-{}", uuid::Uuid::new_v4()));
@@ -704,7 +698,10 @@ mod tests {
         assert_eq!(saved_content, file_content);
 
         // Verify slot status was updated
-        let slot = get_upload_slot(state.global_db(), &slot_id).await.unwrap().unwrap();
+        let slot = get_upload_slot(state.global_db(), &slot_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(slot.status, "uploaded");
         assert!(slot.storage_key.is_some());
 
@@ -863,7 +860,12 @@ mod tests {
         );
 
         // Check content
-        let body = download_response.into_body().collect().await.unwrap().to_bytes();
+        let body = download_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
         assert_eq!(body.as_ref(), file_content);
 
         // Cleanup
@@ -918,7 +920,10 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "file_not_found");
-        assert!(json["message"].as_str().unwrap().contains("not yet uploaded"));
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("not yet uploaded"));
 
         // Cleanup
         std::fs::remove_dir_all(&state.upload_dir).ok();

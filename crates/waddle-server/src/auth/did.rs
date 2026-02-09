@@ -90,16 +90,10 @@ impl DidResolver {
         }
 
         // Fall back to .well-known
-        debug!(
-            "Attempting .well-known resolution for handle: {}",
-            handle
-        );
+        debug!("Attempting .well-known resolution for handle: {}", handle);
         match self.resolve_handle_via_well_known(handle).await {
             Ok(did) => {
-                debug!(
-                    "Resolved handle via .well-known: {} -> {}",
-                    handle, did
-                );
+                debug!("Resolved handle via .well-known: {} -> {}", handle, did);
                 Ok(did)
             }
             Err(e) => {
@@ -207,9 +201,10 @@ impl DidResolver {
         let url = format!("{}/{}", self.plc_directory_url, did);
         debug!("Fetching PLC DID document from: {}", url);
 
-        let response = self.http_client.get(&url).send().await.map_err(|e| {
-            AuthError::HttpError(format!("Failed to fetch PLC document: {}", e))
-        })?;
+        let response =
+            self.http_client.get(&url).send().await.map_err(|e| {
+                AuthError::HttpError(format!("Failed to fetch PLC document: {}", e))
+            })?;
 
         if !response.status().is_success() {
             return Err(AuthError::DidDocumentFetchFailed(format!(
@@ -346,7 +341,10 @@ fn is_valid_handle(handle: &str) -> bool {
         }
 
         // Check for valid characters
-        if !segment.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
             return false;
         }
 
@@ -377,9 +375,7 @@ fn is_valid_did(did: &str) -> bool {
         let identifier = did.strip_prefix("did:plc:").unwrap();
         !identifier.is_empty()
             && identifier.len() <= 64
-            && identifier
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric())
+            && identifier.chars().all(|c| c.is_ascii_alphanumeric())
     } else if did.starts_with("did:web:") {
         let domain = did.strip_prefix("did:web:").unwrap();
         !domain.is_empty() && domain.len() <= 253

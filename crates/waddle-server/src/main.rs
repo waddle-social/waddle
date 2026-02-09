@@ -25,7 +25,8 @@ async fn main() -> Result<()> {
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         telemetry::init().map_err(|e| anyhow::anyhow!("Failed to init telemetry: {}", e))?;
     } else {
-        telemetry::init_local().map_err(|e| anyhow::anyhow!("Failed to init local telemetry: {}", e))?;
+        telemetry::init_local()
+            .map_err(|e| anyhow::anyhow!("Failed to init local telemetry: {}", e))?;
     }
 
     info!("Waddle Server starting...");

@@ -190,9 +190,21 @@ fn stanza_to_xml(stanza: &Stanza) -> String {
     match stanza {
         Stanza::Message(msg) => {
             // Build XML for message
-            let to = msg.to.as_ref().map(|j| format!(" to=\"{}\"", j)).unwrap_or_default();
-            let from = msg.from.as_ref().map(|j| format!(" from=\"{}\"", j)).unwrap_or_default();
-            let id = msg.id.as_ref().map(|i| format!(" id=\"{}\"", i)).unwrap_or_default();
+            let to = msg
+                .to
+                .as_ref()
+                .map(|j| format!(" to=\"{}\"", j))
+                .unwrap_or_default();
+            let from = msg
+                .from
+                .as_ref()
+                .map(|j| format!(" from=\"{}\"", j))
+                .unwrap_or_default();
+            let id = msg
+                .id
+                .as_ref()
+                .map(|i| format!(" id=\"{}\"", i))
+                .unwrap_or_default();
             let msg_type = match msg.type_ {
                 xmpp_parsers::message::MessageType::Chat => " type=\"chat\"",
                 xmpp_parsers::message::MessageType::Groupchat => " type=\"groupchat\"",
@@ -208,11 +220,22 @@ fn stanza_to_xml(stanza: &Stanza) -> String {
                 .map(|b| format!("<body>{}</body>", escape_xml(&b.0)))
                 .unwrap_or_default();
 
-            format!("<message{}{}{}{}>{}</message>", to, from, id, msg_type, body)
+            format!(
+                "<message{}{}{}{}>{}</message>",
+                to, from, id, msg_type, body
+            )
         }
         Stanza::Presence(pres) => {
-            let to = pres.to.as_ref().map(|j| format!(" to=\"{}\"", j)).unwrap_or_default();
-            let from = pres.from.as_ref().map(|j| format!(" from=\"{}\"", j)).unwrap_or_default();
+            let to = pres
+                .to
+                .as_ref()
+                .map(|j| format!(" to=\"{}\"", j))
+                .unwrap_or_default();
+            let from = pres
+                .from
+                .as_ref()
+                .map(|j| format!(" from=\"{}\"", j))
+                .unwrap_or_default();
             let pres_type = match pres.type_ {
                 xmpp_parsers::presence::Type::None => "",
                 xmpp_parsers::presence::Type::Unavailable => " type=\"unavailable\"",
@@ -221,8 +244,16 @@ fn stanza_to_xml(stanza: &Stanza) -> String {
             format!("<presence{}{}{}/>", to, from, pres_type)
         }
         Stanza::Iq(iq) => {
-            let to = iq.to.as_ref().map(|j| format!(" to=\"{}\"", j)).unwrap_or_default();
-            let from = iq.from.as_ref().map(|j| format!(" from=\"{}\"", j)).unwrap_or_default();
+            let to = iq
+                .to
+                .as_ref()
+                .map(|j| format!(" to=\"{}\"", j))
+                .unwrap_or_default();
+            let from = iq
+                .from
+                .as_ref()
+                .map(|j| format!(" from=\"{}\"", j))
+                .unwrap_or_default();
             let iq_type = match iq.payload {
                 xmpp_parsers::iq::IqType::Get(_) => "get",
                 xmpp_parsers::iq::IqType::Set(_) => "set",
@@ -336,49 +367,68 @@ async fn handle_sasl_plain(
     let Some(start) = frame.find('>') else {
         warn!("SASL PLAIN: could not find opening tag end");
         return vec![
-            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#.to_string()
+            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                .to_string(),
         ];
     };
 
     let Some(end) = frame[start..].find('<') else {
         warn!("SASL PLAIN: could not find closing tag");
         return vec![
-            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#.to_string()
+            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                .to_string(),
         ];
     };
 
     let b64_creds = frame[start + 1..start + end].trim();
     debug!(b64 = %b64_creds, "Extracted base64 credentials");
 
-    let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_creds) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(error = %e, b64 = %b64_creds, "Failed to decode base64 credentials");
-            return vec![
-                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#.to_string()
+    let decoded =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_creds) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(error = %e, b64 = %b64_creds, "Failed to decode base64 credentials");
+                return vec![
+                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                    .to_string(),
             ];
-        }
-    };
+            }
+        };
 
     // PLAIN format: \0authzid\0username\0password or \0username\0password
     let parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
     debug!(parts_count = parts.len(), "SASL PLAIN parts");
 
     let (username, password) = if parts.len() >= 3 {
-        (String::from_utf8_lossy(parts[1]), String::from_utf8_lossy(parts[2]))
+        (
+            String::from_utf8_lossy(parts[1]),
+            String::from_utf8_lossy(parts[2]),
+        )
     } else if parts.len() == 2 {
-        (String::from_utf8_lossy(parts[0]), String::from_utf8_lossy(parts[1]))
+        (
+            String::from_utf8_lossy(parts[0]),
+            String::from_utf8_lossy(parts[1]),
+        )
     } else {
-        warn!(parts_count = parts.len(), "SASL PLAIN: unexpected number of parts");
+        warn!(
+            parts_count = parts.len(),
+            "SASL PLAIN: unexpected number of parts"
+        );
         return vec![
-            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#.to_string()
+            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                .to_string(),
         ];
     };
 
     debug!(username = %username, password_len = password.len(), "SASL PLAIN credentials");
 
     // The password is the session token
-    match state.auth_state.session_manager.validate_session(&password).await {
+    match state
+        .auth_state
+        .session_manager
+        .validate_session(&password)
+        .await
+    {
         Ok(session) => {
             info!(jid = %username, did = %session.did, "SASL PLAIN authentication successful");
             *authenticated = true;
@@ -401,7 +451,8 @@ async fn handle_sasl_plain(
         Err(e) => {
             warn!(username = %username, error = %e, "SASL PLAIN authentication failed");
             vec![
-                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#.to_string()
+                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                    .to_string(),
             ]
         }
     }
@@ -420,7 +471,8 @@ fn handle_resource_binding(
     };
 
     let id = extract_attr(frame, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let resource = extract_element_text(frame, "resource").unwrap_or_else(|| "websocket".to_string());
+    let resource =
+        extract_element_text(frame, "resource").unwrap_or_else(|| "websocket".to_string());
 
     // Create the full JID with the requested resource
     let bare_jid = jid.to_bare();
@@ -430,10 +482,13 @@ fn handle_resource_binding(
         info!(jid = %full_jid, "Resource bound");
         *session_jid = Some(full_jid.clone());
 
-        (vec![format!(
-            r#"<iq id="{}" type="result"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><jid>{}</jid></bind></iq>"#,
-            id, full_jid
-        )], true)
+        (
+            vec![format!(
+                r#"<iq id="{}" type="result"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><jid>{}</jid></bind></iq>"#,
+                id, full_jid
+            )],
+            true,
+        )
     } else {
         warn!(jid = %full_jid_str, "Invalid JID during resource binding");
         (vec![], false)
@@ -500,7 +555,10 @@ async fn handle_muc_join(
         None => {
             // Create the room if it doesn't exist
             let config = RoomConfig {
-                name: room_jid.node().map(|n| n.to_string()).unwrap_or_else(|| "Room".to_string()),
+                name: room_jid
+                    .node()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "Room".to_string()),
                 members_only: false, // Allow anyone to join for now
                 ..Default::default()
             };
@@ -511,7 +569,10 @@ async fn handle_muc_join(
                 "default".to_string(), // channel_id placeholder
                 config,
             ) {
-                Ok(_handle) => state.muc_registry.get_room_data(room_jid).expect("Room just created"),
+                Ok(_handle) => state
+                    .muc_registry
+                    .get_room_data(room_jid)
+                    .expect("Room just created"),
                 Err(e) => {
                     warn!(room = %room_jid, error = %e, "Failed to create room");
                     return vec![];
@@ -564,9 +625,13 @@ async fn handle_muc_join(
 
     // Broadcast the new occupant's presence to all existing occupants
     for (existing_jid, _, _, _) in &existing_occupants {
-        let presence_stanza = create_presence_stanza(room_jid, nick, sender_jid, existing_jid, false);
+        let presence_stanza =
+            create_presence_stanza(room_jid, nick, sender_jid, existing_jid, false);
         let stanza = Stanza::Presence(presence_stanza);
-        let _ = state.connection_registry.send_to(existing_jid, stanza).await;
+        let _ = state
+            .connection_registry
+            .send_to(existing_jid, stanza)
+            .await;
     }
 
     // Send self-presence to the joining user (with status code 110)
@@ -577,7 +642,10 @@ async fn handle_muc_join(
     responses.push(self_presence);
 
     // Send room subject
-    let room_name = room_jid.node().map(|n| n.to_string()).unwrap_or_else(|| "Waddle".to_string());
+    let room_name = room_jid
+        .node()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "Waddle".to_string());
     let subject = format!(
         r#"<message from="{}" to="{}" type="groupchat"><subject>Welcome to {}!</subject></message>"#,
         room_jid, sender_jid, room_name
@@ -617,14 +685,19 @@ async fn handle_muc_leave(
 
     // Broadcast unavailable presence to remaining occupants
     for occupant_jid in &remaining_occupants {
-        let from_jid = room_jid.clone()
+        let from_jid = room_jid
+            .clone()
             .with_resource_str(nick)
             .unwrap_or_else(|_| sender_jid.clone());
-        let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+        let mut presence =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(from_jid));
         presence.to = Some(jid::Jid::from(occupant_jid.clone()));
         let stanza = Stanza::Presence(presence);
-        let _ = state.connection_registry.send_to(occupant_jid, stanza).await;
+        let _ = state
+            .connection_registry
+            .send_to(occupant_jid, stanza)
+            .await;
     }
 
     // Send self-presence unavailable to the leaving user
@@ -796,7 +869,8 @@ async fn handle_message(
                 echo_response = Some(msg_xml);
             } else {
                 // Route to other occupants via the connection registry
-                let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(occupant_jid.clone())));
+                let mut msg =
+                    xmpp_parsers::message::Message::new(Some(jid::Jid::from(occupant_jid.clone())));
                 if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
                     msg.from = Some(jid::Jid::from(from_jid));
                 } else {
@@ -804,9 +878,15 @@ async fn handle_message(
                 }
                 msg.id = Some(msg_id.clone());
                 msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-                msg.bodies.insert(String::new(), xmpp_parsers::message::Body(body_text.clone()));
+                msg.bodies.insert(
+                    String::new(),
+                    xmpp_parsers::message::Body(body_text.clone()),
+                );
                 let stanza = Stanza::Message(msg);
-                let _ = state.connection_registry.send_to(occupant_jid, stanza).await;
+                let _ = state
+                    .connection_registry
+                    .send_to(occupant_jid, stanza)
+                    .await;
             }
         }
 
@@ -828,28 +908,41 @@ async fn handle_message(
 
             // Try to parse as FullJid first, then BareJid
             if let Ok(to_full_jid) = to_jid_str.parse::<FullJid>() {
-                let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(to_full_jid.clone())));
+                let mut msg =
+                    xmpp_parsers::message::Message::new(Some(jid::Jid::from(to_full_jid.clone())));
                 msg.from = Some(jid::Jid::from(sender_jid.clone()));
                 msg.id = id.clone();
                 msg.type_ = xmpp_parsers::message::MessageType::Chat;
                 if let Some(b) = body {
-                    msg.bodies.insert(String::new(), xmpp_parsers::message::Body(b));
+                    msg.bodies
+                        .insert(String::new(), xmpp_parsers::message::Body(b));
                 }
                 let stanza = Stanza::Message(msg);
-                let _ = state.connection_registry.send_to(&to_full_jid, stanza).await;
+                let _ = state
+                    .connection_registry
+                    .send_to(&to_full_jid, stanza)
+                    .await;
             } else if let Ok(to_bare_jid) = to_jid_str.parse::<BareJid>() {
                 // Route to all resources of this bare JID
-                let resources = state.connection_registry.get_resources_for_user(&to_bare_jid);
+                let resources = state
+                    .connection_registry
+                    .get_resources_for_user(&to_bare_jid);
                 for resource_jid in resources {
-                    let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(resource_jid.clone())));
+                    let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+                        resource_jid.clone(),
+                    )));
                     msg.from = Some(jid::Jid::from(sender_jid.clone()));
                     msg.id = id.clone();
                     msg.type_ = xmpp_parsers::message::MessageType::Chat;
                     if let Some(ref b) = body {
-                        msg.bodies.insert(String::new(), xmpp_parsers::message::Body(b.clone()));
+                        msg.bodies
+                            .insert(String::new(), xmpp_parsers::message::Body(b.clone()));
                     }
                     let stanza = Stanza::Message(msg);
-                    let _ = state.connection_registry.send_to(&resource_jid, stanza).await;
+                    let _ = state
+                        .connection_registry
+                        .send_to(&resource_jid, stanza)
+                        .await;
                 }
             }
         }
@@ -868,7 +961,10 @@ fn create_presence_stanza(
     to_jid: &FullJid,
     _is_self: bool,
 ) -> xmpp_parsers::presence::Presence {
-    let from_jid = room_jid.clone().with_resource_str(nick).unwrap_or_else(|_| real_jid.clone());
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(nick)
+        .unwrap_or_else(|_| real_jid.clone());
 
     let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
     presence.from = Some(jid::Jid::from(from_jid));

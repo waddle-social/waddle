@@ -9,7 +9,10 @@ pub mod scram;
 
 use jid::BareJid;
 
-pub use scram::{generate_salt, generate_scram_keys, encode_sasl_name, ScramServer, ScramState, ServerFirstMessage, ServerFinalMessage, DEFAULT_ITERATIONS};
+pub use scram::{
+    encode_sasl_name, generate_salt, generate_scram_keys, ScramServer, ScramState,
+    ServerFinalMessage, ServerFirstMessage, DEFAULT_ITERATIONS,
+};
 
 use crate::XmppError;
 
@@ -285,10 +288,22 @@ mod tests {
     fn test_sasl_mechanism_parse() {
         assert_eq!(SaslMechanism::parse("PLAIN"), Some(SaslMechanism::Plain));
         assert_eq!(SaslMechanism::parse("plain"), Some(SaslMechanism::Plain));
-        assert_eq!(SaslMechanism::parse("OAUTHBEARER"), Some(SaslMechanism::OAuthBearer));
-        assert_eq!(SaslMechanism::parse("oauthbearer"), Some(SaslMechanism::OAuthBearer));
-        assert_eq!(SaslMechanism::parse("SCRAM-SHA-256"), Some(SaslMechanism::ScramSha256));
-        assert_eq!(SaslMechanism::parse("scram-sha-256"), Some(SaslMechanism::ScramSha256));
+        assert_eq!(
+            SaslMechanism::parse("OAUTHBEARER"),
+            Some(SaslMechanism::OAuthBearer)
+        );
+        assert_eq!(
+            SaslMechanism::parse("oauthbearer"),
+            Some(SaslMechanism::OAuthBearer)
+        );
+        assert_eq!(
+            SaslMechanism::parse("SCRAM-SHA-256"),
+            Some(SaslMechanism::ScramSha256)
+        );
+        assert_eq!(
+            SaslMechanism::parse("scram-sha-256"),
+            Some(SaslMechanism::ScramSha256)
+        );
         assert_eq!(SaslMechanism::parse("UNKNOWN"), None);
     }
 

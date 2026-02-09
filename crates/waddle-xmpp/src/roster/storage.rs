@@ -185,7 +185,10 @@ pub mod test_storage {
             }
         }
 
-        async fn get_roster_version(&self, _user_jid: &BareJid) -> Result<Option<String>, XmppError> {
+        async fn get_roster_version(
+            &self,
+            _user_jid: &BareJid,
+        ) -> Result<Option<String>, XmppError> {
             // In-memory storage doesn't support versioning
             Ok(None)
         }
@@ -236,7 +239,9 @@ pub mod test_storage {
                 .map(|items| {
                     items
                         .iter()
-                        .filter(|i| matches!(i.subscription, Subscription::From | Subscription::Both))
+                        .filter(|i| {
+                            matches!(i.subscription, Subscription::From | Subscription::Both)
+                        })
                         .map(|i| i.jid.clone())
                         .collect()
                 })
@@ -347,8 +352,14 @@ pub mod test_storage {
             let contact1: BareJid = "contact1@example.com".parse().unwrap();
             let contact2: BareJid = "contact2@example.com".parse().unwrap();
 
-            storage.set_roster_item(&user, &RosterItem::with_name(contact1.clone(), "Alice")).await.unwrap();
-            storage.set_roster_item(&user, &RosterItem::with_name(contact2.clone(), "Bob")).await.unwrap();
+            storage
+                .set_roster_item(&user, &RosterItem::with_name(contact1.clone(), "Alice"))
+                .await
+                .unwrap();
+            storage
+                .set_roster_item(&user, &RosterItem::with_name(contact2.clone(), "Bob"))
+                .await
+                .unwrap();
 
             let item = storage.get_roster_item(&user, &contact1).await.unwrap();
             assert!(item.is_some());
