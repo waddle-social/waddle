@@ -15,71 +15,76 @@ use crate::carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
     is_carbons_enable, should_copy_message,
 };
-use crate::roster::{
-    build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
-    is_roster_set, parse_roster_get, parse_roster_set, RosterItem,
+use crate::disco::{
+    build_disco_info_response, build_disco_items_response, is_disco_info_query,
+    is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
+    parse_disco_items_query, pubsub_service_features, server_features, upload_service_features,
+    DiscoItem, Identity,
 };
+use crate::isr::{
+    build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore,
+};
+use crate::mam::{
+    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
+    ArchivedMessage, MamStorage,
+};
+use crate::metrics::{record_muc_occupant_count, record_muc_presence};
+use crate::muc::{
+    admin::{
+        build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
+        is_role_change_query, parse_admin_query,
+    },
+    affiliation::{AffiliationResolver, AppStateAffiliationResolver},
+    build_affiliation_change_presence, build_ban_presence, build_kick_presence,
+    build_leave_presence, build_occupant_presence, build_role_change_presence, is_muc_owner_get,
+    is_muc_owner_set,
+    owner::{
+        apply_config_form, build_config_form, build_config_result, build_destroy_notification,
+        build_owner_set_result, parse_owner_query, OwnerAction,
+    },
+    parse_muc_presence, MucJoinRequest, MucLeaveRequest, MucMessage, MucPresenceAction,
+    MucRoomRegistry,
+};
+use crate::parser::ParsedStanza;
 use crate::presence::{
     build_available_presence, build_subscription_presence, build_unavailable_presence,
     parse_subscription_presence, PresenceAction, PresenceSubscriptionRequest,
     SubscriptionStateMachine, SubscriptionType,
 };
-use crate::disco::{
-    build_disco_info_response, build_disco_items_response, is_disco_info_query,
-    is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
-    parse_disco_items_query, server_features, DiscoItem, Identity,
+use crate::pubsub::{
+    build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
+    build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem, PubSubRequest,
+    PubSubStorage,
 };
-use crate::isr::{build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore};
-use crate::mam::{
-    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
-    ArchivedMessage, MamStorage,
-};
-use crate::stream_management::{SmSessionRegistry, StreamManagementState};
-use crate::metrics::{record_muc_occupant_count, record_muc_presence};
-use crate::muc::{
-    affiliation::{AffiliationResolver, AppStateAffiliationResolver},
-    admin::{
-        is_muc_admin_iq, parse_admin_query, build_admin_result, build_admin_set_result,
-        is_role_change_query, build_role_result,
-    },
-    owner::{
-        parse_owner_query, build_config_form, build_config_result, build_owner_set_result,
-        build_destroy_notification, apply_config_form,
-        OwnerAction,
-    },
-    build_leave_presence, build_occupant_presence, parse_muc_presence, MucJoinRequest,
-    MucLeaveRequest, MucMessage, MucPresenceAction, MucRoomRegistry,
-    build_kick_presence, build_ban_presence, build_affiliation_change_presence,
-    build_role_change_presence,
-    is_muc_owner_get, is_muc_owner_set,
+use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
+use crate::roster::{
+    build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
+    is_roster_set, parse_roster_get, parse_roster_set, RosterItem,
 };
 use crate::routing::StanzaRouter;
-use crate::types::{Affiliation, Role};
-use crate::parser::ParsedStanza;
-use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::stream::{PreAuthResult, SaslAuthResult, XmppStream};
+use crate::stream_management::{SmSessionRegistry, StreamManagementState};
 use crate::types::ConnectionState;
+use crate::types::{Affiliation, Role};
+use crate::xep::xep0049::{
+    build_private_storage_result, build_private_storage_success, is_private_storage_query,
+    parse_private_storage_get, parse_private_storage_set,
+};
 use crate::xep::xep0054::{
-    is_vcard_get, is_vcard_set, parse_vcard_from_iq, build_vcard_response,
-    build_empty_vcard_response, build_vcard_success,
+    build_empty_vcard_response, build_vcard_response, build_vcard_success, is_vcard_get,
+    is_vcard_set, parse_vcard_from_iq,
 };
+use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0077::RegistrationError;
-use crate::xep::xep0249::{
-    parse_direct_invite_from_message, DirectInvite,
-};
-use crate::xep::xep0363::{
-    is_upload_request, parse_upload_request, build_upload_slot_response, build_upload_error,
-    UploadSlot, UploadError,
-};
 use crate::xep::xep0191::{
-    is_blocking_query, parse_blocking_request, build_blocklist_response, build_blocking_success,
-    build_block_push, build_unblock_push, build_blocking_error, BlockingRequest,
+    build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
+    build_unblock_push, is_blocking_query, parse_blocking_request, BlockingRequest,
 };
-use crate::xep::xep0199::{is_ping, build_ping_result};
-use crate::pubsub::{
-    is_pubsub_iq, parse_pubsub_iq, build_pubsub_items_result, build_pubsub_publish_result,
-    build_pubsub_error, build_pubsub_success,
-    InMemoryPubSubStorage, PubSubError, PubSubItem, PubSubRequest, PubSubStorage,
+use crate::xep::xep0199::{build_ping_result, is_ping};
+use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
+use crate::xep::xep0363::{
+    build_upload_error, build_upload_slot_response, is_upload_request, parse_upload_request,
+    UploadError, UploadSlot,
 };
 use crate::{AppState, Session, XmppError};
 
@@ -135,13 +140,17 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     csi_buffer: Vec<Stanza>,
     /// XEP-0060/XEP-0163 PubSub/PEP storage for bookmarks and other PEP data
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
+    /// XEP-0153 vCard avatar hash (SHA-1 hex) for inclusion in presence stanzas
+    avatar_hash: Option<String>,
+    /// XEP-0398 guard flag to prevent infinite avatar conversion loops
+    converting_avatar: bool,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -157,6 +166,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         isr_token_store: SharedIsrTokenStore,
         sm_session_registry: Arc<dyn SmSessionRegistry>,
         registration_enabled: bool,
+        pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -180,14 +190,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             stanza_router: None, // Federation routing disabled by default; can be set via set_stanza_router()
             client_state: crate::xep::xep0352::ClientState::default(), // XEP-0352: starts as Active
             csi_buffer: Vec::new(), // XEP-0352: stanza buffer for inactive clients
-            pubsub_storage: Arc::new(InMemoryPubSubStorage::new()), // XEP-0060/0163 PubSub/PEP storage
+            pubsub_storage,      // XEP-0060/0163 PubSub/PEP storage (shared across connections)
+            avatar_hash: None,   // XEP-0153: computed on bind from stored vCard
+            converting_avatar: false, // XEP-0398: guard against infinite conversion loops
         };
 
         actor.run(tls_acceptor, registration_enabled).await
     }
 
     /// Main connection loop.
-    async fn run(&mut self, tls_acceptor: TlsAcceptor, registration_enabled: bool) -> Result<(), XmppError> {
+    async fn run(
+        &mut self,
+        tls_acceptor: TlsAcceptor,
+        registration_enabled: bool,
+    ) -> Result<(), XmppError> {
         // Wait for initial stream header
         self.state = ConnectionState::Negotiating;
         let header = self.stream.read_stream_header().await?;
@@ -212,7 +228,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let _header = self.stream.read_stream_header().await?;
 
         // Enable XEP-0077 In-Band Registration in stream features if configured
-        self.stream.send_features_sasl_with_registration(registration_enabled).await?;
+        self.stream
+            .send_features_sasl_with_registration(registration_enabled)
+            .await?;
 
         // Handle pre-auth phase (registration IQs or SASL authentication)
         self.state = ConnectionState::Authenticating;
@@ -236,10 +254,28 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Register this connection with the connection registry for message routing
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
-        self.connection_registry.register(full_jid.clone(), outbound_tx);
+        self.connection_registry
+            .register(full_jid.clone(), outbound_tx);
         self.outbound_rx = Some(outbound_rx);
 
         info!(jid = %full_jid, "Session established and registered");
+
+        // XEP-0153: Pre-compute avatar hash from stored vCard
+        if let Ok(Some(vcard_xml)) = self.app_state.get_vcard(&full_jid.to_bare()).await {
+            if let Ok(elem) = vcard_xml.parse::<minidom::Element>() {
+                if let Ok(vcard) = crate::xep::xep0054::parse_vcard_element(&elem) {
+                    if let Some(ref photo) = vcard.photo {
+                        self.avatar_hash =
+                            crate::xep::xep0153::compute_photo_hash_from_base64(&photo.data);
+                        debug!(
+                            jid = %full_jid,
+                            avatar_hash = ?self.avatar_hash,
+                            "Pre-computed avatar hash from stored vCard"
+                        );
+                    }
+                }
+            }
+        }
 
         // Main stanza processing loop
         let result = self.process_stanzas().await;
@@ -330,7 +366,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 SaslAuthResult::OAuthBearerDiscovery => {
                     // Client requested OAuth discovery - send discovery URL
                     let discovery_url = self.app_state.oauth_discovery_url();
-                    self.stream.send_oauthbearer_discovery(&discovery_url).await?;
+                    self.stream
+                        .send_oauthbearer_discovery(&discovery_url)
+                        .await?;
 
                     debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery, waiting for client to complete OAuth");
 
@@ -348,20 +386,28 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     match self.app_state.lookup_scram_credentials(&username).await {
                         Ok(Some(creds)) => {
                             // Send the challenge
-                            self.stream.send_scram_challenge(&server_first_message_b64).await?;
+                            self.stream
+                                .send_scram_challenge(&server_first_message_b64)
+                                .await?;
 
                             // Continue the SCRAM exchange
-                            match self.stream.continue_scram_auth(
-                                scram_server,
-                                &creds.stored_key,
-                                &creds.server_key,
-                            ).await {
+                            match self
+                                .stream
+                                .continue_scram_auth(
+                                    scram_server,
+                                    &creds.stored_key,
+                                    &creds.server_key,
+                                )
+                                .await
+                            {
                                 Ok(SaslAuthResult::ScramSha256Complete { username }) => {
                                     // Authentication successful - create session for native user
                                     // The JID is username@domain
                                     let jid: jid::BareJid = format!("{}@{}", username, self.domain)
                                         .parse()
-                                        .map_err(|e| XmppError::auth_failed(format!("Invalid JID: {}", e)))?;
+                                        .map_err(|e| {
+                                            XmppError::auth_failed(format!("Invalid JID: {}", e))
+                                        })?;
 
                                     // For native users, the DID is the JID itself (no ATProto)
                                     let session = Session {
@@ -379,7 +425,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                                     // Unexpected result
                                     warn!("Unexpected SCRAM auth result");
                                     self.stream.send_sasl_failure("not-authorized").await?;
-                                    return Err(XmppError::auth_failed("SCRAM authentication failed"));
+                                    return Err(XmppError::auth_failed(
+                                        "SCRAM authentication failed",
+                                    ));
                                 }
                                 Err(e) => {
                                     warn!(error = %e, username = %username, "SCRAM-SHA-256 authentication failed");
@@ -447,7 +495,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             // This is a 'get' request - send registration form
                             debug!(id = %id, "Sending registration form");
                             self.stream
-                                .send_registration_form(&id, Some("Choose a username and password to register."))
+                                .send_registration_form(
+                                    &id,
+                                    Some("Choose a username and password to register."),
+                                )
                                 .await?;
                             // Continue loop to wait for next stanza
                         }
@@ -526,11 +577,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             SaslAuthResult::OAuthBearerDiscovery => {
                 // Client requested OAuth discovery - send discovery URL
                 let discovery_url = self.app_state.oauth_discovery_url();
-                self.stream.send_oauthbearer_discovery(&discovery_url).await?;
+                self.stream
+                    .send_oauthbearer_discovery(&discovery_url)
+                    .await?;
                 debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery");
                 // Need to wait for next auth attempt - this would need to loop
                 // For now, return an error indicating client should reconnect
-                Err(XmppError::auth_failed("OAuth discovery sent - complete OAuth flow and reconnect"))
+                Err(XmppError::auth_failed(
+                    "OAuth discovery sent - complete OAuth flow and reconnect",
+                ))
             }
             SaslAuthResult::ScramSha256Challenge {
                 username,
@@ -540,16 +595,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // SCRAM-SHA-256: Look up credentials and continue
                 match self.app_state.lookup_scram_credentials(&username).await {
                     Ok(Some(creds)) => {
-                        self.stream.send_scram_challenge(&server_first_message_b64).await?;
-                        match self.stream.continue_scram_auth(
-                            scram_server,
-                            &creds.stored_key,
-                            &creds.server_key,
-                        ).await {
+                        self.stream
+                            .send_scram_challenge(&server_first_message_b64)
+                            .await?;
+                        match self
+                            .stream
+                            .continue_scram_auth(scram_server, &creds.stored_key, &creds.server_key)
+                            .await
+                        {
                             Ok(SaslAuthResult::ScramSha256Complete { username }) => {
-                                let jid: jid::BareJid = format!("{}@{}", username, self.domain)
-                                    .parse()
-                                    .map_err(|e| XmppError::auth_failed(format!("Invalid JID: {}", e)))?;
+                                let jid: jid::BareJid =
+                                    format!("{}@{}", username, self.domain).parse().map_err(
+                                        |e| XmppError::auth_failed(format!("Invalid JID: {}", e)),
+                                    )?;
                                 let session = Session {
                                     did: jid.to_string(),
                                     jid: jid.clone(),
@@ -636,9 +694,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 );
 
                 // Send success response
-                self.stream.send_registration_success(id).await.map_err(|e| {
-                    RegistrationError::InternalError(format!("Failed to send success: {}", e))
-                })?;
+                self.stream
+                    .send_registration_success(id)
+                    .await
+                    .map_err(|e| {
+                        RegistrationError::InternalError(format!("Failed to send success: {}", e))
+                    })?;
 
                 Ok(())
             }
@@ -646,7 +707,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Map XmppError to RegistrationError
                 if e.to_string().contains("already exists") || e.to_string().contains("conflict") {
                     Err(RegistrationError::Conflict)
-                } else if e.to_string().contains("not acceptable") || e.to_string().contains("invalid") {
+                } else if e.to_string().contains("not acceptable")
+                    || e.to_string().contains("invalid")
+                {
                     Err(RegistrationError::NotAcceptable(e.to_string()))
                 } else {
                     Err(RegistrationError::InternalError(e.to_string()))
@@ -664,16 +727,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         jid: &jid::BareJid,
     ) -> Result<(), XmppError> {
         // Create an ISR token for this session
-        let isr_token = self.isr_token_store.create_token(
-            session.did.clone(),
-            jid.clone(),
-        );
+        let isr_token = self
+            .isr_token_store
+            .create_token(session.did.clone(), jid.clone());
 
         // Store the token ID for this connection
         self.current_isr_token = Some(isr_token.token.clone());
 
         // Send success with ISR token
-        self.stream.send_sasl_success_with_isr(&isr_token.to_xml()).await?;
+        self.stream
+            .send_sasl_success_with_isr(&isr_token.to_xml())
+            .await?;
 
         debug!(
             did = %session.did,
@@ -758,7 +822,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 Ok(())
             }
             ParsedStanza::Message(element) => {
-                let msg = element.try_into()
+                let msg = element
+                    .try_into()
                     .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
                 // Increment inbound count for SM
                 if self.sm_state.enabled {
@@ -767,7 +832,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.handle_stanza(Stanza::Message(msg)).await
             }
             ParsedStanza::Presence(element) => {
-                let pres = element.try_into()
+                let pres = element
+                    .try_into()
                     .map_err(|e| XmppError::xml_parse(format!("Invalid presence: {:?}", e)))?;
                 // Increment inbound count for SM
                 if self.sm_state.enabled {
@@ -776,7 +842,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.handle_stanza(Stanza::Presence(pres)).await
             }
             ParsedStanza::Iq(element) => {
-                let iq = element.try_into()
+                let iq = element
+                    .try_into()
                     .map_err(|e| XmppError::xml_parse(format!("Invalid iq: {:?}", e)))?;
                 // Increment inbound count for SM
                 if self.sm_state.enabled {
@@ -785,25 +852,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.handle_stanza(Stanza::Iq(iq)).await
             }
             // XEP-0198 Stream Management stanzas
-            ParsedStanza::SmEnable { resume, max } => {
-                self.handle_sm_enable(resume, max).await
-            }
-            ParsedStanza::SmRequest => {
-                self.handle_sm_request().await
-            }
-            ParsedStanza::SmAck { h } => {
-                self.handle_sm_ack(h).await
-            }
-            ParsedStanza::SmResume { previd, h } => {
-                self.handle_sm_resume(&previd, h).await
-            }
+            ParsedStanza::SmEnable { resume, max } => self.handle_sm_enable(resume, max).await,
+            ParsedStanza::SmRequest => self.handle_sm_request().await,
+            ParsedStanza::SmAck { h } => self.handle_sm_ack(h).await,
+            ParsedStanza::SmResume { previd, h } => self.handle_sm_resume(&previd, h).await,
             // XEP-0352 Client State Indication stanzas
-            ParsedStanza::CsiActive => {
-                self.handle_csi_active().await
-            }
-            ParsedStanza::CsiInactive => {
-                self.handle_csi_inactive().await
-            }
+            ParsedStanza::CsiActive => self.handle_csi_active().await,
+            ParsedStanza::CsiInactive => self.handle_csi_inactive().await,
             _ => {
                 debug!("Ignoring unexpected parsed stanza type");
                 Ok(())
@@ -820,7 +875,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Enable SM with or without resumption
         // For now, we support resumption if requested, with a max timeout of 5 minutes
-        let max_seconds = if resume { Some(max.unwrap_or(300).min(300)) } else { None };
+        let max_seconds = if resume {
+            Some(max.unwrap_or(300).min(300))
+        } else {
+            None
+        };
 
         self.sm_state.enable(stream_id.clone(), resume, max_seconds);
 
@@ -851,7 +910,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Send enabled response
-        self.stream.send_sm_enabled(&stream_id, resume, max_seconds).await?;
+        self.stream
+            .send_sm_enabled(&stream_id, resume, max_seconds)
+            .await?;
 
         info!(
             stream_id = %stream_id,
@@ -881,7 +942,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return Ok(());
         }
 
-        debug!(h = h, previous = self.sm_state.last_acked, "Received SM ack from client");
+        debug!(
+            h = h,
+            previous = self.sm_state.last_acked,
+            "Received SM ack from client"
+        );
         self.sm_state.acknowledge(h);
         Ok(())
     }
@@ -941,10 +1006,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     isr_token.sm_outbound_count,
                 )
             } else {
-                self.isr_token_store.create_token(
-                    isr_token.did.clone(),
-                    isr_token.jid.clone(),
-                )
+                self.isr_token_store
+                    .create_token(isr_token.did.clone(), isr_token.jid.clone())
             };
 
             self.current_isr_token = Some(new_isr_token.token.clone());
@@ -979,7 +1042,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Restore session from detached state
                 self.jid = Some(session.jid.clone());
                 self.session = Some(Session {
-                    did: format!("did:sm:{}", session.jid.node().map(|n| n.to_string()).unwrap_or_default()),
+                    did: format!(
+                        "did:sm:{}",
+                        session
+                            .jid
+                            .node()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default()
+                    ),
                     jid: session.jid.to_bare().into(),
                     created_at: Utc::now(),
                     expires_at: Utc::now() + chrono::Duration::hours(24),
@@ -989,7 +1059,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.sm_state.restore_from_session(&session);
 
                 // Get stanzas that need to be resent (client's h tells us what they received)
-                let stanzas_to_resend: Vec<_> = session.unacked_stanzas
+                let stanzas_to_resend: Vec<_> = session
+                    .unacked_stanzas
                     .iter()
                     .filter(|(seq, _)| *seq > h)
                     .map(|(_, xml)| xml.clone())
@@ -998,15 +1069,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 // Send resumed response
                 self.stream
-                    .write_raw(&crate::stream_management::SmResumed::new(
-                        previd.to_string(),
-                        session.inbound_count,
-                    ).to_xml())
+                    .write_raw(
+                        &crate::stream_management::SmResumed::new(
+                            previd.to_string(),
+                            session.inbound_count,
+                        )
+                        .to_xml(),
+                    )
                     .await?;
 
                 // Resend unacked stanzas
                 for stanza_xml in stanzas_to_resend {
-                    debug!(stanza_len = stanza_xml.len(), "Resending unacked stanza after resume");
+                    debug!(
+                        stanza_len = stanza_xml.len(),
+                        "Resending unacked stanza after resume"
+                    );
                     self.stream.write_raw(&stanza_xml).await?;
                 }
 
@@ -1034,7 +1111,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // No session found via any method
-        self.stream.send_sm_failed(Some("item-not-found"), None).await?;
+        self.stream
+            .send_sm_failed(Some("item-not-found"), None)
+            .await?;
         warn!(previd = %previd, "SM resume rejected - session not found");
         Ok(())
     }
@@ -1085,12 +1164,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Route based on message type
         match msg.type_ {
-            MessageType::Groupchat => {
-                self.handle_groupchat_message(msg, sender_jid).await
-            }
-            MessageType::Chat => {
-                self.handle_chat_message(msg, sender_jid).await
-            }
+            MessageType::Groupchat => self.handle_groupchat_message(msg, sender_jid).await,
+            MessageType::Chat => self.handle_chat_message(msg, sender_jid).await,
             MessageType::Normal | MessageType::Headline | MessageType::Error => {
                 debug!(msg_type = ?msg.type_, "Received message of unsupported type");
                 Ok(())
@@ -1150,19 +1225,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let room = room_data.read().await;
 
         // Find the sender's nick in the room and verify permissions
-        let sender_occupant = room
-            .find_occupant_by_real_jid(&sender_jid)
-            .ok_or_else(|| {
-                debug!(
-                    sender = %sender_jid,
-                    room = %room_jid,
-                    "Sender is not an occupant of the room"
-                );
-                XmppError::forbidden(Some(format!(
-                    "You are not an occupant of {}",
-                    room_jid
-                )))
-            })?;
+        let sender_occupant = room.find_occupant_by_real_jid(&sender_jid).ok_or_else(|| {
+            debug!(
+                sender = %sender_jid,
+                room = %room_jid,
+                "Sender is not an occupant of the room"
+            );
+            XmppError::forbidden(Some(format!("You are not an occupant of {}", room_jid)))
+        })?;
 
         let sender_nick = sender_occupant.nick.clone();
 
@@ -1288,11 +1358,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         for mut outbound in messages {
                             // Add stanza-id if we archived successfully
                             if let Some(ref archive_id) = archive_id {
-                                add_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
+                                add_stanza_id(
+                                    &mut outbound.message,
+                                    archive_id,
+                                    &room_jid.to_string(),
+                                );
                             }
 
                             // Route via the stanza router which handles S2S
-                            match router.route_message(outbound.message.clone(), &sender_jid).await {
+                            match router
+                                .route_message(outbound.message.clone(), &sender_jid)
+                                .await
+                            {
                                 Ok(result) => {
                                     debug!(
                                         to = %outbound.to,
@@ -1380,7 +1457,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let recipient_bare = recipient_jid.to_bare();
 
         // Respect XEP-0191: silently drop messages to recipients who have blocked the sender
-        let is_blocked = self.app_state.is_blocked(&recipient_bare, &sender_bare).await?;
+        let is_blocked = self
+            .app_state
+            .is_blocked(&recipient_bare, &sender_bare)
+            .await?;
         if is_blocked {
             debug!(
                 sender = %sender_bare,
@@ -1394,7 +1474,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Route to all connected resources for the recipient
-        let recipient_resources = self.connection_registry.get_resources_for_user(&recipient_bare);
+        let recipient_resources = self
+            .connection_registry
+            .get_resources_for_user(&recipient_bare);
 
         let mut delivered = false;
 
@@ -1428,7 +1510,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             // Send "received" carbons to recipient's other clients
             if delivered && should_carbon {
-                self.send_received_carbons_to_user(&msg_with_from, &recipient_bare, &recipient_resources).await;
+                self.send_received_carbons_to_user(
+                    &msg_with_from,
+                    &recipient_bare,
+                    &recipient_resources,
+                )
+                .await;
             }
         }
 
@@ -1492,7 +1579,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let recipient_bare = recipient_jid.to_bare();
 
         // Respect XEP-0191: silently drop invites to recipients who have blocked the sender
-        let is_blocked = self.app_state.is_blocked(&recipient_bare, &sender_bare).await?;
+        let is_blocked = self
+            .app_state
+            .is_blocked(&recipient_bare, &sender_bare)
+            .await?;
         if is_blocked {
             debug!(
                 sender = %sender_bare,
@@ -1503,7 +1593,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Route to all connected resources for the recipient
-        let recipient_resources = self.connection_registry.get_resources_for_user(&recipient_bare);
+        let recipient_resources = self
+            .connection_registry
+            .get_resources_for_user(&recipient_bare);
 
         let mut delivered = false;
 
@@ -1639,10 +1731,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     creator = %join_req.sender_jid,
                     "Creating instant room on first join"
                 );
-                self.room_registry.create_instant_room(join_req.room_jid.clone())?;
-                self.room_registry.get_room_data(&join_req.room_jid).ok_or_else(|| {
-                    XmppError::internal("Failed to get room data after creation".to_string())
-                })?
+                self.room_registry
+                    .create_instant_room(join_req.room_jid.clone())?;
+                self.room_registry
+                    .get_room_data(&join_req.room_jid)
+                    .ok_or_else(|| {
+                        XmppError::internal("Failed to get room data after creation".to_string())
+                    })?
             }
         };
 
@@ -1666,10 +1761,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let is_members_only = room.config.members_only;
 
         // Resolve affiliation from Zanzibar permissions before checking join permissions
-        let resolver = AppStateAffiliationResolver::new(
-            Arc::clone(&self.app_state),
-            self.domain.clone(),
-        );
+        let resolver =
+            AppStateAffiliationResolver::new(Arc::clone(&self.app_state), self.domain.clone());
 
         let resolved_affiliation = match resolver
             .resolve_affiliation(&user_did, &waddle_id, &channel_id)
@@ -1750,7 +1843,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .collect();
 
         // Add the occupant to the room (uses affiliation from the updated list)
-        let new_occupant = room.add_occupant_with_affiliation(join_req.sender_jid.clone(), join_req.nick.clone(), Some(self.domain.as_str()));
+        let new_occupant = room.add_occupant_with_affiliation(
+            join_req.sender_jid.clone(),
+            join_req.nick.clone(),
+            Some(self.domain.as_str()),
+        );
         let new_occupant_affiliation = new_occupant.affiliation;
         let new_occupant_role = new_occupant.role;
 
@@ -1770,7 +1867,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         record_muc_occupant_count(occupant_count as i64, &join_req.room_jid.to_string());
 
         // Send existing occupants' presence to the joining user
-        for (existing_jid, existing_nick, existing_affiliation, existing_role) in &existing_occupants {
+        for (existing_jid, existing_nick, existing_affiliation, existing_role) in
+            &existing_occupants
+        {
             let existing_room_jid = join_req
                 .room_jid
                 .clone()
@@ -1782,11 +1881,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 &join_req.sender_jid,
                 *existing_affiliation,
                 *existing_role,
-                false, // not self
+                false,              // not self
                 Some(existing_jid), // real JID for semi-anonymous rooms
             );
 
-            self.stream.write_stanza(&Stanza::Presence(presence)).await?;
+            self.stream
+                .write_stanza(&Stanza::Presence(presence))
+                .await?;
         }
 
         // Send room history to the joining user (XEP-0045 §7.2.15)
@@ -1818,7 +1919,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Some(&join_req.sender_jid),
         );
 
-        self.stream.write_stanza(&Stanza::Presence(self_presence)).await?;
+        self.stream
+            .write_stanza(&Stanza::Presence(self_presence))
+            .await?;
 
         info!(
             room = %join_req.room_jid,
@@ -1836,7 +1939,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// groupchat messages with delay timestamps.
     async fn send_muc_history(&mut self, join_req: &MucJoinRequest) {
         // Get history parameters from the join request, or use defaults
-        let history = join_req.history.as_ref()
+        let history = join_req
+            .history
+            .as_ref()
             .cloned()
             .unwrap_or_else(crate::muc::HistoryRequest::default_request);
 
@@ -1862,7 +1967,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Query MAM storage
         let room_jid_str = join_req.room_jid.to_string();
-        match self.mam_storage.query_messages(&room_jid_str, &mam_query).await {
+        match self
+            .mam_storage
+            .query_messages(&room_jid_str, &mam_query)
+            .await
+        {
             Ok(result) => {
                 debug!(
                     room = %join_req.room_jid,
@@ -1872,7 +1981,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 for archived_msg in result.messages {
                     // Build a history message with delay stamp
-                    if let Err(e) = self.send_history_message(&join_req.room_jid, &join_req.sender_jid, &archived_msg).await {
+                    if let Err(e) = self
+                        .send_history_message(
+                            &join_req.room_jid,
+                            &join_req.sender_jid,
+                            &archived_msg,
+                        )
+                        .await
+                    {
                         warn!(
                             room = %join_req.room_jid,
                             error = %e,
@@ -1898,16 +2014,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         to_jid: &FullJid,
         archived: &crate::mam::ArchivedMessage,
     ) -> Result<(), XmppError> {
-        use xmpp_parsers::message::{Message, MessageType as MsgType, Body};
-        use minidom::Element;
         use jid::Jid;
+        use minidom::Element;
+        use xmpp_parsers::message::{Body, Message, MessageType as MsgType};
 
         // Delay namespace (XEP-0203)
         const DELAY_NS: &str = "urn:xmpp:delay";
 
         // Build the from JID (room@domain/sender_nick)
         // The 'from' in archived message is typically the full room JID with nick
-        let from_jid: Jid = archived.from.parse()
+        let from_jid: Jid = archived
+            .from
+            .parse()
             .unwrap_or_else(|_| Jid::from(room_jid.clone()));
 
         // Create the history message
@@ -1915,7 +2033,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         message.type_ = MsgType::Groupchat;
         message.from = Some(from_jid);
         message.id = Some(archived.id.clone());
-        message.bodies.insert(String::new(), Body(archived.body.clone()));
+        message
+            .bodies
+            .insert(String::new(), Body(archived.body.clone()));
 
         // Add delay element per XEP-0203
         let delay = Element::builder("delay", DELAY_NS)
@@ -1941,9 +2061,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         // Get the room data
-        let room_data = self.room_registry.get_room_data(&leave_req.room_jid).ok_or_else(|| {
-            XmppError::item_not_found(Some(format!("Room {} not found", leave_req.room_jid)))
-        })?;
+        let room_data = self
+            .room_registry
+            .get_room_data(&leave_req.room_jid)
+            .ok_or_else(|| {
+                XmppError::item_not_found(Some(format!("Room {} not found", leave_req.room_jid)))
+            })?;
 
         // Lock the room for modification
         let mut room = room_data.write().await;
@@ -1962,9 +2085,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         };
 
         // Get the occupant's info before removal
-        let occupant = room.get_occupant(&nick).ok_or_else(|| {
-            XmppError::internal("Occupant disappeared during leave".to_string())
-        })?;
+        let occupant = room
+            .get_occupant(&nick)
+            .ok_or_else(|| XmppError::internal("Occupant disappeared during leave".to_string()))?;
         let affiliation = occupant.affiliation;
 
         // Build the leaving user's room JID
@@ -2013,7 +2136,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             true, // is_self - includes status code 110
         );
 
-        self.stream.write_stanza(&Stanza::Presence(self_presence)).await?;
+        self.stream
+            .write_stanza(&Stanza::Presence(self_presence))
+            .await?;
 
         info!(
             room = %leave_req.room_jid,
@@ -2038,18 +2163,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         request: PresenceSubscriptionRequest,
     ) -> Result<(), XmppError> {
         match request.subscription_type {
-            SubscriptionType::Subscribe => {
-                self.handle_outbound_subscribe(request).await
-            }
-            SubscriptionType::Subscribed => {
-                self.handle_outbound_subscribed(request).await
-            }
-            SubscriptionType::Unsubscribe => {
-                self.handle_outbound_unsubscribe(request).await
-            }
-            SubscriptionType::Unsubscribed => {
-                self.handle_outbound_unsubscribed(request).await
-            }
+            SubscriptionType::Subscribe => self.handle_outbound_subscribe(request).await,
+            SubscriptionType::Subscribed => self.handle_outbound_subscribed(request).await,
+            SubscriptionType::Unsubscribe => self.handle_outbound_unsubscribe(request).await,
+            SubscriptionType::Unsubscribed => self.handle_outbound_unsubscribed(request).await,
         }
     }
 
@@ -2250,10 +2367,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
 
         // Send unavailable presence to the contact (they can no longer see us)
-        let unavailable_pres = build_unavailable_presence(
-            &user_jid,
-            &contact_jid,
-        );
+        let unavailable_pres = build_unavailable_presence(&user_jid, &contact_jid);
         let stanza = Stanza::Presence(unavailable_pres);
         self.route_stanza_to_bare_jid(&contact_jid, stanza).await?;
 
@@ -2348,20 +2462,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing presence broadcast"
         );
 
-        // For now, we don't have roster storage integration, so we can't
-        // determine which contacts should receive this presence.
-        // This is a stub that logs the presence but doesn't broadcast.
-        //
-        // TODO: When roster storage is integrated:
-        // 1. Get user's roster
-        // 2. For each contact with subscription=from or subscription=both
-        // 3. Send presence to that contact
+        // XEP-0153: Append vCard avatar hash to presence stanza
+        // Build a modified presence with the vCard update element
+        let mut pres_clone = pres.clone();
+        let vcard_update = crate::xep::xep0153::build_vcard_update_element(
+            self.avatar_hash.as_deref(),
+        );
+        pres_clone.payloads.push(vcard_update);
 
         // Log initial presence for now
         if matches!(pres.type_, xmpp_parsers::presence::Type::None) {
             // Available presence (no type = available)
             info!(
                 sender = %sender_bare,
+                avatar_hash = ?self.avatar_hash,
                 "User sent initial available presence"
             );
         } else if matches!(pres.type_, xmpp_parsers::presence::Type::Unavailable) {
@@ -2397,7 +2511,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Send to all connected resources
         for resource_jid in resources {
-            let _ = self.connection_registry.send_to(&resource_jid, stanza.clone()).await;
+            let _ = self
+                .connection_registry
+                .send_to(&resource_jid, stanza.clone())
+                .await;
         }
 
         Ok(())
@@ -2467,14 +2584,33 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Check if this is an HTTP File Upload slot request (XEP-0363)
+        // Route upload IQs addressed to upload.{domain} to the upload handler
         if is_upload_request(&iq) {
             return self.handle_upload_slot_request(iq).await;
+        }
+
+        // Route PubSub IQs addressed to pubsub.{domain} to the pubsub handler
+        {
+            let pubsub_domain = format!("pubsub.{}", self.domain);
+            if is_pubsub_iq(&iq)
+                && iq
+                    .to
+                    .as_ref()
+                    .map(|j| j.to_bare().to_string() == pubsub_domain)
+                    .unwrap_or(false)
+            {
+                return self.handle_pubsub_iq(iq).await;
+            }
         }
 
         // Check if this is a MUC owner IQ (XEP-0045 §10.1-10.2, room config/destroy)
         let muc_domain = self.room_registry.muc_domain();
         if (is_muc_owner_get(&iq) || is_muc_owner_set(&iq))
-            && iq.to.as_ref().map(|j| j.to_bare().domain().as_str() == muc_domain).unwrap_or(false)
+            && iq
+                .to
+                .as_ref()
+                .map(|j| j.to_bare().domain().as_str() == muc_domain)
+                .unwrap_or(false)
         {
             return self.handle_muc_owner_iq(iq).await;
         }
@@ -2482,6 +2618,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a MUC admin IQ (XEP-0045 §10, affiliation/role changes)
         if is_muc_admin_iq(&iq, muc_domain) {
             return self.handle_muc_admin_iq(iq).await;
+        }
+
+        // Check if this is a private XML storage query (XEP-0049)
+        if is_private_storage_query(&iq) {
+            return self.handle_private_storage(iq).await;
         }
 
         // Check if this is a blocking query (XEP-0191)
@@ -2494,8 +2635,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_pubsub_iq(iq).await;
         }
 
-        // Unhandled IQ - log and continue
-        debug!("Received unhandled IQ stanza");
+        // Unhandled IQ get/set - RFC 6120 §8.2.3 requires an error response
+        debug!("Received unhandled IQ stanza, returning service-unavailable");
+        let error = crate::generate_iq_error(
+            &iq.id,
+            iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+            Some(&self.domain),
+            crate::StanzaErrorCondition::ServiceUnavailable,
+            crate::StanzaErrorType::Cancel,
+            None,
+        );
+        self.stream.write_raw(&error).await?;
         Ok(())
     }
 
@@ -2505,11 +2655,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// - Server domain: Server identity + server features
     /// - MUC domain: Conference service identity + MUC features
     /// - MUC room: Conference room identity + room features
+    /// - Upload domain: Upload service identity + upload features
+    /// - PubSub domain: PubSub service identity + PubSub features
+    /// - Bare JID: PEP identity + PEP features
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
     async fn handle_disco_info_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let query = parse_disco_info_query(&iq)?;
 
         let muc_domain = self.room_registry.muc_domain();
+        let upload_domain = format!("upload.{}", self.domain);
+        let pubsub_domain = format!("pubsub.{}", self.domain);
 
         // Determine what entity is being queried
         let (identities, features) = match query.target.as_deref() {
@@ -2527,6 +2682,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 (
                     vec![Identity::muc_service(Some("Multi-User Chat"))],
                     muc_service_features(),
+                )
+            }
+            // Query to upload service domain (XEP-0363)
+            Some(target) if target == upload_domain => {
+                debug!(domain = %upload_domain, "disco#info query to upload domain");
+                (
+                    vec![Identity::upload_service(Some("HTTP File Upload"))],
+                    upload_service_features(),
+                )
+            }
+            // Query to pubsub service domain (XEP-0060)
+            Some(target) if target == pubsub_domain => {
+                debug!(domain = %pubsub_domain, "disco#info query to pubsub domain");
+                (
+                    vec![Identity::pubsub_service(Some("Publish-Subscribe"))],
+                    pubsub_service_features(),
                 )
             }
             // Query to MUC room
@@ -2554,6 +2725,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     ))));
                 }
             }
+            // Query to a bare JID (user@domain) - PEP service (XEP-0163)
+            Some(target)
+                if target.contains('@')
+                    && !target.contains('/')
+                    && target.ends_with(&format!("@{}", self.domain)) =>
+            {
+                debug!(target = %target, "disco#info query to bare JID (PEP)");
+                (
+                    vec![crate::pubsub::pep::build_pep_identity()],
+                    crate::pubsub::pep::pep_features(),
+                )
+            }
             // No target or unknown target - default to server
             None | Some(_) => {
                 debug!(target = ?query.target, "disco#info query (defaulting to server)");
@@ -2564,7 +2747,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        let response = build_disco_info_response(&iq, &identities, &features, query.node.as_deref());
+        let response =
+            build_disco_info_response(&iq, &identities, &features, query.node.as_deref());
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
         debug!("Sent disco#info response");
@@ -2574,20 +2758,31 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a disco#items query.
     ///
     /// Returns available items/services:
-    /// - Server domain: Returns MUC service component
+    /// - Server domain: Returns MUC, upload, and PubSub service components
     /// - MUC domain: Returns list of available rooms
+    /// - PubSub domain: Returns list of nodes
+    /// - Bare JID: Returns PEP node list
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_disco_items_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+    async fn handle_disco_items_query(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
         let query = parse_disco_items_query(&iq)?;
 
         let muc_domain = self.room_registry.muc_domain();
+        let upload_domain = format!("upload.{}", self.domain);
+        let pubsub_domain = format!("pubsub.{}", self.domain);
 
         // Determine what entity is being queried
         let items = match query.target.as_deref() {
-            // Query to server domain - return MUC service
+            // Query to server domain - return all service components
             Some(target) if target == self.domain => {
                 debug!(domain = %self.domain, "disco#items query to server domain");
-                vec![DiscoItem::muc_service(muc_domain, Some("Multi-User Chat"))]
+                vec![
+                    DiscoItem::muc_service(muc_domain, Some("Multi-User Chat")),
+                    DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
+                    DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
+                ]
             }
             // Query to MUC domain - return room list
             Some(target) if target == muc_domain => {
@@ -2598,15 +2793,52 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .map(|info| DiscoItem::muc_room(&info.room_jid.to_string(), &info.name))
                     .collect()
             }
+            // Query to upload domain - no sub-items
+            Some(target) if target == upload_domain => {
+                debug!(domain = %upload_domain, "disco#items query to upload domain");
+                vec![]
+            }
+            // Query to pubsub domain - return node list
+            Some(target) if target == pubsub_domain => {
+                debug!(domain = %pubsub_domain, "disco#items query to pubsub domain");
+                // List all nodes across all users from shared storage
+                // For now, return empty - a full implementation would list all public nodes
+                vec![]
+            }
             // Query to MUC room - return empty list (no sub-items)
             Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
                 debug!(room = %target, "disco#items query to MUC room");
                 vec![] // Rooms don't have sub-items
             }
+            // Query to a bare JID (user@domain) - PEP node list (XEP-0163)
+            Some(target)
+                if target.contains('@')
+                    && !target.contains('/')
+                    && target.ends_with(&format!("@{}", self.domain)) =>
+            {
+                debug!(target = %target, "disco#items query to bare JID (PEP nodes)");
+                if let Ok(target_jid) = target.parse::<jid::BareJid>() {
+                    let nodes = self
+                        .pubsub_storage
+                        .list_nodes(&target_jid)
+                        .await
+                        .unwrap_or_default();
+                    nodes
+                        .iter()
+                        .map(|node| DiscoItem::pubsub_node(target, node))
+                        .collect()
+                } else {
+                    vec![]
+                }
+            }
             // No target or unknown target - default to server services
             None | Some(_) => {
                 debug!(target = ?query.target, "disco#items query (defaulting to server)");
-                vec![DiscoItem::muc_service(muc_domain, Some("Multi-User Chat"))]
+                vec![
+                    DiscoItem::muc_service(muc_domain, Some("Multi-User Chat")),
+                    DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
+                    DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
+                ]
             }
         };
 
@@ -2676,7 +2908,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         // Build and send result messages for each archived message
-        let result_messages = build_result_messages(&query_id, &sender_jid.to_string(), &result.messages);
+        let result_messages =
+            build_result_messages(&query_id, &sender_jid.to_string(), &result.messages);
 
         for msg in result_messages {
             self.stream.write_stanza(&Stanza::Message(msg)).await?;
@@ -2867,13 +3100,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         match request {
             PubSubRequest::Publish { node, item } => {
                 // PEP auto-create: publish with auto_create=true
-                let result = self.pubsub_storage.publish_item(
-                    &target_jid,
-                    &node,
-                    &item,
-                    Some(&user_jid),
-                    true, // auto-create for PEP
-                ).await;
+                let result = self
+                    .pubsub_storage
+                    .publish_item(
+                        &target_jid,
+                        &node,
+                        &item,
+                        Some(&user_jid),
+                        true, // auto-create for PEP
+                    )
+                    .await;
 
                 match result {
                     Ok(publish_result) => {
@@ -2885,12 +3121,81 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         );
 
                         // Send success response
-                        let response = build_pubsub_publish_result(&iq, &node, &publish_result.item_id);
+                        let response =
+                            build_pubsub_publish_result(&iq, &node, &publish_result.item_id);
                         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
                         // Send event notifications to subscribers (presence-based for PEP)
                         // For now, we don't implement subscription notifications
                         // A full implementation would broadcast to roster contacts
+
+                        // XEP-0398: Convert PEP avatar to vCard PHOTO (if avatar metadata published)
+                        if crate::xep::xep0084::is_avatar_metadata_node(&node)
+                            && !self.converting_avatar
+                        {
+                            self.converting_avatar = true;
+                            // Get the avatar data from PEP to convert to vCard
+                            if let Ok(data_items) = self
+                                .pubsub_storage
+                                .get_items(
+                                    &target_jid,
+                                    crate::xep::xep0084::NODE_AVATAR_DATA,
+                                    Some(1),
+                                    std::slice::from_ref(&publish_result.item_id),
+                                )
+                                .await
+                            {
+                                if let Some(data_item) = data_items.first() {
+                                    if let Some(ref payload_xml) = data_item.payload_xml {
+                                        if let Ok(data_elem) =
+                                            payload_xml.parse::<minidom::Element>()
+                                        {
+                                            if let Some(avatar_data_b64) =
+                                                crate::xep::xep0084::parse_avatar_data(&data_elem)
+                                            {
+                                                // Parse the metadata we just published
+                                                if let Some(ref payload) = item.payload {
+                                                    if let Some(avatar_info) =
+                                                        crate::xep::xep0084::parse_avatar_metadata(
+                                                            payload,
+                                                        )
+                                                    {
+                                                        let converter = crate::xep::xep0398::DefaultAvatarConversion;
+                                                        if let Some((photo_b64, mime_type)) =
+                                                            converter.on_pep_avatar_published(
+                                                                &avatar_data_b64,
+                                                                &avatar_info,
+                                                            )
+                                                        {
+                                                            // Update vCard with the photo
+                                                            let vcard = crate::xep::xep0054::VCard {
+                                                                photo: Some(
+                                                                    crate::xep::xep0054::VCardPhoto {
+                                                                        mime_type,
+                                                                        data: photo_b64.clone(),
+                                                                    },
+                                                                ),
+                                                                ..Default::default()
+                                                            };
+                                                            let vcard_elem = crate::xep::xep0054::build_vcard_element(&vcard);
+                                                            let vcard_xml = String::from(&vcard_elem);
+                                                            let _ = self
+                                                                .app_state
+                                                                .set_vcard(&user_jid, &vcard_xml)
+                                                                .await;
+
+                                                            // Update avatar hash
+                                                            self.avatar_hash = crate::xep::xep0153::compute_photo_hash_from_base64(&photo_b64);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            self.converting_avatar = false;
+                        }
                     }
                     Err(e) => {
                         warn!("PubSub publish failed: {}", e);
@@ -2900,21 +3205,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
 
-            PubSubRequest::Items { node, max_items, item_ids } => {
+            PubSubRequest::Items {
+                node,
+                max_items,
+                item_ids,
+            } => {
                 // Retrieve items from a node
-                let result = self.pubsub_storage.get_items(
-                    &target_jid,
-                    &node,
-                    max_items,
-                    &item_ids,
-                ).await;
+                let result = self
+                    .pubsub_storage
+                    .get_items(&target_jid, &node, max_items, &item_ids)
+                    .await;
 
                 match result {
                     Ok(stored_items) => {
-                        let items: Vec<PubSubItem> = stored_items
-                            .iter()
-                            .map(|si| si.to_pubsub_item())
-                            .collect();
+                        let items: Vec<PubSubItem> =
+                            stored_items.iter().map(|si| si.to_pubsub_item()).collect();
 
                         debug!(
                             node = %node,
@@ -2933,7 +3238,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
 
-            PubSubRequest::Retract { node, item_id, notify: _ } => {
+            PubSubRequest::Retract {
+                node,
+                item_id,
+                notify: _,
+            } => {
                 // Only allow retracting from own nodes
                 if target_jid != user_jid {
                     let error = build_pubsub_error(&iq, PubSubError::Forbidden);
@@ -2941,7 +3250,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     return Ok(());
                 }
 
-                let result = self.pubsub_storage.retract_item(&target_jid, &node, &item_id).await;
+                let result = self
+                    .pubsub_storage
+                    .retract_item(&target_jid, &node, &item_id)
+                    .await;
 
                 match result {
                     Ok(retracted) => {
@@ -2971,7 +3283,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
 
                 // For PEP, nodes are auto-created, but explicit create is also supported
-                let result = self.pubsub_storage.get_or_create_node(&target_jid, &node).await;
+                let result = self
+                    .pubsub_storage
+                    .get_or_create_node(&target_jid, &node)
+                    .await;
 
                 match result {
                     Ok((_, created)) => {
@@ -3098,9 +3413,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         match stanza {
             // Use the centralized presence classification
-            Stanza::Presence(pres) => {
-                classify_presence_urgency(pres).can_buffer()
-            }
+            Stanza::Presence(pres) => classify_presence_urgency(pres).can_buffer(),
             // Messages need more careful consideration
             Stanza::Message(msg) => {
                 // First check basic message urgency
@@ -3212,7 +3525,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// </iq>
     /// ```
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_isr_token_request(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+    async fn handle_isr_token_request(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
         debug!("Received ISR token refresh request");
 
         // Require an established session
@@ -3258,7 +3574,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.sm_state.outbound_count,
             )
         } else {
-            self.isr_token_store.create_token(session.did.clone(), jid.clone())
+            self.isr_token_store
+                .create_token(session.did.clone(), jid.clone())
         };
 
         // Store the new token ID
@@ -3306,14 +3623,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in other_resources {
-            let carbon = build_sent_carbon(
-                msg,
-                &bare_jid.to_string(),
-                &resource_jid.to_string(),
-            );
+            let carbon = build_sent_carbon(msg, &bare_jid.to_string(), &resource_jid.to_string());
 
             let stanza = Stanza::Message(carbon);
-            let _ = self.connection_registry.send_to(&resource_jid, stanza).await;
+            let _ = self
+                .connection_registry
+                .send_to(&resource_jid, stanza)
+                .await;
         }
     }
 
@@ -3346,14 +3662,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in other_resources {
-            let carbon = build_received_carbon(
-                msg,
-                &bare_jid.to_string(),
-                &resource_jid.to_string(),
-            );
+            let carbon =
+                build_received_carbon(msg, &bare_jid.to_string(), &resource_jid.to_string());
 
             let stanza = Stanza::Message(carbon);
-            let _ = self.connection_registry.send_to(&resource_jid, stanza).await;
+            let _ = self
+                .connection_registry
+                .send_to(&resource_jid, stanza)
+                .await;
         }
     }
 
@@ -3371,7 +3687,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         delivered_resources: &[FullJid],
     ) {
         // Get all resources for the recipient user
-        let all_resources = self.connection_registry.get_resources_for_user(recipient_bare);
+        let all_resources = self
+            .connection_registry
+            .get_resources_for_user(recipient_bare);
 
         // Filter to resources that didn't receive the original (other devices)
         // In practice, if the message was routed to all resources, we might not need carbons
@@ -3406,11 +3724,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in other_resources {
-            let carbon = build_received_carbon(
-                msg,
-                &recipient_bare.to_string(),
-                &resource_jid.to_string(),
-            );
+            let carbon =
+                build_received_carbon(msg, &recipient_bare.to_string(), &resource_jid.to_string());
 
             let stanza = Stanza::Message(carbon);
             let _ = self.connection_registry.send_to(resource_jid, stanza).await;
@@ -3537,9 +3852,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let bare_jid = sender_jid.to_bare();
 
         // Get all connected resources for this user (including self)
-        let resources = self
-            .connection_registry
-            .get_resources_for_user(&bare_jid);
+        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
 
         if resources.is_empty() {
             return;
@@ -3563,7 +3876,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             );
 
             let stanza = Stanza::Iq(push);
-            let result = self.connection_registry.send_to(&resource_jid, stanza).await;
+            let result = self
+                .connection_registry
+                .send_to(&resource_jid, stanza)
+                .await;
 
             match result {
                 SendResult::Sent => {
@@ -3616,8 +3932,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Parse the stored XML to build the response
                 match xml.parse::<minidom::Element>() {
                     Ok(elem) => {
-                        let vcard = crate::xep::xep0054::parse_vcard_element(&elem)
-                            .unwrap_or_default();
+                        let vcard =
+                            crate::xep::xep0054::parse_vcard_element(&elem).unwrap_or_default();
                         build_vcard_response(&iq, &vcard)
                     }
                     Err(_) => {
@@ -3673,9 +3989,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         debug!(jid = %sender_jid, "Processing vCard set request");
 
         // Parse the vCard from the IQ
-        let vcard = parse_vcard_from_iq(&iq).map_err(|e| {
-            XmppError::bad_request(Some(format!("Invalid vCard: {}", e)))
-        })?;
+        let vcard = parse_vcard_from_iq(&iq)
+            .map_err(|e| XmppError::bad_request(Some(format!("Invalid vCard: {}", e))))?;
 
         // Build the vCard XML for storage
         let vcard_elem = crate::xep::xep0054::build_vcard_element(&vcard);
@@ -3685,6 +4000,59 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.app_state
             .set_vcard(&sender_jid.to_bare(), &vcard_xml)
             .await?;
+
+        // XEP-0153: Compute avatar hash from vCard PHOTO if present
+        if let Some(ref photo) = vcard.photo {
+            let hash = crate::xep::xep0153::compute_photo_hash_from_base64(&photo.data);
+            self.avatar_hash = hash;
+
+            // XEP-0398: Convert vCard PHOTO to PEP avatar (if not already converting)
+            if !self.converting_avatar {
+                self.converting_avatar = true;
+                let converter = crate::xep::xep0398::DefaultAvatarConversion;
+                if let Some((avatar_info, avatar_data_b64)) =
+                    converter.on_vcard_photo_updated(&photo.data, &photo.mime_type)
+                {
+                    // Publish avatar data to PEP
+                    let data_elem = crate::xep::xep0084::build_avatar_data(&avatar_data_b64);
+                    let data_item = PubSubItem::new(
+                        Some(avatar_info.id.clone()),
+                        Some(data_elem),
+                    );
+                    let _ = self
+                        .pubsub_storage
+                        .publish_item(
+                            &sender_jid.to_bare(),
+                            crate::xep::xep0084::NODE_AVATAR_DATA,
+                            &data_item,
+                            Some(&sender_jid.to_bare()),
+                            true,
+                        )
+                        .await;
+
+                    // Publish avatar metadata to PEP
+                    let metadata_elem = crate::xep::xep0084::build_avatar_metadata(&avatar_info);
+                    let metadata_item = PubSubItem::new(
+                        Some(avatar_info.id.clone()),
+                        Some(metadata_elem),
+                    );
+                    let _ = self
+                        .pubsub_storage
+                        .publish_item(
+                            &sender_jid.to_bare(),
+                            crate::xep::xep0084::NODE_AVATAR_METADATA,
+                            &metadata_item,
+                            Some(&sender_jid.to_bare()),
+                            true,
+                        )
+                        .await;
+                }
+                self.converting_avatar = false;
+            }
+        } else {
+            // No photo in vCard, clear the hash
+            self.avatar_hash = None;
+        }
 
         // Send success response
         let response = build_vcard_success(&iq);
@@ -3704,7 +4072,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Processes upload slot requests from authenticated users. Validates the
     /// request, checks file size limits, and returns PUT/GET URLs for the file.
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_upload_slot_request(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+    async fn handle_upload_slot_request(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
         let sender_jid = match &self.jid {
             Some(jid) => jid.clone(),
             None => {
@@ -3740,10 +4111,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check file size limits
         let max_size = self.app_state.max_upload_size();
         if request.size > max_size {
-            let error_response = build_upload_error(
-                &iq.id,
-                &UploadError::FileTooLarge { max_size },
-            );
+            let error_response =
+                build_upload_error(&iq.id, &UploadError::FileTooLarge { max_size });
             self.stream.write_raw(&error_response).await?;
             return Ok(());
         }
@@ -3762,10 +4131,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Ok(info) => info,
             Err(e) => {
                 warn!(error = %e, "Failed to create upload slot");
-                let error_response = build_upload_error(
-                    &iq.id,
-                    &UploadError::InternalError(e.to_string()),
-                );
+                let error_response =
+                    build_upload_error(&iq.id, &UploadError::InternalError(e.to_string()));
                 self.stream.write_raw(&error_response).await?;
                 return Ok(());
             }
@@ -3866,7 +4233,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             if requested_role.is_some() {
                 // Role query - moderators and above can query
-                if sender_role < Role::Moderator && !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin) {
+                if sender_role < Role::Moderator
+                    && !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
+                {
                     let error = crate::generate_iq_error(
                         &iq.id,
                         iq.to.as_ref().map(|j| j.to_string()).as_deref(),
@@ -3881,18 +4250,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 // Build role list response
                 let role = requested_role.unwrap();
-                let items: Vec<(String, Role, Option<jid::BareJid>)> = room.occupants
+                let items: Vec<(String, Role, Option<jid::BareJid>)> = room
+                    .occupants
                     .values()
                     .filter(|o| o.role == role)
                     .map(|o| (o.nick.clone(), o.role, Some(o.real_jid.to_bare())))
                     .collect();
 
-                let response = build_role_result(
-                    &query.iq_id,
-                    &query.room_jid,
-                    &query.from,
-                    &items,
-                );
+                let response =
+                    build_role_result(&query.iq_id, &query.room_jid, &query.from, &items);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
                 debug!(
@@ -3917,26 +4283,23 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
 
                 // Get the requested affiliation from the first item (per XEP-0045)
-                let requested_affiliation = query.items.first()
-                    .and_then(|item| item.affiliation);
+                let requested_affiliation = query.items.first().and_then(|item| item.affiliation);
 
                 let items: Vec<(jid::BareJid, Affiliation)> = match requested_affiliation {
-                    Some(aff) => room.get_jids_by_affiliation(aff)
+                    Some(aff) => room
+                        .get_jids_by_affiliation(aff)
                         .into_iter()
                         .map(|jid| (jid, aff))
                         .collect(),
-                    None => room.get_all_affiliations()
+                    None => room
+                        .get_all_affiliations()
                         .into_iter()
                         .map(|entry| (entry.jid, entry.affiliation))
                         .collect(),
                 };
 
-                let response = build_admin_result(
-                    &query.iq_id,
-                    &query.room_jid,
-                    &query.from,
-                    &items,
-                );
+                let response =
+                    build_admin_result(&query.iq_id, &query.room_jid, &query.from, &items);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
                 debug!(
@@ -3958,7 +4321,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
 
             // Collect presence updates to broadcast after processing
-            let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> = Vec::new();
+            let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> =
+                Vec::new();
             // Collect occupants to remove (for kicks and bans)
             let mut occupants_to_kick: Vec<String> = Vec::new();
 
@@ -3997,13 +4361,26 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     // - Moderators can change roles of participants and visitors
                     // - Admins can change roles of any non-owner
                     // - Owners can change roles of anyone
-                    let can_modify = match (sender_affiliation, sender_role, target_occupant.affiliation, new_role) {
+                    let can_modify = match (
+                        sender_affiliation,
+                        sender_role,
+                        target_occupant.affiliation,
+                        new_role,
+                    ) {
                         // Owners can do anything
                         (Affiliation::Owner, _, _, _) => true,
                         // Admins can modify non-owners
-                        (Affiliation::Admin, _, target_aff, _) if target_aff != Affiliation::Owner => true,
+                        (Affiliation::Admin, _, target_aff, _)
+                            if target_aff != Affiliation::Owner =>
+                        {
+                            true
+                        }
                         // Moderators can modify participants and visitors
-                        (_, Role::Moderator, target_aff, _) if !matches!(target_aff, Affiliation::Owner | Affiliation::Admin) => true,
+                        (_, Role::Moderator, target_aff, _)
+                            if !matches!(target_aff, Affiliation::Owner | Affiliation::Admin) =>
+                        {
+                            true
+                        }
                         _ => false,
                     };
 
@@ -4101,7 +4478,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     // - Owners and admins can ban (outcast) users
                     let can_modify = match new_affiliation {
                         Affiliation::Owner => sender_affiliation == Affiliation::Owner,
-                        Affiliation::Admin | Affiliation::Member | Affiliation::None | Affiliation::Outcast => {
+                        Affiliation::Admin
+                        | Affiliation::Member
+                        | Affiliation::None
+                        | Affiliation::Outcast => {
                             matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
                         }
                     };
@@ -4155,15 +4535,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         );
 
                         // Find occupant with this JID if they are in the room
-                        let affected_occupant = room.occupants.values()
+                        let affected_occupant = room
+                            .occupants
+                            .values()
                             .find(|o| o.real_jid.to_bare() == target_jid)
                             .cloned();
 
                         if let Some(occupant) = affected_occupant {
-                            let from_room_jid = match query.room_jid.with_resource_str(&occupant.nick) {
-                                Ok(jid) => jid,
-                                Err(_) => continue,
-                            };
+                            let from_room_jid =
+                                match query.room_jid.with_resource_str(&occupant.nick) {
+                                    Ok(jid) => jid,
+                                    Err(_) => continue,
+                                };
 
                             if new_affiliation == Affiliation::Outcast {
                                 // Ban - kick the user and send ban presence
@@ -4219,7 +4602,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             // Send all presence updates
             for (to_jid, presence) in presence_updates {
-                match self.connection_registry.send_to(&to_jid, Stanza::Presence(presence)).await {
+                match self
+                    .connection_registry
+                    .send_to(&to_jid, Stanza::Presence(presence))
+                    .await
+                {
                     SendResult::Sent => {
                         debug!(to = %to_jid, "Sent admin presence update");
                     }
@@ -4230,11 +4617,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
 
             // Send success response
-            let response = build_admin_set_result(
-                &query.iq_id,
-                &query.room_jid,
-                &query.from,
-            );
+            let response = build_admin_set_result(&query.iq_id, &query.room_jid, &query.from);
             self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
             debug!(
@@ -4328,12 +4711,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Return room configuration form
                 let room = room_data.read().await;
                 let config_form = build_config_form(&room);
-                let response = build_config_result(
-                    &query.iq_id,
-                    &query.room_jid,
-                    &query.from,
-                    config_form,
-                );
+                let response =
+                    build_config_result(&query.iq_id, &query.room_jid, &query.from, config_form);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
                 debug!(
@@ -4358,11 +4737,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
 
                 // Send success response
-                let response = build_owner_set_result(
-                    &query.iq_id,
-                    &query.room_jid,
-                    &query.from,
-                );
+                let response = build_owner_set_result(&query.iq_id, &query.room_jid, &query.from);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
                 debug!(
@@ -4373,7 +4748,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             OwnerAction::Destroy(destroy_request) => {
                 // Destroy the room
-                let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> = Vec::new();
+                let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> =
+                    Vec::new();
 
                 {
                     let room = room_data.read().await;
@@ -4402,7 +4778,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 // Send destroy notifications to all occupants
                 for (to_jid, presence) in presence_updates {
-                    match self.connection_registry.send_to(&to_jid, Stanza::Presence(presence)).await {
+                    match self
+                        .connection_registry
+                        .send_to(&to_jid, Stanza::Presence(presence))
+                        .await
+                    {
                         SendResult::Sent => {
                             debug!(to = %to_jid, "Sent room destroy notification");
                         }
@@ -4416,11 +4796,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.room_registry.destroy_room(&query.room_jid);
 
                 // Send success response
-                let response = build_owner_set_result(
-                    &query.iq_id,
-                    &query.room_jid,
-                    &query.from,
-                );
+                let response = build_owner_set_result(&query.iq_id, &query.room_jid, &query.from);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
                 info!(
@@ -4431,6 +4807,146 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle XEP-0049 Private XML Storage IQ requests.
+    ///
+    /// Processes private storage operations:
+    /// - GET: Returns stored private XML for the given namespace
+    /// - SET: Stores private XML data keyed by namespace
+    ///
+    /// Also intercepts `storage:bookmarks` namespace queries and delegates
+    /// to XEP-0048 legacy bookmark compatibility.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_private_storage(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Private storage query received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        let bare_jid = sender_jid.to_bare();
+
+        // Handle GET requests
+        if let Some(key) = parse_private_storage_get(&iq) {
+            debug!(
+                jid = %bare_jid,
+                namespace = %key.namespace,
+                "Processing private storage GET"
+            );
+
+            // Check if this is a legacy bookmarks query (XEP-0048)
+            if crate::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
+                // Delegate to XEP-0048 compat: fetch from PEP bookmarks and convert
+                let stored_items = self
+                    .pubsub_storage
+                    .get_items(&bare_jid, crate::xep::xep0402::PEP_NODE, None, &[])
+                    .await
+                    .unwrap_or_default();
+
+                let native_bookmarks: Vec<crate::xep::xep0402::Bookmark> = stored_items
+                    .iter()
+                    .filter_map(|item| {
+                        let xml = item.payload_xml.as_ref()?;
+                        let elem: minidom::Element = xml.parse().ok()?;
+                        crate::xep::xep0402::parse_bookmark(&item.id, &elem).ok()
+                    })
+                    .collect();
+
+                let legacy: Vec<crate::xep::xep0048::LegacyBookmark> = native_bookmarks
+                    .iter()
+                    .map(crate::xep::xep0048::from_native_bookmark)
+                    .collect();
+
+                let bookmarks_elem =
+                    crate::xep::xep0048::build_legacy_bookmarks_element(&legacy);
+                let bookmarks_xml = String::from(&bookmarks_elem);
+                let response =
+                    build_private_storage_result(&iq, Some(&bookmarks_xml), &key);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                return Ok(());
+            }
+
+            // Regular private XML storage
+            let stored = self
+                .app_state
+                .get_private_xml(&bare_jid, &key.namespace)
+                .await?;
+
+            let response =
+                build_private_storage_result(&iq, stored.as_deref(), &key);
+            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+            return Ok(());
+        }
+
+        // Handle SET requests
+        if let Some((key, xml_content)) = parse_private_storage_set(&iq) {
+            debug!(
+                jid = %bare_jid,
+                namespace = %key.namespace,
+                "Processing private storage SET"
+            );
+
+            // Check if this is a legacy bookmarks set (XEP-0048)
+            if crate::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
+                // Parse legacy bookmarks and convert to native (XEP-0402)
+                if let Ok(elem) = xml_content.parse::<minidom::Element>() {
+                    let legacy = crate::xep::xep0048::parse_legacy_bookmarks(&elem);
+                    for lb in &legacy {
+                        if let Some(native) = crate::xep::xep0048::to_native_bookmark(lb) {
+                            let bookmark_elem =
+                                crate::xep::xep0402::build_bookmark_element(&native);
+                            let item = PubSubItem::new(
+                                Some(native.jid.to_string()),
+                                Some(bookmark_elem),
+                            );
+                            let _ = self
+                                .pubsub_storage
+                                .publish_item(
+                                    &bare_jid,
+                                    crate::xep::xep0402::PEP_NODE,
+                                    &item,
+                                    Some(&bare_jid),
+                                    true,
+                                )
+                                .await;
+                        }
+                    }
+                }
+
+                let response = build_private_storage_success(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                return Ok(());
+            }
+
+            // Regular private XML storage
+            self.app_state
+                .set_private_xml(&bare_jid, &key.namespace, &xml_content)
+                .await?;
+
+            let response = build_private_storage_success(&iq);
+            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+            return Ok(());
+        }
+
+        // Neither GET nor SET parsed successfully
+        let error = crate::generate_iq_error(
+            &iq.id,
+            iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+            Some(&self.domain),
+            crate::StanzaErrorCondition::BadRequest,
+            crate::StanzaErrorType::Modify,
+            None,
+        );
+        self.stream.write_raw(&error).await?;
         Ok(())
     }
 
@@ -4487,7 +5003,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             BlockingRequest::Block(jids_to_block) => {
                 // Add JIDs to the blocklist
-                let added = self.app_state.add_blocks(&user_bare_jid, &jids_to_block).await?;
+                let added = self
+                    .app_state
+                    .add_blocks(&user_bare_jid, &jids_to_block)
+                    .await?;
 
                 debug!(
                     from = %sender_jid,
@@ -4512,7 +5031,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     (removed, current_blocklist)
                 } else {
                     // Unblock specific JIDs
-                    let removed = self.app_state.remove_blocks(&user_bare_jid, &jids_to_unblock).await?;
+                    let removed = self
+                        .app_state
+                        .remove_blocks(&user_bare_jid, &jids_to_unblock)
+                        .await?;
                     (removed, jids_to_unblock)
                 };
 
@@ -4548,9 +5070,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let bare_jid = sender_jid.to_bare();
 
         // Get all connected resources for this user
-        let resources = self
-            .connection_registry
-            .get_resources_for_user(&bare_jid);
+        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
 
         if resources.is_empty() {
             return;
@@ -4563,10 +5083,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in resources {
-            let push = build_block_push(&resource_jid.to_string(), blocked_jids);
+            let push = build_block_push(&resource_jid.clone().into(), blocked_jids);
 
             let stanza = Stanza::Iq(push);
-            let result = self.connection_registry.send_to(&resource_jid, stanza).await;
+            let result = self
+                .connection_registry
+                .send_to(&resource_jid, stanza)
+                .await;
 
             match result {
                 SendResult::Sent => {
@@ -4595,9 +5118,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let bare_jid = sender_jid.to_bare();
 
         // Get all connected resources for this user
-        let resources = self
-            .connection_registry
-            .get_resources_for_user(&bare_jid);
+        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
 
         if resources.is_empty() {
             return;
@@ -4610,10 +5131,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in resources {
-            let push = build_unblock_push(&resource_jid.to_string(), unblocked_jids);
+            let push = build_unblock_push(&resource_jid.clone().into(), unblocked_jids);
 
             let stanza = Stanza::Iq(push);
-            let result = self.connection_registry.send_to(&resource_jid, stanza).await;
+            let result = self
+                .connection_registry
+                .send_to(&resource_jid, stanza)
+                .await;
 
             match result {
                 SendResult::Sent => {

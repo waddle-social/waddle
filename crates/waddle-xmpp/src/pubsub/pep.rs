@@ -95,11 +95,7 @@ impl PepHandler {
 
 /// Build the PEP service discovery identity.
 pub fn build_pep_identity() -> crate::disco::Identity {
-    crate::disco::Identity::new(
-        "pubsub",
-        "pep",
-        Some("Personal Eventing Protocol"),
-    )
+    crate::disco::Identity::new("pubsub", "pep", Some("Personal Eventing Protocol"))
 }
 
 /// Get features advertised by the PEP service.
@@ -109,6 +105,7 @@ pub fn pep_features() -> Vec<crate::disco::Feature> {
     vec![
         Feature::new(NS_PUBSUB),
         Feature::new(&format!("{}#access-presence", NS_PUBSUB)),
+        Feature::new(&format!("{}#access-whitelist", NS_PUBSUB)),
         Feature::new(&format!("{}#auto-create", NS_PUBSUB)),
         Feature::new(&format!("{}#auto-subscribe", NS_PUBSUB)),
         Feature::new(&format!("{}#filtered-notifications", NS_PUBSUB)),
@@ -127,7 +124,11 @@ mod tests {
 
     fn make_pubsub_iq(to: Option<&str>) -> Iq {
         let pubsub = Element::builder("pubsub", NS_PUBSUB)
-            .append(Element::builder("items", NS_PUBSUB).attr("node", "test").build())
+            .append(
+                Element::builder("items", NS_PUBSUB)
+                    .attr("node", "test")
+                    .build(),
+            )
             .build();
 
         Iq {
@@ -167,7 +168,9 @@ mod tests {
     fn test_is_well_known_node() {
         assert!(PepHandler::is_well_known_node("urn:xmpp:bookmarks:1"));
         assert!(PepHandler::is_well_known_node("urn:xmpp:avatar:data"));
-        assert!(PepHandler::is_well_known_node("eu.siacs.conversations.axolotl.devicelist"));
+        assert!(PepHandler::is_well_known_node(
+            "eu.siacs.conversations.axolotl.devicelist"
+        ));
         assert!(!PepHandler::is_well_known_node("custom:node"));
     }
 

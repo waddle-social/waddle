@@ -119,9 +119,7 @@ pub fn is_blocklist_get(iq: &Iq) -> bool {
 /// Check if an IQ is a block set request.
 pub fn is_block_set(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
-            elem.name() == "block" && elem.ns() == NS_BLOCKING
-        }
+        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "block" && elem.ns() == NS_BLOCKING,
         _ => false,
     }
 }
@@ -129,9 +127,7 @@ pub fn is_block_set(iq: &Iq) -> bool {
 /// Check if an IQ is an unblock set request.
 pub fn is_unblock_set(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Set(elem) => {
-            elem.name() == "unblock" && elem.ns() == NS_BLOCKING
-        }
+        xmpp_parsers::iq::IqType::Set(elem) => elem.name() == "unblock" && elem.ns() == NS_BLOCKING,
         _ => false,
     }
 }
@@ -237,7 +233,7 @@ pub fn build_blocking_success(original_iq: &Iq) -> Iq {
 /// Build a blocking push notification IQ.
 ///
 /// This is sent to all user resources when the blocklist changes.
-pub fn build_block_push(to: &str, blocked_jids: &[String]) -> Iq {
+pub fn build_block_push(to: &jid::Jid, blocked_jids: &[String]) -> Iq {
     let mut block_builder = Element::builder("block", NS_BLOCKING);
 
     for jid in blocked_jids {
@@ -251,7 +247,7 @@ pub fn build_block_push(to: &str, blocked_jids: &[String]) -> Iq {
 
     Iq {
         from: None,
-        to: Some(to.parse().expect("Invalid JID")),
+        to: Some(to.clone()),
         id: format!("push-block-{}", uuid::Uuid::new_v4()),
         payload: xmpp_parsers::iq::IqType::Set(block),
     }
@@ -261,7 +257,7 @@ pub fn build_block_push(to: &str, blocked_jids: &[String]) -> Iq {
 ///
 /// This is sent to all user resources when JIDs are unblocked.
 /// An empty jids list means all JIDs were unblocked.
-pub fn build_unblock_push(to: &str, unblocked_jids: &[String]) -> Iq {
+pub fn build_unblock_push(to: &jid::Jid, unblocked_jids: &[String]) -> Iq {
     let mut unblock_builder = Element::builder("unblock", NS_BLOCKING);
 
     for jid in unblocked_jids {
@@ -275,7 +271,7 @@ pub fn build_unblock_push(to: &str, unblocked_jids: &[String]) -> Iq {
 
     Iq {
         from: None,
-        to: Some(to.parse().expect("Invalid JID")),
+        to: Some(to.clone()),
         id: format!("push-unblock-{}", uuid::Uuid::new_v4()),
         payload: xmpp_parsers::iq::IqType::Set(unblock),
     }
@@ -545,10 +541,7 @@ mod tests {
             let items: Vec<_> = elem.children().collect();
             assert_eq!(items.len(), 2);
 
-            let jids: Vec<_> = items
-                .iter()
-                .filter_map(|item| item.attr("jid"))
-                .collect();
+            let jids: Vec<_> = items.iter().filter_map(|item| item.attr("jid")).collect();
             assert!(jids.contains(&"romeo@montague.net"));
             assert!(jids.contains(&"iago@shakespeare.lit"));
         } else {
@@ -599,7 +592,8 @@ mod tests {
     #[test]
     fn test_build_block_push() {
         let blocked_jids = vec!["romeo@montague.net".to_string()];
-        let push = build_block_push("user@example.com/resource", &blocked_jids);
+        let to: jid::Jid = "user@example.com/resource".parse().expect("valid jid");
+        let push = build_block_push(&to, &blocked_jids);
 
         assert!(push.id.starts_with("push-block-"));
         if let xmpp_parsers::iq::IqType::Set(elem) = &push.payload {
@@ -616,7 +610,8 @@ mod tests {
     #[test]
     fn test_build_unblock_push() {
         let unblocked_jids = vec!["romeo@montague.net".to_string()];
-        let push = build_unblock_push("user@example.com/resource", &unblocked_jids);
+        let to: jid::Jid = "user@example.com/resource".parse().expect("valid jid");
+        let push = build_unblock_push(&to, &unblocked_jids);
 
         assert!(push.id.starts_with("push-unblock-"));
         if let xmpp_parsers::iq::IqType::Set(elem) = &push.payload {

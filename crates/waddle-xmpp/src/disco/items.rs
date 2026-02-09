@@ -50,6 +50,21 @@ impl DiscoItem {
     pub fn muc_room(jid: &str, name: &str) -> Self {
         Self::new(jid, Some(name), None)
     }
+
+    /// Create an upload service item (XEP-0363).
+    pub fn upload_service(domain: &str, name: Option<&str>) -> Self {
+        Self::new(domain, name, None)
+    }
+
+    /// Create a PubSub service item (XEP-0060).
+    pub fn pubsub_service(domain: &str, name: Option<&str>) -> Self {
+        Self::new(domain, name, None)
+    }
+
+    /// Create a PubSub node item.
+    pub fn pubsub_node(jid: &str, node: &str) -> Self {
+        Self::new(jid, None, Some(node))
+    }
 }
 
 /// Check if an IQ is a disco#items query.
@@ -92,11 +107,7 @@ pub fn parse_disco_items_query(iq: &Iq) -> Result<DiscoItemsQuery, XmppError> {
 /// Build a disco#items response IQ.
 ///
 /// The response includes items available at the queried entity.
-pub fn build_disco_items_response(
-    original_iq: &Iq,
-    items: &[DiscoItem],
-    node: Option<&str>,
-) -> Iq {
+pub fn build_disco_items_response(original_iq: &Iq, items: &[DiscoItem], node: Option<&str>) -> Iq {
     let mut query_builder = Element::builder("query", DISCO_ITEMS_NS);
 
     // Add node attribute if present
@@ -106,8 +117,7 @@ pub fn build_disco_items_response(
 
     // Add items
     for item in items {
-        let mut item_builder =
-            Element::builder("item", DISCO_ITEMS_NS).attr("jid", &item.jid);
+        let mut item_builder = Element::builder("item", DISCO_ITEMS_NS).attr("jid", &item.jid);
 
         if let Some(ref name) = item.name {
             item_builder = item_builder.attr("name", name);

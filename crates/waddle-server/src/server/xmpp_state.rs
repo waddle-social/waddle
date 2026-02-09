@@ -239,9 +239,12 @@ impl waddle_xmpp::AppState for XmppAppState {
     fn oauth_discovery_url(&self) -> String {
         // Construct the discovery URL based on the domain
         // In production, this should be configurable via environment variable
-        let base_url = std::env::var("WADDLE_BASE_URL")
-            .unwrap_or_else(|_| format!("https://{}", self.domain));
-        format!("{}/.well-known/oauth-authorization-server", base_url.trim_end_matches('/'))
+        let base_url =
+            std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", self.domain));
+        format!(
+            "{}/.well-known/oauth-authorization-server",
+            base_url.trim_end_matches('/')
+        )
     }
 
     /// List all relations a subject has on an object.
@@ -341,7 +344,11 @@ impl waddle_xmpp::AppState for XmppAppState {
             "Looking up SCRAM credentials for native user"
         );
 
-        match self.native_user_store.get_scram_credentials(username, &self.domain).await {
+        match self
+            .native_user_store
+            .get_scram_credentials(username, &self.domain)
+            .await
+        {
             Ok(Some(creds)) => {
                 debug!(username = username, "Found SCRAM credentials");
                 Ok(Some(creds))
@@ -382,12 +389,22 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         match self.native_user_store.register(request).await {
             Ok(user_id) => {
-                debug!(username = username, user_id = user_id, "Native user registered successfully");
+                debug!(
+                    username = username,
+                    user_id = user_id,
+                    "Native user registered successfully"
+                );
                 Ok(())
             }
             Err(crate::auth::AuthError::UserAlreadyExists(_)) => {
-                warn!(username = username, "Registration failed: user already exists");
-                Err(XmppError::conflict(Some(format!("User '{}' already exists", username))))
+                warn!(
+                    username = username,
+                    "Registration failed: user already exists"
+                );
+                Err(XmppError::conflict(Some(format!(
+                    "User '{}' already exists",
+                    username
+                ))))
             }
             Err(crate::auth::AuthError::InvalidUsername(msg)) => {
                 warn!(username = username, error = %msg, "Registration failed: invalid username");
@@ -401,17 +418,18 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     /// Check if a native user exists.
-    async fn native_user_exists(
-        &self,
-        username: &str,
-    ) -> Result<bool, XmppError> {
+    async fn native_user_exists(&self, username: &str) -> Result<bool, XmppError> {
         debug!(
             username = username,
             domain = %self.domain,
             "Checking if native user exists"
         );
 
-        match self.native_user_store.user_exists(username, &self.domain).await {
+        match self
+            .native_user_store
+            .user_exists(username, &self.domain)
+            .await
+        {
             Ok(exists) => Ok(exists),
             Err(e) => {
                 warn!(username = username, error = %e, "Failed to check user existence");
@@ -421,10 +439,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     /// Get the vCard for a user (XEP-0054).
-    async fn get_vcard(
-        &self,
-        jid: &jid::BareJid,
-    ) -> Result<Option<String>, XmppError> {
+    async fn get_vcard(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
         debug!(jid = %jid, "Getting vCard");
 
         match self.vcard_store.get(jid).await {
@@ -437,11 +452,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     /// Store/update the vCard for a user (XEP-0054).
-    async fn set_vcard(
-        &self,
-        jid: &jid::BareJid,
-        vcard_xml: &str,
-    ) -> Result<(), XmppError> {
+    async fn set_vcard(&self, jid: &jid::BareJid, vcard_xml: &str) -> Result<(), XmppError> {
         debug!(jid = %jid, "Setting vCard");
 
         match self.vcard_store.set(jid, vcard_xml).await {
@@ -461,7 +472,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         size: u64,
         content_type: Option<&str>,
     ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
-        use waddle_xmpp::xep::xep0363::{sanitize_filename, effective_content_type};
+        use waddle_xmpp::xep::xep0363::{effective_content_type, sanitize_filename};
 
         debug!(
             jid = %requester_jid,
@@ -497,8 +508,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
 
         // Get the base URL for uploads
-        let base_url = std::env::var("WADDLE_BASE_URL")
-            .unwrap_or_else(|_| format!("https://{}", self.domain));
+        let base_url =
+            std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", self.domain));
         let base_url = base_url.trim_end_matches('/');
 
         // Build the PUT and GET URLs
@@ -554,9 +565,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         Ok(waddle_xmpp::UploadSlotInfo {
             put_url,
             get_url,
-            put_headers: vec![
-                ("Content-Type".to_string(), effective_type),
-            ],
+            put_headers: vec![("Content-Type".to_string(), effective_type)],
         })
     }
 
@@ -741,10 +750,13 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         let storage = DatabaseRosterStorage::new((*self.db).clone());
 
-        let jid_strings = storage.get_presence_subscribers(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+        let jid_strings = storage
+            .get_presence_subscribers(user_jid)
+            .await
+            .map_err(|e| {
+                warn!(jid = %user_jid, error = %e, "Failed to get presence subscribers");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
 
         // Parse JID strings into BareJids
         let jids: Result<Vec<_>, _> = jid_strings
@@ -769,10 +781,13 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         let storage = DatabaseRosterStorage::new((*self.db).clone());
 
-        let jid_strings = storage.get_presence_subscriptions(user_jid).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to get presence subscriptions");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+        let jid_strings = storage
+            .get_presence_subscriptions(user_jid)
+            .await
+            .map_err(|e| {
+                warn!(jid = %user_jid, error = %e, "Failed to get presence subscriptions");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
 
         // Parse JID strings into BareJids
         let jids: Result<Vec<_>, _> = jid_strings
@@ -791,10 +806,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     // =========================================================================
 
     /// Get all blocked JIDs for a user.
-    async fn get_blocklist(
-        &self,
-        user_jid: &jid::BareJid,
-    ) -> Result<Vec<String>, XmppError> {
+    async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
         use crate::db::blocking::DatabaseBlockingStorage;
 
         debug!(jid = %user_jid, "Getting blocklist");
@@ -837,10 +849,13 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         let storage = DatabaseBlockingStorage::new((*self.db).clone());
 
-        storage.add_blocks(user_jid, blocked_jids).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to add blocks");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        storage
+            .add_blocks(user_jid, blocked_jids)
+            .await
+            .map_err(|e| {
+                warn!(jid = %user_jid, error = %e, "Failed to add blocks");
+                XmppError::internal(format!("Database error: {}", e))
+            })
     }
 
     /// Remove JIDs from a user's blocklist.
@@ -855,17 +870,17 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         let storage = DatabaseBlockingStorage::new((*self.db).clone());
 
-        storage.remove_blocks(user_jid, blocked_jids).await.map_err(|e| {
-            warn!(jid = %user_jid, error = %e, "Failed to remove blocks");
-            XmppError::internal(format!("Database error: {}", e))
-        })
+        storage
+            .remove_blocks(user_jid, blocked_jids)
+            .await
+            .map_err(|e| {
+                warn!(jid = %user_jid, error = %e, "Failed to remove blocks");
+                XmppError::internal(format!("Database error: {}", e))
+            })
     }
 
     /// Remove all JIDs from a user's blocklist.
-    async fn remove_all_blocks(
-        &self,
-        user_jid: &jid::BareJid,
-    ) -> Result<usize, XmppError> {
+    async fn remove_all_blocks(&self, user_jid: &jid::BareJid) -> Result<usize, XmppError> {
         use crate::db::blocking::DatabaseBlockingStorage;
 
         debug!(jid = %user_jid, "Removing all blocks");
@@ -877,6 +892,103 @@ impl waddle_xmpp::AppState for XmppAppState {
             XmppError::internal(format!("Database error: {}", e))
         })
     }
+
+    // =========================================================================
+    // XEP-0049 Private XML Storage Methods
+    // =========================================================================
+
+    /// Get private XML data for a user by namespace.
+    async fn get_private_xml(
+        &self,
+        jid: &jid::BareJid,
+        namespace: &str,
+    ) -> Result<Option<String>, XmppError> {
+        debug!(jid = %jid, namespace = %namespace, "Getting private XML");
+
+        let query = "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?";
+        let params = libsql::params![jid.to_string(), namespace.to_string()];
+
+        let result = if let Some(persistent) = self.db.persistent_connection() {
+            let conn = persistent.lock().await;
+            let mut rows = conn.query(query, params).await.map_err(|e| {
+                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+            match rows
+                .next()
+                .await
+                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?
+            {
+                Some(row) => {
+                    let xml: String = row
+                        .get(0)
+                        .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+                    Some(xml)
+                }
+                None => None,
+            }
+        } else {
+            let conn = self
+                .db
+                .connect()
+                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+            let mut rows = conn.query(query, params).await.map_err(|e| {
+                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+            match rows
+                .next()
+                .await
+                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?
+            {
+                Some(row) => {
+                    let xml: String = row
+                        .get(0)
+                        .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+                    Some(xml)
+                }
+                None => None,
+            }
+        };
+
+        Ok(result)
+    }
+
+    /// Store/update private XML data for a user by namespace.
+    async fn set_private_xml(
+        &self,
+        jid: &jid::BareJid,
+        namespace: &str,
+        xml_content: &str,
+    ) -> Result<(), XmppError> {
+        debug!(jid = %jid, namespace = %namespace, "Setting private XML");
+
+        let query = "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))";
+        let params = libsql::params![
+            jid.to_string(),
+            namespace.to_string(),
+            xml_content.to_string()
+        ];
+
+        if let Some(persistent) = self.db.persistent_connection() {
+            let conn = persistent.lock().await;
+            conn.execute(query, params).await.map_err(|e| {
+                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+        } else {
+            let conn = self
+                .db
+                .connect()
+                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+            conn.execute(query, params).await.map_err(|e| {
+                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 // =========================================================================
@@ -884,16 +996,22 @@ impl waddle_xmpp::AppState for XmppAppState {
 // =========================================================================
 
 /// Convert a database roster item row to a waddle_xmpp RosterItem.
-fn row_to_roster_item(row: &crate::db::roster::RosterItemRow) -> Result<waddle_xmpp::roster::RosterItem, String> {
-    let jid: jid::BareJid = row.contact_jid.parse()
+fn row_to_roster_item(
+    row: &crate::db::roster::RosterItemRow,
+) -> Result<waddle_xmpp::roster::RosterItem, String> {
+    let jid: jid::BareJid = row
+        .contact_jid
+        .parse()
         .map_err(|e| format!("Invalid JID '{}': {:?}", row.contact_jid, e))?;
 
     let subscription = waddle_xmpp::roster::Subscription::from_str(&row.subscription)
         .map_err(|e| format!("Invalid subscription '{}': {}", row.subscription, e))?;
 
     let ask = match &row.ask {
-        Some(a) => Some(waddle_xmpp::roster::AskType::from_str(a)
-            .map_err(|e| format!("Invalid ask '{}': {}", a, e))?),
+        Some(a) => Some(
+            waddle_xmpp::roster::AskType::from_str(a)
+                .map_err(|e| format!("Invalid ask '{}': {}", a, e))?,
+        ),
         None => None,
     };
 
@@ -925,7 +1043,9 @@ mod tests {
     use waddle_xmpp::AppState;
 
     async fn create_test_db() -> Arc<Database> {
-        let db = Database::in_memory("test-xmpp-state").await.expect("Failed to create test database");
+        let db = Database::in_memory("test-xmpp-state")
+            .await
+            .expect("Failed to create test database");
         let db = Arc::new(db);
 
         // Run migrations

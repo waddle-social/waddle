@@ -187,15 +187,20 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 |------|--------|----------|-------|
 | Complete XEP-0313 MAM | ✅ Complete | P1 | Message archive with RSM pagination (mam/) |
 | Complete XEP-0198 Stream Management | ✅ Complete | P1 | stream_management/ with session registry |
-| XEP-0048 Bookmark Storage | ⬜ Not Started | P1 | Channel bookmark management |
+| XEP-0048 Bookmark Storage | ✅ Complete | P1 | Legacy compat layer over XEP-0402 (xep/xep0048.rs) |
+| XEP-0049 Private XML Storage | ✅ Complete | P1 | Per-user namespace-keyed storage (xep/xep0049.rs) |
+| XEP-0060 PubSub | ✅ Complete | P1 | PubSub service with disco (pubsub/) |
+| XEP-0084 User Avatar | ✅ Complete | P1 | PEP-based avatar data/metadata (xep/xep0084.rs) |
+| XEP-0153 vCard-Based Avatars | ✅ Complete | P1 | Presence avatar hash broadcasting (xep/xep0153.rs) |
+| XEP-0163 PEP | ✅ Complete | P1 | Personal Eventing Protocol (pubsub/pep.rs) |
 | XEP-0191 Blocking Command | ✅ Complete | P1 | User blocking capability |
-| XEP-0402 PEP Native Bookmarks | ⬜ Not Started | P1 | Modern bookmark storage |
+| XEP-0223 Persistent Storage | ✅ Complete | P1 | PubSub best practices profile (xep/xep0223.rs) |
+| XEP-0398 Avatar Conversion | ✅ Complete | P1 | PEP↔vCard avatar bridge (xep/xep0398.rs) |
+| XEP-0402 PEP Native Bookmarks | ✅ Complete | P1 | Modern bookmark storage (xep/xep0402.rs) |
 | XEP-0410 MUC Self-Ping | ✅ Complete | P1 | Connection state verification |
 
-**CI Currently Disabled (needs completion first):**
-- XEP-0220 (Server Dialback) - S2S federation
-- XEP-0060 (PubSub) - not started
-- XEP-0163 (PEP) - not started
+**CI Currently Disabled:**
+- XEP-0220 (Server Dialback) - S2S federation (separate concern)
 
 **Verification:**
 - [x] MAM queries return correct history
@@ -210,7 +215,7 @@ crates/waddle-xmpp/src/muc/federation.rs      (new)
 
 | Task | Status | Priority | Notes |
 |------|--------|----------|-------|
-| XEP-0352 Client State Indication | ⬜ Not Started | P1 | Optimize traffic for mobile clients |
+| XEP-0352 Client State Indication | ✅ Complete | P1 | Traffic optimization for mobile (xep/xep0352.rs) |
 
 **Verification:**
 - [ ] Client can indicate active/inactive state
@@ -498,13 +503,20 @@ External integrations and bot platform.
 ### MXC3: XEP-0479 IM Advanced Compliance
 - [x] XEP-0313 MAM fully working
 - [x] XEP-0198 Stream Management complete
-- [ ] XEP-0048 Bookmark Storage working
+- [x] XEP-0048 Bookmark Storage working (legacy compat over XEP-0402)
+- [x] XEP-0049 Private XML Storage working
+- [x] XEP-0060 PubSub service discoverable and functional
+- [x] XEP-0084 User Avatar working (PEP-based)
+- [x] XEP-0153 vCard-Based Avatars working
+- [x] XEP-0163 PEP discoverable and functional
 - [x] XEP-0191 Blocking Command working
-- [ ] XEP-0402 PEP Native Bookmarks working
+- [x] XEP-0223 Persistent Storage best practices
+- [x] XEP-0398 Avatar Conversion (PEP↔vCard bridge)
+- [x] XEP-0402 PEP Native Bookmarks working
 - [x] XEP-0410 MUC Self-Ping working
 
 ### MXC4: XEP-0479 Mobile Compliance
-- [ ] XEP-0352 Client State Indication working
+- [x] XEP-0352 Client State Indication working
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created

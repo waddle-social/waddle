@@ -11,14 +11,17 @@ use std::time::Duration;
 
 use base64::prelude::*;
 use jid::Jid;
-use rcgen::{CertifiedKey, generate_simple_self_signed};
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tokio_rustls::{TlsAcceptor, TlsConnector, rustls::{ClientConfig, RootCertStore, ServerConfig}};
-use waddle_xmpp::{AppState, ScramCredentials, Session, XmppError, roster};
+use tokio_rustls::{
+    rustls::{ClientConfig, RootCertStore, ServerConfig},
+    TlsAcceptor, TlsConnector,
+};
+use waddle_xmpp::{roster, AppState, ScramCredentials, Session, XmppError};
 
 /// Install the ring crypto provider for rustls.
 /// Must be called once before any TLS operations.
@@ -69,7 +72,10 @@ impl AppState for MockAppState {
         async move {
             if accept {
                 Ok(Session {
-                    did: format!("did:plc:test{}", jid.node().map(|n| n.to_string()).unwrap_or_default()),
+                    did: format!(
+                        "did:plc:test{}",
+                        jid.node().map(|n| n.to_string()).unwrap_or_default()
+                    ),
                     jid: jid.to_bare().into(),
                     created_at: chrono::Utc::now(),
                     expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
@@ -102,7 +108,9 @@ impl AppState for MockAppState {
                 let mock_jid = format!("user_{}@{}", &token[..token.len().min(8)], domain);
                 Ok(Session {
                     did: format!("did:plc:mock{}", &token[..token.len().min(8)]),
-                    jid: mock_jid.parse().unwrap_or_else(|_| "fallback@test.local".parse().unwrap()),
+                    jid: mock_jid
+                        .parse()
+                        .unwrap_or_else(|_| "fallback@test.local".parse().unwrap()),
                     created_at: chrono::Utc::now(),
                     expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
                 })
@@ -117,7 +125,10 @@ impl AppState for MockAppState {
     }
 
     fn oauth_discovery_url(&self) -> String {
-        format!("https://{}/.well-known/oauth-authorization-server", self.domain)
+        format!(
+            "https://{}/.well-known/oauth-authorization-server",
+            self.domain
+        )
     }
 
     fn list_relations(
@@ -208,9 +219,10 @@ impl AppState for MockAppState {
             Ok(waddle_xmpp::UploadSlotInfo {
                 put_url,
                 get_url,
-                put_headers: vec![
-                    ("Content-Type".to_string(), content_type.unwrap_or_else(|| "application/octet-stream".to_string())),
-                ],
+                put_headers: vec![(
+                    "Content-Type".to_string(),
+                    content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                )],
             })
         }
     }
@@ -347,6 +359,29 @@ impl AppState for MockAppState {
         // Mock returns 0 - nothing to remove in mock
         async { Ok(0) }
     }
+
+    // =========================================================================
+    // XEP-0049 Private XML Storage Methods (Mock implementations)
+    // =========================================================================
+
+    fn get_private_xml(
+        &self,
+        _jid: &jid::BareJid,
+        _namespace: &str,
+    ) -> impl Future<Output = Result<Option<String>, XmppError>> + Send {
+        // Mock returns None - no private data in mock
+        async { Ok(None) }
+    }
+
+    fn set_private_xml(
+        &self,
+        _jid: &jid::BareJid,
+        _namespace: &str,
+        _xml_content: &str,
+    ) -> impl Future<Output = Result<(), XmppError>> + Send {
+        // Mock private XML storage always succeeds
+        async { Ok(()) }
+    }
 }
 
 /// Generated TLS credentials for testing.
@@ -399,7 +434,9 @@ impl TestTlsCredentials {
     /// Create a TLS connector (client-side) that trusts this certificate.
     pub fn tls_connector(&self) -> TlsConnector {
         let mut root_store = RootCertStore::empty();
-        root_store.add(self.cert_der.clone()).expect("Failed to add cert");
+        root_store
+            .add(self.cert_der.clone())
+            .expect("Failed to add cert");
 
         let client_config = ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -484,26 +521,23 @@ async fn run_test_server<S: AppState>(
 ) {
     // Create SHARED registries at server level - these are used by all connections
     let muc_domain = format!("muc.{}", domain);
-    let room_registry = std::sync::Arc::new(
-        waddle_xmpp::muc::MucRoomRegistry::new(muc_domain)
-    );
-    let connection_registry = std::sync::Arc::new(
-        waddle_xmpp::registry::ConnectionRegistry::new()
-    );
+    let room_registry = std::sync::Arc::new(waddle_xmpp::muc::MucRoomRegistry::new(muc_domain));
+    let connection_registry = std::sync::Arc::new(waddle_xmpp::registry::ConnectionRegistry::new());
     // Create an in-memory MAM storage for the test (shared)
     let db = libsql::Builder::new_local(":memory:")
         .build()
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    let mam_storage = std::sync::Arc::new(
-        waddle_xmpp::mam::LibSqlMamStorage::new(conn)
-    );
+    let mam_storage = std::sync::Arc::new(waddle_xmpp::mam::LibSqlMamStorage::new(conn));
     // Create a shared ISR token store
     let isr_token_store = waddle_xmpp::isr::create_shared_store();
     // Create a shared SM session registry for stream resumption
     let sm_session_registry: std::sync::Arc<dyn waddle_xmpp::stream_management::SmSessionRegistry> =
         std::sync::Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    // Create a shared PubSub storage for PEP
+    let pubsub_storage: std::sync::Arc<dyn waddle_xmpp::pubsub::PubSubStorage + Send + Sync> =
+        std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
 
     loop {
         tokio::select! {
@@ -519,11 +553,12 @@ async fn run_test_server<S: AppState>(
                         let mam = Arc::clone(&mam_storage);
                         let isr = Arc::clone(&isr_token_store);
                         let sm_reg = Arc::clone(&sm_session_registry);
+                        let pubsub = Arc::clone(&pubsub_storage);
                         // Enable registration for tests
                         let registration_enabled = true;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub
                             ).await;
                         });
                     }
@@ -585,9 +620,16 @@ impl TestClient {
                 TestClientStream::Tcp(s) => s.read(&mut buf).await,
                 TestClientStream::Tls(s) => s.read(&mut buf).await,
             }
-        }).await {
+        })
+        .await
+        {
             Ok(result) => result?,
-            Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Read timeout")),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Read timeout",
+                ))
+            }
         };
 
         self.buffer.extend_from_slice(&buf[..n]);
@@ -595,7 +637,11 @@ impl TestClient {
     }
 
     /// Read until we find a specific pattern.
-    pub async fn read_until(&mut self, pattern: &str, timeout_dur: Duration) -> Result<String, std::io::Error> {
+    pub async fn read_until(
+        &mut self,
+        pattern: &str,
+        timeout_dur: Duration,
+    ) -> Result<String, std::io::Error> {
         let start = std::time::Instant::now();
         loop {
             let data = String::from_utf8_lossy(&self.buffer).to_string();
@@ -617,14 +663,24 @@ impl TestClient {
                     TestClientStream::Tcp(s) => s.read(&mut buf).await,
                     TestClientStream::Tls(s) => s.read(&mut buf).await,
                 }
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Read timeout")),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Read timeout",
+                    ))
+                }
             };
 
             if n == 0 {
-                return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Connection closed"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Connection closed",
+                ));
             }
 
             self.buffer.extend_from_slice(&buf[..n]);
@@ -662,7 +718,8 @@ impl TestClient {
 
     /// Send STARTTLS request.
     pub async fn send_starttls(&mut self) -> Result<(), std::io::Error> {
-        self.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>").await
+        self.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+            .await
     }
 
     /// Wait for STARTTLS proceed response.
@@ -673,10 +730,17 @@ impl TestClient {
     /// Upgrade the connection to TLS.
     /// Note: This method is not used - prefer RawXmppClient for TLS tests.
     #[allow(dead_code)]
-    pub async fn upgrade_to_tls(&mut self, _connector: TlsConnector, _domain: &str) -> Result<(), std::io::Error> {
+    pub async fn upgrade_to_tls(
+        &mut self,
+        _connector: TlsConnector,
+        _domain: &str,
+    ) -> Result<(), std::io::Error> {
         // Note: TestClient with proper TLS upgrade would require unsafe or interior mutability
         // Use RawXmppClient instead for TLS upgrade tests
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "Use RawXmppClient for TLS upgrade"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Use RawXmppClient for TLS upgrade",
+        ))
     }
 
     /// Send SASL PLAIN auth.
@@ -688,7 +752,8 @@ impl TestClient {
         self.send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
             encoded
-        )).await
+        ))
+        .await
     }
 
     /// Wait for SASL success.
@@ -713,7 +778,8 @@ impl TestClient {
                 <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>{}</bind>\
             </iq>",
             bind_body
-        )).await
+        ))
+        .await
     }
 
     /// Wait for bind result.
@@ -766,9 +832,14 @@ impl RawXmppClient {
             } else if let Some(ref mut tcp) = self.tcp {
                 tcp.read(&mut buf).await
             } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "Not connected"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "Not connected",
+                ))
             }
-        }).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Timeout"))??;
+        })
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Timeout"))??;
 
         let data = String::from_utf8_lossy(&buf[..n]).to_string();
         self.buffer.push_str(&data);
@@ -776,7 +847,11 @@ impl RawXmppClient {
     }
 
     /// Read until pattern found.
-    pub async fn read_until(&mut self, pattern: &str, timeout_dur: Duration) -> std::io::Result<String> {
+    pub async fn read_until(
+        &mut self,
+        pattern: &str,
+        timeout_dur: Duration,
+    ) -> std::io::Result<String> {
         let start = std::time::Instant::now();
         while !self.buffer.contains(pattern) {
             if start.elapsed() > timeout_dur {
@@ -802,14 +877,22 @@ impl RawXmppClient {
     }
 
     /// Upgrade to TLS.
-    pub async fn upgrade_tls(&mut self, connector: TlsConnector, domain: &str) -> std::io::Result<()> {
+    pub async fn upgrade_tls(
+        &mut self,
+        connector: TlsConnector,
+        domain: &str,
+    ) -> std::io::Result<()> {
         let tcp = self.tcp.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "No TCP connection or already TLS")
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No TCP connection or already TLS",
+            )
         })?;
 
-        let server_name: rustls::pki_types::ServerName<'static> = domain.to_string().try_into().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid server name")
-        })?;
+        let server_name: rustls::pki_types::ServerName<'static> =
+            domain.to_string().try_into().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid server name")
+            })?;
 
         let tls = connector.connect(server_name, tcp).await?;
         self.tls = Some(tls);
@@ -832,7 +915,8 @@ pub fn encode_sasl_plain(jid: &str, password: &str) -> String {
 /// Helper to validate stream header attributes.
 pub fn validate_stream_header(response: &str) -> Result<(), String> {
     // Check for required xmlns
-    if !response.contains("xmlns='jabber:client'") && !response.contains("xmlns=\"jabber:client\"") {
+    if !response.contains("xmlns='jabber:client'") && !response.contains("xmlns=\"jabber:client\"")
+    {
         return Err("Missing xmlns='jabber:client'".to_string());
     }
 

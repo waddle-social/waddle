@@ -47,8 +47,8 @@ mod error;
 mod types;
 
 pub use error::{
-    generate_iq_error, generate_stream_error, stream_errors, StanzaErrorCondition,
-    StanzaErrorType, XmppError,
+    generate_iq_error, generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType,
+    XmppError,
 };
 pub use parser::{ns, StreamHeader};
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
@@ -343,6 +343,30 @@ pub trait AppState: Send + Sync + 'static {
         &self,
         user_jid: &jid::BareJid,
     ) -> impl std::future::Future<Output = Result<usize, XmppError>> + Send;
+
+    // =========================================================================
+    // XEP-0049 Private XML Storage Methods
+    // =========================================================================
+
+    /// Get private XML data for a user by namespace.
+    ///
+    /// Returns the stored XML string for the given bare JID and namespace,
+    /// or None if no data exists for that namespace.
+    fn get_private_xml(
+        &self,
+        jid: &jid::BareJid,
+        namespace: &str,
+    ) -> impl std::future::Future<Output = Result<Option<String>, XmppError>> + Send;
+
+    /// Store/update private XML data for a user by namespace.
+    ///
+    /// Stores the XML string for the given bare JID and namespace.
+    fn set_private_xml(
+        &self,
+        jid: &jid::BareJid,
+        namespace: &str,
+        xml_content: &str,
+    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 }
 
 /// Information about a created upload slot (XEP-0363).

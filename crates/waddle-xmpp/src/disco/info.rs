@@ -55,6 +55,21 @@ impl Identity {
     pub fn muc_room(name: Option<&str>) -> Self {
         Self::new("conference", "text", name)
     }
+
+    /// Upload service identity (category="store", type="file") for XEP-0363.
+    pub fn upload_service(name: Option<&str>) -> Self {
+        Self::new("store", "file", name)
+    }
+
+    /// PubSub service identity (category="pubsub", type="service") for XEP-0060.
+    pub fn pubsub_service(name: Option<&str>) -> Self {
+        Self::new("pubsub", "service", name)
+    }
+
+    /// PubSub leaf node identity (category="pubsub", type="leaf").
+    pub fn pubsub_leaf(name: Option<&str>) -> Self {
+        Self::new("pubsub", "leaf", name)
+    }
 }
 
 /// Feature element for disco#info response.
@@ -201,14 +216,52 @@ impl Feature {
     pub fn muc_moderated() -> Self {
         Self::new("muc_moderated")
     }
+
+    /// PubSub subscribe feature (XEP-0060)
+    pub fn pubsub_subscribe() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#subscribe")
+    }
+
+    /// PubSub access-whitelist feature (XEP-0060/XEP-0223)
+    pub fn pubsub_access_whitelist() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#access-whitelist")
+    }
+
+    /// PubSub access-presence feature (XEP-0060)
+    pub fn pubsub_access_presence() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#access-presence")
+    }
+
+    /// PubSub auto-subscribe feature (XEP-0060)
+    pub fn pubsub_auto_subscribe() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#auto-subscribe")
+    }
+
+    /// PubSub filtered-notifications feature (XEP-0060)
+    pub fn pubsub_filtered_notifications() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#filtered-notifications")
+    }
+
+    /// Avatar metadata+notify feature (XEP-0084)
+    pub fn avatar_metadata_notify() -> Self {
+        Self::new("urn:xmpp:avatar:metadata+notify")
+    }
+
+    /// PEP vCard conversion feature (XEP-0398)
+    pub fn pep_vcard_conversion() -> Self {
+        Self::new("urn:xmpp:pep-vcard-conversion:0")
+    }
+
+    /// Private XML storage feature (XEP-0049)
+    pub fn private_storage() -> Self {
+        Self::new("jabber:iq:private")
+    }
 }
 
 /// Check if an IQ is a disco#info query.
 pub fn is_disco_info_query(iq: &Iq) -> bool {
     match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(elem) => {
-            elem.name() == "query" && elem.ns() == DISCO_INFO_NS
-        }
+        xmpp_parsers::iq::IqType::Get(elem) => elem.name() == "query" && elem.ns() == DISCO_INFO_NS,
         _ => false,
     }
 }
@@ -308,6 +361,33 @@ pub fn server_features() -> Vec<Feature> {
         Feature::pubsub_persistent_items(),
         Feature::pubsub_publish(),
         Feature::pubsub_retrieve_items(),
+        Feature::pubsub_subscribe(),
+        Feature::pubsub_access_whitelist(),
+        Feature::pubsub_access_presence(),
+        Feature::private_storage(),
+        Feature::avatar_metadata_notify(),
+        Feature::pep_vcard_conversion(),
+    ]
+}
+
+/// Get features for the upload service component (XEP-0363).
+pub fn upload_service_features() -> Vec<Feature> {
+    vec![Feature::disco_info(), Feature::http_upload()]
+}
+
+/// Get features for the PubSub service component (XEP-0060).
+pub fn pubsub_service_features() -> Vec<Feature> {
+    vec![
+        Feature::disco_info(),
+        Feature::disco_items(),
+        Feature::pubsub(),
+        Feature::pubsub_auto_create(),
+        Feature::pubsub_persistent_items(),
+        Feature::pubsub_publish(),
+        Feature::pubsub_retrieve_items(),
+        Feature::pubsub_subscribe(),
+        Feature::pubsub_access_whitelist(),
+        Feature::pubsub_access_presence(),
     ]
 }
 

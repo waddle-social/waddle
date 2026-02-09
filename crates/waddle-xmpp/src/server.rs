@@ -15,6 +15,7 @@ use crate::connection::ConnectionActor;
 use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
 use crate::muc::MucRoomRegistry;
+use crate::pubsub::{InMemoryPubSubStorage, PubSubStorage};
 use crate::registry::ConnectionRegistry;
 use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
@@ -76,6 +77,8 @@ pub struct XmppServer<S: AppState> {
     isr_token_store: SharedIsrTokenStore,
     /// XEP-0198 Stream Management session registry for resumption
     sm_session_registry: Arc<dyn SmSessionRegistry>,
+    /// XEP-0060/0163 PubSub/PEP storage shared across all connections
+    pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
 }
 
 impl<S: AppState> XmppServer<S> {
@@ -102,6 +105,11 @@ impl<S: AppState> XmppServer<S> {
             Arc::new(InMemorySmSessionRegistry::new());
         info!("SM session registry initialized");
 
+        // Create the shared PubSub storage for PEP (XEP-0060/0163)
+        let pubsub_storage: Arc<dyn PubSubStorage + Send + Sync> =
+            Arc::new(InMemoryPubSubStorage::new());
+        info!("PubSub storage initialized");
+
         Ok(Self {
             config,
             app_state,
@@ -111,11 +119,14 @@ impl<S: AppState> XmppServer<S> {
             mam_storage,
             isr_token_store,
             sm_session_registry,
+            pubsub_storage,
         })
     }
 
     /// Create MAM storage from configuration.
-    async fn create_mam_storage(config: &XmppServerConfig) -> Result<Arc<LibSqlMamStorage>, XmppError> {
+    async fn create_mam_storage(
+        config: &XmppServerConfig,
+    ) -> Result<Arc<LibSqlMamStorage>, XmppError> {
         let db_path = config
             .mam_db_path
             .as_ref()
@@ -152,10 +163,16 @@ impl<S: AppState> XmppServer<S> {
         use tokio_rustls::rustls::{pki_types::PrivateKeyDer, ServerConfig};
 
         let cert_file = File::open(&config.tls_cert_path).map_err(|e| {
-            XmppError::config(format!("Failed to open cert file {}: {}", config.tls_cert_path, e))
+            XmppError::config(format!(
+                "Failed to open cert file {}: {}",
+                config.tls_cert_path, e
+            ))
         })?;
         let key_file = File::open(&config.tls_key_path).map_err(|e| {
-            XmppError::config(format!("Failed to open key file {}: {}", config.tls_key_path, e))
+            XmppError::config(format!(
+                "Failed to open key file {}: {}",
+                config.tls_key_path, e
+            ))
         })?;
 
         let certs: Vec<_> = certs(&mut BufReader::new(cert_file))
@@ -186,7 +203,9 @@ impl<S: AppState> XmppServer<S> {
     pub async fn run(self) -> Result<(), XmppError> {
         // Start S2S listener if enabled
         let s2s_handle = if self.config.s2s_enabled {
-            let s2s_addr = self.config.s2s_addr
+            let s2s_addr = self
+                .config
+                .s2s_addr
                 .unwrap_or_else(|| "0.0.0.0:5269".parse().unwrap());
 
             // Generate a dialback secret for this server instance
@@ -204,8 +223,7 @@ impl<S: AppState> XmppServer<S> {
             };
 
             // Create a StanzaRouter for routing inbound S2S stanzas to local users
-            let router_config = RouterConfig::new(self.config.domain.clone())
-                .with_federation(true);
+            let router_config = RouterConfig::new(self.config.domain.clone()).with_federation(true);
             let stanza_router = Arc::new(StanzaRouter::new(
                 router_config,
                 Arc::clone(&self.connection_registry),
@@ -221,9 +239,7 @@ impl<S: AppState> XmppServer<S> {
                 "S2S federation enabled"
             );
 
-            Some(tokio::spawn(async move {
-                s2s_listener.run().await
-            }))
+            Some(tokio::spawn(async move { s2s_listener.run().await }))
         } else {
             info!("S2S federation disabled");
             None
@@ -242,6 +258,7 @@ impl<S: AppState> XmppServer<S> {
             let mam_storage = self.mam_storage;
             let isr_token_store = self.isr_token_store;
             let sm_session_registry = self.sm_session_registry;
+            let pubsub_storage = self.pubsub_storage;
             let registration_enabled = self.config.registration_enabled;
 
             tokio::spawn(async move {
@@ -262,24 +279,25 @@ impl<S: AppState> XmppServer<S> {
                     let mam_storage = Arc::clone(&mam_storage);
                     let isr_token_store = Arc::clone(&isr_token_store);
                     let sm_session_registry = Arc::clone(&sm_session_registry);
+                    let pubsub_storage = Arc::clone(&pubsub_storage);
 
                     tokio::spawn(
                         async move {
-                            if let Err(e) =
-                                ConnectionActor::handle_connection(
-                                    stream,
-                                    peer_addr,
-                                    tls_acceptor,
-                                    domain.clone(),
-                                    app_state,
-                                    room_registry,
-                                    connection_registry,
-                                    mam_storage,
-                                    isr_token_store,
-                                    sm_session_registry,
-                                    registration_enabled,
-                                )
-                                .await
+                            if let Err(e) = ConnectionActor::handle_connection(
+                                stream,
+                                peer_addr,
+                                tls_acceptor,
+                                domain.clone(),
+                                app_state,
+                                room_registry,
+                                connection_registry,
+                                mam_storage,
+                                isr_token_store,
+                                sm_session_registry,
+                                registration_enabled,
+                                pubsub_storage,
+                            )
+                            .await
                             {
                                 tracing::warn!(error = %e, "Connection error");
                             }

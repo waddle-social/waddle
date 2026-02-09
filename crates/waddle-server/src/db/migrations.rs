@@ -260,6 +260,20 @@ CREATE INDEX IF NOT EXISTS idx_blocking_list_user ON blocking_list(user_jid);
 CREATE INDEX IF NOT EXISTS idx_blocking_list_blocked ON blocking_list(blocked_jid);
 "#;
 
+    /// Migration to add private_xml_storage table for XEP-0049 Private XML Storage
+    pub const V0009_PRIVATE_XML_STORAGE: &str = r#"
+-- Private XML storage table for XEP-0049
+-- Stores arbitrary per-user XML data keyed by namespace
+CREATE TABLE IF NOT EXISTS private_xml_storage (
+    jid TEXT NOT NULL,                      -- Bare JID of the user
+    namespace TEXT NOT NULL,                -- XML namespace used as key
+    xml_content TEXT NOT NULL,              -- Stored XML content
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (jid, namespace)
+);
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -302,6 +316,12 @@ CREATE INDEX IF NOT EXISTS idx_blocking_list_blocked ON blocking_list(blocked_ji
                 version: 8,
                 description: "Add blocking_list table for XEP-0191 Blocking Command".to_string(),
                 sql: V0008_BLOCKING_LIST,
+            },
+            Migration {
+                version: 9,
+                description: "Add private_xml_storage table for XEP-0049 Private XML Storage"
+                    .to_string(),
+                sql: V0009_PRIVATE_XML_STORAGE,
             },
         ]
     }
@@ -457,8 +477,10 @@ impl MigrationRunner {
     }
 
     /// Internal method to run migrations with a given connection
-    async fn run_with_connection(&self, conn: &libsql::Connection) -> Result<Vec<i64>, DatabaseError> {
-
+    async fn run_with_connection(
+        &self,
+        conn: &libsql::Connection,
+    ) -> Result<Vec<i64>, DatabaseError> {
         // Ensure migrations table exists
         conn.execute(
             r#"
@@ -471,14 +493,18 @@ impl MigrationRunner {
             (),
         )
         .await
-        .map_err(|e| DatabaseError::MigrationFailed(format!("Failed to create migrations table: {}", e)))?;
+        .map_err(|e| {
+            DatabaseError::MigrationFailed(format!("Failed to create migrations table: {}", e))
+        })?;
 
         // Get applied migrations
         let mut applied: Vec<i64> = Vec::new();
         let mut rows = conn
             .query("SELECT version FROM _migrations ORDER BY version", ())
             .await
-            .map_err(|e| DatabaseError::MigrationFailed(format!("Failed to query migrations: {}", e)))?;
+            .map_err(|e| {
+                DatabaseError::MigrationFailed(format!("Failed to query migrations: {}", e))
+            })?;
 
         while let Some(row) = rows.next().await.map_err(|e| {
             DatabaseError::MigrationFailed(format!("Failed to read migration row: {}", e))
@@ -505,14 +531,12 @@ impl MigrationRunner {
             );
 
             // Execute migration SQL using batch execution
-            conn.execute_batch(migration.sql)
-                .await
-                .map_err(|e| {
-                    DatabaseError::MigrationFailed(format!(
-                        "Migration v{} failed: {}",
-                        migration.version, e
-                    ))
-                })?;
+            conn.execute_batch(migration.sql).await.map_err(|e| {
+                DatabaseError::MigrationFailed(format!(
+                    "Migration v{} failed: {}",
+                    migration.version, e
+                ))
+            })?;
 
             // Record the migration
             conn.execute(
@@ -556,7 +580,10 @@ impl MigrationRunner {
 
     /// Internal method to get current version with a given connection
     #[allow(dead_code)]
-    async fn current_version_with_connection(&self, conn: &libsql::Connection) -> Result<Option<i64>, DatabaseError> {
+    async fn current_version_with_connection(
+        &self,
+        conn: &libsql::Connection,
+    ) -> Result<Option<i64>, DatabaseError> {
         // Check if migrations table exists
         let mut rows = conn
             .query(
@@ -564,11 +591,15 @@ impl MigrationRunner {
                 (),
             )
             .await
-            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to check migrations table: {}", e)))?;
+            .map_err(|e| {
+                DatabaseError::QueryFailed(format!("Failed to check migrations table: {}", e))
+            })?;
 
-        if rows.next().await.map_err(|e| {
-            DatabaseError::QueryFailed(format!("Failed to read result: {}", e))
-        })?.is_none()
+        if rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to read result: {}", e)))?
+            .is_none()
         {
             return Ok(None);
         }
@@ -577,11 +608,15 @@ impl MigrationRunner {
         let mut rows = conn
             .query("SELECT MAX(version) FROM _migrations", ())
             .await
-            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to query max version: {}", e)))?;
+            .map_err(|e| {
+                DatabaseError::QueryFailed(format!("Failed to query max version: {}", e))
+            })?;
 
-        match rows.next().await.map_err(|e| {
-            DatabaseError::QueryFailed(format!("Failed to read max version: {}", e))
-        })? {
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to read max version: {}", e)))?
+        {
             Some(row) => {
                 let version: Option<i64> = row.get(0).ok();
                 Ok(version)
@@ -616,9 +651,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (8 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items + blocking list)
+        // Check version (9 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items + blocking list + private xml storage)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(8));
+        assert_eq!(version, Some(9));
     }
 
     #[tokio::test]
@@ -634,7 +669,10 @@ mod tests {
         let conn = db.persistent_connection().unwrap();
         let conn = conn.lock().await;
         let mut rows = conn
-            .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", ())
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                (),
+            )
             .await
             .unwrap();
 
