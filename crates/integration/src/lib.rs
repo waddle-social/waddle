@@ -1707,15 +1707,24 @@ mod tests {
 
                 // Verify: 3 unique messages stored (msg-1, msg-2 deduped, msg-3)
                 let rows: Vec<Row> = db
-                    .query("SELECT COUNT(*) FROM messages", &[])
+                    .query("SELECT id FROM messages ORDER BY id ASC", &[])
                     .await
                     .unwrap();
-                let count = match rows[0].get(0) {
-                    Some(SqlValue::Integer(n)) => *n,
-                    other => panic!("unexpected count value: {other:?}"),
-                };
-                // msg-2 was pre-stored; MAM stores msg-1 and msg-3; msg-2 deduped
-                assert!(count >= 2, "expected at least 2 messages, got {count}");
+                let ids: Vec<String> = rows
+                    .iter()
+                    .map(|row| match row.get(0) {
+                        Some(SqlValue::Text(id)) => id.clone(),
+                        other => panic!("unexpected message id value: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(
+                    ids,
+                    vec![
+                        "msg-1".to_string(),
+                        "msg-2".to_string(),
+                        "msg-3".to_string()
+                    ]
+                );
 
                 // Verify sync state points to last page's last ID
                 let state: Vec<Row> = db
