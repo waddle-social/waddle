@@ -2,6 +2,20 @@ use std::sync::Arc;
 
 use waddle_storage::{Database, Row, SqlValue, StorageError};
 
+fn escape_like_prefix(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len());
+    for ch in prefix.chars() {
+        match ch {
+            '%' | '_' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvQuota {
     pub max_keys: u64,
@@ -90,35 +104,31 @@ impl<D: Database> PluginKvStore<D> {
 
         let pid = self.plugin_id.clone();
         let k = key.to_string();
-
-        // Check if this key already exists (an overwrite doesn't increase key count)
-        let existing: Vec<Row> = self
-            .db
-            .query(
-                "SELECT 1 FROM plugin_kv WHERE plugin_id = ?1 AND key = ?2",
-                &[&pid, &k],
-            )
-            .await?;
-        let is_new = existing.is_empty();
-
-        if is_new {
-            let usage = self.usage().await?;
-            if usage.key_count >= self.quota.max_keys {
-                return Err(KvError::QuotaExceeded {
-                    current: usage.key_count,
-                    limit: self.quota.max_keys,
-                });
-            }
-        }
-
+        let max_keys = self.quota.max_keys;
         let val = value.to_vec();
-        self.db
+        let rows_affected = self
+            .db
             .execute(
-                "INSERT INTO plugin_kv (plugin_id, key, value) VALUES (?1, ?2, ?3) \
+                "INSERT INTO plugin_kv (plugin_id, key, value) \
+                 SELECT ?1, ?2, ?3 \
+                 WHERE EXISTS ( \
+                     SELECT 1 FROM plugin_kv WHERE plugin_id = ?1 AND key = ?2 \
+                 ) \
+                 OR ( \
+                     SELECT COUNT(*) FROM plugin_kv WHERE plugin_id = ?1 \
+                 ) < ?4 \
                  ON CONFLICT (plugin_id, key) DO UPDATE SET value = excluded.value",
-                &[&pid, &k, &val],
+                &[&pid, &k, &val, &max_keys],
             )
             .await?;
+
+        if rows_affected == 0 {
+            let usage = self.usage().await?;
+            return Err(KvError::QuotaExceeded {
+                current: usage.key_count,
+                limit: self.quota.max_keys,
+            });
+        }
 
         Ok(())
     }
@@ -143,10 +153,10 @@ impl<D: Database> PluginKvStore<D> {
                 .query("SELECT key FROM plugin_kv WHERE plugin_id = ?1", &[&pid])
                 .await?
         } else {
-            let pattern = format!("{prefix}%");
+            let pattern = format!("{}%", escape_like_prefix(prefix));
             self.db
                 .query(
-                    "SELECT key FROM plugin_kv WHERE plugin_id = ?1 AND key LIKE ?2",
+                    "SELECT key FROM plugin_kv WHERE plugin_id = ?1 AND key LIKE ?2 ESCAPE '\\'",
                     &[&pid, &pattern],
                 )
                 .await?
@@ -290,6 +300,34 @@ mod tests {
         let mut keys = store.list_keys("session.").await.expect("list_keys failed");
         keys.sort();
         assert_eq!(keys, vec!["session.a", "session.b"]);
+    }
+
+    #[tokio::test]
+    async fn list_keys_prefix_treats_like_wildcards_as_literals() {
+        let (store, _dir) = open_temp_store("test-plugin").await;
+        store
+            .set("percent%literal", b"1")
+            .await
+            .expect("set failed");
+        store.set("percent%other", b"2").await.expect("set failed");
+        store
+            .set("percentXliteral", b"3")
+            .await
+            .expect("set failed");
+        store.set("under_score", b"4").await.expect("set failed");
+        store.set("underXscore", b"5").await.expect("set failed");
+        store.set(r"path\real", b"6").await.expect("set failed");
+        store.set(r"pathXreal", b"7").await.expect("set failed");
+
+        let mut percent_keys = store.list_keys("percent%").await.expect("list_keys failed");
+        percent_keys.sort();
+        assert_eq!(percent_keys, vec!["percent%literal", "percent%other"]);
+
+        let underscore_keys = store.list_keys("under_").await.expect("list_keys failed");
+        assert_eq!(underscore_keys, vec!["under_score"]);
+
+        let backslash_keys = store.list_keys(r"path\").await.expect("list_keys failed");
+        assert_eq!(backslash_keys, vec![r"path\real"]);
     }
 
     #[tokio::test]
