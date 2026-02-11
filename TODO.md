@@ -38,7 +38,7 @@
 - [x] Implement outbound routing: subscribe to `ui.*` command events (`ui.message.send`, `ui.presence.set`, roster/MUC commands) and convert them to stanza sends through the outbound pipeline.
 
 ## 5. Domain Components
-- [ ] Scaffold `waddle-roster` (depends: `core`, `storage`, `xmpp`), `waddle-messaging` (depends: `core`, `storage`, `xmpp`), `waddle-presence` (depends: `core`, `xmpp`), `waddle-mam` (depends: `core`, `storage`, `xmpp`), and `waddle-notifications` (depends: `core` only). Enforce dependency rules from `specs/01-architecture/workspace-layout.md` — domain crates never depend on each other.
+- [x] Scaffold `waddle-roster` (depends: `core`, `storage`, `xmpp`), `waddle-messaging` (depends: `core`, `storage`, `xmpp`), `waddle-presence` (depends: `core`, `xmpp`), `waddle-mam` (depends: `core`, `storage`, `xmpp`), and `waddle-notifications` (depends: `core` only). Enforce dependency rules from `specs/01-architecture/workspace-layout.md` — domain crates never depend on each other.
 - [ ] Implement roster management: initial fetch on connection, roster push handling, CRUD operations, group management, subscription state machine (`subscribe`/`subscribed`/`unsubscribe`/`unsubscribed`). Emit `xmpp.roster.*` and `xmpp.subscription.*` events.
 - [ ] Implement presence management: local presence publish on connection, contact presence tracking (available/away/dnd/xa/unavailable), connection-state reactions (send unavailable on disconnect). Emit `xmpp.presence.*` events.
 - [ ] Implement 1:1 messaging: send/receive with persistence to storage, delivery receipts (XEP-0184), chat state notifications (XEP-0085). Emit `xmpp.message.*` and `xmpp.chatstate.*` events.

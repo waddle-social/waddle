@@ -1,0 +1,23 @@
+[package]
+name = "waddle-roster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Roster (contact list) management for Waddle"
+
+[features]
+default = ["native"]
+native = ["waddle-core/native", "waddle-storage/native", "waddle-xmpp/native"]
+web = ["waddle-core/web", "waddle-storage/web", "waddle-xmpp/web"]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+waddle-storage = { workspace = true, default-features = false }
+waddle-xmpp = { workspace = true, default-features = false }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+tracing-test = { workspace = true }

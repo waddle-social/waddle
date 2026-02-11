@@ -1,0 +1,22 @@
+[package]
+name = "waddle-notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-platform notification dispatch for Waddle"
+
+[features]
+default = ["native"]
+native = ["waddle-core/native", "dep:notify-rust"]
+web = ["waddle-core/web", "dep:web-sys"]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+tracing = { workspace = true }
+notify-rust = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["Notification", "Window"] }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tracing-test = { workspace = true }
