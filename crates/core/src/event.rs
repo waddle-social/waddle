@@ -283,6 +283,44 @@ pub enum EventPayload {
         event_id: String,
     },
 
+    // ── UI command events (consumed by XMPP outbound router) ────
+    MessageSendRequested {
+        to: String,
+        body: String,
+        message_type: MessageType,
+    },
+    PresenceSetRequested {
+        show: PresenceShow,
+        status: Option<String>,
+    },
+    RosterAddRequested {
+        jid: String,
+        name: Option<String>,
+        groups: Vec<String>,
+    },
+    RosterRemoveRequested {
+        jid: String,
+    },
+    SubscriptionRespondRequested {
+        jid: String,
+        accept: bool,
+    },
+    MucJoinRequested {
+        room: String,
+        nick: String,
+    },
+    MucLeaveRequested {
+        room: String,
+    },
+    MucSendRequested {
+        room: String,
+        body: String,
+    },
+    ChatStateSendRequested {
+        to: String,
+        state: ChatState,
+    },
+
     // ── Plugin events ────────────────────────────────────────────
     PluginLoaded {
         plugin_id: String,

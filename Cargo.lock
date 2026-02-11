@@ -6485,6 +6485,7 @@ dependencies = [
  "tokio-xmpp",
  "tracing",
  "tracing-test",
+ "uuid",
  "waddle-core",
  "wasm-bindgen",
  "wasm-bindgen-futures",

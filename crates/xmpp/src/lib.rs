@@ -2,6 +2,7 @@ pub mod carbons;
 pub mod connection;
 pub mod csi;
 pub mod error;
+pub mod outbound;
 pub mod pipeline;
 pub mod processors;
 pub mod sasl;
@@ -13,6 +14,7 @@ pub use carbons::{CarbonDirection, CarbonsManager, CarbonsState, UnwrappedCarbon
 pub use connection::{ConnectionConfig, ConnectionManager, ConnectionState};
 pub use csi::{ClientState, CsiManager};
 pub use error::{ConnectionError, PipelineError};
+pub use outbound::{OutboundRouter, OutboundRouterError};
 pub use pipeline::{
     ProcessorContext, ProcessorResult, StanzaDirection, StanzaPipeline, StanzaProcessor,
 };
