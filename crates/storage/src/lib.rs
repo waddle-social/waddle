@@ -639,7 +639,7 @@ pub async fn open_database(path: &Path) -> Result<impl Database, StorageError> {
 #[cfg(not(any(feature = "native", feature = "web")))]
 compile_error!("waddle-storage requires either the `native` or `web` feature.");
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use tempfile::TempDir;
