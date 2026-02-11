@@ -30,6 +30,7 @@ wasmtime = { workspace = true, optional = true }
 oci-distribution = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true }
 tokio-test = { workspace = true }
 mockall = { workspace = true }
 tempfile = { workspace = true }

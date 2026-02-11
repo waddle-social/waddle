@@ -50,7 +50,7 @@
 ## 6. Plugin System (`waddle-plugins`)
 - [x] Scaffold `waddle-plugins` (depends: `core`, `storage` — not `xmpp`). Create modules for runtime, registry, and plugin KV storage.
 - [x] Implement plugin manifest parsing/validation and capability-based permission policy checks from `specs/05-plugin-api/packaging.md` and `specs/05-plugin-api/permissions.md`.
-- [ ] Implement plugin KV storage with namespace isolation (`plugin_kv` table, keyed by plugin ID) and quota enforcement.
+- [x] Implement plugin KV storage with namespace isolation (`plugin_kv` table, keyed by plugin ID) and quota enforcement.
 - [ ] Implement Wasmtime runtime: fuel metering, epoch interruption, memory caps, dedicated blocking thread pool. Implement plugin lifecycle: load → init → unload, with 5-error auto-disable threshold.
 - [ ] Implement plugin event and stanza integration: WIT host functions for event subscribe/publish, enforcing `plugin.{id}.*` namespace restrictions on publish.
 - [ ] Implement OCI plugin registry operations (install, uninstall, update, search/list) and local plugin index/cache management per `specs/03-components/plugins-registry.md`.
