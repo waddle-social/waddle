@@ -7,6 +7,9 @@ repository.workspace = true
 description = "Shared fixture loading helpers for Waddle tests"
 
 [dependencies]
+testcontainers = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

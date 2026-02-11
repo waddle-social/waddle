@@ -1,3 +1,5 @@
+pub mod xmpp;
+
 pub mod fixtures {
     use std::fs;
     use std::io;
