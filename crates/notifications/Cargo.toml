@@ -14,9 +14,11 @@ web = ["waddle-core/web", "dep:web-sys"]
 [dependencies]
 waddle-core = { workspace = true, default-features = false }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 notify-rust = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true, features = ["Notification", "Window"] }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 tracing-test = { workspace = true }
+chrono = { workspace = true }

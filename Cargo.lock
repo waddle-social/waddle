@@ -6390,7 +6390,9 @@ dependencies = [
 name = "waddle-notifications"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "notify-rust",
+ "thiserror 2.0.18",
  "tokio-test",
  "tracing",
  "tracing-test",
