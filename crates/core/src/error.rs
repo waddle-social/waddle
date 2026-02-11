@@ -15,6 +15,9 @@ pub enum WaddleError {
     #[error("I18n error: {0}")]
     I18n(String),
 
+    #[error("Theme error: {0}")]
+    Theme(#[from] crate::theme::ThemeError),
+
     #[error("Plugin error: {0}")]
     Plugin(String),
 

@@ -14,7 +14,7 @@
 - [x] Add `EventBus` tests for routing correctness, glob filtering, per-domain ordering, correlation ID tracking, and lagged subscriber recovery behaviour.
 - [x] Implement config loading (`config_path`, TOML parse, environment overrides, validation) per `specs/03-components/core-config.md`.
 - [x] Implement i18n module (Fluent locale negotiation, message resolution) per `specs/03-components/i18n.md`.
-- [ ] Implement theming module (built-in themes, custom theme loading, CSS variable token generation) per `specs/03-components/themes.md`.
+- [x] Implement theming module (built-in themes, custom theme loading, CSS variable token generation) per `specs/03-components/themes.md`.
 
 ## 3. Storage Infrastructure (`waddle-storage`)
 - [ ] Create `waddle-storage` with `native` and `web` feature flags and the `Database` trait API from `specs/03-components/core-storage.md`. Depends on `waddle-core` only.
