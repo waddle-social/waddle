@@ -364,19 +364,19 @@ fn run_migrations(connection: &Connection) -> Result<(), StorageError> {
             reason: format!("failed to create _migrations table: {error}"),
         })?;
 
-    let applied_version: u32 = connection
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM _migrations",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| StorageError::MigrationFailed {
-            version: 0,
-            reason: format!("failed to query migration state: {error}"),
-        })?;
-
     for migration in MIGRATIONS {
-        if migration.version <= applied_version {
+        let is_applied: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations WHERE version = ?1)",
+                params![migration.version],
+                |row| row.get(0),
+            )
+            .map_err(|error| StorageError::MigrationFailed {
+                version: migration.version,
+                reason: format!("failed to query migration state: {error}"),
+            })?;
+
+        if is_applied != 0 {
             continue;
         }
 
