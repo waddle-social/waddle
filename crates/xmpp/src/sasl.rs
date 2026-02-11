@@ -1,10 +1,15 @@
 use std::collections::HashSet;
 
+#[cfg(any(feature = "native", test))]
 use sasl::client::Mechanism;
+#[cfg(any(feature = "native", test))]
 use sasl::client::mechanisms::{Plain, Scram};
+#[cfg(any(feature = "native", test))]
 use sasl::common::Credentials;
+#[cfg(any(feature = "native", test))]
 use sasl::common::scram::{Sha1, Sha256};
 
+#[cfg(any(feature = "native", test))]
 use crate::error::ConnectionError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +48,7 @@ pub fn select_mechanism(server_mechanisms: &HashSet<String>) -> Option<SelectedM
         .copied()
 }
 
+#[cfg(any(feature = "native", test))]
 fn build_mechanism(
     selected: SelectedMechanism,
     credentials: &Credentials,
