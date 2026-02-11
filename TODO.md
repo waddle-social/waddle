@@ -52,7 +52,7 @@
 - [x] Implement plugin manifest parsing/validation and capability-based permission policy checks from `specs/05-plugin-api/packaging.md` and `specs/05-plugin-api/permissions.md`.
 - [x] Implement plugin KV storage with namespace isolation (`plugin_kv` table, keyed by plugin ID) and quota enforcement.
 - [x] Implement Wasmtime runtime: fuel metering, epoch interruption, memory caps, dedicated blocking thread pool. Implement plugin lifecycle: load → init → unload, with 5-error auto-disable threshold.
-- [ ] Implement plugin event and stanza integration: WIT host functions for event subscribe/publish, enforcing `plugin.{id}.*` namespace restrictions on publish.
+- [x] Implement plugin event and stanza integration: WIT host functions for event subscribe/publish, enforcing `plugin.{id}.*` namespace restrictions on publish.
 - [ ] Implement OCI plugin registry operations (install, uninstall, update, search/list) and local plugin index/cache management per `specs/03-components/plugins-registry.md`.
 
 ## 7. User Interfaces

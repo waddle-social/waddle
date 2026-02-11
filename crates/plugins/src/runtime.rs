@@ -11,6 +11,8 @@ use std::thread;
 #[cfg(feature = "native")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "native")]
+use glob::Pattern;
 use waddle_core::event::Event;
 #[cfg(feature = "native")]
 use waddle_core::event::{Channel, EventBus, EventPayload, EventSource};
@@ -18,7 +20,8 @@ use waddle_storage::Database;
 
 #[cfg(feature = "native")]
 use wasmtime::{
-    Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
+    Caller, Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+    TypedFunc,
 };
 
 use crate::registry::{ManifestCapability, PluginManifest};
@@ -29,6 +32,8 @@ const AUTO_DISABLE_ERROR_THRESHOLD: usize = 5;
 const ERROR_WINDOW: Duration = Duration::from_secs(60);
 #[cfg(feature = "native")]
 const BLOCKING_POOL_THREADS: usize = 2;
+#[cfg(feature = "native")]
+const VALID_EVENT_DOMAINS: &[&str] = &["system", "xmpp", "ui", "plugin"];
 
 #[cfg(feature = "native")]
 type BlockingTask = Box<dyn FnOnce() + Send + 'static>;
@@ -146,6 +151,10 @@ pub enum PluginHook {
 struct PluginStoreState {
     plugin_id: String,
     limits: StoreLimits,
+    event_bus: Arc<dyn EventBus>,
+    declared_event_subscriptions: Vec<String>,
+    event_subscription_patterns: Vec<String>,
+    event_subscriptions: Vec<Pattern>,
 }
 
 #[cfg(feature = "native")]
@@ -161,10 +170,20 @@ enum LifecycleShutdown {
 }
 
 #[cfg(feature = "native")]
+#[derive(Clone)]
+enum RuntimeHook {
+    Unit(TypedFunc<(), ()>),
+    Status(TypedFunc<(), i32>),
+}
+
+#[cfg(feature = "native")]
 struct LoadedPlugin {
     store: Store<PluginStoreState>,
     _instance: Instance,
     shutdown: LifecycleShutdown,
+    event_handler: Option<RuntimeHook>,
+    process_inbound: Option<RuntimeHook>,
+    process_outbound: Option<RuntimeHook>,
 }
 
 #[cfg(feature = "native")]
@@ -187,6 +206,71 @@ impl LoadedPlugin {
                     Err(PluginError::ShutdownFailed {
                         id: plugin_id,
                         reason: format!("non-zero shutdown status: {status}"),
+                    })
+                }
+            }
+        }
+    }
+
+    fn matches_event_subscription(&self, channel: &str) -> bool {
+        self.store
+            .data()
+            .event_subscriptions
+            .iter()
+            .any(|pattern| pattern.matches(channel))
+    }
+
+    fn invoke_event_handler(&mut self, fuel_per_invocation: u64) -> Result<(), PluginError> {
+        self.invoke_hook(
+            "event handler",
+            self.event_handler.clone(),
+            fuel_per_invocation,
+        )
+    }
+
+    fn invoke_inbound_stanza(&mut self, fuel_per_invocation: u64) -> Result<(), PluginError> {
+        self.invoke_hook(
+            "stanza inbound processor",
+            self.process_inbound.clone(),
+            fuel_per_invocation,
+        )
+    }
+
+    fn invoke_outbound_stanza(&mut self, fuel_per_invocation: u64) -> Result<(), PluginError> {
+        self.invoke_hook(
+            "stanza outbound processor",
+            self.process_outbound.clone(),
+            fuel_per_invocation,
+        )
+    }
+
+    fn invoke_hook(
+        &mut self,
+        hook_name: &str,
+        hook: Option<RuntimeHook>,
+        fuel_per_invocation: u64,
+    ) -> Result<(), PluginError> {
+        let Some(hook) = hook else {
+            return Ok(());
+        };
+
+        let plugin_id = self.store.data().plugin_id.clone();
+        prepare_invocation(&mut self.store, &plugin_id, fuel_per_invocation)?;
+
+        match hook {
+            RuntimeHook::Unit(func) => func
+                .call(&mut self.store, ())
+                .map_err(|error| classify_invocation_error(&plugin_id, error)),
+            RuntimeHook::Status(func) => {
+                let status = func
+                    .call(&mut self.store, ())
+                    .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(PluginError::InvocationFailed {
+                        id: plugin_id,
+                        reason: format!("non-zero {hook_name} status: {status}"),
                     })
                 }
             }
@@ -404,11 +488,12 @@ impl<D: Database> PluginRuntime<D> {
 
             let engine = self.engine.clone();
             let config = self.config.clone();
-            let plugin_id_for_task = plugin_id.clone();
+            let manifest_for_task = manifest.clone();
+            let event_bus = Arc::clone(&self.event_bus);
             let wasm = wasm_bytes.to_vec();
             let load_result = self
                 .run_blocking_task(plugin_id.clone(), move || {
-                    compile_and_init_plugin(engine, config, plugin_id_for_task, wasm)
+                    compile_and_init_plugin(engine, config, event_bus, manifest_for_task, wasm)
                 })
                 .await;
 
@@ -519,19 +604,63 @@ impl<D: Database> PluginRuntime<D> {
         self.plugins.get(plugin_id)
     }
 
-    pub async fn invoke_hook(&self, hook: PluginHook) -> Result<(), PluginError> {
-        let _ = hook;
-
+    pub async fn invoke_hook(&mut self, hook: PluginHook) -> Result<(), PluginError> {
         #[cfg(feature = "native")]
         {
             if self.runtime_plugins.is_empty() {
                 return Ok(());
             }
-            Err(PluginError::NotImplemented)
+
+            let plugin_ids: Vec<String> = self.runtime_plugins.keys().cloned().collect();
+            let mut failures = Vec::new();
+
+            for plugin_id in plugin_ids {
+                let invocation_result = match &hook {
+                    PluginHook::Event(event) => {
+                        let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
+                            continue;
+                        };
+                        if !plugin.matches_event_subscription(event.channel.as_str()) {
+                            continue;
+                        }
+                        plugin.invoke_event_handler(self.config.fuel_per_invocation)
+                    }
+                    PluginHook::InboundStanza(_xml) => {
+                        let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
+                            continue;
+                        };
+                        plugin.invoke_inbound_stanza(self.config.fuel_per_invocation)
+                    }
+                    PluginHook::OutboundStanza(_xml) => {
+                        let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
+                            continue;
+                        };
+                        plugin.invoke_outbound_stanza(self.config.fuel_per_invocation)
+                    }
+                    PluginHook::TuiRender { .. } | PluginHook::GuiGetComponentInfo => Ok(()),
+                };
+
+                if let Err(error) = invocation_result {
+                    failures.push((plugin_id, error));
+                }
+            }
+
+            for (plugin_id, error) in failures {
+                let reason = error.to_string();
+                let auto_disabled = self.record_plugin_error(&plugin_id, &reason);
+                let _ = self.emit_plugin_error(&plugin_id, &reason);
+
+                if auto_disabled {
+                    let _ = self.emit_plugin_error(&plugin_id, "auto-disabled: too many errors");
+                }
+            }
+
+            Ok(())
         }
 
         #[cfg(not(feature = "native"))]
         {
+            let _ = hook;
             Err(PluginError::NotImplemented)
         }
     }
@@ -661,9 +790,11 @@ fn map_capabilities(manifest: &PluginManifest) -> Vec<PluginCapability> {
 fn compile_and_init_plugin(
     engine: Engine,
     config: PluginRuntimeConfig,
-    plugin_id: String,
+    event_bus: Arc<dyn EventBus>,
+    manifest: PluginManifest,
     wasm_bytes: Vec<u8>,
 ) -> Result<LoadedPlugin, PluginError> {
+    let plugin_id = manifest.id().to_string();
     let module =
         Module::new(&engine, wasm_bytes).map_err(|error| PluginError::CompilationFailed {
             id: plugin_id.clone(),
@@ -680,12 +811,17 @@ fn compile_and_init_plugin(
         PluginStoreState {
             plugin_id: plugin_id.clone(),
             limits,
+            event_bus,
+            declared_event_subscriptions: manifest.permissions.event_subscriptions.clone(),
+            event_subscription_patterns: Vec::new(),
+            event_subscriptions: Vec::new(),
         },
     );
     store.limiter(|state| &mut state.limits);
     store.epoch_deadline_trap();
 
-    let linker = Linker::new(&engine);
+    let mut linker = Linker::new(&engine);
+    bind_host_events(&mut linker, &plugin_id)?;
     let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|error| map_instantiation_error(&plugin_id, error.to_string()))?;
@@ -694,11 +830,47 @@ fn compile_and_init_plugin(
     invoke_init(&mut store, &init, &plugin_id, config.fuel_per_invocation)?;
 
     let shutdown = resolve_shutdown(&mut store, &instance, &plugin_id)?;
+    let event_handler = if manifest.hooks.event_handler {
+        Some(resolve_runtime_hook(
+            &mut store,
+            &instance,
+            &plugin_id,
+            &["plugin_handle_event", "handle_event"],
+            "event handler",
+        )?)
+    } else {
+        None
+    };
+    let process_inbound = if manifest.hooks.stanza_processor {
+        Some(resolve_runtime_hook(
+            &mut store,
+            &instance,
+            &plugin_id,
+            &["plugin_process_inbound", "process_inbound"],
+            "stanza inbound processor",
+        )?)
+    } else {
+        None
+    };
+    let process_outbound = if manifest.hooks.stanza_processor {
+        Some(resolve_runtime_hook(
+            &mut store,
+            &instance,
+            &plugin_id,
+            &["plugin_process_outbound", "process_outbound"],
+            "stanza outbound processor",
+        )?)
+    } else {
+        None
+    };
 
     Ok(LoadedPlugin {
         store,
         _instance: instance,
         shutdown,
+        event_handler,
+        process_inbound,
+        process_outbound,
     })
 }
 
@@ -742,6 +914,216 @@ fn resolve_shutdown(
         id: plugin_id.to_string(),
         reason: "missing required export: plugin_shutdown or shutdown".to_string(),
     })
+}
+
+#[cfg(feature = "native")]
+fn resolve_runtime_hook(
+    store: &mut Store<PluginStoreState>,
+    instance: &Instance,
+    plugin_id: &str,
+    export_names: &[&str],
+    hook_name: &str,
+) -> Result<RuntimeHook, PluginError> {
+    for export_name in export_names {
+        if let Ok(func) = instance.get_typed_func::<(), i32>(&mut *store, export_name) {
+            return Ok(RuntimeHook::Status(func));
+        }
+        if let Ok(func) = instance.get_typed_func::<(), ()>(&mut *store, export_name) {
+            return Ok(RuntimeHook::Unit(func));
+        }
+    }
+
+    Err(PluginError::InitFailed {
+        id: plugin_id.to_string(),
+        reason: format!(
+            "missing required export for {hook_name}: {}",
+            export_names.join(" or ")
+        ),
+    })
+}
+
+#[cfg(feature = "native")]
+fn bind_host_events(
+    linker: &mut Linker<PluginStoreState>,
+    plugin_id: &str,
+) -> Result<(), PluginError> {
+    linker
+        .func_wrap(
+            "host-events",
+            "publish-event",
+            |mut caller: Caller<'_, PluginStoreState>,
+             channel_ptr: i32,
+             channel_len: i32,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                host_publish_event(
+                    &mut caller,
+                    channel_ptr,
+                    channel_len,
+                    payload_ptr,
+                    payload_len,
+                )
+                .map(|_| 0)
+                .unwrap_or(1)
+            },
+        )
+        .map_err(|error| PluginError::InstantiationFailed {
+            id: plugin_id.to_string(),
+            reason: error.to_string(),
+        })?;
+
+    linker
+        .func_wrap(
+            "host-events",
+            "subscribe",
+            |mut caller: Caller<'_, PluginStoreState>, pattern_ptr: i32, pattern_len: i32| -> i32 {
+                host_subscribe(&mut caller, pattern_ptr, pattern_len)
+                    .map(|_| 0)
+                    .unwrap_or(1)
+            },
+        )
+        .map_err(|error| PluginError::InstantiationFailed {
+            id: plugin_id.to_string(),
+            reason: error.to_string(),
+        })?;
+
+    Ok(())
+}
+
+#[cfg(feature = "native")]
+fn host_publish_event(
+    caller: &mut Caller<'_, PluginStoreState>,
+    channel_ptr: i32,
+    channel_len: i32,
+    payload_ptr: i32,
+    payload_len: i32,
+) -> Result<(), String> {
+    let channel_name = read_guest_string(caller, channel_ptr, channel_len)?;
+    let payload = read_guest_string(caller, payload_ptr, payload_len)?;
+
+    let state = caller.data();
+    let prefix = plugin_event_prefix(&state.plugin_id);
+    if !channel_name.starts_with(&prefix) {
+        return Err(format!(
+            "plugins may only publish to channels under '{prefix}'"
+        ));
+    }
+
+    let channel = Channel::new(channel_name.clone()).map_err(|error| error.to_string())?;
+    let data: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| format!("failed to parse plugin event payload: {error}"))?;
+
+    let plugin_id = state.plugin_id.clone();
+    let event_type = channel_name
+        .strip_prefix(&prefix)
+        .unwrap_or("event")
+        .to_string();
+    let event = Event::new(
+        channel,
+        EventSource::Plugin(plugin_id.clone()),
+        EventPayload::PluginCustomEvent {
+            plugin_id,
+            event_type,
+            data,
+        },
+    );
+
+    state
+        .event_bus
+        .publish(event)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "native")]
+fn host_subscribe(
+    caller: &mut Caller<'_, PluginStoreState>,
+    pattern_ptr: i32,
+    pattern_len: i32,
+) -> Result<(), String> {
+    let pattern = read_guest_string(caller, pattern_ptr, pattern_len)?;
+    let compiled = validate_subscription_pattern(&pattern)?;
+
+    let state = caller.data_mut();
+    if !state
+        .declared_event_subscriptions
+        .iter()
+        .any(|declared| declared == &pattern)
+    {
+        return Err(format!(
+            "subscription pattern '{pattern}' is not declared in permissions.event_subscriptions"
+        ));
+    }
+
+    if state
+        .event_subscription_patterns
+        .iter()
+        .any(|existing| existing == &pattern)
+    {
+        return Ok(());
+    }
+
+    state.event_subscription_patterns.push(pattern);
+    state.event_subscriptions.push(compiled);
+    Ok(())
+}
+
+#[cfg(feature = "native")]
+fn validate_subscription_pattern(pattern: &str) -> Result<Pattern, String> {
+    if pattern.is_empty() {
+        return Err("event subscription patterns must not be empty".to_string());
+    }
+
+    let compiled = Pattern::new(pattern)
+        .map_err(|error| format!("invalid event subscription pattern '{pattern}': {error}"))?;
+    let first_segment = pattern.split('.').next().unwrap_or_default();
+
+    if first_segment.is_empty() {
+        return Err(format!(
+            "invalid event subscription domain in pattern '{pattern}'"
+        ));
+    }
+
+    if !has_glob_meta(first_segment) && !VALID_EVENT_DOMAINS.contains(&first_segment) {
+        return Err(format!(
+            "invalid event subscription domain in pattern '{pattern}'"
+        ));
+    }
+
+    Ok(compiled)
+}
+
+#[cfg(feature = "native")]
+fn read_guest_string(
+    caller: &mut Caller<'_, PluginStoreState>,
+    ptr: i32,
+    len: i32,
+) -> Result<String, String> {
+    if ptr < 0 || len < 0 {
+        return Err("pointer and length must be non-negative".to_string());
+    }
+
+    let ptr = usize::try_from(ptr).map_err(|_| "pointer conversion failed".to_string())?;
+    let len = usize::try_from(len).map_err(|_| "length conversion failed".to_string())?;
+
+    let Some(export) = caller.get_export("memory") else {
+        return Err("guest module does not export memory".to_string());
+    };
+    let Some(memory) = export.into_memory() else {
+        return Err("guest memory export is not a memory".to_string());
+    };
+
+    let data = memory.data(caller);
+    let end = ptr
+        .checked_add(len)
+        .ok_or_else(|| "memory range overflow".to_string())?;
+    if end > data.len() {
+        return Err("guest memory access out of bounds".to_string());
+    }
+
+    std::str::from_utf8(&data[ptr..end])
+        .map(|value| value.to_string())
+        .map_err(|error| format!("guest string is not valid utf-8: {error}"))
 }
 
 #[cfg(feature = "native")]
@@ -868,24 +1250,56 @@ fn is_memory_limit_error(reason: &str) -> bool {
 
 #[cfg(feature = "native")]
 fn plugin_channel(plugin_id: &str, action: &str) -> Result<Channel, PluginError> {
-    let safe_plugin_id = plugin_id.replace('-', "_");
-    let channel_name = format!("plugin.{safe_plugin_id}.{action}");
+    let channel_name = format!("{}{}", plugin_event_prefix(plugin_id), action);
     Channel::new(channel_name.clone()).map_err(|error| PluginError::EventPublishFailed {
         id: plugin_id.to_string(),
         reason: error.to_string(),
     })
 }
 
+#[cfg(feature = "native")]
+fn plugin_event_prefix(plugin_id: &str) -> String {
+    let safe_plugin_id = plugin_id.replace('-', "_");
+    format!("plugin.{safe_plugin_id}.")
+}
+
+#[cfg(feature = "native")]
+fn has_glob_meta(segment: &str) -> bool {
+    segment.contains('*')
+        || segment.contains('?')
+        || segment.contains('[')
+        || segment.contains(']')
+        || segment.contains('{')
+        || segment.contains('}')
+        || segment.contains('!')
+}
+
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use std::path::Path;
 
+    use tokio::time::{Duration, timeout};
     use waddle_core::event::BroadcastEventBus;
     use waddle_storage::open_database;
 
     use super::*;
 
     fn test_manifest(plugin_id: &str) -> PluginManifest {
+        test_manifest_with(plugin_id, false, &[], false, false)
+    }
+
+    fn test_manifest_with(
+        plugin_id: &str,
+        stanza_access: bool,
+        event_subscriptions: &[&str],
+        stanza_processor: bool,
+        event_handler: bool,
+    ) -> PluginManifest {
+        let event_subscriptions = event_subscriptions
+            .iter()
+            .map(|pattern| format!("\"{pattern}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let toml = format!(
             r#"
 [plugin]
@@ -896,14 +1310,14 @@ description = "Runtime test plugin"
 license = "MIT"
 
 [permissions]
-stanza_access = false
-event_subscriptions = []
+stanza_access = {stanza_access}
+event_subscriptions = [{event_subscriptions}]
 kv_storage = false
 
 [hooks]
-stanza_processor = false
+stanza_processor = {stanza_processor}
 stanza_priority = 0
-event_handler = false
+event_handler = {event_handler}
 tui_renderer = false
 gui_metadata = false
 "#
@@ -960,6 +1374,198 @@ gui_metadata = false
             .await
             .expect("unload should succeed");
         assert!(runtime.list_plugins().is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_publish_event_enforces_plugin_namespace() {
+        let (mut runtime, _dir) = open_runtime(PluginRuntimeConfig::default()).await;
+        let manifest = test_manifest("com.waddle.runtime.publisher");
+        let wasm = r#"
+            (module
+              (import "host-events" "publish-event" (func $publish_event (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "xmpp.message.sent")
+              (data (i32.const 64) "{}")
+              (func (export "plugin_init") (result i32)
+                i32.const 0
+                i32.const 17
+                i32.const 64
+                i32.const 2
+                call $publish_event)
+              (func (export "plugin_shutdown")))
+        "#;
+
+        let result = runtime.load_plugin(manifest, wasm.as_bytes()).await;
+        assert!(
+            matches!(
+                result,
+                Err(PluginError::InitFailed { ref id, .. }) if id == "com.waddle.runtime.publisher"
+            ),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_subscribe_enforces_declared_permissions() {
+        let (mut runtime, _dir) = open_runtime(PluginRuntimeConfig::default()).await;
+        let manifest = test_manifest_with("com.waddle.runtime.subscriber", false, &[], false, true);
+        let wasm = r#"
+            (module
+              (import "host-events" "subscribe" (func $subscribe (param i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "xmpp.message.*")
+              (func (export "plugin_init") (result i32)
+                i32.const 0
+                i32.const 14
+                call $subscribe)
+              (func (export "plugin_handle_event"))
+              (func (export "plugin_shutdown")))
+        "#;
+
+        let result = runtime.load_plugin(manifest, wasm.as_bytes()).await;
+        assert!(
+            matches!(
+                result,
+                Err(PluginError::InitFailed { ref id, .. }) if id == "com.waddle.runtime.subscriber"
+            ),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_event_hook_dispatches_to_subscribed_plugins() {
+        let (mut runtime, _dir) = open_runtime(PluginRuntimeConfig::default()).await;
+        let manifest = test_manifest_with(
+            "com.waddle.eh",
+            false,
+            &["xmpp.message.received"],
+            false,
+            true,
+        );
+        let mut custom_events = runtime
+            .event_bus()
+            .subscribe("plugin.com.waddle.eh.event")
+            .expect("event bus subscription should succeed");
+
+        let wasm = r#"
+            (module
+              (import "host-events" "subscribe" (func $subscribe (param i32 i32) (result i32)))
+              (import "host-events" "publish-event" (func $publish_event (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "xmpp.message.received")
+              (data (i32.const 64) "plugin.com.waddle.eh.event")
+              (data (i32.const 128) "{\"ok\":true}")
+              (func (export "plugin_init") (result i32)
+                i32.const 0
+                i32.const 21
+                call $subscribe)
+              (func (export "plugin_handle_event") (result i32)
+                i32.const 64
+                i32.const 26
+                i32.const 128
+                i32.const 11
+                call $publish_event)
+              (func (export "plugin_shutdown")))
+        "#;
+
+        runtime
+            .load_plugin(manifest, wasm.as_bytes())
+            .await
+            .expect("plugin load should succeed");
+
+        let event = Event::new(
+            Channel::new("xmpp.message.received").expect("channel should be valid"),
+            EventSource::Xmpp,
+            EventPayload::RawStanzaReceived {
+                stanza: "<message/>".to_string(),
+            },
+        );
+        runtime
+            .invoke_hook(PluginHook::Event(Box::new(event)))
+            .await
+            .expect("hook invocation should succeed");
+
+        let published = timeout(Duration::from_secs(1), custom_events.recv())
+            .await
+            .expect("timed out waiting for custom event")
+            .expect("custom event should be published");
+        assert_eq!(published.channel.as_str(), "plugin.com.waddle.eh.event");
+        assert!(matches!(
+            published.payload,
+            EventPayload::PluginCustomEvent {
+                ref plugin_id,
+                ref event_type,
+                ref data
+            } if plugin_id == "com.waddle.eh"
+                && event_type == "event"
+                && data.get("ok").and_then(|value| value.as_bool()) == Some(true)
+        ));
+    }
+
+    #[tokio::test]
+    async fn invoke_stanza_hooks_runs_plugin_stanza_processors() {
+        let (mut runtime, _dir) = open_runtime(PluginRuntimeConfig::default()).await;
+        let manifest = test_manifest_with("com.waddle.stanza", true, &[], true, false);
+        let mut inbound_events = runtime
+            .event_bus()
+            .subscribe("plugin.com.waddle.stanza.inbound")
+            .expect("event bus subscription should succeed");
+        let mut outbound_events = runtime
+            .event_bus()
+            .subscribe("plugin.com.waddle.stanza.outbound")
+            .expect("event bus subscription should succeed");
+
+        let wasm = r#"
+            (module
+              (import "host-events" "publish-event" (func $publish_event (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "plugin.com.waddle.stanza.inbound")
+              (data (i32.const 64) "plugin.com.waddle.stanza.outbound")
+              (data (i32.const 128) "{}")
+              (func (export "plugin_init") (result i32)
+                i32.const 0)
+              (func (export "plugin_process_inbound") (result i32)
+                i32.const 0
+                i32.const 32
+                i32.const 128
+                i32.const 2
+                call $publish_event)
+              (func (export "plugin_process_outbound") (result i32)
+                i32.const 64
+                i32.const 33
+                i32.const 128
+                i32.const 2
+                call $publish_event)
+              (func (export "plugin_shutdown")))
+        "#;
+
+        runtime
+            .load_plugin(manifest, wasm.as_bytes())
+            .await
+            .expect("plugin load should succeed");
+
+        runtime
+            .invoke_hook(PluginHook::InboundStanza("<message/>".to_string()))
+            .await
+            .expect("inbound hook invocation should succeed");
+        runtime
+            .invoke_hook(PluginHook::OutboundStanza("<message/>".to_string()))
+            .await
+            .expect("outbound hook invocation should succeed");
+
+        let inbound = timeout(Duration::from_secs(1), inbound_events.recv())
+            .await
+            .expect("timed out waiting for inbound event")
+            .expect("inbound event should exist");
+        assert_eq!(inbound.channel.as_str(), "plugin.com.waddle.stanza.inbound");
+        let outbound = timeout(Duration::from_secs(1), outbound_events.recv())
+            .await
+            .expect("timed out waiting for outbound event")
+            .expect("outbound event should exist");
+        assert_eq!(
+            outbound.channel.as_str(),
+            "plugin.com.waddle.stanza.outbound"
+        );
     }
 
     #[tokio::test]
