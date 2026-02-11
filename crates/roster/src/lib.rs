@@ -246,6 +246,36 @@ impl<D: Database> RosterManager<D> {
         Ok(())
     }
 
+    pub async fn request_subscription(&self, jid: &str) -> Result<(), RosterError> {
+        #[cfg(feature = "native")]
+        {
+            let _ = self.event_bus.publish(Event::new(
+                Channel::new("ui.subscription.send").unwrap(),
+                EventSource::System("roster".into()),
+                EventPayload::SubscriptionSendRequested {
+                    jid: jid.to_string(),
+                    subscribe: true,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn unsubscribe(&self, jid: &str) -> Result<(), RosterError> {
+        #[cfg(feature = "native")]
+        {
+            let _ = self.event_bus.publish(Event::new(
+                Channel::new("ui.subscription.send").unwrap(),
+                EventSource::System("roster".into()),
+                EventPayload::SubscriptionSendRequested {
+                    jid: jid.to_string(),
+                    subscribe: false,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     async fn upsert_item(&self, item: &RosterItem) -> Result<(), RosterError> {
         let groups_json =
             serde_json::to_string(&item.groups).map_err(|e| RosterError::SetFailed {
@@ -311,6 +341,11 @@ impl<D: Database> RosterManager<D> {
                 if let Err(e) = self.delete_item(jid).await {
                     error!(error = %e, jid = %jid, "failed to delete roster item");
                 }
+            }
+            EventPayload::SubscriptionRequest { from } => {
+                debug!(from = %from, "inbound subscription request received");
+                // The UI layer should prompt the user; we just log it here.
+                // Approval/denial is handled via approve_subscription/deny_subscription.
             }
             EventPayload::SubscriptionApproved { jid } => {
                 debug!(jid = %jid, "subscription approved");
@@ -663,5 +698,64 @@ mod tests {
             assert_eq!(stored[i].jid, *jid);
             assert_eq!(stored[i].subscription, *sub);
         }
+    }
+
+    #[tokio::test]
+    async fn request_subscription_emits_event() {
+        let (manager, event_bus, _dir) = setup().await;
+        let mut sub = event_bus.subscribe("ui.**").unwrap();
+
+        manager
+            .request_subscription("carol@example.com")
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+            .await
+            .expect("timed out")
+            .expect("should receive event");
+
+        assert!(matches!(
+            received.payload,
+            EventPayload::SubscriptionSendRequested {
+                ref jid,
+                subscribe: true,
+            } if jid == "carol@example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_emits_event() {
+        let (manager, event_bus, _dir) = setup().await;
+        let mut sub = event_bus.subscribe("ui.**").unwrap();
+
+        manager.unsubscribe("carol@example.com").await.unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+            .await
+            .expect("timed out")
+            .expect("should receive event");
+
+        assert!(matches!(
+            received.payload,
+            EventPayload::SubscriptionSendRequested {
+                ref jid,
+                subscribe: false,
+            } if jid == "carol@example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_subscription_request_does_not_error() {
+        let (manager, _, _dir) = setup().await;
+
+        let event = Event::new(
+            Channel::new("xmpp.subscription.request").unwrap(),
+            EventSource::Xmpp,
+            EventPayload::SubscriptionRequest {
+                from: "carol@example.com".to_string(),
+            },
+        );
+        manager.handle_event(&event).await;
     }
 }

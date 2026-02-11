@@ -305,6 +305,10 @@ pub enum EventPayload {
         jid: String,
         accept: bool,
     },
+    SubscriptionSendRequested {
+        jid: String,
+        subscribe: bool,
+    },
     MucJoinRequested {
         room: String,
         nick: String,

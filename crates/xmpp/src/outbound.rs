@@ -120,6 +120,9 @@ impl OutboundRouter {
             EventPayload::SubscriptionRespondRequested { jid, accept } => {
                 Some(build_subscription_response_stanza(jid, *accept)?)
             }
+            EventPayload::SubscriptionSendRequested { jid, subscribe } => {
+                Some(build_subscription_send_stanza(jid, *subscribe)?)
+            }
             EventPayload::MucJoinRequested { room, nick } => {
                 Some(build_muc_join_stanza(room, nick)?)
             }
@@ -343,6 +346,24 @@ fn build_subscription_response_stanza(
     Ok(Stanza::Presence(Box::new(presence)))
 }
 
+fn build_subscription_send_stanza(
+    jid_str: &str,
+    subscribe: bool,
+) -> Result<Stanza, OutboundRouterError> {
+    let to_jid: jid::Jid = jid_str
+        .parse()
+        .map_err(|_| OutboundRouterError::InvalidJid(jid_str.to_string()))?;
+
+    let mut presence = Presence::new(if subscribe {
+        PresenceType::Subscribe
+    } else {
+        PresenceType::Unsubscribe
+    });
+    presence.to = Some(to_jid);
+
+    Ok(Stanza::Presence(Box::new(presence)))
+}
+
 fn build_muc_join_stanza(room: &str, nick: &str) -> Result<Stanza, OutboundRouterError> {
     let room_jid: jid::Jid = format!("{room}/{nick}")
         .parse()
@@ -554,6 +575,32 @@ mod tests {
     }
 
     #[test]
+    fn builds_subscription_subscribe() {
+        let stanza = build_subscription_send_stanza("carol@example.com", true).unwrap();
+        let Stanza::Presence(p) = &stanza else {
+            panic!("expected presence stanza");
+        };
+        assert_eq!(p.type_, PresenceType::Subscribe);
+        assert_eq!(
+            p.to.as_ref().map(|j| j.to_string()),
+            Some("carol@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_subscription_unsubscribe() {
+        let stanza = build_subscription_send_stanza("carol@example.com", false).unwrap();
+        let Stanza::Presence(p) = &stanza else {
+            panic!("expected presence stanza");
+        };
+        assert_eq!(p.type_, PresenceType::Unsubscribe);
+        assert_eq!(
+            p.to.as_ref().map(|j| j.to_string()),
+            Some("carol@example.com".to_string())
+        );
+    }
+
+    #[test]
     fn builds_muc_join_stanza_test() {
         let stanza = build_muc_join_stanza("room@conference.example.com", "mynick").unwrap();
         let Stanza::Presence(p) = &stanza else {
@@ -649,6 +696,8 @@ mod tests {
             build_roster_remove_stanza("alice@example.com").unwrap(),
             build_subscription_response_stanza("carol@example.com", true).unwrap(),
             build_subscription_response_stanza("carol@example.com", false).unwrap(),
+            build_subscription_send_stanza("carol@example.com", true).unwrap(),
+            build_subscription_send_stanza("carol@example.com", false).unwrap(),
             build_muc_join_stanza("room@conference.example.com", "nick").unwrap(),
             build_muc_leave_stanza("room@conference.example.com").unwrap(),
             build_muc_message_stanza("room@conference.example.com", "hi").unwrap(),
@@ -1031,6 +1080,13 @@ mod integration_tests {
                 },
             ),
             (
+                "ui.subscription.send",
+                EventPayload::SubscriptionSendRequested {
+                    jid: "carol@example.com".to_string(),
+                    subscribe: true,
+                },
+            ),
+            (
                 "ui.muc.join",
                 EventPayload::MucJoinRequested {
                     room: "room@conference.example.com".to_string(),
@@ -1076,7 +1132,7 @@ mod integration_tests {
 
         assert_eq!(
             received, expected_count,
-            "all 9 command types should produce wire bytes"
+            "all 10 command types should produce wire bytes"
         );
 
         _handle.abort();
