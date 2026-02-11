@@ -11,6 +11,7 @@ repository = "https://github.com/waddle-social/app"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +34,7 @@ thiserror = "2"
 # XMPP
 tokio-xmpp = "4"
 xmpp-parsers = "0.22"
+sasl = "0.5"
 
 # WebSocket (web transport)
 tokio-tungstenite = "0.26"

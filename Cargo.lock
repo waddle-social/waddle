@@ -6471,8 +6471,10 @@ dependencies = [
 name = "waddle-xmpp"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "mockall",
  "rustls",
+ "sasl",
  "serde",
  "thiserror 2.0.18",
  "tokio",

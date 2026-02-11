@@ -102,13 +102,31 @@ mod native {
             let server_config = to_server_config(config);
             let io_timeout = connect_timeout(config);
 
-            let stream = timeout(io_timeout, server_config.connect(&jid, ns::JABBER_CLIENT))
+            let xmpp_stream = timeout(io_timeout, server_config.connect(&jid, ns::JABBER_CLIENT))
                 .await
                 .map_err(|_| ConnectionError::Timeout)?
                 .map_err(map_starttls_error)?;
 
+            let username = jid.node().ok_or_else(|| {
+                ConnectionError::AuthenticationFailed(format!(
+                    "JID '{}' has no local part for SASL authentication",
+                    config.jid
+                ))
+            })?;
+
+            let raw_stream = timeout(
+                io_timeout,
+                crate::sasl::authenticate(xmpp_stream, username.as_str(), &config.password),
+            )
+            .await
+            .map_err(|_| ConnectionError::Timeout)?
+            .map_err(|e| match e {
+                ConnectionError::AuthenticationFailed(_) => e,
+                other => ConnectionError::StreamError(format!("SASL negotiation failed: {other}")),
+            })?;
+
             Ok(Self {
-                stream: Box::new(stream.into_inner()),
+                stream: Box::new(raw_stream),
                 io_timeout,
             })
         }

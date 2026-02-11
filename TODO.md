@@ -29,7 +29,7 @@
 - [x] Create `waddle-xmpp` with `native`/`web` feature flags. Depends on `waddle-core` only. Define the `XmppTransport` trait.
 - [x] Implement feature-gated native TCP/TLS transport (`tokio-xmpp` + `rustls`) and web WebSocket transport (`tokio-tungstenite` / `web-sys`, RFC 7395, XEP-0156 discovery).
 - [x] Implement `ConnectionManager` state machine (`Disconnected` → `Connecting` → `Connected` → `Reconnecting`) with exponential backoff (1s–60s cap) and lifecycle event emission per `specs/03-components/xmpp-connection.md`.
-- [ ] Implement SASL negotiation with SCRAM-SHA-256 preference, SCRAM-SHA-1 fallback, and explicit non-retryable `AuthenticationFailed` handling.
+- [x] Implement SASL negotiation with SCRAM-SHA-256 preference, SCRAM-SHA-1 fallback, and explicit non-retryable `AuthenticationFailed` handling.
 - [ ] Implement XEP-0198 (Stream Management) for stream resumption after network interruption.
 - [ ] Implement XEP-0280 (Message Carbons) and XEP-0352 (Client State Indication) as core protocol features.
 - [ ] Implement stanza parse/serialise boundary using `xmpp-parsers`.

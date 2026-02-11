@@ -27,10 +27,12 @@ web = [
 [dependencies]
 waddle-core = { workspace = true, default-features = false }
 tokio = { workspace = true, optional = true }
+futures = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 xmpp-parsers = { workspace = true }
+sasl = { workspace = true }
 tokio-xmpp = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
