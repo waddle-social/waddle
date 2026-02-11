@@ -56,7 +56,7 @@
 - [x] Implement OCI plugin registry operations (install, uninstall, update, search/list) and local plugin index/cache management per `specs/03-components/plugins-registry.md`.
 
 ## 7. User Interfaces
-- [ ] Implement `waddle-tui` shell: four-panel layout (sidebar, conversation, status bar, input), keyboard input loop, event bus subscribe/publish wiring per `specs/03-components/tui-shell.md`.
+- [x] Implement `waddle-tui` shell: four-panel layout (sidebar, conversation, status bar, input), keyboard input loop, event bus subscribe/publish wiring per `specs/03-components/tui-shell.md`.
 - [ ] Wire TUI command mode (`:` prefix) to domain actions (presence set, theme switching, room join/leave) with i18n message resolution and theme-driven rendering.
 - [ ] Implement `waddle-gui-backend` Tauri v2 command handlers, app lifecycle wiring (startup sequence from `specs/01-architecture/overview.md`), and event forwarding to the Vue frontend.
 - [ ] Initialise `gui/` with Vue 3 (Composition API) + Vite + Tailwind CSS + Ark UI Vue + Pinia + Vue Router. Create route views and Pinia stores for conversations, roster, settings, and plugins.
