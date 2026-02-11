@@ -4,6 +4,7 @@ pub mod csi;
 pub mod error;
 pub mod pipeline;
 pub mod sasl;
+pub mod stanza;
 pub mod stream_management;
 pub mod transport;
 
@@ -13,6 +14,7 @@ pub use csi::{ClientState, CsiManager};
 pub use error::{ConnectionError, PipelineError};
 pub use pipeline::{ProcessorContext, ProcessorResult, StanzaPipeline, StanzaProcessor};
 pub use sasl::SelectedMechanism;
+pub use stanza::{Stanza, parse_stanza, serialize_stanza};
 pub use stream_management::{
     StreamManagementAction, StreamManagementState, StreamManager, decode_nonza, encode_nonza,
 };

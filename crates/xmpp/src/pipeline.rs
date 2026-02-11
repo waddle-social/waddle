@@ -1,9 +1,9 @@
-use crate::error::PipelineError;
+use crate::{error::PipelineError, stanza::Stanza};
 
 pub enum ProcessorResult {
     Continue,
     Drop,
-    Replace(Vec<u8>),
+    Replace(Box<Stanza>),
 }
 
 pub struct ProcessorContext {
@@ -16,9 +16,9 @@ pub enum StanzaDirection {
 }
 
 pub trait StanzaProcessor: Send + Sync + 'static {
-    fn process_inbound(&self, stanza: &mut Vec<u8>, ctx: &ProcessorContext) -> ProcessorResult;
+    fn process_inbound(&self, stanza: &mut Stanza, ctx: &ProcessorContext) -> ProcessorResult;
 
-    fn process_outbound(&self, stanza: &mut Vec<u8>, ctx: &ProcessorContext) -> ProcessorResult;
+    fn process_outbound(&self, stanza: &mut Stanza, ctx: &ProcessorContext) -> ProcessorResult;
 
     fn priority(&self) -> i32;
 }
@@ -43,7 +43,7 @@ impl StanzaPipeline {
         todo!("StanzaPipeline::process_inbound")
     }
 
-    pub async fn process_outbound(&self, _stanza: Vec<u8>) -> Result<(), PipelineError> {
+    pub async fn process_outbound(&self, _stanza: Stanza) -> Result<(), PipelineError> {
         todo!("StanzaPipeline::process_outbound")
     }
 }
