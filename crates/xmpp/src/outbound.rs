@@ -91,6 +91,9 @@ impl OutboundRouter {
 
     #[cfg(feature = "native")]
     async fn handle_event(&self, event: &Event) -> Result<(), OutboundRouterError> {
+        let mut message_sent = None;
+        let mut own_presence_changed = None;
+
         let stanza = match &event.payload {
             EventPayload::MessageSendRequested {
                 to,
@@ -98,12 +101,12 @@ impl OutboundRouter {
                 message_type,
             } => {
                 let stanza = build_message_stanza(to, body, message_type)?;
-                self.emit_message_sent(event, to, body, message_type);
+                message_sent = Some((to.clone(), body.clone(), message_type.clone()));
                 Some(stanza)
             }
             EventPayload::PresenceSetRequested { show, status } => {
                 let stanza = build_presence_stanza(show, status.as_deref());
-                self.emit_own_presence_changed(show, status.as_deref());
+                own_presence_changed = Some((show.clone(), status.clone()));
                 Some(stanza)
             }
             EventPayload::RosterAddRequested { jid, name, groups } => {
@@ -137,6 +140,14 @@ impl OutboundRouter {
                 .send(bytes)
                 .await
                 .map_err(|_| OutboundRouterError::WireSendFailed)?;
+
+            if let Some((to, body, message_type)) = message_sent {
+                self.emit_message_sent(event, &to, &body, &message_type);
+            }
+
+            if let Some((show, status)) = own_presence_changed {
+                self.emit_own_presence_changed(&show, status.as_deref());
+            }
         }
 
         Ok(())
@@ -897,6 +908,69 @@ mod integration_tests {
             result.unwrap_err(),
             OutboundRouterError::WireSendFailed
         ));
+    }
+
+    #[tokio::test]
+    async fn closed_wire_channel_does_not_emit_message_sent_event() {
+        let event_bus: Arc<dyn EventBus> = Arc::new(BroadcastEventBus::new(64));
+        let mut sent_sub = event_bus
+            .subscribe("xmpp.message.sent")
+            .expect("subscribe should succeed");
+        let pipeline = Arc::new(StanzaPipeline::new());
+        let (tx, rx) = stanza_channel(1);
+        drop(rx);
+
+        let router = OutboundRouter::new(event_bus.clone(), pipeline, tx);
+
+        let event = Event::new(
+            Channel::new("ui.message.send").expect("valid channel"),
+            EventSource::Ui(UiTarget::Tui),
+            EventPayload::MessageSendRequested {
+                to: "bob@example.com".to_string(),
+                body: "test".to_string(),
+                message_type: CoreMessageType::Chat,
+            },
+        );
+
+        let result = router.handle_event(&event).await;
+        assert!(matches!(result, Err(OutboundRouterError::WireSendFailed)));
+
+        let received = timeout(Duration::from_millis(100), sent_sub.recv()).await;
+        assert!(
+            received.is_err(),
+            "message.sent should not be emitted when wire send fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_wire_channel_does_not_emit_own_presence_changed_event() {
+        let event_bus: Arc<dyn EventBus> = Arc::new(BroadcastEventBus::new(64));
+        let mut presence_sub = event_bus
+            .subscribe("xmpp.presence.own_changed")
+            .expect("subscribe should succeed");
+        let pipeline = Arc::new(StanzaPipeline::new());
+        let (tx, rx) = stanza_channel(1);
+        drop(rx);
+
+        let router = OutboundRouter::new(event_bus.clone(), pipeline, tx);
+
+        let event = Event::new(
+            Channel::new("ui.presence.set").expect("valid channel"),
+            EventSource::Ui(UiTarget::Tui),
+            EventPayload::PresenceSetRequested {
+                show: CorePresenceShow::Away,
+                status: Some("brb".to_string()),
+            },
+        );
+
+        let result = router.handle_event(&event).await;
+        assert!(matches!(result, Err(OutboundRouterError::WireSendFailed)));
+
+        let received = timeout(Duration::from_millis(100), presence_sub.recv()).await;
+        assert!(
+            received.is_err(),
+            "presence.own_changed should not be emitted when wire send fails"
+        );
     }
 
     #[tokio::test]
