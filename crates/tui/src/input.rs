@@ -72,6 +72,7 @@ fn handle_normal_mode(state: &mut AppState, key: KeyEvent) -> Action {
                     state.active_conversation = Some(jid.clone());
                     state.scroll_offset = 0;
                     state.ensure_conversation(&jid);
+                    state.mark_conversation_read(&jid);
                     return Action::OpenConversation(jid);
                 }
             }

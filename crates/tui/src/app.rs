@@ -19,7 +19,8 @@ pub struct TuiApp;
 
 impl TuiApp {
     pub async fn run(event_bus: Arc<dyn EventBus>, _config: &Config) -> Result<(), TuiError> {
-        let mut terminal = ratatui::init();
+        let mut terminal =
+            ratatui::try_init().map_err(|e| TuiError::TerminalInit(e.to_string()))?;
         let result = run_loop(&mut terminal, event_bus).await;
         ratatui::restore();
         result
@@ -245,12 +246,7 @@ fn handle_bus_event(state: &mut AppState, event: Event) {
             add_message(state, &to_bare, message);
         }
         EventPayload::MessageDelivered { id, .. } => {
-            for conv in state.conversations.values_mut() {
-                if let Some(msg) = conv.messages.iter_mut().find(|m| m.id == id) {
-                    let _ = msg;
-                    break;
-                }
-            }
+            state.delivered_message_ids.insert(id);
         }
         EventPayload::ChatStateReceived { from, state: cs } => {
             let bare = from.split('/').next().unwrap_or(&from);
@@ -290,6 +286,7 @@ fn handle_bus_event(state: &mut AppState, event: Event) {
             }
         }
         EventPayload::ConnectionEstablished { jid } => {
+            state.connected_jid = Some(jid.clone());
             state.connection_status = ConnectionStatus::Connected { jid };
         }
         EventPayload::ConnectionLost { .. } => {
@@ -303,7 +300,10 @@ fn handle_bus_event(state: &mut AppState, event: Event) {
         }
         EventPayload::SyncCompleted { .. } => {
             if let ConnectionStatus::Syncing = state.connection_status {
-                state.connection_status = ConnectionStatus::Connected { jid: String::new() };
+                state.connection_status = match state.connected_jid.clone() {
+                    Some(jid) => ConnectionStatus::Connected { jid },
+                    None => ConnectionStatus::Disconnected,
+                };
             }
         }
         _ => {}

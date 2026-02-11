@@ -163,8 +163,9 @@ fn draw_conversation(frame: &mut Frame, state: &AppState, area: Rect) {
             for msg in &conversation.messages {
                 let time = msg.timestamp.format("%H:%M");
                 let sender = msg.from.split('@').next().unwrap_or(&msg.from);
+                let sender = if sender.is_empty() { "you" } else { sender };
 
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{time} "), Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("{sender}: "),
@@ -173,7 +174,16 @@ fn draw_conversation(frame: &mut Frame, state: &AppState, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(&msg.body),
-                ]));
+                ];
+
+                if state.delivered_message_ids.contains(&msg.id) {
+                    spans.push(Span::styled(
+                        " [delivered]",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+
+                lines.push(Line::from(spans));
             }
 
             let skip = if lines.len() > visible_height + state.scroll_offset as usize {

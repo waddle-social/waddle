@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use waddle_core::event::{ChatMessage, ChatState, PresenceShow, RosterItem};
 
@@ -66,7 +66,9 @@ pub struct AppState {
     pub roster: Vec<RosterEntry>,
     pub rooms: Vec<MucRoom>,
     pub conversations: HashMap<String, Conversation>,
+    pub delivered_message_ids: HashSet<String>,
     pub active_conversation: Option<String>,
+    pub connected_jid: Option<String>,
     pub connection_status: ConnectionStatus,
     pub input_mode: InputMode,
     pub input_buffer: String,
@@ -82,7 +84,9 @@ impl AppState {
             roster: Vec::new(),
             rooms: Vec::new(),
             conversations: HashMap::new(),
+            delivered_message_ids: HashSet::new(),
             active_conversation: None,
+            connected_jid: None,
             connection_status: ConnectionStatus::Disconnected,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
@@ -118,5 +122,14 @@ impl AppState {
 
     pub fn ensure_conversation(&mut self, jid: &str) -> &mut Conversation {
         self.conversations.entry(jid.to_string()).or_default()
+    }
+
+    pub fn mark_conversation_read(&mut self, jid: &str) {
+        if let Some(entry) = self.roster.iter_mut().find(|entry| entry.item.jid == jid) {
+            entry.unread = 0;
+        }
+        if let Some(room) = self.rooms.iter_mut().find(|room| room.jid == jid) {
+            room.unread = 0;
+        }
     }
 }
