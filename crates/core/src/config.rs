@@ -130,6 +130,14 @@ pub struct StorageConfig {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct ConfigOverrides {
+    jid: Option<String>,
+    password: Option<String>,
+    server: Option<String>,
+    log_level: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -195,6 +203,18 @@ pub fn load_config() -> Result<Config, ConfigError> {
 
 /// Load configuration from a specific path. Used by `load_config()` and tests.
 pub fn load_config_from(path: PathBuf) -> Result<Config, ConfigError> {
+    load_config_from_with_overrides(path, config_overrides_from_env())
+}
+
+/// Parse configuration from a TOML string directly (for testing).
+pub fn load_config_from_str(toml_str: &str) -> Result<Config, ConfigError> {
+    load_config_from_str_with_overrides(toml_str, config_overrides_from_env())
+}
+
+fn load_config_from_with_overrides(
+    path: PathBuf,
+    overrides: ConfigOverrides,
+) -> Result<Config, ConfigError> {
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -206,30 +226,13 @@ pub fn load_config_from(path: PathBuf) -> Result<Config, ConfigError> {
         Err(e) => return Err(ConfigError::Io(e)),
     };
 
-    let mut config: Config = toml::from_str(&contents).map_err(|e| {
-        let (line, column) = e.span().map_or((0, 0), |span| {
-            let before = &contents[..span.start];
-            let line = before.chars().filter(|&c| c == '\n').count() + 1;
-            let column = before
-                .rfind('\n')
-                .map_or(span.start + 1, |nl| span.start - nl);
-            (line, column)
-        });
-        ConfigError::InvalidToml {
-            line,
-            column,
-            message: e.message().to_string(),
-        }
-    })?;
-
-    apply_env_overrides(&mut config);
-    validate(&config)?;
-
-    Ok(config)
+    load_config_from_str_with_overrides(&contents, overrides)
 }
 
-/// Parse configuration from a TOML string directly (for testing).
-pub fn load_config_from_str(toml_str: &str) -> Result<Config, ConfigError> {
+fn load_config_from_str_with_overrides(
+    toml_str: &str,
+    overrides: ConfigOverrides,
+) -> Result<Config, ConfigError> {
     let mut config: Config = toml::from_str(toml_str).map_err(|e| {
         let (line, column) = e.span().map_or((0, 0), |span| {
             let before = &toml_str[..span.start];
@@ -246,23 +249,32 @@ pub fn load_config_from_str(toml_str: &str) -> Result<Config, ConfigError> {
         }
     })?;
 
-    apply_env_overrides(&mut config);
+    apply_overrides(&mut config, overrides);
     validate(&config)?;
 
     Ok(config)
 }
 
-fn apply_env_overrides(config: &mut Config) {
-    if let Ok(jid) = std::env::var("WADDLE_JID") {
+fn config_overrides_from_env() -> ConfigOverrides {
+    ConfigOverrides {
+        jid: std::env::var("WADDLE_JID").ok(),
+        password: std::env::var("WADDLE_PASSWORD").ok(),
+        server: std::env::var("WADDLE_SERVER").ok(),
+        log_level: std::env::var("WADDLE_LOG_LEVEL").ok(),
+    }
+}
+
+fn apply_overrides(config: &mut Config, overrides: ConfigOverrides) {
+    if let Some(jid) = overrides.jid {
         config.account.jid = jid;
     }
-    if let Ok(password) = std::env::var("WADDLE_PASSWORD") {
+    if let Some(password) = overrides.password {
         config.account.password = password;
     }
-    if let Ok(server) = std::env::var("WADDLE_SERVER") {
+    if let Some(server) = overrides.server {
         config.account.server = Some(server);
     }
-    if let Ok(level) = std::env::var("WADDLE_LOG_LEVEL") {
+    if let Some(level) = overrides.log_level {
         config.logging.level = level;
     }
 }
@@ -303,6 +315,10 @@ fn create_default_config(path: &PathBuf) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
 
+    fn parse_without_env(toml_str: &str) -> Result<Config, ConfigError> {
+        load_config_from_str_with_overrides(toml_str, ConfigOverrides::default())
+    }
+
     fn valid_toml() -> &'static str {
         r#"
 [account]
@@ -341,7 +357,7 @@ password = "secret"
 
     #[test]
     fn parses_full_config() {
-        let config = load_config_from_str(valid_toml()).unwrap();
+        let config = parse_without_env(valid_toml()).unwrap();
         assert_eq!(config.account.jid, "user@example.com");
         assert_eq!(config.account.password, "secret");
         assert!(config.account.server.is_none());
@@ -359,7 +375,7 @@ password = "secret"
 
     #[test]
     fn parses_minimal_config_with_defaults() {
-        let config = load_config_from_str(minimal_toml()).unwrap();
+        let config = parse_without_env(minimal_toml()).unwrap();
         assert_eq!(config.account.jid, "user@example.com");
         assert_eq!(config.account.password, "secret");
         assert!(config.ui.notifications);
@@ -379,7 +395,7 @@ password = "secret"
 server = "xmpp.example.com"
 port = 5222
 "#;
-        let config = load_config_from_str(toml).unwrap();
+        let config = parse_without_env(toml).unwrap();
         assert_eq!(config.account.server.as_deref(), Some("xmpp.example.com"));
         assert_eq!(config.account.port, Some(5222));
     }
@@ -395,7 +411,7 @@ password = "secret"
 name = "dracula"
 custom_path = "/home/user/.config/waddle/themes/dracula.toml"
 "#;
-        let config = load_config_from_str(toml).unwrap();
+        let config = parse_without_env(toml).unwrap();
         assert_eq!(config.theme.name, "dracula");
         assert_eq!(
             config.theme.custom_path.as_deref(),
@@ -414,7 +430,7 @@ password = "secret"
 enabled = false
 directory = "/opt/waddle/plugins"
 "#;
-        let config = load_config_from_str(toml).unwrap();
+        let config = parse_without_env(toml).unwrap();
         assert!(!config.plugins.enabled);
         assert_eq!(
             config.plugins.directory.as_deref(),
@@ -432,7 +448,7 @@ password = "secret"
 [storage]
 path = "/data/waddle.db"
 "#;
-        let config = load_config_from_str(toml).unwrap();
+        let config = parse_without_env(toml).unwrap();
         assert_eq!(config.storage.path.as_deref(), Some("/data/waddle.db"));
     }
 
@@ -445,7 +461,7 @@ path = "/data/waddle.db"
 jid = ""
 password = "secret"
 "#;
-        let err = load_config_from_str(toml).unwrap_err();
+        let err = parse_without_env(toml).unwrap_err();
         match err {
             ConfigError::MissingRequiredFields { fields } => {
                 assert!(fields.contains(&"account.jid".to_string()));
@@ -462,7 +478,7 @@ password = "secret"
 jid = "user@example.com"
 password = ""
 "#;
-        let err = load_config_from_str(toml).unwrap_err();
+        let err = parse_without_env(toml).unwrap_err();
         match err {
             ConfigError::MissingRequiredFields { fields } => {
                 assert!(fields.contains(&"account.password".to_string()));
@@ -479,7 +495,7 @@ password = ""
 jid = ""
 password = ""
 "#;
-        let err = load_config_from_str(toml).unwrap_err();
+        let err = parse_without_env(toml).unwrap_err();
         match err {
             ConfigError::MissingRequiredFields { fields } => {
                 assert_eq!(fields.len(), 2);
@@ -500,7 +516,7 @@ password = "secret"
 [logging]
 level = "verbose"
 "#;
-        let err = load_config_from_str(toml).unwrap_err();
+        let err = parse_without_env(toml).unwrap_err();
         match err {
             ConfigError::InvalidValue { field, .. } => {
                 assert_eq!(field, "logging.level");
@@ -522,7 +538,7 @@ password = "secret"
 level = "{level}"
 "#
             );
-            load_config_from_str(&toml).unwrap();
+            parse_without_env(&toml).unwrap();
         }
     }
 
@@ -534,7 +550,7 @@ level = "{level}"
 [account
 jid = "broken"
 "#;
-        let err = load_config_from_str(toml).unwrap_err();
+        let err = parse_without_env(toml).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToml { .. }));
     }
 
@@ -546,7 +562,7 @@ jid = "user@example.com"
 password = "secret"
 bad_line ===
 "#;
-        let err = load_config_from_str(toml).unwrap_err();
+        let err = parse_without_env(toml).unwrap_err();
         match err {
             ConfigError::InvalidToml { line, .. } => {
                 assert!(line > 0, "line should be > 0, got {line}");
@@ -559,22 +575,31 @@ bad_line ===
 
     #[test]
     fn env_override_jid() {
-        let _guard = EnvGuard::set("WADDLE_JID", "override@example.com");
-        let config = load_config_from_str(minimal_toml()).unwrap();
+        let overrides = ConfigOverrides {
+            jid: Some("override@example.com".to_string()),
+            ..Default::default()
+        };
+        let config = load_config_from_str_with_overrides(minimal_toml(), overrides).unwrap();
         assert_eq!(config.account.jid, "override@example.com");
     }
 
     #[test]
     fn env_override_password() {
-        let _guard = EnvGuard::set("WADDLE_PASSWORD", "env_password");
-        let config = load_config_from_str(minimal_toml()).unwrap();
+        let overrides = ConfigOverrides {
+            password: Some("env_password".to_string()),
+            ..Default::default()
+        };
+        let config = load_config_from_str_with_overrides(minimal_toml(), overrides).unwrap();
         assert_eq!(config.account.password, "env_password");
     }
 
     #[test]
     fn env_override_server() {
-        let _guard = EnvGuard::set("WADDLE_SERVER", "env.xmpp.example.com");
-        let config = load_config_from_str(minimal_toml()).unwrap();
+        let overrides = ConfigOverrides {
+            server: Some("env.xmpp.example.com".to_string()),
+            ..Default::default()
+        };
+        let config = load_config_from_str_with_overrides(minimal_toml(), overrides).unwrap();
         assert_eq!(
             config.account.server.as_deref(),
             Some("env.xmpp.example.com")
@@ -583,15 +608,21 @@ bad_line ===
 
     #[test]
     fn env_override_log_level() {
-        let _guard = EnvGuard::set("WADDLE_LOG_LEVEL", "debug");
-        let config = load_config_from_str(minimal_toml()).unwrap();
+        let overrides = ConfigOverrides {
+            log_level: Some("debug".to_string()),
+            ..Default::default()
+        };
+        let config = load_config_from_str_with_overrides(minimal_toml(), overrides).unwrap();
         assert_eq!(config.logging.level, "debug");
     }
 
     #[test]
     fn env_override_invalid_log_level_rejected() {
-        let _guard = EnvGuard::set("WADDLE_LOG_LEVEL", "invalid");
-        let err = load_config_from_str(minimal_toml()).unwrap_err();
+        let overrides = ConfigOverrides {
+            log_level: Some("invalid".to_string()),
+            ..Default::default()
+        };
+        let err = load_config_from_str_with_overrides(minimal_toml(), overrides).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
     }
 
@@ -606,12 +637,14 @@ server = "file.xmpp.example.com"
 [logging]
 level = "warn"
 "#;
-        let _jid = EnvGuard::set("WADDLE_JID", "env@example.com");
-        let _pass = EnvGuard::set("WADDLE_PASSWORD", "env_password");
-        let _server = EnvGuard::set("WADDLE_SERVER", "env.xmpp.example.com");
-        let _level = EnvGuard::set("WADDLE_LOG_LEVEL", "trace");
+        let overrides = ConfigOverrides {
+            jid: Some("env@example.com".to_string()),
+            password: Some("env_password".to_string()),
+            server: Some("env.xmpp.example.com".to_string()),
+            log_level: Some("trace".to_string()),
+        };
 
-        let config = load_config_from_str(toml).unwrap();
+        let config = load_config_from_str_with_overrides(toml, overrides).unwrap();
         assert_eq!(config.account.jid, "env@example.com");
         assert_eq!(config.account.password, "env_password");
         assert_eq!(
@@ -629,7 +662,7 @@ level = "warn"
         let path = dir.path().join("config.toml");
         std::fs::write(&path, minimal_toml()).unwrap();
 
-        let config = load_config_from(path).unwrap();
+        let config = load_config_from_with_overrides(path, ConfigOverrides::default()).unwrap();
         assert_eq!(config.account.jid, "user@example.com");
     }
 
@@ -638,7 +671,8 @@ level = "warn"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("subdir").join("config.toml");
 
-        let err = load_config_from(path.clone()).unwrap_err();
+        let err =
+            load_config_from_with_overrides(path.clone(), ConfigOverrides::default()).unwrap_err();
         match err {
             ConfigError::MissingRequiredFields { fields } => {
                 assert!(fields.contains(&"account.jid".to_string()));
@@ -662,32 +696,5 @@ level = "warn"
             path.ends_with("config.toml"),
             "config_path should end with config.toml, got: {path:?}"
         );
-    }
-
-    // ── Helper: scoped env var guard ──────────────────────────────
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: tests using EnvGuard run with --test-threads=1 or are
-            // isolated by unique env var names; no concurrent mutation occurs.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: see EnvGuard::set
-            match &self.previous {
-                Some(val) => unsafe { std::env::set_var(self.key, val) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
     }
 }
