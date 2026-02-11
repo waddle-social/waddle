@@ -547,15 +547,44 @@ impl Database for NativeDatabase {
     }
 }
 
+/// Hardcoded database name for the web backend. On web targets, the `storage.path`
+/// config setting is ignored; this name is used with OPFS or IndexedDB backing.
 #[cfg(feature = "web")]
-#[derive(Debug, Default)]
-pub struct WebDatabase;
+pub const WEB_DATABASE_NAME: &str = "waddle";
+
+/// Web storage backend backed by wa-sqlite (compiled to WASM) with OPFS persistence
+/// (preferred) or IndexedDB fallback. Uses single-connection mode (no WAL, no pooling).
+///
+/// This is currently a compile-safe placeholder. The full implementation will:
+/// - Load wa-sqlite as a WASM module alongside the application
+/// - Use OPFS (Origin Private File System) when available, falling back to IndexedDB
+/// - Share the same SQL dialect and migration system as the native backend
+/// - Run in single-connection mode (all reads and writes serialised)
+#[cfg(feature = "web")]
+#[derive(Debug)]
+pub struct WebDatabase {
+    name: String,
+}
 
 #[cfg(feature = "web")]
 impl WebDatabase {
-    async fn open(path: &Path) -> Result<Self, StorageError> {
-        let _ = path;
-        Ok(Self)
+    /// Open (or create) a web database with the given logical name.
+    ///
+    /// In the future this will initialise wa-sqlite with OPFS/IndexedDB backing
+    /// and run pending migrations. Currently returns a stub that errors on all
+    /// operations.
+    pub async fn open(path: &Path) -> Result<Self, StorageError> {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(WEB_DATABASE_NAME)
+            .to_string();
+
+        Ok(Self { name })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -564,7 +593,7 @@ impl Database for WebDatabase {
     async fn execute(&self, sql: &str, params: &[&dyn ToSql]) -> Result<u64, StorageError> {
         let _ = (sql, params);
         Err(StorageError::QueryFailed(
-            "web storage backend not implemented".to_string(),
+            "web storage backend not yet implemented (wa-sqlite)".to_string(),
         ))
     }
 
@@ -575,7 +604,7 @@ impl Database for WebDatabase {
     ) -> Result<Vec<T>, StorageError> {
         let _ = (sql, params);
         Err(StorageError::QueryFailed(
-            "web storage backend not implemented".to_string(),
+            "web storage backend not yet implemented (wa-sqlite)".to_string(),
         ))
     }
 
@@ -586,7 +615,7 @@ impl Database for WebDatabase {
     ) -> Result<T, StorageError> {
         let _ = (sql, params);
         Err(StorageError::QueryFailed(
-            "web storage backend not implemented".to_string(),
+            "web storage backend not yet implemented (wa-sqlite)".to_string(),
         ))
     }
 
@@ -596,7 +625,7 @@ impl Database for WebDatabase {
     {
         let _ = f;
         Err(StorageError::TransactionFailed(
-            "web storage backend not implemented".to_string(),
+            "web storage backend not yet implemented (wa-sqlite)".to_string(),
         ))
     }
 }
