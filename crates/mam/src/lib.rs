@@ -1,16 +1,23 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use waddle_core::event::{ChatMessage, Event, EventPayload, ScrollDirection};
+use waddle_core::event::ChatMessage;
 use waddle_storage::{Database, FromRow, Row, SqlValue, StorageError};
 
 #[cfg(feature = "native")]
-use waddle_core::event::{Channel, EventBus, EventSource};
+use tracing::{debug, error, info, warn};
+
+#[cfg(feature = "native")]
+use waddle_core::event::{
+    Channel, Event, EventBus, EventPayload, EventSource, EventSubscription, ScrollDirection,
+};
 
 const MAM_PAGE_SIZE: u32 = 50;
+#[cfg(feature = "native")]
+const MAM_QUERY_TIMEOUT_SECS: u64 = 30;
+const GLOBAL_SYNC_KEY: &str = "__global__";
 
 #[derive(Debug, thiserror::Error)]
 pub enum MamError {
@@ -38,8 +45,6 @@ pub struct MamSyncResult {
 
 struct SyncState {
     last_stanza_id: String,
-    #[allow(dead_code)]
-    last_sync_at: String,
 }
 
 impl FromRow for SyncState {
@@ -52,18 +57,7 @@ impl FromRow for SyncState {
                 ));
             }
         };
-        let last_sync_at = match row.get(1) {
-            Some(SqlValue::Text(s)) => s.clone(),
-            _ => {
-                return Err(StorageError::QueryFailed(
-                    "missing last_sync_at column".to_string(),
-                ));
-            }
-        };
-        Ok(SyncState {
-            last_stanza_id,
-            last_sync_at,
-        })
+        Ok(SyncState { last_stanza_id })
     }
 }
 
@@ -74,6 +68,14 @@ fn message_type_to_str(mt: &waddle_core::event::MessageType) -> &'static str {
         waddle_core::event::MessageType::Normal => "normal",
         waddle_core::event::MessageType::Headline => "headline",
         waddle_core::event::MessageType::Error => "error",
+    }
+}
+
+fn sync_key(jid: &str) -> String {
+    if jid.is_empty() {
+        GLOBAL_SYNC_KEY.to_string()
+    } else {
+        jid.to_string()
     }
 }
 
@@ -90,30 +92,28 @@ impl<D: Database> MamManager<D> {
     }
 
     pub async fn sync_since(&self, _timestamp: DateTime<Utc>) -> Result<MamSyncResult, MamError> {
+        if !self.is_supported().await {
+            return Ok(MamSyncResult {
+                messages_synced: 0,
+                complete: true,
+            });
+        }
+
         let last_stanza_id = self.get_last_stanza_id("").await?;
 
-        let query_id = Uuid::new_v4().to_string();
         let correlation_id = Uuid::new_v4();
 
-        #[cfg(feature = "native")]
-        {
-            let _ = self.event_bus.publish(Event::with_correlation(
-                Channel::new("system.sync.started").unwrap(),
-                EventSource::System("mam".into()),
-                EventPayload::SyncStarted,
-                correlation_id,
-            ));
-        }
+        self.emit_sync_started(correlation_id)?;
 
         let mut total_synced: u64 = 0;
         let mut complete = false;
         let mut after = last_stanza_id;
 
         while !complete {
-            self.send_mam_query(&query_id, after.as_deref(), None)
+            let query_id = Uuid::new_v4().to_string();
+            let (messages, fin_complete, last_id) = self
+                .query_page(&query_id, None, after.as_deref(), None, MAM_PAGE_SIZE)
                 .await?;
-
-            let (messages, fin_complete, last_id) = self.collect_query_results(&query_id).await?;
 
             let page_count = messages.len() as u64;
 
@@ -131,17 +131,7 @@ impl<D: Database> MamManager<D> {
             complete = fin_complete || page_count == 0;
         }
 
-        #[cfg(feature = "native")]
-        {
-            let _ = self.event_bus.publish(Event::with_correlation(
-                Channel::new("system.sync.completed").unwrap(),
-                EventSource::System("mam".into()),
-                EventPayload::SyncCompleted {
-                    messages_synced: total_synced,
-                },
-                correlation_id,
-            ));
-        }
+        self.emit_sync_completed(total_synced, correlation_id)?;
 
         Ok(MamSyncResult {
             messages_synced: total_synced,
@@ -151,15 +141,20 @@ impl<D: Database> MamManager<D> {
 
     pub async fn fetch_history(
         &self,
-        _jid: &str,
+        jid: &str,
         before: Option<&str>,
-        _limit: u32,
+        limit: u32,
     ) -> Result<Vec<ChatMessage>, MamError> {
+        if !self.is_supported().await {
+            return Ok(Vec::new());
+        }
+
         let query_id = Uuid::new_v4().to_string();
+        let page_size = limit.clamp(1, MAM_PAGE_SIZE);
 
-        self.send_mam_query(&query_id, None, before).await?;
-
-        let (messages, _complete, _last_id) = self.collect_query_results(&query_id).await?;
+        let (messages, _complete, _last_id) = self
+            .query_page(&query_id, Some(jid), None, before, page_size)
+            .await?;
 
         for msg in &messages {
             self.persist_message(msg).await?;
@@ -169,21 +164,16 @@ impl<D: Database> MamManager<D> {
     }
 
     pub async fn is_supported(&self) -> bool {
-        // TODO: implement disco#info check for urn:xmpp:mam:2
-        true
+        cfg!(feature = "native")
     }
 
     async fn get_last_stanza_id(&self, jid: &str) -> Result<Option<String>, MamError> {
-        let jid_s = if jid.is_empty() {
-            "__global__".to_string()
-        } else {
-            jid.to_string()
-        };
+        let jid_s = sync_key(jid);
 
         let rows: Vec<SyncState> = self
             .db
             .query(
-                "SELECT last_stanza_id, last_sync_at FROM mam_sync_state WHERE jid = ?1",
+                "SELECT last_stanza_id FROM mam_sync_state WHERE jid = ?1",
                 &[&jid_s],
             )
             .await?;
@@ -192,11 +182,7 @@ impl<D: Database> MamManager<D> {
     }
 
     async fn update_sync_state(&self, jid: &str, stanza_id: &str) -> Result<(), MamError> {
-        let jid_s = if jid.is_empty() {
-            "__global__".to_string()
-        } else {
-            jid.to_string()
-        };
+        let jid_s = sync_key(jid);
         let stanza_id_s = stanza_id.to_string();
         let now = Utc::now().to_rfc3339();
 
@@ -209,6 +195,33 @@ impl<D: Database> MamManager<D> {
             .await?;
 
         Ok(())
+    }
+
+    #[cfg(feature = "native")]
+    async fn oldest_local_message_id(&self, jid: &str) -> Result<Option<String>, MamError> {
+        let jid_s = jid.to_string();
+        let rows: Vec<Row> = self
+            .db
+            .query(
+                "SELECT id FROM messages \
+                 WHERE from_jid = ?1 OR to_jid = ?1 \
+                 ORDER BY timestamp ASC \
+                 LIMIT 1",
+                &[&jid_s],
+            )
+            .await?;
+
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+
+        match row.get(0) {
+            Some(SqlValue::Text(id)) => Ok(Some(id.clone())),
+            Some(SqlValue::Null) | None => Ok(None),
+            _ => Err(MamError::QueryFailed(
+                "invalid message id type in oldest message query".to_string(),
+            )),
+        }
     }
 
     async fn persist_message(&self, message: &ChatMessage) -> Result<(), MamError> {
@@ -233,62 +246,82 @@ impl<D: Database> MamManager<D> {
     }
 
     #[cfg(feature = "native")]
-    async fn send_mam_query(
+    async fn query_page(
         &self,
         query_id: &str,
+        with_jid: Option<&str>,
         after: Option<&str>,
         before: Option<&str>,
-    ) -> Result<(), MamError> {
-        let _ = self.event_bus.publish(Event::new(
-            Channel::new("ui.mam.query").unwrap(),
-            EventSource::System("mam".into()),
-            EventPayload::MamQueryRequested {
-                query_id: query_id.to_string(),
-                after: after.map(String::from),
-                before: before.map(String::from),
-                max: MAM_PAGE_SIZE,
-            },
-        ));
-
-        Ok(())
-    }
-
-    #[cfg(feature = "native")]
-    async fn collect_query_results(
-        &self,
-        _query_id: &str,
+        max: u32,
     ) -> Result<(Vec<ChatMessage>, bool, Option<String>), MamError> {
         let mut sub = self
             .event_bus
             .subscribe("xmpp.mam.**")
             .map_err(|e| MamError::EventBus(e.to_string()))?;
 
+        self.event_bus
+            .publish(Event::new(
+                Channel::new("ui.mam.query").unwrap(),
+                EventSource::System("mam".into()),
+                EventPayload::MamQueryRequested {
+                    query_id: query_id.to_string(),
+                    with_jid: with_jid.map(String::from),
+                    after: after.map(String::from),
+                    before: before.map(String::from),
+                    max,
+                },
+            ))
+            .map_err(|e| MamError::EventBus(e.to_string()))?;
+
+        self.collect_query_results(&mut sub, query_id).await
+    }
+
+    #[cfg(not(feature = "native"))]
+    async fn query_page(
+        &self,
+        _query_id: &str,
+        _with_jid: Option<&str>,
+        _after: Option<&str>,
+        _before: Option<&str>,
+        _max: u32,
+    ) -> Result<(Vec<ChatMessage>, bool, Option<String>), MamError> {
+        Err(MamError::NotSupported)
+    }
+
+    #[cfg(feature = "native")]
+    async fn collect_query_results(
+        &self,
+        sub: &mut EventSubscription,
+        query_id: &str,
+    ) -> Result<(Vec<ChatMessage>, bool, Option<String>), MamError> {
         let mut messages = Vec::new();
         let mut last_id = None;
-
-        let timeout_duration = tokio::time::Duration::from_secs(30);
+        let timeout_duration = tokio::time::Duration::from_secs(MAM_QUERY_TIMEOUT_SECS);
 
         loop {
             match tokio::time::timeout(timeout_duration, sub.recv()).await {
                 Ok(Ok(event)) => match &event.payload {
                     EventPayload::MamResultReceived {
+                        query_id: result_query_id,
                         messages: page_msgs,
-                        ..
-                    } => {
+                        complete,
+                    } if result_query_id == query_id => {
                         for msg in page_msgs {
                             last_id = Some(msg.id.clone());
                             messages.push(msg.clone());
                         }
+
+                        if *complete {
+                            return Ok((messages, true, last_id));
+                        }
                     }
                     EventPayload::MamFinReceived {
+                        iq_id,
                         complete,
                         last_id: fin_last,
-                        ..
-                    } => {
-                        if let Some(id) = fin_last {
-                            last_id = Some(id.clone());
-                        }
-                        return Ok((messages, *complete, last_id));
+                    } if iq_id == query_id => {
+                        let resolved_last = fin_last.clone().or(last_id);
+                        return Ok((messages, *complete, resolved_last));
                     }
                     _ => {}
                 },
@@ -299,10 +332,52 @@ impl<D: Database> MamManager<D> {
                     return Err(MamError::QueryFailed(format!("event bus error: {e}")));
                 }
                 Err(_) => {
-                    return Err(MamError::Timeout(30));
+                    return Err(MamError::Timeout(MAM_QUERY_TIMEOUT_SECS));
                 }
             }
         }
+    }
+
+    #[cfg(feature = "native")]
+    fn emit_sync_started(&self, correlation_id: Uuid) -> Result<(), MamError> {
+        self.event_bus
+            .publish(Event::with_correlation(
+                Channel::new("system.sync.started").unwrap(),
+                EventSource::System("mam".into()),
+                EventPayload::SyncStarted,
+                correlation_id,
+            ))
+            .map_err(|e| MamError::EventBus(e.to_string()))
+    }
+
+    #[cfg(not(feature = "native"))]
+    fn emit_sync_started(&self, _correlation_id: Uuid) -> Result<(), MamError> {
+        Ok(())
+    }
+
+    #[cfg(feature = "native")]
+    fn emit_sync_completed(
+        &self,
+        messages_synced: u64,
+        correlation_id: Uuid,
+    ) -> Result<(), MamError> {
+        self.event_bus
+            .publish(Event::with_correlation(
+                Channel::new("system.sync.completed").unwrap(),
+                EventSource::System("mam".into()),
+                EventPayload::SyncCompleted { messages_synced },
+                correlation_id,
+            ))
+            .map_err(|e| MamError::EventBus(e.to_string()))
+    }
+
+    #[cfg(not(feature = "native"))]
+    fn emit_sync_completed(
+        &self,
+        _messages_synced: u64,
+        _correlation_id: Uuid,
+    ) -> Result<(), MamError> {
+        Ok(())
     }
 
     #[cfg(feature = "native")]
@@ -330,7 +405,18 @@ impl<D: Database> MamManager<D> {
                 direction: ScrollDirection::Up,
             } => {
                 debug!(jid = %jid, "scroll up requested, fetching MAM history");
-                match self.fetch_history(jid, None, MAM_PAGE_SIZE).await {
+                let before = match self.oldest_local_message_id(jid).await {
+                    Ok(oldest) => oldest,
+                    Err(e) => {
+                        error!(error = %e, jid = %jid, "failed to read oldest local message");
+                        None
+                    }
+                };
+
+                match self
+                    .fetch_history(jid, before.as_deref(), MAM_PAGE_SIZE)
+                    .await
+                {
                     Ok(messages) => {
                         debug!(count = messages.len(), jid = %jid, "fetched MAM history");
                     }
@@ -541,7 +627,7 @@ mod tests {
                         Channel::new("xmpp.mam.fin.received").unwrap(),
                         EventSource::Xmpp,
                         EventPayload::MamFinReceived {
-                            iq_id: "iq-1".to_string(),
+                            iq_id: query_id,
                             complete: true,
                             last_id: Some("arch-2".to_string()),
                         },
@@ -624,10 +710,10 @@ mod tests {
                         .expect("timed out waiting for MAM query")
                         .expect("should receive query event");
 
-                assert!(matches!(
-                    query_event.payload,
-                    EventPayload::MamQueryRequested { .. }
-                ));
+                let query_id = match query_event.payload {
+                    EventPayload::MamQueryRequested { query_id, .. } => query_id,
+                    other => panic!("expected MamQueryRequested event, got {other:?}"),
+                };
 
                 // Send immediate fin to complete the sync
                 event_bus
@@ -635,7 +721,7 @@ mod tests {
                         Channel::new("xmpp.mam.fin.received").unwrap(),
                         EventSource::Xmpp,
                         EventPayload::MamFinReceived {
-                            iq_id: "iq-1".to_string(),
+                            iq_id: query_id,
                             complete: true,
                             last_id: None,
                         },
@@ -680,12 +766,15 @@ mod tests {
                         .expect("timed out")
                         .expect("should receive query event");
 
-                match &query_event.payload {
-                    EventPayload::MamQueryRequested { after, .. } => {
+                let query_id = match &query_event.payload {
+                    EventPayload::MamQueryRequested {
+                        query_id, after, ..
+                    } => {
                         assert_eq!(after.as_deref(), Some("existing-id-99"));
+                        query_id.clone()
                     }
                     _ => panic!("expected MamQueryRequested"),
-                }
+                };
 
                 // Complete the sync
                 event_bus
@@ -693,7 +782,7 @@ mod tests {
                         Channel::new("xmpp.mam.fin.received").unwrap(),
                         EventSource::Xmpp,
                         EventPayload::MamFinReceived {
-                            iq_id: "iq-1".to_string(),
+                            iq_id: query_id,
                             complete: true,
                             last_id: None,
                         },
@@ -705,6 +794,168 @@ mod tests {
                     .expect("timed out")
                     .expect("should not panic")
                     .expect("sync should succeed");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn fetch_history_uses_jid_filter_and_limit() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (manager, event_bus, _dir) = setup().await;
+
+                let mut ui_sub = event_bus.subscribe("ui.**").unwrap();
+
+                let manager_clone = manager.clone();
+                let fetch_handle = tokio::task::spawn_local(async move {
+                    manager_clone
+                        .fetch_history("bob@example.com", Some("oldest-1"), 10)
+                        .await
+                });
+
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                let query_event =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), ui_sub.recv())
+                        .await
+                        .expect("timed out waiting for MAM query")
+                        .expect("should receive query event");
+
+                let query_id = match query_event.payload {
+                    EventPayload::MamQueryRequested {
+                        query_id,
+                        with_jid,
+                        before,
+                        max,
+                        ..
+                    } => {
+                        assert_eq!(with_jid.as_deref(), Some("bob@example.com"));
+                        assert_eq!(before.as_deref(), Some("oldest-1"));
+                        assert_eq!(max, 10);
+                        query_id
+                    }
+                    other => panic!("expected MamQueryRequested event, got {other:?}"),
+                };
+
+                event_bus
+                    .publish(Event::new(
+                        Channel::new("xmpp.mam.fin.received").unwrap(),
+                        EventSource::Xmpp,
+                        EventPayload::MamFinReceived {
+                            iq_id: query_id,
+                            complete: true,
+                            last_id: None,
+                        },
+                    ))
+                    .unwrap();
+
+                let messages =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), fetch_handle)
+                        .await
+                        .expect("fetch timed out")
+                        .expect("fetch should not panic")
+                        .expect("fetch should succeed");
+
+                assert!(messages.is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sync_since_ignores_other_query_results() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (manager, event_bus, _dir) = setup().await;
+
+                let mut ui_sub = event_bus.subscribe("ui.**").unwrap();
+
+                let manager_clone = manager.clone();
+                let sync_handle =
+                    tokio::task::spawn_local(
+                        async move { manager_clone.sync_since(Utc::now()).await },
+                    );
+
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                let query_event =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), ui_sub.recv())
+                        .await
+                        .expect("timed out waiting for MAM query")
+                        .expect("should receive query event");
+
+                let query_id = match query_event.payload {
+                    EventPayload::MamQueryRequested { query_id, .. } => query_id,
+                    other => panic!("expected MamQueryRequested event, got {other:?}"),
+                };
+
+                let unrelated =
+                    make_chat_message("other-1", "eve@example.com", "alice@example.com", "Noise");
+                event_bus
+                    .publish(Event::new(
+                        Channel::new("xmpp.mam.result.received").unwrap(),
+                        EventSource::Xmpp,
+                        EventPayload::MamResultReceived {
+                            query_id: "other-query".to_string(),
+                            messages: vec![unrelated],
+                            complete: false,
+                        },
+                    ))
+                    .unwrap();
+                event_bus
+                    .publish(Event::new(
+                        Channel::new("xmpp.mam.fin.received").unwrap(),
+                        EventSource::Xmpp,
+                        EventPayload::MamFinReceived {
+                            iq_id: "other-query".to_string(),
+                            complete: true,
+                            last_id: Some("other-1".to_string()),
+                        },
+                    ))
+                    .unwrap();
+
+                let expected =
+                    make_chat_message("arch-10", "bob@example.com", "alice@example.com", "Hi");
+                event_bus
+                    .publish(Event::new(
+                        Channel::new("xmpp.mam.result.received").unwrap(),
+                        EventSource::Xmpp,
+                        EventPayload::MamResultReceived {
+                            query_id: query_id.clone(),
+                            messages: vec![expected],
+                            complete: false,
+                        },
+                    ))
+                    .unwrap();
+                event_bus
+                    .publish(Event::new(
+                        Channel::new("xmpp.mam.fin.received").unwrap(),
+                        EventSource::Xmpp,
+                        EventPayload::MamFinReceived {
+                            iq_id: query_id,
+                            complete: true,
+                            last_id: Some("arch-10".to_string()),
+                        },
+                    ))
+                    .unwrap();
+
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), sync_handle)
+                    .await
+                    .expect("sync timed out")
+                    .expect("sync task should not panic")
+                    .expect("sync should succeed");
+                assert_eq!(result.messages_synced, 1);
+
+                let rows: Vec<Row> = manager
+                    .db
+                    .query("SELECT id FROM messages ORDER BY id", &[])
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].get(0), Some(&SqlValue::Text("arch-10".to_string())));
             })
             .await;
     }

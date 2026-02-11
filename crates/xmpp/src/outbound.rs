@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 use xmpp_parsers::chatstates::ChatState as XmppChatState;
+use xmpp_parsers::data_forms::{DataForm, DataFormType, Field};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jid;
 use xmpp_parsers::mam;
@@ -142,10 +143,13 @@ impl OutboundRouter {
             }
             EventPayload::MamQueryRequested {
                 query_id,
+                with_jid,
                 after,
                 before,
                 max,
-            } => Some(build_mam_query_stanza(query_id, after, before, *max)),
+            } => Some(build_mam_query_stanza(
+                query_id, with_jid, after, before, *max,
+            )),
             _ => None,
         };
 
@@ -423,6 +427,7 @@ fn build_muc_message_stanza(room: &str, body: &str) -> Result<Stanza, OutboundRo
 
 fn build_mam_query_stanza(
     query_id: &str,
+    with_jid: &Option<String>,
     after: &Option<String>,
     before: &Option<String>,
     max: u32,
@@ -434,15 +439,23 @@ fn build_mam_query_stanza(
         index: None,
     };
 
+    let form = with_jid.as_ref().map(|jid| {
+        DataForm::new(
+            DataFormType::Submit,
+            "urn:xmpp:mam:2",
+            vec![Field::text_single("with", jid)],
+        )
+    });
+
     let query = mam::Query {
         queryid: Some(mam::QueryId(query_id.to_string())),
         node: None,
-        form: None,
+        form,
         set: Some(set),
         flip_page: false,
     };
 
-    let iq = Iq::from_set(Uuid::new_v4().to_string(), query);
+    let iq = Iq::from_set(query_id.to_string(), query);
     Stanza::Iq(Box::new(iq))
 }
 
@@ -689,6 +702,49 @@ mod tests {
             Some("room@conference.example.com".to_string())
         );
         assert_eq!(msg.bodies.get("").map(String::as_str), Some("Hello room!"));
+    }
+
+    #[test]
+    fn builds_mam_query_stanza_with_query_id_and_jid_filter() {
+        let stanza = build_mam_query_stanza(
+            "query-123",
+            &Some("bob@example.com".to_string()),
+            &Some("after-1".to_string()),
+            &Some("before-1".to_string()),
+            25,
+        );
+        let Stanza::Iq(iq) = &stanza else {
+            panic!("expected iq stanza");
+        };
+
+        let (id, payload) = match iq.as_ref() {
+            Iq::Set { id, payload, .. } => (id, payload),
+            _ => panic!("expected IQ set"),
+        };
+
+        assert_eq!(id, "query-123");
+
+        let query = mam::Query::try_from(payload.clone()).expect("payload should be MAM query");
+        assert_eq!(
+            query.queryid.as_ref().map(|query_id| query_id.0.as_str()),
+            Some("query-123")
+        );
+
+        let set = query.set.expect("MAM query should have RSM set");
+        assert_eq!(set.max, Some(25));
+        assert_eq!(set.after.as_deref(), Some("after-1"));
+        assert_eq!(set.before.as_deref(), Some("before-1"));
+
+        let form = query.form.expect("MAM query should include form filter");
+        let with_field = form
+            .fields
+            .iter()
+            .find(|field| field.var.as_deref() == Some("with"))
+            .expect("MAM query should include `with` field");
+        assert_eq!(
+            with_field.values.first().map(String::as_str),
+            Some("bob@example.com")
+        );
     }
 
     #[test]
@@ -1210,6 +1266,16 @@ mod integration_tests {
                     state: CoreChatState::Active,
                 },
             ),
+            (
+                "ui.mam.query",
+                EventPayload::MamQueryRequested {
+                    query_id: "mam-q1".to_string(),
+                    with_jid: Some("bob@example.com".to_string()),
+                    after: Some("a1".to_string()),
+                    before: None,
+                    max: 25,
+                },
+            ),
         ];
 
         let expected_count = commands.len();
@@ -1229,7 +1295,7 @@ mod integration_tests {
 
         assert_eq!(
             received, expected_count,
-            "all 10 command types should produce wire bytes"
+            "all command types should produce wire bytes"
         );
 
         _handle.abort();

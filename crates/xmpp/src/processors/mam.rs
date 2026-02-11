@@ -118,7 +118,7 @@ impl StanzaProcessor for MamProcessor {
                         #[cfg(feature = "native")]
                         {
                             let _ = self.event_bus.publish(Event::new(
-                                Channel::new("xmpp.mam.result.received").unwrap(),
+                                Channel::new("xmpp.mam.fin.received").unwrap(),
                                 EventSource::Xmpp,
                                 EventPayload::MamFinReceived {
                                     iq_id: id.clone(),

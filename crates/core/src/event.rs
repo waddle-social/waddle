@@ -338,6 +338,7 @@ pub enum EventPayload {
     },
     MamQueryRequested {
         query_id: String,
+        with_jid: Option<String>,
         after: Option<String>,
         before: Option<String>,
         max: u32,
