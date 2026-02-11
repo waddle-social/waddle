@@ -6422,6 +6422,10 @@ name = "waddle-roster"
 version = "0.1.0"
 dependencies = [
  "mockall",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tokio-test",
  "tracing",
  "tracing-test",

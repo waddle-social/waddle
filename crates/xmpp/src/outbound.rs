@@ -112,7 +112,11 @@ impl OutboundRouter {
             EventPayload::RosterAddRequested { jid, name, groups } => {
                 Some(build_roster_add_stanza(jid, name.as_deref(), groups)?)
             }
+            EventPayload::RosterUpdateRequested { jid, name, groups } => {
+                Some(build_roster_add_stanza(jid, name.as_deref(), groups)?)
+            }
             EventPayload::RosterRemoveRequested { jid } => Some(build_roster_remove_stanza(jid)?),
+            EventPayload::RosterFetchRequested => Some(build_roster_get_stanza()),
             EventPayload::SubscriptionRespondRequested { jid, accept } => {
                 Some(build_subscription_response_stanza(jid, *accept)?)
             }
@@ -288,6 +292,15 @@ fn build_roster_add_stanza(
 
     let iq = Iq::from_set(Uuid::new_v4().to_string(), query);
     Ok(Stanza::Iq(Box::new(iq)))
+}
+
+fn build_roster_get_stanza() -> Stanza {
+    let query = roster::Roster {
+        ver: None,
+        items: vec![],
+    };
+    let iq = Iq::from_get(Uuid::new_v4().to_string(), query);
+    Stanza::Iq(Box::new(iq))
 }
 
 fn build_roster_remove_stanza(jid_str: &str) -> Result<Stanza, OutboundRouterError> {

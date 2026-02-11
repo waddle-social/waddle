@@ -627,7 +627,7 @@ impl Database for WebDatabase {
 }
 
 #[cfg(feature = "native")]
-pub async fn open_database(path: &Path) -> Result<impl Database, StorageError> {
+pub async fn open_database(path: &Path) -> Result<impl Database + use<>, StorageError> {
     NativeDatabase::open(path).await
 }
 

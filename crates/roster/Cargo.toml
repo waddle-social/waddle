@@ -8,7 +8,7 @@ description = "Roster (contact list) management for Waddle"
 
 [features]
 default = ["native"]
-native = ["waddle-core/native", "waddle-storage/native", "waddle-xmpp/native"]
+native = ["waddle-core/native", "waddle-storage/native", "waddle-xmpp/native", "tokio"]
 web = ["waddle-core/web", "waddle-storage/web", "waddle-xmpp/web"]
 
 [dependencies]
@@ -16,8 +16,13 @@ waddle-core = { workspace = true, default-features = false }
 waddle-storage = { workspace = true, default-features = false }
 waddle-xmpp = { workspace = true, default-features = false }
 tracing = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 mockall = { workspace = true }
 tracing-test = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }

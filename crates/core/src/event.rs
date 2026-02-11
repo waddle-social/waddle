@@ -312,6 +312,12 @@ pub enum EventPayload {
     MucLeaveRequested {
         room: String,
     },
+    RosterUpdateRequested {
+        jid: String,
+        name: Option<String>,
+        groups: Vec<String>,
+    },
+    RosterFetchRequested,
     MucSendRequested {
         room: String,
         body: String,
@@ -363,7 +369,7 @@ pub struct RosterItem {
     pub groups: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Subscription {
     None,
@@ -371,6 +377,32 @@ pub enum Subscription {
     From,
     Both,
     Remove,
+}
+
+impl Subscription {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Subscription::None => "none",
+            Subscription::To => "to",
+            Subscription::From => "from",
+            Subscription::Both => "both",
+            Subscription::Remove => "remove",
+        }
+    }
+}
+
+impl std::str::FromStr for Subscription {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "to" => Subscription::To,
+            "from" => Subscription::From,
+            "both" => Subscription::Both,
+            "remove" => Subscription::Remove,
+            _ => Subscription::None,
+        })
+    }
 }
 
 /// A chat message (1:1 or MUC).
