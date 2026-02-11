@@ -203,6 +203,7 @@ pub enum EventPayload {
         jid: String,
         show: PresenceShow,
         status: Option<String>,
+        priority: i8,
     },
     OwnPresenceChanged {
         show: PresenceShow,

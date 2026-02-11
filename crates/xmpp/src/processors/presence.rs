@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing::debug;
 use xmpp_parsers::muc::Muc;
-use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
+use xmpp_parsers::presence::{Presence, Priority, Show, Type as PresenceType};
 
 use waddle_core::event::{
     Channel, Event, EventPayload, EventSource, PresenceShow as CorePresenceShow,
@@ -97,13 +97,19 @@ impl StanzaProcessor for PresenceProcessor {
                     .unwrap_or_default();
                 let show = convert_show(presence);
                 let status = presence.statuses.get("").cloned();
-                debug!(jid = %jid, ?show, "presence changed");
+                let priority = extract_priority(&presence.priority);
+                debug!(jid = %jid, ?show, priority, "presence changed");
                 #[cfg(feature = "native")]
                 {
                     let _ = self.event_bus.publish(Event::new(
                         Channel::new("xmpp.presence.changed").unwrap(),
                         EventSource::Xmpp,
-                        EventPayload::PresenceChanged { jid, show, status },
+                        EventPayload::PresenceChanged {
+                            jid,
+                            show,
+                            status,
+                            priority,
+                        },
                     ));
                 }
             }
@@ -144,6 +150,11 @@ fn convert_show(presence: &Presence) -> CorePresenceShow {
         Some(Show::Xa) => CorePresenceShow::Xa,
         Some(Show::Dnd) => CorePresenceShow::Dnd,
     }
+}
+
+fn extract_priority(priority: &Priority) -> i8 {
+    let el: xmpp_parsers::minidom::Element = priority.into();
+    el.text().parse::<i8>().unwrap_or(0)
 }
 
 #[cfg(test)]
