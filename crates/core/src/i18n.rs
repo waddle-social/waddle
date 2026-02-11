@@ -51,15 +51,40 @@ impl I18n {
             available
         };
 
-        let negotiated = Self::negotiate(&requested_strs, effective_available);
-        let current_locale = negotiated.first().copied().unwrap_or("en-US").to_string();
-
         let mut bundles = HashMap::new();
         for &locale_str in effective_available {
             if let Some(bundle) = Self::build_bundle(locale_str) {
                 bundles.insert(locale_str.to_string(), bundle);
             }
         }
+
+        if !bundles.contains_key("en-US") {
+            if let Some(bundle) = Self::build_bundle("en-US") {
+                bundles.insert("en-US".to_string(), bundle);
+            }
+        }
+
+        let mut negotiated_available: Vec<&str> = effective_available
+            .iter()
+            .copied()
+            .filter(|locale| bundles.contains_key(*locale))
+            .collect();
+
+        if bundles.contains_key("en-US")
+            && !negotiated_available
+                .iter()
+                .any(|locale| locale.eq_ignore_ascii_case("en-US"))
+        {
+            negotiated_available.push("en-US");
+        }
+
+        let negotiated = Self::negotiate(&requested_strs, &negotiated_available);
+        let current_locale = negotiated
+            .first()
+            .copied()
+            .or_else(|| negotiated_available.first().copied())
+            .unwrap_or("en-US")
+            .to_string();
 
         Self {
             current_locale,
@@ -85,7 +110,9 @@ impl I18n {
     }
 
     pub fn available_locales(&self) -> Vec<String> {
-        self.bundles.keys().cloned().collect()
+        let mut locales: Vec<String> = self.bundles.keys().cloned().collect();
+        locales.sort();
+        locales
     }
 
     pub fn add_messages(&mut self, locale: &str, ftl_content: &str) -> Result<(), I18nError> {
@@ -238,5 +265,19 @@ mod tests {
     fn falls_back_to_en_us_for_unknown_locale() {
         let i18n = I18n::new(Some("xx-YY"), &["en-US"]);
         assert_eq!(i18n.current_locale(), "en-US");
+    }
+
+    #[test]
+    fn falls_back_to_en_us_when_preferred_locale_has_no_bundle() {
+        let i18n = I18n::new(Some("de"), &["de", "en-US"]);
+        assert_eq!(i18n.current_locale(), "en-US");
+        assert_eq!(i18n.t("app-name", None), "Waddle");
+    }
+
+    #[test]
+    fn falls_back_to_en_us_when_available_has_no_loadable_locales() {
+        let i18n = I18n::new(Some("de"), &["de"]);
+        assert_eq!(i18n.current_locale(), "en-US");
+        assert_eq!(i18n.t("app-name", None), "Waddle");
     }
 }
