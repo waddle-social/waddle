@@ -12,7 +12,9 @@ pub use carbons::{CarbonDirection, CarbonsManager, CarbonsState, UnwrappedCarbon
 pub use connection::{ConnectionConfig, ConnectionManager, ConnectionState};
 pub use csi::{ClientState, CsiManager};
 pub use error::{ConnectionError, PipelineError};
-pub use pipeline::{ProcessorContext, ProcessorResult, StanzaPipeline, StanzaProcessor};
+pub use pipeline::{
+    ProcessorContext, ProcessorResult, StanzaDirection, StanzaPipeline, StanzaProcessor,
+};
 pub use sasl::SelectedMechanism;
 pub use stanza::{Stanza, parse_stanza, serialize_stanza};
 pub use stream_management::{
