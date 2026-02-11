@@ -66,7 +66,7 @@
 - [x] Implement startup/shutdown orchestration matching the deterministic sequences in `specs/04-events/lifecycle.md` (config → storage → event bus → plugins → XMPP connection → roster → presence → MAM sync).
 - [x] Create `waddle-test-support` crate with fixture loading helpers and test stanza/roster/config data in `tests/fixtures/`.
 - [x] Add Prosody testcontainers harness with pre-configured test users (alice, bob, charlie) and modules (MAM, MUC, Carbons) per `specs/07-testing/infrastructure.md`.
-- [ ] Add integration tests for cross-crate flows: connection/auth, roster sync, 1:1 messaging, MUC messaging, MAM sync, offline queue drain.
+- [x] Add integration tests for cross-crate flows: connection/auth, roster sync, 1:1 messaging, MUC messaging, MAM sync, offline queue drain.
 - [ ] Add cucumber-rs BDD runner with step definitions covering: authentication, roster/presence, messaging (1:1 + MUC), MAM/offline sync, plugins, i18n/theming, and notifications features from `specs/06-bdd/features/`.
 - [ ] Add property-based tests (proptest) for event ordering guarantees, storage consistency invariants, and stanza parsing robustness.
 - [ ] Add coverage tooling (`cargo-llvm-cov` with threshold checks) aligned to `specs/07-testing/coverage-targets.md`.
