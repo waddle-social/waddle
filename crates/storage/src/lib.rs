@@ -53,7 +53,9 @@ impl ToSql for i32 {
 
 impl ToSql for u64 {
     fn to_sql_value(&self) -> SqlValue {
-        SqlValue::Integer(*self as i64)
+        SqlValue::Integer(
+            i64::try_from(*self).expect("u64 value exceeds i64::MAX; cannot store in SQLite"),
+        )
     }
 }
 
@@ -279,12 +281,12 @@ impl Database for WebDatabase {
 }
 
 #[cfg(feature = "native")]
-pub async fn open_database(path: &Path) -> Result<NativeDatabase, StorageError> {
+pub async fn open_database(path: &Path) -> Result<impl Database, StorageError> {
     NativeDatabase::open(path).await
 }
 
 #[cfg(all(not(feature = "native"), feature = "web"))]
-pub async fn open_database(path: &Path) -> Result<WebDatabase, StorageError> {
+pub async fn open_database(path: &Path) -> Result<impl Database, StorageError> {
     WebDatabase::open(path).await
 }
 
