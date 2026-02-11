@@ -23,7 +23,7 @@
 - [x] Add migration `002_add_mam_sync_state.sql` for the `mam_sync_state` table.
 - [x] Add migration `003_add_offline_queue.sql` for the `offline_queue` table with status enum and indices, matching `specs/03-components/offline.md`.
 - [x] Add web backend stub (`wa-sqlite`/`sql.js` compile-safe placeholder behind `web` feature flag).
-- [ ] Add storage tests for migration sequencing, query/transaction behaviour, and offline queue operations.
+- [x] Add storage tests for migration sequencing, query/transaction behaviour, and offline queue operations.
 
 ## 4. XMPP Infrastructure (`waddle-xmpp`)
 - [ ] Create `waddle-xmpp` with `native`/`web` feature flags. Depends on `waddle-core` only. Define the `XmppTransport` trait.

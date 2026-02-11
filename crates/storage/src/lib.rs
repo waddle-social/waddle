@@ -638,3 +638,783 @@ pub async fn open_database(path: &Path) -> Result<impl Database, StorageError> {
 
 #[cfg(not(any(feature = "native", feature = "web")))]
 compile_error!("waddle-storage requires either the `native` or `web` feature.");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn open_temp_db() -> (NativeDatabase, TempDir) {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let db = NativeDatabase::open(&db_path)
+            .await
+            .expect("failed to open database");
+        (db, dir)
+    }
+
+    fn s(val: &str) -> String {
+        val.to_string()
+    }
+
+    // ---- Migration sequencing ----
+
+    #[tokio::test]
+    async fn migrations_create_all_tables() {
+        let (db, _dir) = open_temp_db().await;
+
+        let tables: Vec<Row> = db
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                &[],
+            )
+            .await
+            .expect("failed to query tables");
+
+        let table_names: Vec<&str> = tables
+            .iter()
+            .filter_map(|row| match row.get(0) {
+                Some(SqlValue::Text(name)) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            table_names.contains(&"_migrations"),
+            "missing _migrations table"
+        );
+        assert!(table_names.contains(&"messages"), "missing messages table");
+        assert!(table_names.contains(&"roster"), "missing roster table");
+        assert!(
+            table_names.contains(&"muc_rooms"),
+            "missing muc_rooms table"
+        );
+        assert!(
+            table_names.contains(&"plugin_kv"),
+            "missing plugin_kv table"
+        );
+        assert!(
+            table_names.contains(&"mam_sync_state"),
+            "missing mam_sync_state table"
+        );
+        assert!(
+            table_names.contains(&"offline_queue"),
+            "missing offline_queue table"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrations_record_all_versions() {
+        let (db, _dir) = open_temp_db().await;
+
+        let rows: Vec<Row> = db
+            .query("SELECT version FROM _migrations ORDER BY version", &[])
+            .await
+            .expect("failed to query migration versions");
+
+        let versions: Vec<i64> = rows
+            .iter()
+            .filter_map(|row| match row.get(0) {
+                Some(SqlValue::Integer(v)) => Some(*v),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(versions, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn migrations_are_idempotent() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+
+        let _db1 = NativeDatabase::open(&db_path)
+            .await
+            .expect("first open failed");
+        drop(_db1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let db2 = NativeDatabase::open(&db_path)
+            .await
+            .expect("second open failed");
+
+        let rows: Vec<Row> = db2
+            .query("SELECT version FROM _migrations ORDER BY version", &[])
+            .await
+            .expect("failed to query migration versions");
+
+        let versions: Vec<i64> = rows
+            .iter()
+            .filter_map(|row| match row.get(0) {
+                Some(SqlValue::Integer(v)) => Some(*v),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            versions,
+            vec![1, 2, 3],
+            "migrations should not duplicate on re-open"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrations_create_expected_indices() {
+        let (db, _dir) = open_temp_db().await;
+
+        let rows: Vec<Row> = db
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name",
+                &[],
+            )
+            .await
+            .expect("failed to query indices");
+
+        let index_names: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row.get(0) {
+                Some(SqlValue::Text(name)) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(index_names.contains(&"idx_messages_from"));
+        assert!(index_names.contains(&"idx_messages_to"));
+        assert!(index_names.contains(&"idx_messages_timestamp"));
+        assert!(index_names.contains(&"idx_offline_queue_status"));
+    }
+
+    // ---- Query and transaction behaviour ----
+
+    #[tokio::test]
+    async fn execute_returns_rows_affected() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("alice@example.com");
+        let name = s("Alice");
+        let sub = s("both");
+        let affected = db
+            .execute(
+                "INSERT INTO roster (jid, name, subscription) VALUES (?1, ?2, ?3)",
+                &[&jid, &name, &sub],
+            )
+            .await
+            .expect("insert failed");
+
+        assert_eq!(affected, 1);
+    }
+
+    #[tokio::test]
+    async fn query_returns_inserted_rows() {
+        let (db, _dir) = open_temp_db().await;
+
+        let alice = s("alice@example.com");
+        let alice_name = s("Alice");
+        let both = s("both");
+        db.execute(
+            "INSERT INTO roster (jid, name, subscription) VALUES (?1, ?2, ?3)",
+            &[&alice, &alice_name, &both],
+        )
+        .await
+        .expect("insert failed");
+
+        let bob = s("bob@example.com");
+        let bob_name = s("Bob");
+        let to = s("to");
+        db.execute(
+            "INSERT INTO roster (jid, name, subscription) VALUES (?1, ?2, ?3)",
+            &[&bob, &bob_name, &to],
+        )
+        .await
+        .expect("insert failed");
+
+        let rows: Vec<Row> = db
+            .query(
+                "SELECT jid, name, subscription FROM roster ORDER BY jid",
+                &[],
+            )
+            .await
+            .expect("query failed");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].get(0),
+            Some(&SqlValue::Text(s("alice@example.com")))
+        );
+        assert_eq!(rows[0].get(1), Some(&SqlValue::Text(s("Alice"))));
+        assert_eq!(rows[0].get(2), Some(&SqlValue::Text(s("both"))));
+        assert_eq!(rows[1].get(0), Some(&SqlValue::Text(s("bob@example.com"))));
+    }
+
+    #[tokio::test]
+    async fn query_one_returns_single_row() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("alice@example.com");
+        let name = s("Alice");
+        let sub = s("both");
+        db.execute(
+            "INSERT INTO roster (jid, name, subscription) VALUES (?1, ?2, ?3)",
+            &[&jid, &name, &sub],
+        )
+        .await
+        .expect("insert failed");
+
+        let qjid = s("alice@example.com");
+        let row: Row = db
+            .query_one("SELECT name FROM roster WHERE jid = ?1", &[&qjid])
+            .await
+            .expect("query_one failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Text(s("Alice"))));
+    }
+
+    #[tokio::test]
+    async fn query_one_returns_not_found_for_missing_row() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("nobody@example.com");
+        let result: Result<Row, StorageError> = db
+            .query_one("SELECT name FROM roster WHERE jid = ?1", &[&jid])
+            .await;
+
+        assert!(matches!(result, Err(StorageError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn query_empty_table_returns_empty_vec() {
+        let (db, _dir) = open_temp_db().await;
+
+        let rows: Vec<Row> = db
+            .query("SELECT * FROM roster", &[])
+            .await
+            .expect("query failed");
+
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_with_invalid_sql_returns_error() {
+        let (db, _dir) = open_temp_db().await;
+
+        let val = s("val");
+        let result = db
+            .execute("INSERT INTO nonexistent_table (x) VALUES (?1)", &[&val])
+            .await;
+
+        assert!(matches!(result, Err(StorageError::QueryFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn query_with_parameterised_filter() {
+        let (db, _dir) = open_temp_db().await;
+
+        let id1 = s("msg-1");
+        let from1 = s("alice@example.com");
+        let to1 = s("bob@example.com");
+        let body1 = s("Hello");
+        let ts1 = s("2025-01-01T00:00:00Z");
+        let mt = s("chat");
+        db.execute(
+            "INSERT INTO messages (id, from_jid, to_jid, body, timestamp, message_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &[&id1, &from1, &to1, &body1, &ts1, &mt],
+        )
+        .await
+        .expect("insert failed");
+
+        let id2 = s("msg-2");
+        let from2 = s("bob@example.com");
+        let to2 = s("alice@example.com");
+        let body2 = s("Hi back");
+        let ts2 = s("2025-01-01T00:01:00Z");
+        let mt2 = s("chat");
+        db.execute(
+            "INSERT INTO messages (id, from_jid, to_jid, body, timestamp, message_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &[&id2, &from2, &to2, &body2, &ts2, &mt2],
+        )
+        .await
+        .expect("insert failed");
+
+        let filter = s("alice@example.com");
+        let rows: Vec<Row> = db
+            .query(
+                "SELECT id, body FROM messages WHERE from_jid = ?1",
+                &[&filter],
+            )
+            .await
+            .expect("query failed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(1), Some(&SqlValue::Text(s("Hello"))));
+    }
+
+    #[tokio::test]
+    async fn execute_update_modifies_existing_row() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("alice@example.com");
+        let name = s("Alice");
+        let sub = s("none");
+        db.execute(
+            "INSERT INTO roster (jid, name, subscription) VALUES (?1, ?2, ?3)",
+            &[&jid, &name, &sub],
+        )
+        .await
+        .expect("insert failed");
+
+        let new_sub = s("both");
+        let ujid = s("alice@example.com");
+        let affected = db
+            .execute(
+                "UPDATE roster SET subscription = ?1 WHERE jid = ?2",
+                &[&new_sub, &ujid],
+            )
+            .await
+            .expect("update failed");
+
+        assert_eq!(affected, 1);
+
+        let qjid = s("alice@example.com");
+        let row: Row = db
+            .query_one("SELECT subscription FROM roster WHERE jid = ?1", &[&qjid])
+            .await
+            .expect("query_one failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Text(s("both"))));
+    }
+
+    #[tokio::test]
+    async fn execute_delete_removes_row() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("alice@example.com");
+        let name = s("Alice");
+        let sub = s("both");
+        db.execute(
+            "INSERT INTO roster (jid, name, subscription) VALUES (?1, ?2, ?3)",
+            &[&jid, &name, &sub],
+        )
+        .await
+        .expect("insert failed");
+
+        let djid = s("alice@example.com");
+        let affected = db
+            .execute("DELETE FROM roster WHERE jid = ?1", &[&djid])
+            .await
+            .expect("delete failed");
+
+        assert_eq!(affected, 1);
+
+        let rows: Vec<Row> = db
+            .query("SELECT * FROM roster", &[])
+            .await
+            .expect("query failed");
+
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transaction_closure_executes() {
+        let (db, _dir) = open_temp_db().await;
+
+        let result = db
+            .transaction(|_tx| Ok(42))
+            .await
+            .expect("transaction failed");
+
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn transaction_closure_error_propagates() {
+        let (db, _dir) = open_temp_db().await;
+
+        let result: Result<(), StorageError> = db
+            .transaction(|_tx| Err(StorageError::QueryFailed("test error".to_string())))
+            .await;
+
+        assert!(matches!(result, Err(StorageError::TransactionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn null_values_round_trip_correctly() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("alice@example.com");
+        let name: Option<String> = None;
+        let sub = s("none");
+        let groups: Option<String> = None;
+        db.execute(
+            "INSERT INTO roster (jid, name, subscription, groups) VALUES (?1, ?2, ?3, ?4)",
+            &[&jid, &name, &sub, &groups],
+        )
+        .await
+        .expect("insert failed");
+
+        let qjid = s("alice@example.com");
+        let row: Row = db
+            .query_one("SELECT name, groups FROM roster WHERE jid = ?1", &[&qjid])
+            .await
+            .expect("query_one failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Null));
+        assert_eq!(row.get(1), Some(&SqlValue::Null));
+    }
+
+    #[tokio::test]
+    async fn integer_values_round_trip_correctly() {
+        let (db, _dir) = open_temp_db().await;
+
+        let room = s("room@muc.example.com");
+        let nick = s("mynick");
+        let joined = 1_i64;
+        let subject: Option<String> = None;
+        db.execute(
+            "INSERT INTO muc_rooms (room_jid, nick, joined, subject) VALUES (?1, ?2, ?3, ?4)",
+            &[&room, &nick, &joined, &subject],
+        )
+        .await
+        .expect("insert failed");
+
+        let qroom = s("room@muc.example.com");
+        let row: Row = db
+            .query_one(
+                "SELECT joined FROM muc_rooms WHERE room_jid = ?1",
+                &[&qroom],
+            )
+            .await
+            .expect("query_one failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Integer(1)));
+    }
+
+    // ---- Offline queue operations ----
+
+    #[tokio::test]
+    async fn offline_queue_enqueue_and_query_pending() {
+        let (db, _dir) = open_temp_db().await;
+
+        let stype = s("message");
+        let payload = s("<message>hello</message>");
+        let ts = s("2025-01-01T00:00:00Z");
+        db.execute(
+            "INSERT INTO offline_queue (stanza_type, payload, created_at) VALUES (?1, ?2, ?3)",
+            &[&stype, &payload, &ts],
+        )
+        .await
+        .expect("enqueue failed");
+
+        let rows: Vec<Row> = db
+            .query(
+                "SELECT id, stanza_type, payload, status FROM offline_queue WHERE status = 'pending' ORDER BY id ASC",
+                &[],
+            )
+            .await
+            .expect("query failed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(1), Some(&SqlValue::Text(s("message"))));
+        assert_eq!(
+            rows[0].get(2),
+            Some(&SqlValue::Text(s("<message>hello</message>")))
+        );
+        assert_eq!(rows[0].get(3), Some(&SqlValue::Text(s("pending"))));
+    }
+
+    #[tokio::test]
+    async fn offline_queue_default_status_is_pending() {
+        let (db, _dir) = open_temp_db().await;
+
+        let stype = s("presence");
+        let payload = s("<presence/>");
+        let ts = s("2025-01-01T00:00:00Z");
+        db.execute(
+            "INSERT INTO offline_queue (stanza_type, payload, created_at) VALUES (?1, ?2, ?3)",
+            &[&stype, &payload, &ts],
+        )
+        .await
+        .expect("enqueue failed");
+
+        let row: Row = db
+            .query_one("SELECT status FROM offline_queue", &[])
+            .await
+            .expect("query failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Text(s("pending"))));
+    }
+
+    #[tokio::test]
+    async fn offline_queue_fifo_ordering() {
+        let (db, _dir) = open_temp_db().await;
+
+        let stype = s("message");
+        for i in 1..=5 {
+            let payload = format!("payload-{i}");
+            let ts = format!("2025-01-01T00:0{i}:00Z");
+            db.execute(
+                "INSERT INTO offline_queue (stanza_type, payload, created_at) VALUES (?1, ?2, ?3)",
+                &[&stype, &payload, &ts],
+            )
+            .await
+            .expect("enqueue failed");
+        }
+
+        let rows: Vec<Row> = db
+            .query(
+                "SELECT payload FROM offline_queue WHERE status = 'pending' ORDER BY id ASC",
+                &[],
+            )
+            .await
+            .expect("query failed");
+
+        assert_eq!(rows.len(), 5);
+        for (i, row) in rows.iter().enumerate() {
+            let expected = format!("payload-{}", i + 1);
+            assert_eq!(
+                row.get(0),
+                Some(&SqlValue::Text(expected)),
+                "FIFO order violated at position {i}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_queue_update_status() {
+        let (db, _dir) = open_temp_db().await;
+
+        let stype = s("message");
+        let payload = s("<message/>");
+        let ts = s("2025-01-01T00:00:00Z");
+        db.execute(
+            "INSERT INTO offline_queue (stanza_type, payload, created_at) VALUES (?1, ?2, ?3)",
+            &[&stype, &payload, &ts],
+        )
+        .await
+        .expect("enqueue failed");
+
+        let row: Row = db
+            .query_one("SELECT id FROM offline_queue", &[])
+            .await
+            .expect("query failed");
+
+        let id = match row.get(0) {
+            Some(SqlValue::Integer(id)) => *id,
+            _ => panic!("expected integer id"),
+        };
+
+        // Transition: pending -> sent
+        let sent = s("sent");
+        db.execute(
+            "UPDATE offline_queue SET status = ?1 WHERE id = ?2",
+            &[&sent, &id],
+        )
+        .await
+        .expect("update to sent failed");
+
+        let row: Row = db
+            .query_one("SELECT status FROM offline_queue WHERE id = ?1", &[&id])
+            .await
+            .expect("query failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Text(s("sent"))));
+
+        // Transition: sent -> confirmed
+        let confirmed = s("confirmed");
+        db.execute(
+            "UPDATE offline_queue SET status = ?1 WHERE id = ?2",
+            &[&confirmed, &id],
+        )
+        .await
+        .expect("update to confirmed failed");
+
+        let row: Row = db
+            .query_one("SELECT status FROM offline_queue WHERE id = ?1", &[&id])
+            .await
+            .expect("query failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Text(s("confirmed"))));
+    }
+
+    #[tokio::test]
+    async fn offline_queue_pending_excludes_non_pending() {
+        let (db, _dir) = open_temp_db().await;
+
+        let items: Vec<(String, String)> = vec![
+            (s("pending-item"), s("pending")),
+            (s("sent-item"), s("sent")),
+            (s("confirmed-item"), s("confirmed")),
+            (s("failed-item"), s("failed")),
+        ];
+        let payload = s("<payload/>");
+        let ts = s("2025-01-01T00:00:00Z");
+        for (stype, status) in &items {
+            db.execute(
+                "INSERT INTO offline_queue (stanza_type, payload, created_at, status) VALUES (?1, ?2, ?3, ?4)",
+                &[stype, &payload, &ts, status],
+            )
+            .await
+            .expect("insert failed");
+        }
+
+        let rows: Vec<Row> = db
+            .query(
+                "SELECT stanza_type FROM offline_queue WHERE status = 'pending'",
+                &[],
+            )
+            .await
+            .expect("query failed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(0), Some(&SqlValue::Text(s("pending-item"))));
+    }
+
+    #[tokio::test]
+    async fn offline_queue_delete_confirmed() {
+        let (db, _dir) = open_temp_db().await;
+
+        let stype = s("message");
+        let payload = s("<message/>");
+        let ts1 = s("2025-01-01T00:00:00Z");
+        let confirmed = s("confirmed");
+        db.execute(
+            "INSERT INTO offline_queue (stanza_type, payload, created_at, status) VALUES (?1, ?2, ?3, ?4)",
+            &[&stype, &payload, &ts1, &confirmed],
+        )
+        .await
+        .expect("insert failed");
+
+        let ts2 = s("2025-01-01T00:01:00Z");
+        let pending = s("pending");
+        db.execute(
+            "INSERT INTO offline_queue (stanza_type, payload, created_at, status) VALUES (?1, ?2, ?3, ?4)",
+            &[&stype, &payload, &ts2, &pending],
+        )
+        .await
+        .expect("insert failed");
+
+        let deleted = db
+            .execute("DELETE FROM offline_queue WHERE status = 'confirmed'", &[])
+            .await
+            .expect("delete failed");
+
+        assert_eq!(deleted, 1);
+
+        let rows: Vec<Row> = db
+            .query("SELECT status FROM offline_queue", &[])
+            .await
+            .expect("query failed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(0), Some(&SqlValue::Text(s("pending"))));
+    }
+
+    #[tokio::test]
+    async fn offline_queue_autoincrement_ids() {
+        let (db, _dir) = open_temp_db().await;
+
+        let stype = s("message");
+        let payload = s("<msg/>");
+        let ts = s("2025-01-01T00:00:00Z");
+        for _ in 0..3 {
+            db.execute(
+                "INSERT INTO offline_queue (stanza_type, payload, created_at) VALUES (?1, ?2, ?3)",
+                &[&stype, &payload, &ts],
+            )
+            .await
+            .expect("enqueue failed");
+        }
+
+        let rows: Vec<Row> = db
+            .query("SELECT id FROM offline_queue ORDER BY id ASC", &[])
+            .await
+            .expect("query failed");
+
+        let ids: Vec<i64> = rows
+            .iter()
+            .filter_map(|row| match row.get(0) {
+                Some(SqlValue::Integer(id)) => Some(*id),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ids.len(), 3);
+        assert!(
+            ids[0] < ids[1] && ids[1] < ids[2],
+            "IDs should be monotonically increasing"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_kv_composite_key() {
+        let (db, _dir) = open_temp_db().await;
+
+        let pid_a = s("plugin-a");
+        let pid_b = s("plugin-b");
+        let key = s("setting");
+        let val1 = b"value1".to_vec();
+        let val2 = b"value2".to_vec();
+        db.execute(
+            "INSERT INTO plugin_kv (plugin_id, key, value) VALUES (?1, ?2, ?3)",
+            &[&pid_a, &key, &val1],
+        )
+        .await
+        .expect("insert failed");
+
+        db.execute(
+            "INSERT INTO plugin_kv (plugin_id, key, value) VALUES (?1, ?2, ?3)",
+            &[&pid_b, &key, &val2],
+        )
+        .await
+        .expect("insert failed");
+
+        let qpid = s("plugin-a");
+        let qkey = s("setting");
+        let row: Row = db
+            .query_one(
+                "SELECT value FROM plugin_kv WHERE plugin_id = ?1 AND key = ?2",
+                &[&qpid, &qkey],
+            )
+            .await
+            .expect("query_one failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Blob(b"value1".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn mam_sync_state_upsert() {
+        let (db, _dir) = open_temp_db().await;
+
+        let jid = s("alice@example.com");
+        let sid1 = s("stanza-1");
+        let ts1 = s("2025-01-01T00:00:00Z");
+        db.execute(
+            "INSERT INTO mam_sync_state (jid, last_stanza_id, last_sync_at) VALUES (?1, ?2, ?3)",
+            &[&jid, &sid1, &ts1],
+        )
+        .await
+        .expect("insert failed");
+
+        let jid2 = s("alice@example.com");
+        let sid2 = s("stanza-2");
+        let ts2 = s("2025-01-02T00:00:00Z");
+        db.execute(
+            "INSERT OR REPLACE INTO mam_sync_state (jid, last_stanza_id, last_sync_at) VALUES (?1, ?2, ?3)",
+            &[&jid2, &sid2, &ts2],
+        )
+        .await
+        .expect("upsert failed");
+
+        let qjid = s("alice@example.com");
+        let row: Row = db
+            .query_one(
+                "SELECT last_stanza_id, last_sync_at FROM mam_sync_state WHERE jid = ?1",
+                &[&qjid],
+            )
+            .await
+            .expect("query_one failed");
+
+        assert_eq!(row.get(0), Some(&SqlValue::Text(s("stanza-2"))));
+        assert_eq!(row.get(1), Some(&SqlValue::Text(s("2025-01-02T00:00:00Z"))));
+    }
+}
