@@ -1,0 +1,45 @@
+[package]
+name = "waddle-gui-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tauri v2 backend bridging Rust core to Vue.js for Waddle"
+
+[features]
+default = ["native"]
+native = [
+    "waddle-core/native",
+    "waddle-storage/native",
+    "waddle-xmpp/native",
+    "waddle-roster/native",
+    "waddle-messaging/native",
+    "waddle-presence/native",
+    "waddle-mam/native",
+    "waddle-plugins/native",
+    "waddle-notifications/native",
+    "dep:tokio",
+    "dep:tauri",
+]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+waddle-storage = { workspace = true, default-features = false }
+waddle-xmpp = { workspace = true, default-features = false }
+waddle-roster = { workspace = true, default-features = false }
+waddle-messaging = { workspace = true, default-features = false }
+waddle-presence = { workspace = true, default-features = false }
+waddle-mam = { workspace = true, default-features = false }
+waddle-plugins = { workspace = true, default-features = false }
+waddle-notifications = { workspace = true, default-features = false }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tauri = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }
