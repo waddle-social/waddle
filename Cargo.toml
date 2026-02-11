@@ -19,6 +19,7 @@ serde_json = "1"
 
 # Configuration
 toml = "0.8"
+semver = "1"
 
 # Date/time and identifiers
 chrono = { version = "0.4", features = ["serde"] }

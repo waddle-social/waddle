@@ -21,6 +21,9 @@ waddle-core = { workspace = true, default-features = false }
 waddle-storage = { workspace = true, default-features = false }
 tokio = { workspace = true, optional = true }
 serde = { workspace = true }
+toml = { workspace = true }
+glob = { workspace = true }
+semver = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 wasmtime = { workspace = true, optional = true }

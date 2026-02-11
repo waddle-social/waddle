@@ -6404,13 +6404,16 @@ dependencies = [
 name = "waddle-plugins"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "mockall",
  "oci-distribution",
+ "semver",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "toml 0.8.23",
  "tracing",
  "tracing-test",
  "waddle-core",
