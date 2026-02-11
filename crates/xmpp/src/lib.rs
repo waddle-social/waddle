@@ -15,6 +15,8 @@ pub use connection::{ConnectionConfig, ConnectionManager, ConnectionState};
 pub use csi::{ClientState, CsiManager};
 pub use error::{ConnectionError, PipelineError};
 pub use outbound::{OutboundRouter, OutboundRouterError};
+#[cfg(feature = "native")]
+pub use outbound::{StanzaReceiver, StanzaSender, stanza_channel};
 pub use pipeline::{
     ProcessorContext, ProcessorResult, StanzaDirection, StanzaPipeline, StanzaProcessor,
 };

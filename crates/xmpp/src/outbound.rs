@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+#[cfg(feature = "native")]
+use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 use xmpp_parsers::chatstates::ChatState as XmppChatState;
@@ -21,18 +23,36 @@ use waddle_core::event::{Channel, EventBus};
 use crate::pipeline::StanzaPipeline;
 use crate::stanza::Stanza;
 
+#[cfg(feature = "native")]
+pub type StanzaSender = mpsc::Sender<Vec<u8>>;
+
+#[cfg(feature = "native")]
+pub type StanzaReceiver = mpsc::Receiver<Vec<u8>>;
+
+#[cfg(feature = "native")]
+pub fn stanza_channel(buffer: usize) -> (StanzaSender, StanzaReceiver) {
+    mpsc::channel(buffer)
+}
+
 pub struct OutboundRouter {
     #[cfg(feature = "native")]
     event_bus: Arc<dyn EventBus>,
     pipeline: Arc<StanzaPipeline>,
+    #[cfg(feature = "native")]
+    wire_sender: StanzaSender,
 }
 
 impl OutboundRouter {
     #[cfg(feature = "native")]
-    pub fn new(event_bus: Arc<dyn EventBus>, pipeline: Arc<StanzaPipeline>) -> Self {
+    pub fn new(
+        event_bus: Arc<dyn EventBus>,
+        pipeline: Arc<StanzaPipeline>,
+        wire_sender: StanzaSender,
+    ) -> Self {
         Self {
             event_bus,
             pipeline,
+            wire_sender,
         }
     }
 
@@ -107,11 +127,16 @@ impl OutboundRouter {
         };
 
         if let Some(stanza) = stanza {
-            let _bytes = self
+            let bytes = self
                 .pipeline
                 .process_outbound(stanza)
                 .await
                 .map_err(|e| OutboundRouterError::PipelineFailed(e.to_string()))?;
+
+            self.wire_sender
+                .send(bytes)
+                .await
+                .map_err(|_| OutboundRouterError::WireSendFailed)?;
         }
 
         Ok(())
@@ -363,6 +388,9 @@ pub enum OutboundRouterError {
 
     #[error("outbound pipeline failed: {0}")]
     PipelineFailed(String),
+
+    #[error("wire send failed: transport channel closed")]
+    WireSendFailed,
 }
 
 #[cfg(test)]
@@ -608,5 +636,362 @@ mod tests {
             let reparsed = Stanza::parse(&bytes).expect("serialized stanza should reparse");
             assert_eq!(reparsed.name(), stanza.name());
         }
+    }
+}
+
+#[cfg(all(test, feature = "native"))]
+mod integration_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+    use waddle_core::event::{
+        BroadcastEventBus, Channel, ChatState as CoreChatState, Event, EventBus, EventPayload,
+        EventSource, MessageType as CoreMessageType, PresenceShow as CorePresenceShow, UiTarget,
+    };
+
+    use super::*;
+    use crate::pipeline::StanzaPipeline;
+
+    fn make_router() -> (OutboundRouter, StanzaReceiver, Arc<dyn EventBus>) {
+        let event_bus: Arc<dyn EventBus> = Arc::new(BroadcastEventBus::new(64));
+        let pipeline = Arc::new(StanzaPipeline::new());
+        let (tx, rx) = stanza_channel(64);
+        let router = OutboundRouter::new(event_bus.clone(), pipeline, tx);
+        (router, rx, event_bus)
+    }
+
+    fn publish_ui_event(event_bus: &Arc<dyn EventBus>, channel: &str, payload: EventPayload) {
+        let channel = Channel::new(channel).expect("valid channel");
+        let event = Event::new(channel, EventSource::Ui(UiTarget::Tui), payload);
+        event_bus.publish(event).expect("publish should succeed");
+    }
+
+    async fn yield_to_router() {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn message_send_reaches_wire() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.message.send",
+            EventPayload::MessageSendRequested {
+                to: "bob@example.com".to_string(),
+                body: "Hello Bob!".to_string(),
+                message_type: CoreMessageType::Chat,
+            },
+        );
+
+        let bytes = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for wire bytes")
+            .expect("channel should not be closed");
+
+        let stanza = Stanza::parse(&bytes).expect("wire bytes should parse as stanza");
+        assert_eq!(stanza.name(), "message");
+        let Stanza::Message(msg) = &stanza else {
+            panic!("expected message stanza");
+        };
+        assert_eq!(msg.bodies.get("").map(String::as_str), Some("Hello Bob!"));
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn presence_set_reaches_wire() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.presence.set",
+            EventPayload::PresenceSetRequested {
+                show: CorePresenceShow::Away,
+                status: Some("brb".to_string()),
+            },
+        );
+
+        let bytes = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for wire bytes")
+            .expect("channel should not be closed");
+
+        let stanza = Stanza::parse(&bytes).expect("wire bytes should parse as stanza");
+        assert_eq!(stanza.name(), "presence");
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn roster_add_reaches_wire() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.roster.add",
+            EventPayload::RosterAddRequested {
+                jid: "alice@example.com".to_string(),
+                name: Some("Alice".to_string()),
+                groups: vec!["Friends".to_string()],
+            },
+        );
+
+        let bytes = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for wire bytes")
+            .expect("channel should not be closed");
+
+        let stanza = Stanza::parse(&bytes).expect("wire bytes should parse as stanza");
+        assert_eq!(stanza.name(), "iq");
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn muc_join_reaches_wire() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.muc.join",
+            EventPayload::MucJoinRequested {
+                room: "room@conference.example.com".to_string(),
+                nick: "mynick".to_string(),
+            },
+        );
+
+        let bytes = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for wire bytes")
+            .expect("channel should not be closed");
+
+        let stanza = Stanza::parse(&bytes).expect("wire bytes should parse as stanza");
+        assert_eq!(stanza.name(), "presence");
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_state_reaches_wire() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.chatstate.send",
+            EventPayload::ChatStateSendRequested {
+                to: "bob@example.com".to_string(),
+                state: CoreChatState::Composing,
+            },
+        );
+
+        let bytes = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for wire bytes")
+            .expect("channel should not be closed");
+
+        let stanza = Stanza::parse(&bytes).expect("wire bytes should parse as stanza");
+        assert_eq!(stanza.name(), "message");
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn message_sent_event_emitted_on_outbound_message() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let mut sent_sub = event_bus
+            .subscribe("xmpp.message.sent")
+            .expect("subscribe should succeed");
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.message.send",
+            EventPayload::MessageSendRequested {
+                to: "bob@example.com".to_string(),
+                body: "Test".to_string(),
+                message_type: CoreMessageType::Chat,
+            },
+        );
+
+        // Drain the wire bytes
+        let _ = timeout(Duration::from_millis(200), rx.recv()).await;
+
+        let event = timeout(Duration::from_millis(200), sent_sub.recv())
+            .await
+            .expect("timed out waiting for message.sent event")
+            .expect("should receive event");
+
+        assert_eq!(event.channel.as_str(), "xmpp.message.sent");
+        assert!(matches!(event.payload, EventPayload::MessageSent { .. }));
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn non_command_ui_events_do_not_produce_wire_bytes() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        publish_ui_event(
+            &event_bus,
+            "ui.theme.changed",
+            EventPayload::ThemeChanged {
+                theme_id: "dark".to_string(),
+            },
+        );
+
+        let result = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "non-command UI event should not produce wire bytes"
+        );
+
+        _handle.abort();
+    }
+
+    #[tokio::test]
+    async fn closed_wire_channel_returns_error() {
+        let event_bus: Arc<dyn EventBus> = Arc::new(BroadcastEventBus::new(64));
+        let pipeline = Arc::new(StanzaPipeline::new());
+        let (tx, rx) = stanza_channel(1);
+        drop(rx);
+
+        let router = OutboundRouter::new(event_bus.clone(), pipeline, tx);
+
+        let event = Event::new(
+            Channel::new("ui.message.send").unwrap(),
+            EventSource::Ui(UiTarget::Tui),
+            EventPayload::MessageSendRequested {
+                to: "bob@example.com".to_string(),
+                body: "test".to_string(),
+                message_type: CoreMessageType::Chat,
+            },
+        );
+
+        let result = router.handle_event(&event).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OutboundRouterError::WireSendFailed
+        ));
+    }
+
+    #[tokio::test]
+    async fn all_command_types_reach_wire() {
+        let (router, mut rx, event_bus) = make_router();
+
+        let _handle = tokio::spawn(async move { router.run().await });
+        yield_to_router().await;
+
+        let commands: Vec<(&str, EventPayload)> = vec![
+            (
+                "ui.message.send",
+                EventPayload::MessageSendRequested {
+                    to: "bob@example.com".to_string(),
+                    body: "hi".to_string(),
+                    message_type: CoreMessageType::Chat,
+                },
+            ),
+            (
+                "ui.presence.set",
+                EventPayload::PresenceSetRequested {
+                    show: CorePresenceShow::Dnd,
+                    status: None,
+                },
+            ),
+            (
+                "ui.roster.add",
+                EventPayload::RosterAddRequested {
+                    jid: "alice@example.com".to_string(),
+                    name: None,
+                    groups: vec![],
+                },
+            ),
+            (
+                "ui.roster.remove",
+                EventPayload::RosterRemoveRequested {
+                    jid: "alice@example.com".to_string(),
+                },
+            ),
+            (
+                "ui.subscription.respond",
+                EventPayload::SubscriptionRespondRequested {
+                    jid: "carol@example.com".to_string(),
+                    accept: true,
+                },
+            ),
+            (
+                "ui.muc.join",
+                EventPayload::MucJoinRequested {
+                    room: "room@conference.example.com".to_string(),
+                    nick: "nick".to_string(),
+                },
+            ),
+            (
+                "ui.muc.leave",
+                EventPayload::MucLeaveRequested {
+                    room: "room@conference.example.com".to_string(),
+                },
+            ),
+            (
+                "ui.muc.send",
+                EventPayload::MucSendRequested {
+                    room: "room@conference.example.com".to_string(),
+                    body: "hi room".to_string(),
+                },
+            ),
+            (
+                "ui.chatstate.send",
+                EventPayload::ChatStateSendRequested {
+                    to: "bob@example.com".to_string(),
+                    state: CoreChatState::Active,
+                },
+            ),
+        ];
+
+        let expected_count = commands.len();
+
+        for (channel, payload) in commands {
+            publish_ui_event(&event_bus, channel, payload);
+        }
+
+        let mut received = 0;
+        for _ in 0..expected_count {
+            let result = timeout(Duration::from_millis(500), rx.recv()).await;
+            if let Ok(Some(bytes)) = result {
+                Stanza::parse(&bytes).expect("wire bytes should parse as stanza");
+                received += 1;
+            }
+        }
+
+        assert_eq!(
+            received, expected_count,
+            "all 9 command types should produce wire bytes"
+        );
+
+        _handle.abort();
     }
 }
