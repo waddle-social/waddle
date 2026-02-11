@@ -31,7 +31,7 @@
 - [x] Implement `ConnectionManager` state machine (`Disconnected` → `Connecting` → `Connected` → `Reconnecting`) with exponential backoff (1s–60s cap) and lifecycle event emission per `specs/03-components/xmpp-connection.md`.
 - [x] Implement SASL negotiation with SCRAM-SHA-256 preference, SCRAM-SHA-1 fallback, and explicit non-retryable `AuthenticationFailed` handling.
 - [x] Implement XEP-0198 (Stream Management) for stream resumption after network interruption.
-- [ ] Implement XEP-0280 (Message Carbons) and XEP-0352 (Client State Indication) as core protocol features.
+- [x] Implement XEP-0280 (Message Carbons) and XEP-0352 (Client State Indication) as core protocol features.
 - [ ] Implement stanza parse/serialise boundary using `xmpp-parsers`.
 - [ ] Implement the `StanzaProcessor` trait and `StanzaPipeline` with priority ordering and plugin hook insertion points (pre-process < 10, post-process > 50) per `specs/03-components/xmpp-stanza-pipeline.md`.
 - [ ] Implement the 7 built-in stanza processors: `RosterProcessor` (10), `MessageProcessor` (10), `PresenceProcessor` (10), `MamProcessor` (10), `MucProcessor` (10), `ChatStateProcessor` (20), `DebugProcessor` (100, debug builds only). Map outputs to `xmpp.*` events from `specs/04-events/catalog.md`.

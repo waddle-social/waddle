@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 pub use crate::transport::ConnectionConfig;
 use crate::{
+    carbons::{CarbonsManager, CarbonsState, is_carbons_iq_response},
+    csi::{ClientState, CsiManager},
     error::ConnectionError,
     stream_management::{
         StreamManagementAction, StreamManagementState, StreamManager, decode_nonza, encode_nonza,
@@ -40,6 +42,8 @@ where
     config: ConnectionConfig,
     transport: Option<T>,
     stream_manager: StreamManager,
+    carbons_manager: CarbonsManager,
+    csi_manager: CsiManager,
     #[cfg(feature = "native")]
     event_bus: Option<Arc<dyn EventBus>>,
 }
@@ -57,6 +61,8 @@ where
             config,
             transport: None,
             stream_manager: StreamManager::new(),
+            carbons_manager: CarbonsManager::new(),
+            csi_manager: CsiManager::new(),
             #[cfg(feature = "native")]
             event_bus: None,
         }
@@ -69,6 +75,8 @@ where
             config,
             transport: None,
             stream_manager: StreamManager::new(),
+            carbons_manager: CarbonsManager::new(),
+            csi_manager: CsiManager::new(),
             event_bus: Some(event_bus),
         }
     }
@@ -94,6 +102,7 @@ where
 
                     self.transport = Some(transport);
                     self.state = ConnectionState::Connected;
+                    self.bootstrap_csi().await;
                     #[cfg(feature = "native")]
                     self.emit_connection_established();
                     return Ok(());
@@ -118,6 +127,59 @@ where
 
     pub fn stream_management_state(&self) -> StreamManagementState {
         self.stream_manager.state()
+    }
+
+    pub fn carbons_state(&self) -> CarbonsState {
+        self.carbons_manager.state()
+    }
+
+    pub fn csi_state(&self) -> ClientState {
+        self.csi_manager.state()
+    }
+
+    pub fn set_csi_server_support(&mut self, supported: bool) {
+        self.csi_manager.set_server_support(supported);
+    }
+
+    pub async fn enable_carbons(&mut self) -> Result<(), ConnectionError> {
+        if let Some(iq) = self.carbons_manager.enable() {
+            self.send_raw(&iq, false).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn disable_carbons(&mut self) -> Result<(), ConnectionError> {
+        if let Some(iq) = self.carbons_manager.disable() {
+            self.send_raw(&iq, false).await?;
+        }
+        Ok(())
+    }
+
+    pub fn handle_carbons_iq_response(&mut self, stanza: &[u8]) -> bool {
+        let Some((is_enable, success)) = is_carbons_iq_response(stanza) else {
+            return false;
+        };
+
+        if is_enable {
+            self.carbons_manager.on_enable_result(success);
+        } else {
+            self.carbons_manager.on_disable_result(success);
+        }
+        true
+    }
+
+    pub async fn set_csi_inactive(&mut self) -> Result<(), ConnectionError> {
+        if let Some(stanza) = self.csi_manager.set_inactive() {
+            self.send_raw(&stanza, false).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_csi_active(&mut self) -> Result<(), ConnectionError> {
+        if let Some(stanza) = self.csi_manager.set_active() {
+            self.send_raw(&stanza, false).await?;
+        }
+        Ok(())
     }
 
     pub async fn handle_stream_management_frame(
@@ -145,6 +207,7 @@ where
 
         self.state = ConnectionState::Disconnected;
         self.stream_manager.prepare_for_reconnect();
+        self.carbons_manager.reset();
 
         #[cfg(feature = "native")]
         self.emit_connection_lost(reason, will_retry);
@@ -157,6 +220,8 @@ where
             if let Err(error) = transport.close().await {
                 self.state = ConnectionState::Disconnected;
                 self.stream_manager.reset();
+                self.carbons_manager.reset();
+                self.csi_manager.reset();
                 #[cfg(feature = "native")]
                 {
                     self.emit_connection_lost(error.to_string(), false);
@@ -173,6 +238,8 @@ where
 
         self.state = ConnectionState::Disconnected;
         self.stream_manager.reset();
+        self.carbons_manager.reset();
+        self.csi_manager.reset();
         Ok(())
     }
 
@@ -189,6 +256,12 @@ where
             transport.send(&request).await?;
         }
         Ok(())
+    }
+
+    async fn bootstrap_csi(&mut self) {
+        if let Some(stanza) = self.csi_manager.on_stream_started() {
+            let _ = self.send_raw(&stanza, false).await;
+        }
     }
 
     async fn handle_connect_failure(
