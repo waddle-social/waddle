@@ -549,7 +549,13 @@ impl<D: Database> MessageManager<D> {
             }
 
             if item.stanza_type != "message" {
-                if let Err(error) = self
+                if let Err(error) = self.update_queue_status(item.id, OFFLINE_STATUS_SENT).await {
+                    error!(
+                        queue_id = item.id,
+                        error = %error,
+                        "failed to update queued command status to sent"
+                    );
+                } else if let Err(error) = self
                     .update_queue_status(item.id, OFFLINE_STATUS_CONFIRMED)
                     .await
                 {
