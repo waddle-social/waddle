@@ -26,7 +26,7 @@
 - [x] Add storage tests for migration sequencing, query/transaction behaviour, and offline queue operations.
 
 ## 4. XMPP Infrastructure (`waddle-xmpp`)
-- [ ] Create `waddle-xmpp` with `native`/`web` feature flags. Depends on `waddle-core` only. Define the `XmppTransport` trait.
+- [x] Create `waddle-xmpp` with `native`/`web` feature flags. Depends on `waddle-core` only. Define the `XmppTransport` trait.
 - [ ] Implement feature-gated native TCP/TLS transport (`tokio-xmpp` + `rustls`) and web WebSocket transport (`tokio-tungstenite` / `web-sys`, RFC 7395, XEP-0156 discovery).
 - [ ] Implement `ConnectionManager` state machine (`Disconnected` → `Connecting` → `Connected` → `Reconnecting`) with exponential backoff (1s–60s cap) and lifecycle event emission per `specs/03-components/xmpp-connection.md`.
 - [ ] Implement SASL negotiation with SCRAM-SHA-256 preference, SCRAM-SHA-1 fallback, and explicit non-retryable `AuthenticationFailed` handling.
