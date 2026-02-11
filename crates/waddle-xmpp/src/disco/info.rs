@@ -122,6 +122,11 @@ impl Feature {
         Self::new("http://jabber.org/protocol/caps")
     }
 
+    /// RFC 6121 roster versioning stream feature namespace.
+    pub fn roster_versioning() -> Self {
+        Self::new("urn:xmpp:features:rosterver")
+    }
+
     /// XEP-0054 vcard-temp feature
     pub fn vcard() -> Self {
         Self::new("vcard-temp")
@@ -132,6 +137,11 @@ impl Feature {
         Self::new("urn:xmpp:http:upload:0")
     }
 
+    /// XEP-0065 SOCKS5 Bytestreams feature
+    pub fn socks5_bytestreams() -> Self {
+        Self::new("http://jabber.org/protocol/bytestreams")
+    }
+
     /// XEP-0191 Blocking Command feature
     pub fn blocking() -> Self {
         Self::new("urn:xmpp:blocking")
@@ -140,6 +150,11 @@ impl Feature {
     /// XEP-0199 XMPP Ping feature
     pub fn ping() -> Self {
         Self::new("urn:xmpp:ping")
+    }
+
+    /// XEP-0215 External Service Discovery feature
+    pub fn extdisco() -> Self {
+        Self::new("urn:xmpp:extdisco:2")
     }
 
     /// XEP-0352 Client State Indication feature
@@ -190,6 +205,26 @@ impl Feature {
     /// XEP-0402 Bookmarks Compatibility feature
     pub fn bookmarks_compat() -> Self {
         Self::new("urn:xmpp:bookmarks:1#compat")
+    }
+
+    /// XEP-0280 recommended rules feature.
+    pub fn carbons_rules() -> Self {
+        Self::new("urn:xmpp:carbons:rules:0")
+    }
+
+    /// XEP-0160 offline message storage feature.
+    pub fn offline_messages() -> Self {
+        Self::new("msgoffline")
+    }
+
+    /// XEP-0485 PubSub Server Information feature.
+    pub fn server_info() -> Self {
+        Self::new("urn:xmpp:serverinfo:0")
+    }
+
+    /// XEP-0421 Occupant ID feature.
+    pub fn occupant_id() -> Self {
+        Self::new("urn:xmpp:occupant-id:0")
     }
 
     /// MUC room features (XEP-0045)
@@ -302,6 +337,19 @@ pub fn build_disco_info_response(
     features: &[Feature],
     node: Option<&str>,
 ) -> Iq {
+    build_disco_info_response_with_extensions(original_iq, identities, features, node, &[])
+}
+
+/// Build a disco#info response IQ with extension payloads.
+///
+/// Extension payloads are appended to the disco#info query element (e.g., XEP-0157 x:data forms).
+pub fn build_disco_info_response_with_extensions(
+    original_iq: &Iq,
+    identities: &[Identity],
+    features: &[Feature],
+    node: Option<&str>,
+    extensions: &[Element],
+) -> Iq {
     let mut query_builder = Element::builder("query", DISCO_INFO_NS);
 
     // Add node attribute if present
@@ -330,6 +378,10 @@ pub fn build_disco_info_response(
         query_builder = query_builder.append(feat_elem);
     }
 
+    for extension in extensions {
+        query_builder = query_builder.append(extension.clone());
+    }
+
     let query = query_builder.build();
 
     // Build response IQ
@@ -341,19 +393,56 @@ pub fn build_disco_info_response(
     }
 }
 
+/// Build a server-info data form with an abuse contact (XEP-0157/XEP-0485).
+pub fn build_server_info_abuse_form(domain: &str) -> Element {
+    let abuse_address = format!("mailto:abuse@{}", domain);
+
+    Element::builder("x", "jabber:x:data")
+        .attr("type", "result")
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr("var", "FORM_TYPE")
+                .attr("type", "hidden")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append("urn:xmpp:serverinfo:0")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("field", "jabber:x:data")
+                .attr("var", "abuse-addresses")
+                .append(
+                    Element::builder("value", "jabber:x:data")
+                        .append(abuse_address)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
 /// Get the standard server features.
 pub fn server_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
         Feature::disco_items(),
+        Feature::caps(),
+        Feature::roster_versioning(),
         Feature::mam(),
         Feature::stream_management(),
         Feature::roster(),
         Feature::carbons(),
+        Feature::carbons_rules(),
+        Feature::offline_messages(),
         Feature::vcard(),
         Feature::http_upload(),
+        Feature::socks5_bytestreams(),
         Feature::blocking(),
         Feature::ping(),
+        Feature::extdisco(),
+        Feature::server_info(),
         Feature::csi(),
         Feature::pubsub(),
         Feature::pep(),
@@ -407,6 +496,8 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::vcard(),
+        Feature::occupant_id(),
         Feature::muc_semianonymous(),
     ];
 

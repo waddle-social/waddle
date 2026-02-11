@@ -19,10 +19,10 @@ use crate::carbons::{
     is_carbons_enable, should_copy_message,
 };
 use crate::disco::{
-    build_disco_info_response, build_disco_items_response, is_disco_info_query,
-    is_disco_items_query, muc_room_features, muc_service_features, parse_disco_info_query,
-    parse_disco_items_query, pubsub_service_features, server_features, upload_service_features,
-    DiscoItem, Identity,
+    build_disco_info_response_with_extensions, build_disco_items_response,
+    build_server_info_abuse_form, is_disco_info_query, is_disco_items_query, muc_room_features,
+    muc_service_features, parse_disco_info_query, parse_disco_items_query, pubsub_service_features,
+    server_features, upload_service_features, DiscoItem, Identity,
 };
 use crate::isr::{
     build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore,
@@ -93,6 +93,14 @@ use crate::{AppState, Session, XmppError};
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BareMessageDelivery {
+    /// Deliver to all available resources with non-negative priority.
+    AllNonNegative,
+    /// Deliver to one highest-priority resource or all when priorities tie.
+    HighestOrAll,
+}
 
 /// Receiver for outbound stanzas to be sent to this connection.
 type OutboundReceiver = mpsc::Receiver<OutboundStanza>;
@@ -224,7 +232,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Send stream features (STARTTLS required)
-        self.stream.send_features_starttls().await?;
+        self.stream
+            .send_features_starttls_with_registration(registration_enabled)
+            .await?;
 
         // Wait for STARTTLS
         self.state = ConnectionState::StartTls;
@@ -1290,8 +1300,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// Routes messages based on type:
     /// - Groupchat: Route to MUC room for broadcasting to all occupants
-    /// - Chat: Direct message to another user (TODO)
-    /// - Other: Currently logged and ignored
+    /// - Chat/Normal: Route to bare/full JID following RFC 6121 priority rules
+    /// - Headline: Route to all non-negative available resources of bare JID
+    /// - Error: Ignored for server-side routing
     #[instrument(skip(self, msg), fields(msg_type = ?msg.type_, to = ?msg.to))]
     async fn handle_message(
         &mut self,
@@ -1314,13 +1325,134 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Route based on message type
         match msg.type_ {
-            MessageType::Groupchat => self.handle_groupchat_message(msg, sender_jid).await,
-            MessageType::Chat => self.handle_chat_message(msg, sender_jid).await,
-            MessageType::Normal | MessageType::Headline | MessageType::Error => {
-                debug!(msg_type = ?msg.type_, "Received message of unsupported type");
-                Ok(())
+            MessageType::Groupchat => {
+                if let Some(to_jid) = &msg.to {
+                    let to_bare = to_jid.to_bare();
+                    if self.room_registry.is_muc_jid(&to_bare) {
+                        return self.handle_groupchat_message(msg, sender_jid).await;
+                    }
+
+                    // RFC 6121 Section 8.5.2.1.1: groupchat to bare JID (non-MUC) MUST error.
+                    if to_jid.clone().try_into_full().is_err() {
+                        self.send_message_error(
+                            &msg,
+                            crate::StanzaErrorCondition::ServiceUnavailable,
+                            crate::StanzaErrorType::Cancel,
+                            Some("groupchat is only valid for MUC destinations"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+
+                // Full JID groupchat messages are treated as direct messages.
+                self.handle_direct_message(msg, sender_jid, BareMessageDelivery::AllNonNegative)
+                    .await
+            }
+            MessageType::Chat => {
+                self.handle_direct_message(msg, sender_jid, BareMessageDelivery::HighestOrAll)
+                    .await
+            }
+            MessageType::Normal => {
+                self.handle_direct_message(msg, sender_jid, BareMessageDelivery::HighestOrAll)
+                    .await
+            }
+            MessageType::Headline => {
+                self.handle_direct_message(msg, sender_jid, BareMessageDelivery::AllNonNegative)
+                    .await
+            }
+            MessageType::Error => {
+                self.handle_direct_message(msg, sender_jid, BareMessageDelivery::AllNonNegative)
+                    .await
             }
         }
+    }
+
+    fn select_bare_message_targets(
+        &self,
+        recipient_bare: &jid::BareJid,
+        delivery: BareMessageDelivery,
+    ) -> Vec<FullJid> {
+        let mut available = self
+            .connection_registry
+            .get_available_resources_for_user(recipient_bare)
+            .into_iter()
+            .filter(|(_, priority)| *priority >= 0)
+            .collect::<Vec<_>>();
+
+        if available.is_empty() {
+            return Vec::new();
+        }
+
+        available.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+
+        match delivery {
+            BareMessageDelivery::AllNonNegative => {
+                available.into_iter().map(|(jid, _)| jid).collect()
+            }
+            BareMessageDelivery::HighestOrAll => {
+                let highest = available
+                    .iter()
+                    .map(|(_, priority)| *priority)
+                    .max()
+                    .unwrap_or(0);
+                let highest_resources = available
+                    .iter()
+                    .filter(|(_, priority)| *priority == highest)
+                    .count();
+
+                // RFC 6121 allows delivery to either exactly one highest-priority
+                // resource or all non-negative resources. We choose:
+                // - all non-negative when all share highest priority
+                // - exactly one highest-priority resource otherwise.
+                if highest_resources == available.len() {
+                    available.into_iter().map(|(jid, _)| jid).collect()
+                } else {
+                    available
+                        .into_iter()
+                        .find(|(_, priority)| *priority == highest)
+                        .map(|(jid, _)| vec![jid])
+                        .unwrap_or_default()
+                }
+            }
+        }
+    }
+
+    async fn send_message_error(
+        &mut self,
+        original: &xmpp_parsers::message::Message,
+        condition: crate::StanzaErrorCondition,
+        error_type: crate::StanzaErrorType,
+        text: Option<&str>,
+    ) -> Result<(), XmppError> {
+        let mut xml = "<message type='error'".to_string();
+
+        if let Some(to) = &original.from {
+            xml.push_str(&format!(" to='{}'", to));
+        }
+
+        if let Some(from) = &original.to {
+            xml.push_str(&format!(" from='{}'", from));
+        }
+
+        if let Some(id) = &original.id {
+            xml.push_str(&format!(" id='{}'", id));
+        }
+
+        xml.push_str(&format!(
+            "><error type='{}'><{} xmlns='{}'/>{}</error></message>",
+            error_type.as_str(),
+            condition.as_str(),
+            crate::parser::ns::STANZAS,
+            text.map(|t| format!(
+                "<text xmlns='{}' xml:lang='en'>{}</text>",
+                crate::parser::ns::STANZAS,
+                t
+            ))
+            .unwrap_or_default()
+        ));
+
+        self.stream.write_raw(&xml).await
     }
 
     /// Handle a groupchat (MUC) message.
@@ -1565,25 +1697,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
-    /// Handle a direct chat (1-to-1) message.
+    /// Handle a direct non-groupchat message (chat/normal/headline).
     ///
-    /// Routes the message to the recipient's connected resources and handles
-    /// XEP-0280 Message Carbons for synchronization across devices.
-    ///
-    /// Per XEP-0280:
-    /// - After sending, "sent" carbons are delivered to sender's other clients
-    /// - When delivering to recipient, "received" carbons go to recipient's other clients
-    /// - Messages with `<private/>` or `<no-copy/>` are not carbon-copied
-    #[instrument(skip(self, msg), fields(to = ?msg.to))]
-    async fn handle_chat_message(
+    /// For bare-JID recipients, delivery follows RFC 6121 non-negative priority rules.
+    /// For full-JID recipients, delivery targets the exact addressed resource.
+    #[instrument(skip(self, msg), fields(to = ?msg.to, msg_type = ?msg.type_))]
+    async fn handle_direct_message(
         &mut self,
         msg: xmpp_parsers::message::Message,
         sender_jid: FullJid,
+        bare_delivery: BareMessageDelivery,
     ) -> Result<(), XmppError> {
         let recipient_jid = match &msg.to {
             Some(jid) => jid.clone(),
             None => {
-                warn!("Chat message missing 'to' attribute");
+                warn!("Direct message missing 'to' attribute");
                 return Err(XmppError::bad_request(Some(
                     "Message must have a recipient".to_string(),
                 )));
@@ -1593,7 +1721,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         debug!(
             sender = %sender_jid,
             recipient = %recipient_jid,
-            "Routing chat message"
+            msg_type = ?msg.type_,
+            "Routing direct message"
         );
 
         // Ensure the message has the sender's full JID
@@ -1601,7 +1730,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         msg_with_from.from = Some(sender_jid.clone().into());
 
         // Determine if this message should be carbon-copied
-        let should_carbon = should_copy_message(&msg);
+        let should_carbon = msg.type_ == MessageType::Chat && should_copy_message(&msg);
 
         let sender_bare = sender_jid.to_bare();
         let recipient_bare = recipient_jid.to_bare();
@@ -1615,7 +1744,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             debug!(
                 sender = %sender_bare,
                 recipient = %recipient_bare,
-                "Recipient has blocked sender; dropping chat message"
+                "Recipient has blocked sender; dropping direct message"
             );
             if should_carbon {
                 self.send_sent_carbons(&msg_with_from).await;
@@ -1623,20 +1752,52 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return Ok(());
         }
 
-        // Route to all connected resources for the recipient
-        let recipient_resources = self
-            .connection_registry
-            .get_resources_for_user(&recipient_bare);
-
+        let recipient_full = recipient_jid.clone().try_into_full().ok();
+        let mut delivered_resources = Vec::new();
         let mut delivered = false;
 
-        if recipient_resources.is_empty() {
-            debug!(
-                recipient = %recipient_bare,
-                "Recipient has no connected resources"
-            );
-            // In a full implementation, we might queue for offline delivery
+        if let Some(recipient_full) = recipient_full {
+            let stanza = Stanza::Message(msg_with_from.clone());
+            match self
+                .connection_registry
+                .send_to(&recipient_full, stanza)
+                .await
+            {
+                SendResult::Sent => {
+                    delivered = true;
+                    delivered_resources.push(recipient_full.clone());
+                    debug!(to = %recipient_full, "Message delivered to full JID recipient");
+                }
+                SendResult::NotConnected => {
+                    debug!(
+                        to = %recipient_full,
+                        "Recipient full JID is not connected, message not delivered"
+                    );
+                }
+                SendResult::ChannelFull => {
+                    warn!(
+                        to = %recipient_full,
+                        "Recipient full JID channel full, message dropped"
+                    );
+                }
+                SendResult::ChannelClosed => {
+                    debug!(
+                        to = %recipient_full,
+                        "Recipient full JID channel closed, message not delivered"
+                    );
+                }
+            }
         } else {
+            let recipient_resources =
+                self.select_bare_message_targets(&recipient_bare, bare_delivery);
+
+            if recipient_resources.is_empty() {
+                debug!(
+                    recipient = %recipient_bare,
+                    "No non-negative available recipient resources for bare-JID routing"
+                );
+            }
+
             for resource_jid in &recipient_resources {
                 let stanza = Stanza::Message(msg_with_from.clone());
                 let result = self.connection_registry.send_to(resource_jid, stanza).await;
@@ -1645,6 +1806,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     SendResult::Sent => {
                         debug!(to = %resource_jid, "Message delivered to recipient resource");
                         delivered = true;
+                        delivered_resources.push(resource_jid.clone());
                     }
                     SendResult::NotConnected => {
                         debug!(to = %resource_jid, "Recipient resource not connected");
@@ -1657,16 +1819,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     }
                 }
             }
+        }
 
-            // Send "received" carbons to recipient's other clients
-            if delivered && should_carbon {
-                self.send_received_carbons_to_user(
-                    &msg_with_from,
-                    &recipient_bare,
-                    &recipient_resources,
-                )
-                .await;
-            }
+        // Send "received" carbons to recipient's other clients only when a
+        // specific full JID was addressed.
+        if delivered
+            && should_carbon
+            && msg
+                .to
+                .as_ref()
+                .and_then(|jid| jid.clone().try_into_full().ok())
+                .is_some()
+        {
+            self.send_received_carbons_to_user(
+                &msg_with_from,
+                &recipient_bare,
+                &delivered_resources,
+            )
+            .await;
         }
 
         // Send "sent" carbons to sender's other connected clients
@@ -1679,7 +1849,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             recipient = %recipient_jid,
             delivered = delivered,
             carbon_copied = should_carbon,
-            "Chat message processed"
+            "Direct message processed"
         );
 
         Ok(())
@@ -1872,8 +2042,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Get the room data, or create an instant room if it doesn't exist
         // Per XEP-0045 Section 10.1.2, rooms can be created dynamically when a user joins
-        let room_data = match self.room_registry.get_room_data(&join_req.room_jid) {
-            Some(data) => data,
+        let (room_data, room_created) = match self.room_registry.get_room_data(&join_req.room_jid) {
+            Some(data) => (data, false),
             None => {
                 // Create instant room (XEP-0045 Section 10.1.2)
                 debug!(
@@ -1883,11 +2053,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 );
                 self.room_registry
                     .create_instant_room(join_req.room_jid.clone())?;
-                self.room_registry
-                    .get_room_data(&join_req.room_jid)
-                    .ok_or_else(|| {
-                        XmppError::internal("Failed to get room data after creation".to_string())
-                    })?
+                (
+                    self.room_registry
+                        .get_room_data(&join_req.room_jid)
+                        .ok_or_else(|| {
+                            XmppError::internal(
+                                "Failed to get room data after creation".to_string(),
+                            )
+                        })?,
+                    true,
+                )
             }
         };
 
@@ -1939,15 +2114,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        // Update the room's affiliation list with the resolved affiliation
+        // For newly created instant rooms, ensure the creator is room owner.
+        let effective_affiliation = if room_created {
+            Affiliation::Owner
+        } else {
+            resolved_affiliation
+        };
+
+        // Update the room's affiliation list with the effective affiliation
         // This ensures the affiliation is persisted for subsequent queries
         let bare_jid = join_req.sender_jid.to_bare();
-        if resolved_affiliation != Affiliation::None {
-            room.update_affiliation_from_resolver(bare_jid.clone(), resolved_affiliation);
+        if effective_affiliation != Affiliation::None {
+            room.update_affiliation_from_resolver(bare_jid.clone(), effective_affiliation);
             debug!(
                 jid = %bare_jid,
-                affiliation = %resolved_affiliation,
-                "Updated room affiliation list from Zanzibar"
+                affiliation = %effective_affiliation,
+                "Updated room affiliation"
             );
         }
 
@@ -2679,31 +2861,73 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing presence broadcast"
         );
 
-        // XEP-0153: Append vCard avatar hash to presence stanza
-        // Build a modified presence with the vCard update element
+        // Build a modified presence with XEP-0153 vCard avatar hash.
         let mut pres_clone = pres.clone();
         let vcard_update =
             crate::xep::xep0153::build_vcard_update_element(self.avatar_hash.as_deref());
         pres_clone.payloads.push(vcard_update);
-        if let Some(ref sender_full) = self.jid {
-            pres_clone.from = Some(sender_full.clone().into());
+        pres_clone.from = Some(sender_jid.clone().into());
+
+        // Directed presence (presence with 'to') is routed to the addressed JID(s),
+        // not roster subscribers.
+        if let Some(target) = pres_clone.to.clone() {
+            if let Ok(target_full) = target.clone().try_into_full() {
+                let stanza = Stanza::Presence(pres_clone);
+                let _ = self.connection_registry.send_to(&target_full, stanza).await;
+                return Ok(());
+            }
+
+            let target_bare = target.to_bare();
+            let available_targets = self
+                .connection_registry
+                .get_available_resources_for_user(&target_bare);
+            for (target_full, _) in available_targets {
+                let mut routed = pres_clone.clone();
+                routed.to = Some(target_full.clone().into());
+                let stanza = Stanza::Presence(routed);
+                let _ = self.connection_registry.send_to(&target_full, stanza).await;
+            }
+            return Ok(());
         }
 
-        // Log initial presence for now
-        if matches!(pres.type_, xmpp_parsers::presence::Type::None) {
-            self.last_available_presence = Some(pres_clone);
-            // Available presence (no type = available)
+        // Undirected presence updates the sender availability state.
+        let is_available = matches!(pres.type_, xmpp_parsers::presence::Type::None);
+        let priority = pres.priority;
+        let _ = self
+            .connection_registry
+            .update_presence(&sender_jid, is_available, priority);
+
+        if is_available {
+            self.last_available_presence = Some(pres_clone.clone());
             info!(
                 sender = %sender_bare,
                 avatar_hash = ?self.avatar_hash,
-                "User sent initial available presence"
+                priority = priority,
+                "User sent available presence"
             );
         } else if matches!(pres.type_, xmpp_parsers::presence::Type::Unavailable) {
             self.last_available_presence = None;
-            info!(
-                sender = %sender_bare,
-                "User sent unavailable presence"
-            );
+            info!(sender = %sender_bare, "User sent unavailable presence");
+        }
+
+        // Broadcast undirected presence to roster subscribers.
+        let subscribers = self
+            .app_state
+            .get_presence_subscribers(&sender_bare)
+            .await?;
+        for subscriber in subscribers {
+            let resources = self
+                .connection_registry
+                .get_available_resources_for_user(&subscriber);
+            for (resource_jid, _) in resources {
+                let mut routed = pres_clone.clone();
+                routed.to = Some(resource_jid.clone().into());
+                let stanza = Stanza::Presence(routed);
+                let _ = self
+                    .connection_registry
+                    .send_to(&resource_jid, stanza)
+                    .await;
+            }
         }
 
         Ok(())
@@ -2865,6 +3089,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_ping(iq).await;
         }
 
+        // Check if this is an external service discovery request (XEP-0215)
+        if matches!(
+            &iq.payload,
+            IqType::Get(elem) if elem.name() == "services" && elem.ns() == "urn:xmpp:extdisco:2"
+        ) {
+            return self.handle_external_services_query(iq).await;
+        }
+
         // Check if this is an ISR token refresh request (XEP-0397)
         if is_isr_token_request(&iq) {
             return self.handle_isr_token_request(iq).await;
@@ -2984,13 +3216,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let pubsub_domain = format!("pubsub.{}", self.domain);
 
         // Determine what entity is being queried
-        let (identities, features) = match query.target.as_deref() {
+        let (identities, features, extensions) = match query.target.as_deref() {
             // Query to server domain
             Some(target) if target == self.domain => {
                 debug!(domain = %self.domain, "disco#info query to server domain");
                 (
                     vec![Identity::server(Some("Waddle XMPP Server"))],
                     server_features(),
+                    vec![build_server_info_abuse_form(&self.domain)],
                 )
             }
             // Query to MUC domain
@@ -2999,6 +3232,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 (
                     vec![Identity::muc_service(Some("Multi-User Chat"))],
                     muc_service_features(),
+                    vec![],
                 )
             }
             // Query to upload service domain (XEP-0363)
@@ -3007,6 +3241,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 (
                     vec![Identity::upload_service(Some("HTTP File Upload"))],
                     upload_service_features(),
+                    vec![],
                 )
             }
             // Query to pubsub service domain (XEP-0060)
@@ -3015,6 +3250,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 (
                     vec![Identity::pubsub_service(Some("Publish-Subscribe"))],
                     pubsub_service_features(),
+                    vec![],
                 )
             }
             // Query to MUC room
@@ -3033,6 +3269,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             room.config.members_only,
                             room.config.moderated,
                         ),
+                        vec![],
                     )
                 } else {
                     // Room doesn't exist
@@ -3052,6 +3289,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 (
                     vec![crate::pubsub::pep::build_pep_identity()],
                     crate::pubsub::pep::pep_features(),
+                    vec![],
                 )
             }
             // No target or unknown target - default to server
@@ -3060,12 +3298,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 (
                     vec![Identity::server(Some("Waddle XMPP Server"))],
                     server_features(),
+                    vec![build_server_info_abuse_form(&self.domain)],
                 )
             }
         };
 
-        let response =
-            build_disco_info_response(&iq, &identities, &features, query.node.as_deref());
+        let response = build_disco_info_response_with_extensions(
+            &iq,
+            &identities,
+            &features,
+            query.node.as_deref(),
+            &extensions,
+        );
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
         debug!("Sent disco#info response");
@@ -3359,6 +3603,63 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Default ping response (server or component)
         let response = build_ping_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+        Ok(())
+    }
+
+    /// Handle external service discovery query (XEP-0215).
+    ///
+    /// Returns STUN and TURN service entries from static configuration.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_external_services_query(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
+        let stun_host =
+            std::env::var("WADDLE_EXTDISCO_STUN_HOST").unwrap_or_else(|_| self.domain.clone());
+        let stun_port = std::env::var("WADDLE_EXTDISCO_STUN_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(3478);
+
+        let turn_host =
+            std::env::var("WADDLE_EXTDISCO_TURN_HOST").unwrap_or_else(|_| stun_host.clone());
+        let turn_port = std::env::var("WADDLE_EXTDISCO_TURN_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(3478);
+        let turn_username =
+            std::env::var("WADDLE_EXTDISCO_TURN_USERNAME").unwrap_or_else(|_| "waddle".to_string());
+        let turn_password =
+            std::env::var("WADDLE_EXTDISCO_TURN_PASSWORD").unwrap_or_else(|_| "waddle".to_string());
+
+        let services = minidom::Element::builder("services", "urn:xmpp:extdisco:2")
+            .append(
+                minidom::Element::builder("service", "urn:xmpp:extdisco:2")
+                    .attr("type", "stun")
+                    .attr("host", stun_host.as_str())
+                    .attr("port", stun_port.to_string())
+                    .attr("transport", "udp")
+                    .build(),
+            )
+            .append(
+                minidom::Element::builder("service", "urn:xmpp:extdisco:2")
+                    .attr("type", "turn")
+                    .attr("host", turn_host.as_str())
+                    .attr("port", turn_port.to_string())
+                    .attr("transport", "udp")
+                    .attr("username", turn_username.as_str())
+                    .attr("password", turn_password.as_str())
+                    .build(),
+            )
+            .build();
+
+        let response = xmpp_parsers::iq::Iq {
+            from: iq.to.clone(),
+            to: iq.from.clone(),
+            id: iq.id.clone(),
+            payload: IqType::Result(Some(services)),
+        };
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
         Ok(())
     }
@@ -4996,7 +5297,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// - SET with form: Update room configuration
     /// - SET with destroy: Destroy the room
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_muc_owner_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+    async fn handle_muc_owner_iq(&mut self, mut iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let sender_jid = match &self.jid {
             Some(jid) => jid.clone(),
             None => {
@@ -5006,6 +5307,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 )));
             }
         };
+
+        // Client stanzas often omit 'from'; normalize it for owner query parsing.
+        if iq.from.is_none() {
+            iq.from = Some(sender_jid.clone().into());
+        }
 
         let muc_domain = self.room_registry.muc_domain();
         let query = match parse_owner_query(&iq, muc_domain) {

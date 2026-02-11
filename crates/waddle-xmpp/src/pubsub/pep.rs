@@ -103,6 +103,7 @@ pub fn pep_features() -> Vec<crate::disco::Feature> {
     use crate::disco::Feature;
 
     vec![
+        // PEP service identity/features
         Feature::new(NS_PUBSUB),
         Feature::new(&format!("{}#access-presence", NS_PUBSUB)),
         Feature::new(&format!("{}#access-whitelist", NS_PUBSUB)),
@@ -113,6 +114,20 @@ pub fn pep_features() -> Vec<crate::disco::Feature> {
         Feature::new(&format!("{}#publish", NS_PUBSUB)),
         Feature::new(&format!("{}#retrieve-items", NS_PUBSUB)),
         Feature::new(&format!("{}#subscribe", NS_PUBSUB)),
+        // XEP-0313 / MAM
+        Feature::new("urn:xmpp:mam:2"),
+        Feature::new("urn:xmpp:mam:2#extended"),
+        // XEP-0357 Push
+        Feature::new("urn:xmpp:push:0"),
+        // XEP-0398 Avatar conversion
+        Feature::new("urn:xmpp:pep-vcard-conversion:0"),
+        // XEP-0402 Bookmarks compatibility on PEP
+        Feature::new("urn:xmpp:bookmarks:1#compat"),
+        Feature::new("urn:xmpp:bookmarks:1#compat-pep"),
+        // XEP-0490 / XEP-0402 compatibility checks in CAAS
+        Feature::new("http://jabber.org/protocol/pubsub#config-node-max"),
+        // XEP-0384 fallback signal (used when publish-options is unavailable)
+        Feature::new("eu.siacs.conversations.axolotl.whitelisted"),
     ]
 }
 

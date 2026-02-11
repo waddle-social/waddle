@@ -639,12 +639,21 @@ fn run_compliance(
 ) -> Result<()> {
     let workspace = workspace_root();
     let resolved_artifact_dir = resolve_artifact_dir(artifact_dir)?;
+    let container_timeout_secs = std::env::var("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS")
+        .unwrap_or_else(|_| "0".to_string());
+    let timeout_display = match container_timeout_secs.trim().to_ascii_lowercase().as_str() {
+        "0" | "none" | "off" | "unbounded" | "infinite" | "no-limit" => {
+            "none (run until completion)".to_string()
+        }
+        other => other.to_string(),
+    };
 
     println!("Running XMPP compliance harness...");
     println!("  Profile:      {}", profile);
     println!("  Domain:       {}", domain);
     println!("  Host:         {}", host);
     println!("  Timeout (ms): {}", timeout_ms);
+    println!("  Timeout (s):  {}", timeout_display);
     println!(
         "  Registration: {}",
         if !admin_username.trim().is_empty() && !admin_password.trim().is_empty() {
@@ -671,6 +680,10 @@ fn run_compliance(
         .env("WADDLE_COMPLIANCE_HOST", host)
         .env("WADDLE_COMPLIANCE_TIMEOUT_MS", timeout_ms.to_string())
         .env(
+            "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS",
+            container_timeout_secs.trim(),
+        )
+        .env(
             "WADDLE_COMPLIANCE_ARTIFACT_DIR",
             resolved_artifact_dir.to_string_lossy().to_string(),
         )
@@ -696,6 +709,9 @@ fn run_compliance(
     let status = command
         .status()
         .context("Running compliance harness command")?;
+    if let Err(error) = print_compliance_summary(&resolved_artifact_dir) {
+        eprintln!("Failed to read compliance summary: {error}");
+    }
     if status.success() {
         return Ok(());
     }
@@ -703,6 +719,96 @@ fn run_compliance(
     Err(anyhow::anyhow!(
         "Compliance harness exited with status {status}"
     ))
+}
+
+fn print_compliance_summary(artifact_dir: &Path) -> Result<()> {
+    let summary_path = artifact_dir.join("summary.json");
+    if !summary_path.exists() {
+        eprintln!("Compliance summary not found at {}", summary_path.display());
+        return Ok(());
+    }
+
+    let summary_bytes = std::fs::read(&summary_path)
+        .with_context(|| format!("Reading {}", summary_path.display()))?;
+    let summary: serde_json::Value = serde_json::from_slice(&summary_bytes)
+        .with_context(|| format!("Parsing {}", summary_path.display()))?;
+
+    if let Some(progress) = summary.get("interop_progress") {
+        let tests_started = progress
+            .get("tests_started")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let tests_completed = progress
+            .get("tests_completed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let tests_passed = progress
+            .get("tests_passed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let tests_failed = progress
+            .get("tests_failed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let pass_started = progress
+            .get("pass_percentage_of_started")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let pass_completed = progress
+            .get("pass_percentage_of_completed")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let completion = progress
+            .get("completion_percentage")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let running_test = progress
+            .get("running_test")
+            .and_then(serde_json::Value::as_str);
+
+        println!("Compliance pass percentage:");
+        println!("  Tests started:   {}", tests_started);
+        println!("  Tests completed: {}", tests_completed);
+        println!("  Tests passed:    {}", tests_passed);
+        println!("  Tests failed:    {}", tests_failed);
+        println!("  Pass% started:   {:.2}%", pass_started);
+        println!("  Pass% completed: {:.2}%", pass_completed);
+        println!("  Completion:      {:.2}%", completion);
+        if let Some(test_name) = running_test {
+            println!("  Last running:    {}", test_name);
+        }
+        return Ok(());
+    }
+
+    if let Some(junit) = summary.get("junit") {
+        let tests = junit
+            .get("tests")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let failures = junit
+            .get("failures")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let errors = junit
+            .get("errors")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let skipped = junit
+            .get("skipped")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+
+        if tests > 0 {
+            let passed = tests.saturating_sub(failures + errors + skipped);
+            let pass_percent = (passed as f64 / tests as f64) * 100.0;
+            println!(
+                "Compliance pass percentage (JUnit): {:.2}% ({}/{})",
+                pass_percent, passed, tests
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_artifact_dir(path: &str) -> Result<PathBuf> {

@@ -28,8 +28,9 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
 /// Returns XRD document for XMPP service discovery (XEP-0156).
 /// Used by XMPP clients to discover WebSocket/BOSH endpoints.
 async fn host_meta_xml_handler(State(state): State<Arc<AuthState>>) -> Response {
-    let domain = extract_domain(&state.base_url);
-    let websocket_url = format!("wss://{}/xmpp-websocket", domain);
+    let authority = extract_authority(&state.base_url);
+    let websocket_scheme = extract_websocket_scheme(&state.base_url);
+    let websocket_url = format!("{}://{}/xmpp-websocket", websocket_scheme, authority);
 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -41,7 +42,10 @@ async fn host_meta_xml_handler(State(state): State<Arc<AuthState>>) -> Response 
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/xrd+xml; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "application/xrd+xml; charset=utf-8"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
         xml,
     )
         .into_response()
@@ -51,8 +55,9 @@ async fn host_meta_xml_handler(State(state): State<Arc<AuthState>>) -> Response 
 ///
 /// Returns JSON variant of host-meta for XMPP service discovery.
 async fn host_meta_json_handler(State(state): State<Arc<AuthState>>) -> Response {
-    let domain = extract_domain(&state.base_url);
-    let websocket_url = format!("wss://{}/xmpp-websocket", domain);
+    let authority = extract_authority(&state.base_url);
+    let websocket_scheme = extract_websocket_scheme(&state.base_url);
+    let websocket_url = format!("{}://{}/xmpp-websocket", websocket_scheme, authority);
 
     let json = serde_json::json!({
         "links": [
@@ -63,13 +68,39 @@ async fn host_meta_json_handler(State(state): State<Arc<AuthState>>) -> Response
         ]
     });
 
-    (StatusCode::OK, axum::Json(json)).into_response()
+    (
+        StatusCode::OK,
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        axum::Json(json),
+    )
+        .into_response()
 }
 
-/// Extract domain from base URL
-fn extract_domain(base_url: &str) -> String {
-    url::Url::parse(base_url)
+/// Extract host[:port] authority from base URL.
+fn extract_authority(base_url: &str) -> String {
+    let parsed = match url::Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(_) => return "localhost".to_string(),
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return "localhost".to_string();
+    };
+
+    match parsed.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    }
+}
+
+/// Map HTTP URL scheme to the matching WebSocket scheme.
+fn extract_websocket_scheme(base_url: &str) -> &'static str {
+    match url::Url::parse(base_url)
         .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "localhost".to_string())
+        .map(|u| u.scheme().to_string())
+        .as_deref()
+    {
+        Some("https") => "wss",
+        _ => "ws",
+    }
 }

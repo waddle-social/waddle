@@ -33,6 +33,10 @@ pub mod ns {
     pub const ISR: &str = "urn:xmpp:isr:0";
     /// Client State Indication namespace (XEP-0352)
     pub const CSI: &str = "urn:xmpp:csi:0";
+    /// Roster versioning stream feature (RFC 6121)
+    pub const ROSTERVER: &str = "urn:xmpp:features:rosterver";
+    /// Entity capabilities namespace (XEP-0115)
+    pub const CAPS: &str = "http://jabber.org/protocol/caps";
 }
 
 /// Parsed stream header information.

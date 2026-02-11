@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use testcontainers::{
-    core::{wait::ExitWaitStrategy, Host, Mount, WaitFor},
+    core::{Host, Mount},
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
@@ -39,6 +39,7 @@ const DEFAULT_HOST: &str = "host.docker.internal";
 const DEFAULT_TIMEOUT_MS: u32 = 10_000;
 const DEFAULT_CONTAINER_TIMEOUT_SECS_CORE: u64 = 60 * 20;
 const DEFAULT_CONTAINER_TIMEOUT_SECS_FULL: u64 = 60 * 90;
+const DEFAULT_CONTAINER_STARTUP_TIMEOUT_SECS: u64 = 60 * 5;
 const DEFAULT_ADMIN_USERNAME: &str = "";
 const DEFAULT_ADMIN_PASSWORD: &str = "";
 const SERVER_READY_TIMEOUT_SECS: u64 = 45;
@@ -46,6 +47,9 @@ const CONTAINER_ARTIFACTS_DIR: &str = "/waddle-artifacts";
 const CONTAINER_SERVER_CERT: &str = "/waddle-artifacts/server.crt";
 const CONTAINER_CACERTS_PATH: &str = "/opt/java/openjdk/lib/security/cacerts";
 const CONTAINER_CERT_ALIAS: &str = "waddle-compliance-local-ca";
+const INTEROP_COMPLETE_LOG_FILENAME: &str = "completeLog";
+const INTEROP_OUTSIDE_LOG_FILENAME: &str = "outsideTestLog";
+const INTEROP_TESTS_FILENAME: &str = "tests";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,7 +88,7 @@ struct ComplianceConfig {
     domain: String,
     host: String,
     timeout_ms: u32,
-    container_timeout_secs: u64,
+    container_timeout_secs: Option<u64>,
     admin_username: String,
     admin_password: String,
     enabled_specs: Vec<String>,
@@ -128,10 +132,7 @@ impl ComplianceConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_TIMEOUT_MS),
-            container_timeout_secs: env::var("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or_else(|| default_container_timeout_secs(profile)),
+            container_timeout_secs: parse_container_timeout_secs(profile)?,
             admin_username: env::var("WADDLE_COMPLIANCE_ADMIN_USERNAME")
                 .unwrap_or_else(|_| DEFAULT_ADMIN_USERNAME.to_string()),
             admin_password: env::var("WADDLE_COMPLIANCE_ADMIN_PASSWORD")
@@ -184,6 +185,9 @@ struct ArtifactPaths {
     interop_stderr: PathBuf,
     interop_command: PathBuf,
     interop_logs_dir: PathBuf,
+    interop_complete_log: PathBuf,
+    interop_outside_log: PathBuf,
+    interop_tests_log: PathBuf,
     junit_xml: PathBuf,
     summary_json: PathBuf,
     cert_path: PathBuf,
@@ -210,6 +214,9 @@ impl ArtifactPaths {
             interop_stderr: config.artifact_dir.join("interop-stderr.log"),
             interop_command: config.artifact_dir.join("interop-command.txt"),
             interop_logs_dir: interop_logs_dir.clone(),
+            interop_complete_log: interop_logs_dir.join(INTEROP_COMPLETE_LOG_FILENAME),
+            interop_outside_log: interop_logs_dir.join(INTEROP_OUTSIDE_LOG_FILENAME),
+            interop_tests_log: interop_logs_dir.join(INTEROP_TESTS_FILENAME),
             junit_xml: interop_logs_dir.join("test-results.xml"),
             summary_json: config.artifact_dir.join("summary.json"),
             cert_path: config.artifact_dir.join("server.crt"),
@@ -300,6 +307,19 @@ struct JunitTotals {
     skipped: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct InteropProgress {
+    tests_started: u64,
+    tests_completed: u64,
+    tests_passed: u64,
+    tests_failed: u64,
+    pass_percentage_of_started: f64,
+    pass_percentage_of_completed: f64,
+    completion_percentage: f64,
+    running_test: Option<String>,
+    failed_tests: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ComplianceSummary {
     profile: ComplianceProfile,
@@ -307,7 +327,7 @@ struct ComplianceSummary {
     domain: String,
     host: String,
     timeout_ms: u32,
-    container_timeout_secs: u64,
+    container_timeout_secs: Option<u64>,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
     duration_secs: f64,
@@ -315,6 +335,7 @@ struct ComplianceSummary {
     disabled_specs: Vec<String>,
     container_exit_code: Option<i64>,
     junit: Option<JunitTotals>,
+    interop_progress: Option<InteropProgress>,
     compliance_failed: bool,
     artifacts: SummaryArtifacts,
 }
@@ -326,6 +347,9 @@ struct SummaryArtifacts {
     interop_stdout: String,
     interop_stderr: String,
     interop_command: String,
+    interop_complete_log: String,
+    interop_outside_log: String,
+    interop_tests_log: String,
     junit_xml: String,
     summary_json: String,
 }
@@ -353,10 +377,10 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
 
     println!("Compliance profile: {:?}", config.profile);
     println!("Artifact directory: {}", artifacts.dir.display());
-    println!(
-        "Interop container timeout (s): {}",
-        config.container_timeout_secs
-    );
+    match config.container_timeout_secs {
+        Some(timeout_secs) => println!("Interop container timeout (s): {}", timeout_secs),
+        None => println!("Interop container timeout (s): none (run until completion)"),
+    }
 
     let enabled_specs = config.effective_enabled_specs();
     let disabled_specs = config.effective_disabled_specs();
@@ -385,11 +409,16 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
     }
 
     if interop.stdout.trim().is_empty() && interop.stderr.trim().is_empty() {
-        bail!("Interop container produced no output; harness likely failed to run tests");
+        eprintln!(
+            "Interop stdout/stderr were empty; relying on mounted logs under {}.",
+            artifacts.interop_logs_dir.display()
+        );
     }
 
     let junit = parse_junit_totals(&artifacts.junit_xml)
         .with_context(|| format!("Parsing {}", artifacts.junit_xml.display()))?;
+    let interop_progress = parse_interop_progress(&artifacts.interop_complete_log)
+        .with_context(|| format!("Parsing {}", artifacts.interop_complete_log.display()))?;
 
     if junit.is_none() {
         eprintln!(
@@ -397,12 +426,24 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
             artifacts.junit_xml.display()
         );
     }
+    if interop_progress.is_none() {
+        eprintln!(
+            "Interop progress log not found at {}; pass percentages unavailable.",
+            artifacts.interop_complete_log.display()
+        );
+    }
 
     let junit_failed = junit
         .map(|totals| totals.failures > 0 || totals.errors > 0)
         .unwrap_or(false);
+    let progress_failed = interop_progress
+        .as_ref()
+        .map(|progress| {
+            progress.tests_failed > 0 || progress.tests_completed < progress.tests_started
+        })
+        .unwrap_or(false);
     let exit_failed = interop.exit_code.unwrap_or(1) != 0;
-    let compliance_failed = junit_failed || exit_failed;
+    let compliance_failed = junit_failed || progress_failed || exit_failed;
 
     let summary = ComplianceSummary {
         profile: config.profile,
@@ -421,6 +462,7 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
         disabled_specs: disabled_specs.clone(),
         container_exit_code: interop.exit_code,
         junit,
+        interop_progress,
         compliance_failed,
         artifacts: SummaryArtifacts {
             root: artifacts.dir.display().to_string(),
@@ -428,6 +470,9 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
             interop_stdout: artifacts.interop_stdout.display().to_string(),
             interop_stderr: artifacts.interop_stderr.display().to_string(),
             interop_command: artifacts.interop_command.display().to_string(),
+            interop_complete_log: artifacts.interop_complete_log.display().to_string(),
+            interop_outside_log: artifacts.interop_outside_log.display().to_string(),
+            interop_tests_log: artifacts.interop_tests_log.display().to_string(),
             junit_xml: artifacts.junit_xml.display().to_string(),
             summary_json: artifacts.summary_json.display().to_string(),
         },
@@ -441,6 +486,20 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
 
     println!("Container exit code: {:?}", interop.exit_code);
     println!("JUnit totals: {:?}", summary.junit);
+    if let Some(progress) = &summary.interop_progress {
+        println!(
+            "Interop progress: started={} completed={} passed={} failed={} pass(started)={:.2}% pass(completed)={:.2}%",
+            progress.tests_started,
+            progress.tests_completed,
+            progress.tests_passed,
+            progress.tests_failed,
+            progress.pass_percentage_of_started,
+            progress.pass_percentage_of_completed
+        );
+        if let Some(running_test) = &progress.running_test {
+            println!("Last running test before stop: {}", running_test);
+        }
+    }
     println!("Summary JSON: {}", artifacts.summary_json.display());
     println!("Server log: {}", artifacts.server_log.display());
     println!("Interop stdout: {}", artifacts.interop_stdout.display());
@@ -484,7 +543,6 @@ async fn run_interop_container(
 
     let image = GenericImage::new(XMPP_INTEROP_IMAGE, XMPP_INTEROP_TAG)
         .with_entrypoint("sh")
-        .with_wait_for(WaitFor::exit(ExitWaitStrategy::new()))
         .with_cmd(shell_cmd)
         .with_host("host.docker.internal", Host::HostGateway)
         .with_mount(Mount::bind_mount(
@@ -495,24 +553,47 @@ async fn run_interop_container(
             artifacts_mount_source.to_string_lossy().to_string(),
             CONTAINER_ARTIFACTS_DIR,
         ))
-        .with_startup_timeout(Duration::from_secs(config.container_timeout_secs));
+        .with_startup_timeout(Duration::from_secs(DEFAULT_CONTAINER_STARTUP_TIMEOUT_SECS));
 
     let container = image
         .start()
         .await
         .context("Starting interop container with testcontainers-rs")?;
 
-    let stdout =
-        String::from_utf8_lossy(&container.stdout_to_vec().await.unwrap_or_default()).to_string();
-    let stderr =
-        String::from_utf8_lossy(&container.stderr_to_vec().await.unwrap_or_default()).to_string();
+    let exit_code = wait_for_container_exit(
+        container.id(),
+        config.container_timeout_secs.map(Duration::from_secs),
+    )
+    .with_context(|| match config.container_timeout_secs {
+        Some(timeout_secs) => {
+            format!(
+                "Interop container exceeded execution timeout ({}s)",
+                timeout_secs
+            )
+        }
+        None => "Interop container wait failed in unbounded mode".to_string(),
+    })?;
+
+    let stdout = match container.stdout_to_vec().await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(error) => {
+            eprintln!("Failed reading interop stdout via testcontainers: {error}");
+            String::new()
+        }
+    };
+
+    let stderr = match container.stderr_to_vec().await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(error) => {
+            eprintln!("Failed reading interop stderr via testcontainers: {error}");
+            String::new()
+        }
+    };
 
     fs::write(&artifacts.interop_stdout, &stdout)
         .with_context(|| format!("Writing {}", artifacts.interop_stdout.display()))?;
     fs::write(&artifacts.interop_stderr, &stderr)
         .with_context(|| format!("Writing {}", artifacts.interop_stderr.display()))?;
-
-    let exit_code = inspect_container_exit_code(container.id()).ok();
 
     if config.keep_containers {
         println!("Keeping interop container alive: {}", container.id());
@@ -522,7 +603,7 @@ async fn run_interop_container(
     Ok(InteropResult {
         stdout,
         stderr,
-        exit_code,
+        exit_code: Some(exit_code),
     })
 }
 
@@ -812,22 +893,75 @@ fn resolve_waddle_server_binary() -> Result<PathBuf> {
     );
 }
 
-fn inspect_container_exit_code(container_id: &str) -> Result<i64> {
+fn wait_for_container_exit(container_id: &str, timeout: Option<Duration>) -> Result<i64> {
+    let deadline = timeout.map(|limit| Instant::now() + limit);
+
+    loop {
+        let status = inspect_container_status(container_id)?;
+        if !status.running {
+            return Ok(status.exit_code);
+        }
+
+        if let Some(deadline) = deadline {
+            if Instant::now() > deadline {
+                let timeout_secs = timeout.map(|value| value.as_secs()).unwrap_or(0);
+                bail!(
+                    "Timed out waiting for interop container {container_id} after {}s",
+                    timeout_secs
+                );
+            }
+        }
+
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContainerStatus {
+    running: bool,
+    exit_code: i64,
+}
+
+fn inspect_container_status(container_id: &str) -> Result<ContainerStatus> {
     let output = Command::new("docker")
         .arg("inspect")
         .arg("--format")
-        .arg("{{.State.ExitCode}}")
+        .arg("{{.State.Running}} {{.State.ExitCode}}")
         .arg(container_id)
         .output()
-        .context("Inspecting interop container exit code")?;
+        .context("Inspecting interop container status")?;
 
     if !output.status.success() {
         bail!("docker inspect failed with status {}", output.status);
     }
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    text.parse::<i64>()
-        .with_context(|| format!("Parsing docker inspect exit code from '{text}'"))
+    parse_container_status(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+fn parse_container_status(output: &str) -> Result<ContainerStatus> {
+    let mut parts = output.split_whitespace();
+    let running = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Missing running state in docker inspect output"))?;
+    let exit_code = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Missing exit code in docker inspect output"))?;
+
+    if parts.next().is_some() {
+        bail!("Unexpected docker inspect output: '{output}'");
+    }
+
+    let running = match running {
+        "true" => true,
+        "false" => false,
+        other => bail!("Unexpected running state value '{other}'"),
+    };
+
+    let exit_code = exit_code
+        .parse::<i64>()
+        .with_context(|| format!("Parsing docker inspect exit code from '{exit_code}'"))?;
+
+    Ok(ContainerStatus { running, exit_code })
 }
 
 fn parse_junit_totals(path: &Path) -> Result<Option<JunitTotals>> {
@@ -857,6 +991,90 @@ fn parse_junit_totals(path: &Path) -> Result<Option<JunitTotals>> {
         errors: parse_xml_attr_u64(tag, "errors").unwrap_or(0),
         skipped: parse_xml_attr_u64(tag, "skipped").unwrap_or(0),
     }))
+}
+
+fn parse_interop_progress(path: &Path) -> Result<Option<InteropProgress>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let mut complete_log = String::new();
+    File::open(path)
+        .with_context(|| format!("Opening interop completeLog {}", path.display()))?
+        .read_to_string(&mut complete_log)
+        .with_context(|| format!("Reading interop completeLog {}", path.display()))?;
+
+    if complete_log.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut tests_started = 0_u64;
+    let mut tests_passed = 0_u64;
+    let mut tests_failed = 0_u64;
+    let mut in_flight = Vec::new();
+    let mut failed_tests = Vec::new();
+
+    for line in complete_log.lines() {
+        let line = line.trim_start();
+        if let Some(test_name) = line.strip_prefix("START: ") {
+            let test_name = test_name.trim().to_string();
+            tests_started += 1;
+            in_flight.push(test_name);
+            continue;
+        }
+
+        if let Some(test_name) = line.strip_prefix("TEST SUCCESSFUL: ") {
+            tests_passed += 1;
+            remove_in_flight_test(&mut in_flight, test_name.trim());
+            continue;
+        }
+
+        if let Some(test_name) = line.strip_prefix("TEST FAILED: ") {
+            let test_name = test_name.trim().to_string();
+            tests_failed += 1;
+            failed_tests.push(test_name.clone());
+            remove_in_flight_test(&mut in_flight, &test_name);
+        }
+    }
+
+    let tests_completed = tests_passed + tests_failed;
+    if tests_started == 0 && tests_completed == 0 {
+        return Ok(None);
+    }
+
+    let pass_percentage_of_started = if tests_started > 0 {
+        (tests_passed as f64 / tests_started as f64) * 100.0
+    } else {
+        0.0
+    };
+    let pass_percentage_of_completed = if tests_completed > 0 {
+        (tests_passed as f64 / tests_completed as f64) * 100.0
+    } else {
+        0.0
+    };
+    let completion_percentage = if tests_started > 0 {
+        (tests_completed as f64 / tests_started as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    Ok(Some(InteropProgress {
+        tests_started,
+        tests_completed,
+        tests_passed,
+        tests_failed,
+        pass_percentage_of_started,
+        pass_percentage_of_completed,
+        completion_percentage,
+        running_test: in_flight.last().cloned(),
+        failed_tests,
+    }))
+}
+
+fn remove_in_flight_test(in_flight: &mut Vec<String>, finished_test: &str) {
+    if let Some(index) = in_flight.iter().position(|entry| entry == finished_test) {
+        in_flight.remove(index);
+    }
 }
 
 fn parse_xml_attr_u64(tag: &str, attr: &str) -> Option<u64> {
@@ -912,6 +1130,39 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+fn parse_container_timeout_secs(profile: ComplianceProfile) -> Result<Option<u64>> {
+    let default_timeout = default_container_timeout_secs(profile);
+    let raw_value = match env::var("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS") {
+        Ok(value) => value,
+        Err(_) => return Ok(Some(default_timeout)),
+    };
+
+    let normalized = raw_value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(Some(default_timeout));
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "0" | "none" | "off" | "unbounded" | "infinite" | "no-limit"
+    ) {
+        return Ok(None);
+    }
+
+    let timeout_secs = normalized.parse::<u64>().with_context(|| {
+        format!(
+            "Parsing WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS from '{}'",
+            raw_value
+        )
+    })?;
+
+    if timeout_secs == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(timeout_secs))
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -941,5 +1192,95 @@ mod unit_tests {
         assert_eq!(parse_xml_attr_u64(tag, "errors"), Some(1));
         assert_eq!(parse_xml_attr_u64(tag, "skipped"), Some(3));
         assert_eq!(parse_xml_attr_u64(tag, "missing"), None);
+    }
+
+    #[test]
+    fn test_parse_container_status() {
+        assert_eq!(
+            parse_container_status("true 0").unwrap(),
+            ContainerStatus {
+                running: true,
+                exit_code: 0,
+            }
+        );
+        assert_eq!(
+            parse_container_status("false 137").unwrap(),
+            ContainerStatus {
+                running: false,
+                exit_code: 137,
+            }
+        );
+        assert!(parse_container_status("not-a-bool 0").is_err());
+        assert!(parse_container_status("true").is_err());
+        assert!(parse_container_status("true 0 extra").is_err());
+    }
+
+    #[test]
+    fn test_parse_container_timeout_secs() {
+        let env_name = "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS";
+        let previous = env::var(env_name).ok();
+
+        env::remove_var(env_name);
+        assert_eq!(
+            parse_container_timeout_secs(ComplianceProfile::BestEffortFull).unwrap(),
+            Some(DEFAULT_CONTAINER_TIMEOUT_SECS_FULL)
+        );
+
+        env::set_var(env_name, "7200");
+        assert_eq!(
+            parse_container_timeout_secs(ComplianceProfile::BestEffortFull).unwrap(),
+            Some(7200)
+        );
+
+        env::set_var(env_name, "0");
+        assert_eq!(
+            parse_container_timeout_secs(ComplianceProfile::BestEffortFull).unwrap(),
+            None
+        );
+
+        env::set_var(env_name, "none");
+        assert_eq!(
+            parse_container_timeout_secs(ComplianceProfile::BestEffortFull).unwrap(),
+            None
+        );
+
+        env::set_var(env_name, "invalid");
+        assert!(parse_container_timeout_secs(ComplianceProfile::BestEffortFull).is_err());
+
+        match previous {
+            Some(value) => env::set_var(env_name, value),
+            None => env::remove_var(env_name),
+        }
+    }
+
+    #[test]
+    fn test_parse_interop_progress() {
+        let path = std::env::temp_dir().join(format!(
+            "xep0479-completeLog-{}-{}.txt",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        fs::write(
+            &path,
+            "START: Alpha.testOne\n\
+             TEST SUCCESSFUL: Alpha.testOne\n\
+             START: Alpha.testTwo\n\
+             TEST FAILED: Alpha.testTwo\n\
+             START: Alpha.testThree\n",
+        )
+        .unwrap();
+
+        let progress = parse_interop_progress(&path).unwrap().unwrap();
+        assert_eq!(progress.tests_started, 3);
+        assert_eq!(progress.tests_completed, 2);
+        assert_eq!(progress.tests_passed, 1);
+        assert_eq!(progress.tests_failed, 1);
+        assert_eq!(progress.running_test.as_deref(), Some("Alpha.testThree"));
+        assert_eq!(progress.failed_tests, vec!["Alpha.testTwo".to_string()]);
+        assert!((progress.pass_percentage_of_started - 33.3333).abs() < 0.1);
+        assert!((progress.pass_percentage_of_completed - 50.0).abs() < 0.1);
+
+        let _ = fs::remove_file(path);
     }
 }

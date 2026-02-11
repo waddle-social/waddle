@@ -200,19 +200,42 @@ impl XmppStream {
     /// Send stream features advertising STARTTLS.
     #[instrument(skip(self), name = "xmpp.stream.send_features_starttls")]
     pub async fn send_features_starttls(&mut self) -> Result<(), XmppError> {
+        self.send_features_starttls_with_registration(false).await
+    }
+
+    /// Send stream features advertising STARTTLS with optional registration.
+    ///
+    /// Some clients discover XEP-0077 support from the initial pre-TLS feature set.
+    #[instrument(skip(self), name = "xmpp.stream.send_features_starttls")]
+    pub async fn send_features_starttls_with_registration(
+        &mut self,
+        registration_enabled: bool,
+    ) -> Result<(), XmppError> {
+        let registration_feature = if registration_enabled {
+            crate::xep::xep0077::build_registration_feature()
+        } else {
+            String::new()
+        };
+
         let features = format!(
             "<stream:features>\
                 <starttls xmlns='{}'>\
                     <required/>\
                 </starttls>\
+                {}\
             </stream:features>",
-            ns::TLS
+            ns::TLS,
+            registration_feature
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent STARTTLS features");
+        if registration_enabled {
+            debug!("Sent STARTTLS features with registration");
+        } else {
+            debug!("Sent STARTTLS features");
+        }
         Ok(())
     }
 
@@ -705,30 +728,48 @@ impl XmppStream {
     /// Send stream features for resource binding.
     #[instrument(skip(self), name = "xmpp.stream.send_features_bind")]
     pub async fn send_features_bind(&mut self) -> Result<(), XmppError> {
+        let caps_feature = self.build_caps_stream_feature();
+
         // XEP-0198: Stream Management is advertised alongside bind
         // XEP-0397: ISR is also advertised for instant stream resumption
         // XEP-0352: CSI is advertised for client state indication
         let features = format!(
             "<stream:features>\
                 <bind xmlns='{}'/>\
+                <ver xmlns='{}'/>\
                 <session xmlns='{}'>\
                     <optional/>\
                 </session>\
                 <sm xmlns='{}'/>\
                 <isr xmlns='{}'/>\
                 <csi xmlns='urn:xmpp:csi:0'/>\
+                {}\
             </stream:features>",
             ns::BIND,
+            ns::ROSTERVER,
             ns::SESSION,
             ns::SM,
-            ns::ISR
+            ns::ISR,
+            caps_feature
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent bind features (with Stream Management, ISR, and CSI)");
+        debug!("Sent bind features (with rosterver, caps, Stream Management, ISR, and CSI)");
         Ok(())
+    }
+
+    fn build_caps_stream_feature(&self) -> String {
+        let identities = vec![crate::disco::Identity::server(Some("Waddle XMPP Server"))];
+        let features = crate::disco::server_features();
+        let ver = crate::xep::xep0115::compute_caps_hash(&identities, &features);
+        format!(
+            "<c xmlns='{}' hash='sha-1' node='{}' ver='{}'/>",
+            ns::CAPS,
+            crate::xep::xep0115::WADDLE_CAPS_NODE,
+            ver
+        )
     }
 
     /// Send stream features with only Stream Management (after bind, if SM was enabled).

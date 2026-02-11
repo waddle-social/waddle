@@ -823,8 +823,16 @@ mod tests {
             .append(
                 Element::builder("item", ROSTER_NS)
                     .attr("jid", "contact@example.com")
-                    .append(Element::builder("group", ROSTER_NS).append("Friends").build())
-                    .append(Element::builder("group", ROSTER_NS).append("Friends").build())
+                    .append(
+                        Element::builder("group", ROSTER_NS)
+                            .append("Friends")
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("group", ROSTER_NS)
+                            .append("Friends")
+                            .build(),
+                    )
                     .build(),
             )
             .build();

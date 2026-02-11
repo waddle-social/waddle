@@ -40,6 +40,10 @@ pub struct ConnectionEntry {
     pub sender: mpsc::Sender<OutboundStanza>,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
     pub carbons_enabled: Arc<AtomicBool>,
+    /// Whether this resource is currently available (presence type != unavailable)
+    pub presence_available: Arc<AtomicBool>,
+    /// Last advertised priority for this resource (-128..127)
+    pub presence_priority: Arc<std::sync::atomic::AtomicI8>,
 }
 
 impl ConnectionEntry {
@@ -48,6 +52,8 @@ impl ConnectionEntry {
         Self {
             sender,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
+            presence_available: Arc::new(AtomicBool::new(false)),
+            presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
         }
     }
 
@@ -62,6 +68,16 @@ impl ConnectionEntry {
     /// Check if carbons is enabled for this connection.
     pub fn is_carbons_enabled(&self) -> bool {
         self.carbons_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Check if this resource is currently available.
+    pub fn is_presence_available(&self) -> bool {
+        self.presence_available.load(Ordering::Relaxed)
+    }
+
+    /// Get the last advertised presence priority.
+    pub fn presence_priority(&self) -> i8 {
+        self.presence_priority.load(Ordering::Relaxed)
     }
 }
 
@@ -250,6 +266,36 @@ impl ConnectionRegistry {
             .iter()
             .filter(|entry| entry.key().to_bare() == *bare_jid)
             .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Update presence state for a connected resource.
+    ///
+    /// Returns true if the resource was found and updated.
+    pub fn update_presence(&self, jid: &FullJid, available: bool, priority: i8) -> bool {
+        if let Some(entry) = self.connections.get(jid) {
+            entry
+                .value()
+                .presence_available
+                .store(available, Ordering::Relaxed);
+            entry
+                .value()
+                .presence_priority
+                .store(priority, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get all available resources for a bare JID with their priorities.
+    pub fn get_available_resources_for_user(&self, bare_jid: &BareJid) -> Vec<(FullJid, i8)> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                entry.key().to_bare() == *bare_jid && entry.value().is_presence_available()
+            })
+            .map(|entry| (entry.key().clone(), entry.value().presence_priority()))
             .collect()
     }
 
@@ -509,5 +555,40 @@ mod tests {
         // Verify messages were received
         assert!(rx1.recv().await.is_some());
         assert!(rx2.recv().await.is_some());
+    }
+
+    #[test]
+    fn test_update_presence_and_get_available_resources() {
+        let registry = ConnectionRegistry::new();
+
+        let jid1: FullJid = "user@example.com/one".parse().unwrap();
+        let jid2: FullJid = "user@example.com/two".parse().unwrap();
+        let bare: BareJid = "user@example.com".parse().unwrap();
+
+        let (tx1, _rx1) = mpsc::channel(16);
+        let (tx2, _rx2) = mpsc::channel(16);
+        registry.register(jid1.clone(), tx1);
+        registry.register(jid2.clone(), tx2);
+
+        // Default is unavailable until initial presence is sent.
+        assert!(registry.get_available_resources_for_user(&bare).is_empty());
+
+        assert!(registry.update_presence(&jid1, true, 5));
+        assert!(registry.update_presence(&jid2, true, -1));
+
+        let mut resources = registry.get_available_resources_for_user(&bare);
+        resources.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0].0, jid1);
+        assert_eq!(resources[0].1, 5);
+        assert_eq!(resources[1].0, jid2);
+        assert_eq!(resources[1].1, -1);
+    }
+
+    #[test]
+    fn test_update_presence_missing_jid_returns_false() {
+        let registry = ConnectionRegistry::new();
+        let missing: FullJid = "missing@example.com/resource".parse().unwrap();
+        assert!(!registry.update_presence(&missing, true, 1));
     }
 }

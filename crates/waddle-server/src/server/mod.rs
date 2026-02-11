@@ -347,6 +347,8 @@ fn create_router(
     // Create server info for the /api/v1/server-info endpoint
     let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
     let server_info_state = ServerInfoState { server_info };
+    // Well-known endpoints for XMPP service discovery (XEP-0156)
+    let well_known_router = routes::well_known::router(auth_state.clone());
 
     // Build the base router with health and server-info endpoints
     let mut router = Router::new()
@@ -374,9 +376,6 @@ fn create_router(
         // Auth page router for web-based XMPP credential retrieval
         let auth_page_router = routes::auth_page::router(auth_state.clone());
 
-        // Well-known endpoints for service discovery (XEP-0156)
-        let well_known_router = routes::well_known::router(auth_state.clone());
-
         router = router
             // Merge auth routes after the main router has its state applied
             .merge(auth_router)
@@ -385,9 +384,7 @@ fn create_router(
             // Merge XMPP OAuth routes for standard XMPP client authentication (XEP-0493)
             .merge(xmpp_oauth_router)
             // Merge auth page routes for web-based XMPP credential retrieval
-            .merge(auth_page_router)
-            // Merge well-known endpoints for XMPP service discovery
-            .merge(well_known_router);
+            .merge(auth_page_router);
     } else {
         info!("ATProto OAuth routes disabled (Standalone mode)");
     }
@@ -402,6 +399,8 @@ fn create_router(
         .merge(waddles_router)
         // Merge channels routes
         .merge(channels_router)
+        // Merge well-known endpoints for XMPP service discovery
+        .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
         .merge(upload_router)
         .layer(

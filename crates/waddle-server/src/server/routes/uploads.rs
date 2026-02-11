@@ -56,10 +56,30 @@ impl UploadState {
 pub fn router(upload_state: Arc<UploadState>) -> Router {
     Router::new()
         // Upload endpoint (PUT /api/upload/:slot_id)
-        .route("/api/upload/:slot_id", put(upload_handler))
+        .route(
+            "/api/upload/:slot_id",
+            put(upload_handler).options(upload_options_handler),
+        )
         // Download endpoint (GET /api/files/:slot_id/:filename)
         .route("/api/files/:slot_id/:filename", get(download_handler))
         .with_state(upload_state)
+}
+
+/// OPTIONS /api/upload/:slot_id
+///
+/// Explicit preflight response for XEP-0363 CORS checks.
+async fn upload_options_handler() -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::ACCESS_CONTROL_ALLOW_METHODS, "PUT, OPTIONS"),
+            (
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                "Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers, Origin",
+            ),
+        ],
+    )
 }
 
 // === Response Types ===
@@ -706,6 +726,46 @@ mod tests {
         assert!(slot.storage_key.is_some());
 
         // Cleanup
+        std::fs::remove_dir_all(&state.upload_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_upload_options_cors_headers() {
+        let state = create_test_upload_state().await;
+        let slot_id = uuid::Uuid::new_v4().to_string();
+        let app = router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri(format!("/api/upload/{}", slot_id))
+                    .header("Origin", "https://compliance.conversations.im")
+                    .header("Access-Control-Request-Method", "PUT")
+                    .header("Access-Control-Request-Headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "*"
+        );
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-methods"));
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-headers"));
+
         std::fs::remove_dir_all(&state.upload_dir).ok();
     }
 
