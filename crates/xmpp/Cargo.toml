@@ -27,6 +27,7 @@ web = [
 [dependencies]
 waddle-core = { workspace = true, default-features = false }
 tokio = { workspace = true, optional = true }
+chrono = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }

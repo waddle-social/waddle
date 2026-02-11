@@ -3,6 +3,7 @@ pub mod connection;
 pub mod csi;
 pub mod error;
 pub mod pipeline;
+pub mod processors;
 pub mod sasl;
 pub mod stanza;
 pub mod stream_management;
@@ -14,6 +15,12 @@ pub use csi::{ClientState, CsiManager};
 pub use error::{ConnectionError, PipelineError};
 pub use pipeline::{
     ProcessorContext, ProcessorResult, StanzaDirection, StanzaPipeline, StanzaProcessor,
+};
+#[cfg(debug_assertions)]
+pub use processors::DebugProcessor;
+pub use processors::{
+    ChatStateProcessor, MamProcessor, MessageProcessor, MucProcessor, PresenceProcessor,
+    RosterProcessor,
 };
 pub use sasl::SelectedMechanism;
 pub use stanza::{Stanza, parse_stanza, serialize_stanza};
