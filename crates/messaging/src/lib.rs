@@ -1,10 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use std::sync::RwLock;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use waddle_core::event::{ChatMessage, ChatState, Event, EventPayload, MessageType};
+use waddle_core::event::{
+    ChatMessage, ChatState, Event, EventPayload, MessageType, MucOccupant, MucRole,
+};
 use waddle_storage::{Database, FromRow, Row, SqlValue, StorageError};
 use waddle_xmpp::Stanza;
 
@@ -322,34 +326,365 @@ impl<D: Database> MessageManager<D> {
     pub fn handle_stanza(&self, _stanza: &Stanza) {}
 }
 
-#[derive(Debug)]
-pub struct MucManager<D>
-where
-    D: Database,
-{
-    _database: std::marker::PhantomData<D>,
+#[derive(Debug, Clone)]
+pub struct MucRoom {
+    pub room_jid: String,
+    pub nick: String,
+    pub joined: bool,
+    pub subject: Option<String>,
 }
 
-impl<D> Default for MucManager<D>
-where
-    D: Database,
-{
-    fn default() -> Self {
-        Self {
-            _database: std::marker::PhantomData,
+struct StoredRoom {
+    room_jid: String,
+    nick: String,
+    joined: i64,
+    subject: Option<String>,
+}
+
+impl FromRow for StoredRoom {
+    fn from_row(row: &Row) -> Result<Self, StorageError> {
+        let room_jid = match row.get(0) {
+            Some(SqlValue::Text(s)) => s.clone(),
+            _ => {
+                return Err(StorageError::QueryFailed(
+                    "missing room_jid column".to_string(),
+                ));
+            }
+        };
+        let nick = match row.get(1) {
+            Some(SqlValue::Text(s)) => s.clone(),
+            _ => return Err(StorageError::QueryFailed("missing nick column".to_string())),
+        };
+        let joined = match row.get(2) {
+            Some(SqlValue::Integer(i)) => *i,
+            _ => {
+                return Err(StorageError::QueryFailed(
+                    "missing joined column".to_string(),
+                ));
+            }
+        };
+        let subject = match row.get(3) {
+            Some(SqlValue::Text(s)) => Some(s.clone()),
+            Some(SqlValue::Null) | None => None,
+            _ => None,
+        };
+        Ok(StoredRoom {
+            room_jid,
+            nick,
+            joined,
+            subject,
+        })
+    }
+}
+
+impl StoredRoom {
+    fn into_muc_room(self) -> MucRoom {
+        MucRoom {
+            room_jid: self.room_jid,
+            nick: self.nick,
+            joined: self.joined != 0,
+            subject: self.subject,
         }
     }
 }
 
-impl<D> MucManager<D>
-where
-    D: Database,
-{
-    pub fn new() -> Self {
-        Self::default()
+/// Per-room occupant map: nick -> MucOccupant
+type OccupantMap = HashMap<String, MucOccupant>;
+
+pub struct MucManager<D: Database> {
+    db: Arc<D>,
+    occupants: RwLock<HashMap<String, OccupantMap>>,
+    #[cfg(feature = "native")]
+    event_bus: Arc<dyn EventBus>,
+}
+
+impl<D: Database> MucManager<D> {
+    #[cfg(feature = "native")]
+    pub fn new(db: Arc<D>, event_bus: Arc<dyn EventBus>) -> Self {
+        Self {
+            db,
+            occupants: RwLock::new(HashMap::new()),
+            event_bus,
+        }
     }
 
-    pub fn handle_event(&self, _event: &Event) {}
+    pub async fn join_room(&self, room: &str, nick: &str) -> Result<(), MessagingError> {
+        let room_s = room.to_string();
+        let nick_s = nick.to_string();
+        let joined = 0_i64;
+        let subject: Option<String> = None;
+
+        self.db
+            .execute(
+                "INSERT OR REPLACE INTO muc_rooms (room_jid, nick, joined, subject) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                &[&room_s, &nick_s, &joined, &subject],
+            )
+            .await?;
+
+        #[cfg(feature = "native")]
+        {
+            let _ = self.event_bus.publish(Event::new(
+                Channel::new("ui.muc.join").unwrap(),
+                EventSource::System("muc".into()),
+                EventPayload::MucJoinRequested {
+                    room: room.to_string(),
+                    nick: nick.to_string(),
+                },
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn leave_room(&self, room: &str) -> Result<(), MessagingError> {
+        #[cfg(feature = "native")]
+        {
+            let _ = self.event_bus.publish(Event::new(
+                Channel::new("ui.muc.leave").unwrap(),
+                EventSource::System("muc".into()),
+                EventPayload::MucLeaveRequested {
+                    room: room.to_string(),
+                },
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn send_message(&self, room: &str, body: &str) -> Result<(), MessagingError> {
+        #[cfg(feature = "native")]
+        {
+            let _ = self.event_bus.publish(Event::new(
+                Channel::new("ui.muc.send").unwrap(),
+                EventSource::System("muc".into()),
+                EventPayload::MucSendRequested {
+                    room: room.to_string(),
+                    body: body.to_string(),
+                },
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_rooms(&self) -> Result<Vec<MucRoom>, MessagingError> {
+        let rows: Vec<StoredRoom> = self
+            .db
+            .query(
+                "SELECT room_jid, nick, joined, subject FROM muc_rooms ORDER BY room_jid",
+                &[],
+            )
+            .await?;
+
+        Ok(rows.into_iter().map(|r| r.into_muc_room()).collect())
+    }
+
+    pub async fn get_joined_rooms(&self) -> Result<Vec<MucRoom>, MessagingError> {
+        let joined = 1_i64;
+        let rows: Vec<StoredRoom> = self
+            .db
+            .query(
+                "SELECT room_jid, nick, joined, subject FROM muc_rooms \
+                 WHERE joined = ?1 ORDER BY room_jid",
+                &[&joined],
+            )
+            .await?;
+
+        Ok(rows.into_iter().map(|r| r.into_muc_room()).collect())
+    }
+
+    pub async fn get_room_messages(
+        &self,
+        room: &str,
+        limit: u32,
+        before: Option<&str>,
+    ) -> Result<Vec<ChatMessage>, MessagingError> {
+        let room_s = room.to_string();
+        let limit_i = i64::from(limit);
+
+        let rows: Vec<StoredMessage> = if let Some(before_ts) = before {
+            let before_s = before_ts.to_string();
+            self.db
+                .query(
+                    "SELECT id, from_jid, to_jid, body, timestamp, message_type, thread \
+                     FROM messages \
+                     WHERE to_jid = ?1 AND message_type = 'groupchat' AND timestamp < ?2 \
+                     ORDER BY timestamp DESC \
+                     LIMIT ?3",
+                    &[&room_s, &before_s, &limit_i],
+                )
+                .await?
+        } else {
+            self.db
+                .query(
+                    "SELECT id, from_jid, to_jid, body, timestamp, message_type, thread \
+                     FROM messages \
+                     WHERE to_jid = ?1 AND message_type = 'groupchat' \
+                     ORDER BY timestamp DESC \
+                     LIMIT ?2",
+                    &[&room_s, &limit_i],
+                )
+                .await?
+        };
+
+        Ok(rows.into_iter().map(|r| r.into_chat_message()).collect())
+    }
+
+    pub fn get_occupants(&self, room: &str) -> Vec<MucOccupant> {
+        let occupants = self.occupants.read().unwrap();
+        match occupants.get(room) {
+            Some(map) => map.values().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    async fn persist_message(&self, message: &ChatMessage) -> Result<(), MessagingError> {
+        let id = message.id.clone();
+        let from = message.from.clone();
+        let to = message.to.clone();
+        let body = message.body.clone();
+        let ts = message.timestamp.to_rfc3339();
+        let mt = message_type_to_str(&message.message_type).to_string();
+        let thread = message.thread.clone();
+        let read = 0_i64;
+
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                &[&id, &from, &to, &body, &ts, &mt, &thread, &read],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_room_joined(&self, room: &str, nick: &str) -> Result<(), MessagingError> {
+        let room_s = room.to_string();
+        let nick_s = nick.to_string();
+        let joined = 1_i64;
+        let subject: Option<String> = None;
+
+        self.db
+            .execute(
+                "INSERT OR REPLACE INTO muc_rooms (room_jid, nick, joined, subject) \
+                 VALUES (?1, ?2, ?3, \
+                 COALESCE((SELECT subject FROM muc_rooms WHERE room_jid = ?1), ?4))",
+                &[&room_s, &nick_s, &joined, &subject],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_room_left(&self, room: &str) -> Result<(), MessagingError> {
+        let room_s = room.to_string();
+        let joined = 0_i64;
+
+        self.db
+            .execute(
+                "UPDATE muc_rooms SET joined = ?1 WHERE room_jid = ?2",
+                &[&joined, &room_s],
+            )
+            .await?;
+
+        self.occupants.write().unwrap().remove(room);
+        Ok(())
+    }
+
+    async fn update_subject(&self, room: &str, subject: &str) -> Result<(), MessagingError> {
+        let room_s = room.to_string();
+        let subject_s = subject.to_string();
+
+        self.db
+            .execute(
+                "UPDATE muc_rooms SET subject = ?1 WHERE room_jid = ?2",
+                &[&subject_s, &room_s],
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn track_occupant(&self, room: &str, occupant: &MucOccupant) {
+        let mut occupants = self.occupants.write().unwrap();
+        let room_occupants = occupants.entry(room.to_string()).or_default();
+
+        if matches!(occupant.role, MucRole::None) {
+            room_occupants.remove(&occupant.nick);
+        } else {
+            room_occupants.insert(occupant.nick.clone(), occupant.clone());
+        }
+    }
+
+    #[cfg(feature = "native")]
+    pub async fn handle_event(&self, event: &Event) {
+        match &event.payload {
+            EventPayload::MucJoined { room, nick } => {
+                debug!(room = %room, nick = %nick, "joined MUC room");
+                if let Err(e) = self.mark_room_joined(room, nick).await {
+                    error!(error = %e, room = %room, "failed to persist room join");
+                }
+            }
+            EventPayload::MucLeft { room } => {
+                debug!(room = %room, "left MUC room");
+                if let Err(e) = self.mark_room_left(room).await {
+                    error!(error = %e, room = %room, "failed to persist room leave");
+                }
+            }
+            EventPayload::MucMessageReceived { room, message } => {
+                debug!(
+                    room = %room,
+                    id = %message.id,
+                    from = %message.from,
+                    "MUC message received, persisting"
+                );
+                if let Err(e) = self.persist_message(message).await {
+                    error!(error = %e, "failed to persist MUC message");
+                }
+            }
+            EventPayload::MucSubjectChanged { room, subject } => {
+                debug!(room = %room, subject = %subject, "MUC subject changed");
+                if let Err(e) = self.update_subject(room, subject).await {
+                    error!(error = %e, room = %room, "failed to persist subject change");
+                }
+            }
+            EventPayload::MucOccupantChanged { room, occupant } => {
+                debug!(
+                    room = %room,
+                    nick = %occupant.nick,
+                    "MUC occupant changed"
+                );
+                self.track_occupant(room, occupant);
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "native")]
+    pub async fn run(self: Arc<Self>) -> Result<(), MessagingError> {
+        let mut sub = self
+            .event_bus
+            .subscribe("xmpp.muc.**")
+            .map_err(|e| MessagingError::EventBus(e.to_string()))?;
+
+        loop {
+            match sub.recv().await {
+                Ok(event) => {
+                    self.handle_event(&event).await;
+                }
+                Err(waddle_core::error::EventBusError::ChannelClosed) => {
+                    debug!("event bus closed, MUC manager stopping");
+                    return Ok(());
+                }
+                Err(waddle_core::error::EventBusError::Lagged(count)) => {
+                    warn!(count, "MUC manager lagged, some events dropped");
+                }
+                Err(e) => {
+                    error!(error = %e, "MUC manager subscription error");
+                    return Err(MessagingError::EventBus(e.to_string()));
+                }
+            }
+        }
+    }
 
     pub fn handle_stanza(&self, _stanza: &Stanza) {}
 }
@@ -777,5 +1112,546 @@ mod tests {
             .unwrap();
 
         assert_eq!(messages.len(), 2);
+    }
+}
+
+#[cfg(all(test, feature = "native"))]
+mod muc_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use waddle_core::event::{BroadcastEventBus, Channel, EventBus, EventSource, MucAffiliation};
+
+    async fn setup_muc() -> (Arc<MucManager<impl Database>>, Arc<dyn EventBus>, TempDir) {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let db = waddle_storage::open_database(&db_path)
+            .await
+            .expect("failed to open database");
+        let db = Arc::new(db);
+        let event_bus: Arc<dyn EventBus> = Arc::new(BroadcastEventBus::default());
+        let manager = Arc::new(MucManager::new(db, event_bus.clone()));
+        (manager, event_bus, dir)
+    }
+
+    fn make_event(channel: &str, payload: EventPayload) -> Event {
+        Event::new(
+            Channel::new(channel).unwrap(),
+            EventSource::System("test".into()),
+            payload,
+        )
+    }
+
+    fn make_muc_message(id: &str, from: &str, room: &str, body: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: room.to_string(),
+            body: body.to_string(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Groupchat,
+            thread: None,
+        }
+    }
+
+    fn make_occupant(nick: &str, role: MucRole, affiliation: MucAffiliation) -> MucOccupant {
+        MucOccupant {
+            nick: nick.to_string(),
+            jid: None,
+            affiliation,
+            role,
+        }
+    }
+
+    #[tokio::test]
+    async fn join_room_emits_event_and_persists() {
+        let (manager, event_bus, _dir) = setup_muc().await;
+        let mut sub = event_bus.subscribe("ui.**").unwrap();
+
+        manager
+            .join_room("room@conference.example.com", "Alice")
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+            .await
+            .expect("timed out")
+            .expect("should receive event");
+
+        assert!(matches!(
+            received.payload,
+            EventPayload::MucJoinRequested {
+                ref room,
+                ref nick,
+            } if room == "room@conference.example.com" && nick == "Alice"
+        ));
+
+        let rooms = manager.get_rooms().await.unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].room_jid, "room@conference.example.com");
+        assert_eq!(rooms[0].nick, "Alice");
+        assert!(!rooms[0].joined);
+    }
+
+    #[tokio::test]
+    async fn handle_muc_joined_marks_room_joined() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        manager
+            .join_room("room@conference.example.com", "Alice")
+            .await
+            .unwrap();
+
+        let event = make_event(
+            "xmpp.muc.joined",
+            EventPayload::MucJoined {
+                room: "room@conference.example.com".to_string(),
+                nick: "Alice".to_string(),
+            },
+        );
+        manager.handle_event(&event).await;
+
+        let rooms = manager.get_joined_rooms().await.unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert!(rooms[0].joined);
+    }
+
+    #[tokio::test]
+    async fn handle_muc_left_marks_room_not_joined() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        manager
+            .join_room("room@conference.example.com", "Alice")
+            .await
+            .unwrap();
+
+        let join_event = make_event(
+            "xmpp.muc.joined",
+            EventPayload::MucJoined {
+                room: "room@conference.example.com".to_string(),
+                nick: "Alice".to_string(),
+            },
+        );
+        manager.handle_event(&join_event).await;
+
+        let leave_event = make_event(
+            "xmpp.muc.left",
+            EventPayload::MucLeft {
+                room: "room@conference.example.com".to_string(),
+            },
+        );
+        manager.handle_event(&leave_event).await;
+
+        let joined_rooms = manager.get_joined_rooms().await.unwrap();
+        assert!(joined_rooms.is_empty());
+
+        let all_rooms = manager.get_rooms().await.unwrap();
+        assert_eq!(all_rooms.len(), 1);
+        assert!(!all_rooms[0].joined);
+    }
+
+    #[tokio::test]
+    async fn leave_room_emits_event() {
+        let (manager, event_bus, _dir) = setup_muc().await;
+        let mut sub = event_bus.subscribe("ui.**").unwrap();
+
+        manager
+            .leave_room("room@conference.example.com")
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+            .await
+            .expect("timed out")
+            .expect("should receive event");
+
+        assert!(matches!(
+            received.payload,
+            EventPayload::MucLeaveRequested {
+                ref room,
+            } if room == "room@conference.example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_muc_message_emits_event() {
+        let (manager, event_bus, _dir) = setup_muc().await;
+        let mut sub = event_bus.subscribe("ui.**").unwrap();
+
+        manager
+            .send_message("room@conference.example.com", "Hello everyone!")
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+            .await
+            .expect("timed out")
+            .expect("should receive event");
+
+        assert!(matches!(
+            received.payload,
+            EventPayload::MucSendRequested {
+                ref room,
+                ref body,
+            } if room == "room@conference.example.com" && body == "Hello everyone!"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_muc_message_received_persists() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let msg = make_muc_message(
+            "muc-msg-1",
+            "room@conference.example.com/Bob",
+            "room@conference.example.com",
+            "Hi all!",
+        );
+
+        let event = make_event(
+            "xmpp.muc.message.received",
+            EventPayload::MucMessageReceived {
+                room: "room@conference.example.com".to_string(),
+                message: msg,
+            },
+        );
+        manager.handle_event(&event).await;
+
+        let messages = manager
+            .get_room_messages("room@conference.example.com", 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "muc-msg-1");
+        assert_eq!(messages[0].body, "Hi all!");
+        assert!(matches!(messages[0].message_type, MessageType::Groupchat));
+    }
+
+    #[tokio::test]
+    async fn handle_muc_subject_changed_persists() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        manager
+            .join_room("room@conference.example.com", "Alice")
+            .await
+            .unwrap();
+
+        let join_event = make_event(
+            "xmpp.muc.joined",
+            EventPayload::MucJoined {
+                room: "room@conference.example.com".to_string(),
+                nick: "Alice".to_string(),
+            },
+        );
+        manager.handle_event(&join_event).await;
+
+        let event = make_event(
+            "xmpp.muc.subject.changed",
+            EventPayload::MucSubjectChanged {
+                room: "room@conference.example.com".to_string(),
+                subject: "Sprint Planning - Week 7".to_string(),
+            },
+        );
+        manager.handle_event(&event).await;
+
+        let rooms = manager.get_joined_rooms().await.unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(
+            rooms[0].subject,
+            Some("Sprint Planning - Week 7".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn occupant_tracking_add_and_remove() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let occupant = make_occupant("Bob", MucRole::Participant, MucAffiliation::Member);
+        let event = make_event(
+            "xmpp.muc.occupant.changed",
+            EventPayload::MucOccupantChanged {
+                room: "room@conference.example.com".to_string(),
+                occupant,
+            },
+        );
+        manager.handle_event(&event).await;
+
+        let occupants = manager.get_occupants("room@conference.example.com");
+        assert_eq!(occupants.len(), 1);
+        assert_eq!(occupants[0].nick, "Bob");
+        assert!(matches!(occupants[0].role, MucRole::Participant));
+        assert!(matches!(occupants[0].affiliation, MucAffiliation::Member));
+
+        // Occupant leaves (role = None)
+        let left_occupant = make_occupant("Bob", MucRole::None, MucAffiliation::Member);
+        let leave_event = make_event(
+            "xmpp.muc.occupant.changed",
+            EventPayload::MucOccupantChanged {
+                room: "room@conference.example.com".to_string(),
+                occupant: left_occupant,
+            },
+        );
+        manager.handle_event(&leave_event).await;
+
+        let occupants = manager.get_occupants("room@conference.example.com");
+        assert!(occupants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn multiple_occupants_tracked() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let occupants_data = vec![
+            ("Alice", MucRole::Moderator, MucAffiliation::Owner),
+            ("Bob", MucRole::Participant, MucAffiliation::Member),
+            ("Carol", MucRole::Visitor, MucAffiliation::None),
+        ];
+
+        for (nick, role, affiliation) in &occupants_data {
+            let occupant = make_occupant(nick, role.clone(), affiliation.clone());
+            let event = make_event(
+                "xmpp.muc.occupant.changed",
+                EventPayload::MucOccupantChanged {
+                    room: "room@conference.example.com".to_string(),
+                    occupant,
+                },
+            );
+            manager.handle_event(&event).await;
+        }
+
+        let occupants = manager.get_occupants("room@conference.example.com");
+        assert_eq!(occupants.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn occupants_cleared_on_room_leave() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        manager
+            .join_room("room@conference.example.com", "Alice")
+            .await
+            .unwrap();
+
+        let join_event = make_event(
+            "xmpp.muc.joined",
+            EventPayload::MucJoined {
+                room: "room@conference.example.com".to_string(),
+                nick: "Alice".to_string(),
+            },
+        );
+        manager.handle_event(&join_event).await;
+
+        let occupant = make_occupant("Bob", MucRole::Participant, MucAffiliation::Member);
+        let occ_event = make_event(
+            "xmpp.muc.occupant.changed",
+            EventPayload::MucOccupantChanged {
+                room: "room@conference.example.com".to_string(),
+                occupant,
+            },
+        );
+        manager.handle_event(&occ_event).await;
+        assert_eq!(
+            manager.get_occupants("room@conference.example.com").len(),
+            1
+        );
+
+        let leave_event = make_event(
+            "xmpp.muc.left",
+            EventPayload::MucLeft {
+                room: "room@conference.example.com".to_string(),
+            },
+        );
+        manager.handle_event(&leave_event).await;
+
+        assert!(
+            manager
+                .get_occupants("room@conference.example.com")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_room_messages_empty() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let messages = manager
+            .get_room_messages("room@conference.example.com", 50, None)
+            .await
+            .unwrap();
+
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_room_messages_only_returns_groupchat() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let gc_msg = make_muc_message(
+            "muc-msg-1",
+            "room@conference.example.com/Bob",
+            "room@conference.example.com",
+            "Group message",
+        );
+        let event = make_event(
+            "xmpp.muc.message.received",
+            EventPayload::MucMessageReceived {
+                room: "room@conference.example.com".to_string(),
+                message: gc_msg,
+            },
+        );
+        manager.handle_event(&event).await;
+
+        let messages = manager
+            .get_room_messages("room@conference.example.com", 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "Group message");
+    }
+
+    #[tokio::test]
+    async fn get_room_messages_with_pagination() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let base = Utc::now();
+        for i in 0..5 {
+            let msg = ChatMessage {
+                id: format!("muc-msg-{i}"),
+                from: "room@conference.example.com/Bob".to_string(),
+                to: "room@conference.example.com".to_string(),
+                body: format!("Message {i}"),
+                timestamp: base + chrono::Duration::seconds(i),
+                message_type: MessageType::Groupchat,
+                thread: None,
+            };
+            let event = make_event(
+                "xmpp.muc.message.received",
+                EventPayload::MucMessageReceived {
+                    room: "room@conference.example.com".to_string(),
+                    message: msg,
+                },
+            );
+            manager.handle_event(&event).await;
+        }
+
+        let cutoff = (base + chrono::Duration::seconds(3)).to_rfc3339();
+        let messages = manager
+            .get_room_messages("room@conference.example.com", 50, Some(&cutoff))
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_occupants_unknown_room_returns_empty() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let occupants = manager.get_occupants("unknown@conference.example.com");
+        assert!(occupants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_muc_message_not_inserted_twice() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let msg = make_muc_message(
+            "muc-dup",
+            "room@conference.example.com/Bob",
+            "room@conference.example.com",
+            "Hello",
+        );
+
+        for _ in 0..2 {
+            let event = make_event(
+                "xmpp.muc.message.received",
+                EventPayload::MucMessageReceived {
+                    room: "room@conference.example.com".to_string(),
+                    message: msg.clone(),
+                },
+            );
+            manager.handle_event(&event).await;
+        }
+
+        let messages = manager
+            .get_room_messages("room@conference.example.com", 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn muc_run_loop_processes_events() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (manager, event_bus, _dir) = setup_muc().await;
+
+                // Pre-create the room so we can verify join
+                manager
+                    .join_room("room@conference.example.com", "Alice")
+                    .await
+                    .unwrap();
+
+                let manager_clone = manager.clone();
+                let handle = tokio::task::spawn_local(async move { manager_clone.run().await });
+
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                event_bus
+                    .publish(Event::new(
+                        Channel::new("xmpp.muc.joined").unwrap(),
+                        EventSource::Xmpp,
+                        EventPayload::MucJoined {
+                            room: "room@conference.example.com".to_string(),
+                            nick: "Alice".to_string(),
+                        },
+                    ))
+                    .unwrap();
+
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                let rooms = manager.get_joined_rooms().await.unwrap();
+                assert_eq!(rooms.len(), 1);
+                assert!(rooms[0].joined);
+
+                handle.abort();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn occupant_role_update_tracked() {
+        let (manager, _, _dir) = setup_muc().await;
+
+        let occupant = make_occupant("Bob", MucRole::Participant, MucAffiliation::Member);
+        let event = make_event(
+            "xmpp.muc.occupant.changed",
+            EventPayload::MucOccupantChanged {
+                room: "room@conference.example.com".to_string(),
+                occupant,
+            },
+        );
+        manager.handle_event(&event).await;
+
+        let occupant_updated = make_occupant("Bob", MucRole::Moderator, MucAffiliation::Admin);
+        let update_event = make_event(
+            "xmpp.muc.occupant.changed",
+            EventPayload::MucOccupantChanged {
+                room: "room@conference.example.com".to_string(),
+                occupant: occupant_updated,
+            },
+        );
+        manager.handle_event(&update_event).await;
+
+        let occupants = manager.get_occupants("room@conference.example.com");
+        assert_eq!(occupants.len(), 1);
+        assert_eq!(occupants[0].nick, "Bob");
+        assert!(matches!(occupants[0].role, MucRole::Moderator));
+        assert!(matches!(occupants[0].affiliation, MucAffiliation::Admin));
     }
 }

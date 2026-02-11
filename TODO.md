@@ -42,7 +42,7 @@
 - [x] Implement roster management: initial fetch on connection, roster push handling, CRUD operations, group management, subscription state machine (`subscribe`/`subscribed`/`unsubscribe`/`unsubscribed`). Emit `xmpp.roster.*` and `xmpp.subscription.*` events.
 - [x] Implement presence management: local presence publish on connection, contact presence tracking (available/away/dnd/xa/unavailable), connection-state reactions (send unavailable on disconnect). Emit `xmpp.presence.*` events.
 - [x] Implement 1:1 messaging: send/receive with persistence to storage, delivery receipts (XEP-0184), chat state notifications (XEP-0085). Emit `xmpp.message.*` and `xmpp.chatstate.*` events.
-- [ ] Implement MUC messaging: join/leave/send, subject updates, occupant tracking, room persistence to `muc_rooms` table. Emit `xmpp.muc.*` events.
+- [x] Implement MUC messaging: join/leave/send, subject updates, occupant tracking, room persistence to `muc_rooms` table. Emit `xmpp.muc.*` events.
 - [ ] Implement MAM sync: `sync_since` using `mam_sync_state` table, paginated history fetch with RSM (XEP-0059), deduplication by message ID, sync progress events (`system.sync.started`/`system.sync.completed` with correlation IDs).
 - [ ] Implement offline-first orchestration: enqueue outbound writes to `offline_queue` when disconnected, FIFO drain on reconnect, status lifecycle (`pending` → `sent` → `confirmed`/`failed`), reconcile with MAM per `specs/03-components/offline.md`.
 - [ ] Implement notifications manager: global toggle, focused-conversation suppression, per-conversation mute, notification aggregation rules. Emit via platform-native APIs (`notify-rust`).
