@@ -6365,10 +6365,15 @@ dependencies = [
 name = "waddle-messaging"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "mockall",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tokio-test",
  "tracing",
  "tracing-test",
+ "uuid",
  "waddle-core",
  "waddle-storage",
  "waddle-xmpp",
