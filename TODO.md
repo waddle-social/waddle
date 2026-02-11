@@ -20,7 +20,7 @@
 - [x] Create `waddle-storage` with `native` and `web` feature flags and the `Database` trait API from `specs/03-components/core-storage.md`. Depends on `waddle-core` only.
 - [x] Implement native SQLite backend (`rusqlite`, WAL mode, serialised write path through a single writer task).
 - [x] Implement migration runner and initial schema migration (`001_initial.sql`: `_migrations`, `messages`, `roster`, `muc_rooms`, `plugin_kv` tables with indices).
-- [ ] Add migration `002_add_mam_sync_state.sql` for the `mam_sync_state` table.
+- [x] Add migration `002_add_mam_sync_state.sql` for the `mam_sync_state` table.
 - [ ] Add migration `003_add_offline_queue.sql` for the `offline_queue` table with status enum and indices, matching `specs/03-components/offline.md`.
 - [ ] Add web backend stub (`wa-sqlite`/`sql.js` compile-safe placeholder behind `web` feature flag).
 - [ ] Add storage tests for migration sequencing, query/transaction behaviour, and offline queue operations.

@@ -345,10 +345,16 @@ struct Migration {
 }
 
 #[cfg(feature = "native")]
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("../migrations/001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("../migrations/001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("../migrations/002_add_mam_sync_state.sql"),
+    },
+];
 
 #[cfg(feature = "native")]
 fn run_migrations(connection: &Connection) -> Result<(), StorageError> {
