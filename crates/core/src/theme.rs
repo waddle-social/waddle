@@ -50,6 +50,7 @@ pub struct Theme {
     pub colors: ThemeColors,
     pub tui_overrides: Option<TuiOverrides>,
     pub gui_overrides: Option<GuiOverrides>,
+    plugin_colors: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,8 +64,7 @@ struct ThemeFile {
 #[derive(Debug, Deserialize)]
 struct ThemeFileMeta {
     name: String,
-    #[allow(dead_code)]
-    description: Option<String>,
+    _description: Option<String>,
 }
 
 impl Theme {
@@ -89,12 +89,36 @@ impl Theme {
             }
         }
 
+        for (plugin_id, tokens) in &self.plugin_colors {
+            for (token, value) in tokens {
+                props.insert(
+                    format!("--waddle-plugin-{plugin_id}-{token}"),
+                    value.clone(),
+                );
+            }
+        }
+
         props
     }
 
+    pub fn register_plugin_colors(
+        &mut self,
+        plugin_id: &str,
+        colors: HashMap<String, String>,
+    ) -> Result<(), ThemeError> {
+        for value in colors.values() {
+            validate_color(value)?;
+        }
+
+        self.plugin_colors.insert(plugin_id.to_string(), colors);
+        Ok(())
+    }
+
     pub fn plugin_color(&self, plugin_id: &str, token: &str) -> Option<String> {
-        let key = format!("--waddle-plugin-{plugin_id}-{token}");
-        self.css_custom_properties().get(&key).cloned()
+        self.plugin_colors
+            .get(plugin_id)
+            .and_then(|tokens| tokens.get(token))
+            .cloned()
     }
 }
 
@@ -139,6 +163,7 @@ fn builtin_default() -> Theme {
         },
         tui_overrides: None,
         gui_overrides: None,
+        plugin_colors: HashMap::new(),
     }
 }
 
@@ -158,6 +183,7 @@ fn builtin_dark() -> Theme {
         },
         tui_overrides: None,
         gui_overrides: None,
+        plugin_colors: HashMap::new(),
     }
 }
 
@@ -177,6 +203,7 @@ fn builtin_high_contrast() -> Theme {
         },
         tui_overrides: None,
         gui_overrides: None,
+        plugin_colors: HashMap::new(),
     }
 }
 
@@ -189,7 +216,17 @@ pub struct ThemeManager {
 impl ThemeManager {
     pub fn load(config: &ThemeConfig) -> Result<Theme, ThemeError> {
         if let Some(ref custom_path) = config.custom_path {
-            return Self::load_custom(custom_path);
+            match Self::load_custom(custom_path) {
+                Ok(theme) => return Ok(theme),
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to load custom theme from '{}': {}; falling back to default",
+                        custom_path,
+                        err
+                    );
+                    return Ok(builtin_default());
+                }
+            }
         }
 
         if let Some(theme) = Self::builtin(&config.name) {
@@ -254,6 +291,7 @@ impl ThemeManager {
             colors: theme_file.colors,
             tui_overrides: theme_file.tui,
             gui_overrides: theme_file.gui,
+            plugin_colors: HashMap::new(),
         })
     }
 }
@@ -415,8 +453,8 @@ muted = "#999999"
             name: "whatever".to_string(),
             custom_path: Some("/nonexistent/path/theme.toml".to_string()),
         };
-        let err = ThemeManager::load(&config).unwrap_err();
-        assert!(matches!(err, ThemeError::ParseFailed { .. }));
+        let theme = ThemeManager::load(&config).unwrap();
+        assert_eq!(theme.name, "default");
     }
 
     #[test]
@@ -429,8 +467,8 @@ muted = "#999999"
             name: "bad".to_string(),
             custom_path: Some(theme_path.to_str().unwrap().to_string()),
         };
-        let err = ThemeManager::load(&config).unwrap_err();
-        assert!(matches!(err, ThemeError::ParseFailed { .. }));
+        let theme = ThemeManager::load(&config).unwrap();
+        assert_eq!(theme.name, "default");
     }
 
     #[test]
@@ -461,8 +499,8 @@ muted = "#999999"
             name: "BadColor".to_string(),
             custom_path: Some(theme_path.to_str().unwrap().to_string()),
         };
-        let err = ThemeManager::load(&config).unwrap_err();
-        assert!(matches!(err, ThemeError::InvalidColor(_)));
+        let theme = ThemeManager::load(&config).unwrap();
+        assert_eq!(theme.name, "default");
     }
 
     #[test]
@@ -509,6 +547,7 @@ muted = "#999999"
             colors: builtin_default().colors,
             tui_overrides: None,
             gui_overrides: None,
+            plugin_colors: HashMap::new(),
         });
         let themes = manager.available_themes();
         assert!(themes.contains(&"nord".to_string()));
@@ -523,6 +562,7 @@ muted = "#999999"
             colors: builtin_default().colors,
             tui_overrides: None,
             gui_overrides: None,
+            plugin_colors: HashMap::new(),
         });
         let themes = manager.available_themes();
         let mut sorted = themes.clone();
@@ -545,6 +585,7 @@ muted = "#999999"
             colors: builtin_dark().colors,
             tui_overrides: None,
             gui_overrides: None,
+            plugin_colors: HashMap::new(),
         });
         let theme = manager.get("custom").unwrap();
         assert_eq!(theme.name, "custom");
@@ -585,6 +626,51 @@ muted = "#999999"
     fn plugin_color_returns_none_without_plugin_tokens() {
         let theme = builtin_default();
         assert!(theme.plugin_color("myplugin", "accent").is_none());
+    }
+
+    #[test]
+    fn register_plugin_colors_and_read_token() {
+        let mut theme = builtin_default();
+        let mut colors = HashMap::new();
+        colors.insert("accent".to_string(), "#ff6b6b".to_string());
+        colors.insert("surface".to_string(), "#2d2d2d".to_string());
+
+        theme.register_plugin_colors("myplugin", colors).unwrap();
+        assert_eq!(
+            theme.plugin_color("myplugin", "accent"),
+            Some("#ff6b6b".to_string())
+        );
+        assert_eq!(
+            theme.plugin_color("myplugin", "surface"),
+            Some("#2d2d2d".to_string())
+        );
+    }
+
+    #[test]
+    fn register_plugin_colors_rejects_invalid_values() {
+        let mut theme = builtin_default();
+        let mut colors = HashMap::new();
+        colors.insert("accent".to_string(), "not-a-color".to_string());
+
+        let err = theme
+            .register_plugin_colors("myplugin", colors)
+            .unwrap_err();
+        assert!(matches!(err, ThemeError::InvalidColor(_)));
+        assert!(theme.plugin_color("myplugin", "accent").is_none());
+    }
+
+    #[test]
+    fn css_custom_properties_include_plugin_colors() {
+        let mut theme = builtin_default();
+        let mut colors = HashMap::new();
+        colors.insert("accent".to_string(), "#ff6b6b".to_string());
+
+        theme.register_plugin_colors("myplugin", colors).unwrap();
+        let props = theme.css_custom_properties();
+        assert_eq!(
+            props.get("--waddle-plugin-myplugin-accent").unwrap(),
+            "#ff6b6b"
+        );
     }
 
     #[test]
