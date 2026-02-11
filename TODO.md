@@ -30,7 +30,7 @@
 - [x] Implement feature-gated native TCP/TLS transport (`tokio-xmpp` + `rustls`) and web WebSocket transport (`tokio-tungstenite` / `web-sys`, RFC 7395, XEP-0156 discovery).
 - [x] Implement `ConnectionManager` state machine (`Disconnected` → `Connecting` → `Connected` → `Reconnecting`) with exponential backoff (1s–60s cap) and lifecycle event emission per `specs/03-components/xmpp-connection.md`.
 - [x] Implement SASL negotiation with SCRAM-SHA-256 preference, SCRAM-SHA-1 fallback, and explicit non-retryable `AuthenticationFailed` handling.
-- [ ] Implement XEP-0198 (Stream Management) for stream resumption after network interruption.
+- [x] Implement XEP-0198 (Stream Management) for stream resumption after network interruption.
 - [ ] Implement XEP-0280 (Message Carbons) and XEP-0352 (Client State Indication) as core protocol features.
 - [ ] Implement stanza parse/serialise boundary using `xmpp-parsers`.
 - [ ] Implement the `StanzaProcessor` trait and `StanzaPipeline` with priority ordering and plugin hook insertion points (pre-process < 10, post-process > 50) per `specs/03-components/xmpp-stanza-pipeline.md`.

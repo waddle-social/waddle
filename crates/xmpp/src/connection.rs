@@ -4,7 +4,13 @@ use std::time::Duration;
 use std::sync::Arc;
 
 pub use crate::transport::ConnectionConfig;
-use crate::{error::ConnectionError, transport::XmppTransport};
+use crate::{
+    error::ConnectionError,
+    stream_management::{
+        StreamManagementAction, StreamManagementState, StreamManager, decode_nonza, encode_nonza,
+    },
+    transport::XmppTransport,
+};
 
 #[cfg(feature = "native")]
 use waddle_core::event::{Channel, Event, EventBus, EventPayload, EventSource};
@@ -33,6 +39,7 @@ where
     state: ConnectionState,
     config: ConnectionConfig,
     transport: Option<T>,
+    stream_manager: StreamManager,
     #[cfg(feature = "native")]
     event_bus: Option<Arc<dyn EventBus>>,
 }
@@ -49,6 +56,7 @@ where
             state: ConnectionState::Disconnected,
             config,
             transport: None,
+            stream_manager: StreamManager::new(),
             #[cfg(feature = "native")]
             event_bus: None,
         }
@@ -60,12 +68,13 @@ where
             state: ConnectionState::Disconnected,
             config,
             transport: None,
+            stream_manager: StreamManager::new(),
             event_bus: Some(event_bus),
         }
     }
 
     pub async fn connect(&mut self) -> Result<(), ConnectionError> {
-        if matches!(self.state, ConnectionState::Connected) {
+        if matches!(self.state, ConnectionState::Connected) && self.transport.is_some() {
             return Ok(());
         }
 
@@ -74,7 +83,15 @@ where
 
         loop {
             match T::connect(&self.config).await {
-                Ok(transport) => {
+                Ok(mut transport) => {
+                    if let Err(error) = self.bootstrap_stream_management(&mut transport).await {
+                        self.stream_manager.on_connect_attempt_failed();
+                        reconnect_attempt = self
+                            .handle_connect_failure(error, reconnect_attempt)
+                            .await?;
+                        continue;
+                    }
+
                     self.transport = Some(transport);
                     self.state = ConnectionState::Connected;
                     #[cfg(feature = "native")]
@@ -82,39 +99,64 @@ where
                     return Ok(());
                 }
                 Err(error) => {
-                    self.transport = None;
-                    let next_attempt = reconnect_attempt.saturating_add(1);
-                    let will_retry = error.is_retryable() && self.should_retry(next_attempt);
-
-                    #[cfg(feature = "native")]
-                    {
-                        self.emit_connection_lost(error.to_string(), will_retry);
-                        self.emit_connection_error(&error);
-                    }
-
-                    if !will_retry {
-                        self.state = ConnectionState::Disconnected;
-                        return Err(error);
-                    }
-
-                    reconnect_attempt = next_attempt;
-                    self.state = ConnectionState::Reconnecting {
-                        attempt: reconnect_attempt,
-                    };
-                    #[cfg(feature = "native")]
-                    self.emit_connection_reconnecting(reconnect_attempt);
-
-                    tokio::time::sleep(Self::reconnect_delay(reconnect_attempt)).await;
-                    self.state = ConnectionState::Connecting;
+                    self.stream_manager.on_connect_attempt_failed();
+                    reconnect_attempt = self
+                        .handle_connect_failure(error, reconnect_attempt)
+                        .await?;
                 }
             }
         }
+    }
+
+    pub async fn send_stanza(&mut self, stanza: &[u8]) -> Result<(), ConnectionError> {
+        self.send_raw(stanza, true).await
+    }
+
+    pub fn mark_inbound_stanza_handled(&mut self) {
+        self.stream_manager.mark_inbound_handled();
+    }
+
+    pub fn stream_management_state(&self) -> StreamManagementState {
+        self.stream_manager.state()
+    }
+
+    pub async fn handle_stream_management_frame(
+        &mut self,
+        frame: &[u8],
+    ) -> Result<bool, ConnectionError> {
+        let Some(nonza) = decode_nonza(frame) else {
+            return Ok(false);
+        };
+
+        let actions = self.stream_manager.process_nonza(nonza)?;
+        self.apply_stream_management_actions(actions).await?;
+        Ok(true)
+    }
+
+    pub async fn recover_after_network_interruption(
+        &mut self,
+        reason: String,
+    ) -> Result<(), ConnectionError> {
+        let will_retry = self.should_retry(1);
+
+        if let Some(mut transport) = self.transport.take() {
+            let _ = transport.close().await;
+        }
+
+        self.state = ConnectionState::Disconnected;
+        self.stream_manager.prepare_for_reconnect();
+
+        #[cfg(feature = "native")]
+        self.emit_connection_lost(reason, will_retry);
+
+        self.connect().await
     }
 
     pub async fn disconnect(&mut self) -> Result<(), ConnectionError> {
         if let Some(mut transport) = self.transport.take() {
             if let Err(error) = transport.close().await {
                 self.state = ConnectionState::Disconnected;
+                self.stream_manager.reset();
                 #[cfg(feature = "native")]
                 {
                     self.emit_connection_lost(error.to_string(), false);
@@ -130,11 +172,91 @@ where
         }
 
         self.state = ConnectionState::Disconnected;
+        self.stream_manager.reset();
         Ok(())
     }
 
     pub fn state(&self) -> ConnectionState {
         self.state.clone()
+    }
+
+    async fn bootstrap_stream_management(
+        &mut self,
+        transport: &mut T,
+    ) -> Result<(), ConnectionError> {
+        if let Some(nonza) = self.stream_manager.on_stream_started() {
+            let request = encode_nonza(nonza)?;
+            transport.send(&request).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_connect_failure(
+        &mut self,
+        error: ConnectionError,
+        reconnect_attempt: u32,
+    ) -> Result<u32, ConnectionError> {
+        self.transport = None;
+        let next_attempt = reconnect_attempt.saturating_add(1);
+        let will_retry = error.is_retryable() && self.should_retry(next_attempt);
+
+        #[cfg(feature = "native")]
+        {
+            self.emit_connection_lost(error.to_string(), will_retry);
+            self.emit_connection_error(&error);
+        }
+
+        if !will_retry {
+            self.state = ConnectionState::Disconnected;
+            return Err(error);
+        }
+
+        self.state = ConnectionState::Reconnecting {
+            attempt: next_attempt,
+        };
+        #[cfg(feature = "native")]
+        self.emit_connection_reconnecting(next_attempt);
+
+        tokio::time::sleep(Self::reconnect_delay(next_attempt)).await;
+        self.state = ConnectionState::Connecting;
+        Ok(next_attempt)
+    }
+
+    async fn apply_stream_management_actions(
+        &mut self,
+        actions: Vec<StreamManagementAction>,
+    ) -> Result<(), ConnectionError> {
+        for action in actions {
+            match action {
+                StreamManagementAction::SendNonza(nonza) => {
+                    let payload = encode_nonza(nonza)?;
+                    self.send_raw(&payload, false).await?;
+                }
+                StreamManagementAction::ReplayStanzas(stanzas) => {
+                    for stanza in stanzas {
+                        self.send_raw(&stanza, false).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_raw(
+        &mut self,
+        data: &[u8],
+        track_for_resumption: bool,
+    ) -> Result<(), ConnectionError> {
+        let transport = self.transport.as_mut().ok_or_else(|| {
+            ConnectionError::TransportError("cannot send data while disconnected".to_string())
+        })?;
+        transport.send(data).await?;
+
+        if track_for_resumption {
+            self.stream_manager.track_outbound_stanza(data);
+        }
+
+        Ok(())
     }
 
     fn should_retry(&self, attempt: u32) -> bool {
@@ -269,6 +391,7 @@ mod native_tests {
 
     use tokio::{sync::Mutex as AsyncMutex, time};
     use waddle_core::event::{BroadcastEventBus, EventPayload};
+    use xmpp_parsers::sm::Nonza;
 
     use super::*;
 
@@ -277,6 +400,7 @@ mod native_tests {
         connect_outcomes: VecDeque<Result<(), ConnectionError>>,
         connect_calls: u32,
         close_calls: u32,
+        sent_payloads: Vec<String>,
     }
 
     fn transport_state() -> &'static Mutex<TestTransportState> {
@@ -296,6 +420,7 @@ mod native_tests {
         state.connect_outcomes = outcomes.into_iter().collect();
         state.connect_calls = 0;
         state.close_calls = 0;
+        state.sent_payloads.clear();
     }
 
     fn connect_calls() -> u32 {
@@ -310,6 +435,21 @@ mod native_tests {
             .lock()
             .expect("failed to lock transport state")
             .close_calls
+    }
+
+    fn sent_payloads() -> Vec<String> {
+        transport_state()
+            .lock()
+            .expect("failed to lock transport state")
+            .sent_payloads
+            .clone()
+    }
+
+    fn nonzas_sent() -> Vec<Nonza> {
+        sent_payloads()
+            .into_iter()
+            .filter_map(|payload| decode_nonza(payload.as_bytes()))
+            .collect()
     }
 
     fn config(max_reconnect_attempts: u32) -> ConnectionConfig {
@@ -337,7 +477,13 @@ mod native_tests {
             }
         }
 
-        async fn send(&mut self, _data: &[u8]) -> Result<(), ConnectionError> {
+        async fn send(&mut self, data: &[u8]) -> Result<(), ConnectionError> {
+            let mut state = transport_state()
+                .lock()
+                .expect("failed to lock transport state");
+            state
+                .sent_payloads
+                .push(String::from_utf8_lossy(data).into_owned());
             Ok(())
         }
 
@@ -370,6 +516,15 @@ mod native_tests {
 
         assert_eq!(manager.state(), ConnectionState::Connected);
         assert_eq!(connect_calls(), 1);
+        assert_eq!(
+            manager.stream_management_state(),
+            StreamManagementState::Enabling
+        );
+        assert!(
+            nonzas_sent()
+                .iter()
+                .any(|nonza| matches!(nonza, Nonza::Enable(enable) if enable.resume))
+        );
 
         let event = time::timeout(Duration::from_millis(100), established.recv())
             .await
@@ -491,6 +646,72 @@ mod native_tests {
             established_event.payload,
             EventPayload::ConnectionEstablished { jid } if jid == "alice@example.com"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn network_interruption_uses_stream_resumption_and_replays_unacked() {
+        let _guard = test_lock().lock().await;
+        configure_transport(vec![Ok(()), Ok(())]);
+
+        let event_bus: Arc<dyn EventBus> = Arc::new(BroadcastEventBus::new(16));
+        let mut manager =
+            ConnectionManager::<TestTransport>::with_event_bus(config(0), event_bus.clone());
+        manager.connect().await.expect("connect should succeed");
+        manager
+            .handle_stream_management_frame(
+                br#"<enabled xmlns='urn:xmpp:sm:3' id='stream-1' resume='true'/>"#,
+            )
+            .await
+            .expect("failed to process stream-management enabled response");
+
+        manager
+            .send_stanza(b"<message id='one'/>")
+            .await
+            .expect("first stanza should be sent");
+        manager
+            .send_stanza(b"<message id='two'/>")
+            .await
+            .expect("second stanza should be sent");
+        manager.mark_inbound_stanza_handled();
+
+        manager
+            .recover_after_network_interruption("network lost".to_string())
+            .await
+            .expect("recovery should reconnect");
+
+        assert_eq!(connect_calls(), 2);
+        let resume = nonzas_sent()
+            .into_iter()
+            .find_map(|nonza| match nonza {
+                Nonza::Resume(resume) => Some(resume),
+                _ => None,
+            })
+            .expect("expected a stream resumption request");
+        assert_eq!(resume.h, 1);
+        assert_eq!(resume.previd.0, "stream-1");
+
+        manager
+            .handle_stream_management_frame(
+                br#"<resumed xmlns='urn:xmpp:sm:3' h='1' previd='stream-1'/>"#,
+            )
+            .await
+            .expect("failed to process stream resumption");
+        assert_eq!(
+            manager.stream_management_state(),
+            StreamManagementState::Enabled
+        );
+
+        let sent = sent_payloads();
+        let one_count = sent
+            .iter()
+            .filter(|payload| payload.as_str() == "<message id='one'/>")
+            .count();
+        let two_count = sent
+            .iter()
+            .filter(|payload| payload.as_str() == "<message id='two'/>")
+            .count();
+        assert_eq!(one_count, 1);
+        assert_eq!(two_count, 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
