@@ -1,0 +1,5 @@
+<message from='alice@localhost/waddle' to='bob@localhost' type='chat' id='msg-1'>
+  <body>Hello, world!</body>
+  <active xmlns='http://jabber.org/protocol/chatstates'/>
+  <request xmlns='urn:xmpp:receipts'/>
+</message>

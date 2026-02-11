@@ -1,0 +1,8 @@
+<iq from='localhost' to='alice@localhost/waddle' type='result' id='roster_1'>
+  <query xmlns='jabber:iq:roster'>
+    <item jid='bob@localhost' name='Bob' subscription='both'>
+      <group>Friends</group>
+    </item>
+    <item jid='charlie@localhost' name='Charlie' subscription='from'/>
+  </query>
+</iq>

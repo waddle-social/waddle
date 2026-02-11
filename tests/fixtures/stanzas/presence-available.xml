@@ -1,0 +1,5 @@
+<presence from='alice@localhost/waddle' to='bob@localhost'>
+  <show>away</show>
+  <status>Out for lunch</status>
+  <priority>5</priority>
+</presence>

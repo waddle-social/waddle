@@ -6511,6 +6511,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "waddle-test-support"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "waddle-tui"
 version = "0.1.0"
 dependencies = [

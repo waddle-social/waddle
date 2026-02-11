@@ -92,6 +92,7 @@ waddle-presence = { path = "crates/presence", default-features = false }
 waddle-mam = { path = "crates/mam", default-features = false }
 waddle-plugins = { path = "crates/plugins", default-features = false }
 waddle-notifications = { path = "crates/notifications", default-features = false }
+waddle-test-support = { path = "crates/test-support", default-features = false }
 
 # Dev dependencies
 tokio-test = "0.4"
