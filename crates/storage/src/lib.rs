@@ -354,6 +354,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("../migrations/002_add_mam_sync_state.sql"),
     },
+    Migration {
+        version: 3,
+        sql: include_str!("../migrations/003_add_offline_queue.sql"),
+    },
 ];
 
 #[cfg(feature = "native")]
