@@ -92,12 +92,16 @@ where
         loop {
             match T::connect(&self.config).await {
                 Ok(mut transport) => {
-                    if let Err(error) = self.bootstrap_stream_management(&mut transport).await {
-                        self.stream_manager.on_connect_attempt_failed();
-                        reconnect_attempt = self
-                            .handle_connect_failure(error, reconnect_attempt)
-                            .await?;
-                        continue;
+                    if transport.supports_stream_management() {
+                        if let Err(error) = self.bootstrap_stream_management(&mut transport).await {
+                            self.stream_manager.on_connect_attempt_failed();
+                            reconnect_attempt = self
+                                .handle_connect_failure(error, reconnect_attempt)
+                                .await?;
+                            continue;
+                        }
+                    } else {
+                        self.stream_manager.reset();
                     }
 
                     self.transport = Some(transport);
@@ -119,6 +123,20 @@ where
 
     pub async fn send_stanza(&mut self, stanza: &[u8]) -> Result<(), ConnectionError> {
         self.send_raw(stanza, true).await
+    }
+
+    pub async fn recv_frame_with_timeout(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> Result<Option<Vec<u8>>, ConnectionError> {
+        let Some(transport) = self.transport.as_mut() else {
+            return Ok(None);
+        };
+
+        match tokio::time::timeout(timeout_duration, transport.recv()).await {
+            Ok(result) => result.map(Some),
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn mark_inbound_stanza_handled(&mut self) {
@@ -432,6 +450,10 @@ mod tests {
         async fn close(&mut self) -> Result<(), ConnectionError> {
             Ok(())
         }
+
+        fn supports_stream_management(&self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -612,6 +634,10 @@ mod native_tests {
                 .expect("failed to lock transport state");
             state.close_calls += 1;
             Ok(())
+        }
+
+        fn supports_stream_management(&self) -> bool {
+            true
         }
     }
 

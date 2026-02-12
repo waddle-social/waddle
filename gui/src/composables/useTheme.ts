@@ -7,12 +7,18 @@ interface ThemeColors {
   background: string;
   foreground: string;
   surface: string;
+  surfaceRaised: string;
   accent: string;
   border: string;
   success: string;
   warning: string;
   error: string;
   muted: string;
+  sidebar: string;
+  header: string;
+  chatBg: string;
+  hover: string;
+  active: string;
 }
 
 type BuiltinThemeName = 'light' | 'dark' | 'high-contrast';
@@ -21,35 +27,53 @@ const BUILTIN_THEMES: Record<BuiltinThemeName, ThemeColors> = {
   light: {
     background: '#ffffff',
     foreground: '#1a1a1a',
-    surface: '#f5f5f5',
-    accent: '#0066cc',
-    border: '#d4d4d4',
-    success: '#22863a',
-    warning: '#b08800',
-    error: '#cb2431',
-    muted: '#6a737d',
+    surface: '#f2f3f5',
+    surfaceRaised: '#ebedef',
+    accent: '#5865f2',
+    border: '#e3e5e8',
+    success: '#23a559',
+    warning: '#f0b232',
+    error: '#da373c',
+    muted: '#6d6f78',
+    sidebar: '#f2f3f5',
+    header: '#ffffff',
+    chatBg: '#ffffff',
+    hover: 'rgba(116, 127, 141, 0.08)',
+    active: 'rgba(116, 127, 141, 0.16)',
   },
   dark: {
-    background: '#1e1e2e',
-    foreground: '#cdd6f4',
-    surface: '#313244',
-    accent: '#89b4fa',
-    border: '#45475a',
-    success: '#a6e3a1',
-    warning: '#f9e2af',
-    error: '#f38ba8',
-    muted: '#6c7086',
+    background: '#1e1f22',
+    foreground: '#dbdee1',
+    surface: '#2b2d31',
+    surfaceRaised: '#313338',
+    accent: '#5865f2',
+    border: '#3f4147',
+    success: '#23a559',
+    warning: '#f0b232',
+    error: '#da373c',
+    muted: '#80848e',
+    sidebar: '#2b2d31',
+    header: '#313338',
+    chatBg: '#313338',
+    hover: 'rgba(79, 84, 92, 0.32)',
+    active: 'rgba(79, 84, 92, 0.48)',
   },
   'high-contrast': {
     background: '#000000',
     foreground: '#ffffff',
     surface: '#1a1a1a',
+    surfaceRaised: '#2a2a2a',
     accent: '#ffff00',
     border: '#ffffff',
     success: '#00ff00',
     warning: '#ffff00',
     error: '#ff0000',
     muted: '#aaaaaa',
+    sidebar: '#0a0a0a',
+    header: '#1a1a1a',
+    chatBg: '#0a0a0a',
+    hover: 'rgba(255, 255, 255, 0.08)',
+    active: 'rgba(255, 255, 255, 0.16)',
   },
 };
 
@@ -69,12 +93,18 @@ function applyThemeColors(colors: ThemeColors): void {
   root.style.setProperty('--waddle-bg', colors.background);
   root.style.setProperty('--waddle-fg', colors.foreground);
   root.style.setProperty('--waddle-surface', colors.surface);
+  root.style.setProperty('--waddle-surface-raised', colors.surfaceRaised);
   root.style.setProperty('--waddle-accent', colors.accent);
   root.style.setProperty('--waddle-border', colors.border);
   root.style.setProperty('--waddle-success', colors.success);
   root.style.setProperty('--waddle-warning', colors.warning);
   root.style.setProperty('--waddle-error', colors.error);
   root.style.setProperty('--waddle-muted', colors.muted);
+  root.style.setProperty('--waddle-sidebar', colors.sidebar);
+  root.style.setProperty('--waddle-header', colors.header);
+  root.style.setProperty('--waddle-chat-bg', colors.chatBg);
+  root.style.setProperty('--waddle-hover', colors.hover);
+  root.style.setProperty('--waddle-active', colors.active);
 }
 
 function applyThemeChoice(choice: ThemeChoice): void {

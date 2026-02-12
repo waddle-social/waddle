@@ -219,10 +219,15 @@ impl OutboundRouter {
             Err(_) => return,
         };
 
+        let bare_to = to
+            .parse::<jid::Jid>()
+            .map(|j| j.to_bare().to_string())
+            .unwrap_or_else(|_| to.to_string());
+
         let msg = ChatMessage {
             id: message_id.to_string(),
             from: String::new(),
-            to: to.to_string(),
+            to: bare_to,
             body: body.to_string(),
             timestamp: chrono::Utc::now(),
             message_type: message_type.clone(),

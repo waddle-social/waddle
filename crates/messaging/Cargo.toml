@@ -8,7 +8,7 @@ description = "1:1 and MUC messaging for Waddle"
 
 [features]
 default = ["native"]
-native = ["waddle-core/native", "waddle-storage/native", "waddle-xmpp/native"]
+native = ["waddle-core/native", "waddle-storage/native", "waddle-xmpp/native", "dep:tokio"]
 web = ["waddle-core/web", "waddle-storage/web", "waddle-xmpp/web"]
 
 [dependencies]
@@ -21,6 +21,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

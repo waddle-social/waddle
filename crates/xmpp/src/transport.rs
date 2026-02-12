@@ -16,40 +16,56 @@ pub struct ConnectionConfig {
 /// - `NativeTcpTransport` (native feature): TCP/TLS via tokio-xmpp + rustls
 /// - `WebSocketTransport` (web feature): WebSocket via tokio-tungstenite / web-sys
 pub trait XmppTransport: Send + 'static {
-    fn connect(
-        config: &ConnectionConfig,
-    ) -> impl Future<Output = Result<Self, ConnectionError>> + Send
+    fn connect(config: &ConnectionConfig) -> impl Future<Output = Result<Self, ConnectionError>>
     where
         Self: Sized;
 
-    fn send(&mut self, data: &[u8]) -> impl Future<Output = Result<(), ConnectionError>> + Send;
+    fn send(&mut self, data: &[u8]) -> impl Future<Output = Result<(), ConnectionError>>;
 
-    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, ConnectionError>> + Send;
+    fn recv(&mut self) -> impl Future<Output = Result<Vec<u8>, ConnectionError>>;
 
-    fn close(&mut self) -> impl Future<Output = Result<(), ConnectionError>> + Send;
+    fn close(&mut self) -> impl Future<Output = Result<(), ConnectionError>>;
+
+    fn supports_stream_management(&self) -> bool;
 }
 
 #[cfg(feature = "native")]
 mod native {
     use super::*;
-    use std::time::Duration;
+    use bytes::BytesMut;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::Duration,
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         time::timeout,
     };
+    use tokio_util::codec::Decoder;
     use tokio_xmpp::{
         connect::{AsyncReadAndWrite, ServerConnector},
         parsers::{jid::Jid, ns},
         starttls::{ServerConfig, error::Error as StartTlsError},
+        tcp::{TcpServerConnector, error::Error as TcpConnectError},
+        xmpp_stream::XMPPStream,
+        Packet, XmppCodec,
     };
+    use tracing::warn;
 
     const DEFAULT_XMPP_PORT: u16 = 5222;
+    const INSECURE_TCP_ENV: &str = "WADDLE_XMPP_INSECURE_TCP";
     const MIN_TIMEOUT_SECONDS: u64 = 1;
     const RECV_BUFFER_SIZE: usize = 16 * 1024;
+    const STREAM_PRIME: &str =
+        "<stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>";
+    static LOOPBACK_TLS_FAILED: AtomicBool = AtomicBool::new(false);
 
     pub struct NativeTcpTransport {
         stream: Box<dyn AsyncReadAndWrite>,
         io_timeout: Duration,
+        stream_management_supported: bool,
+        inbound_codec: XmppCodec,
+        inbound_buffer: BytesMut,
     }
 
     fn connect_timeout(config: &ConnectionConfig) -> Duration {
@@ -92,20 +108,165 @@ mod native {
         }
     }
 
+    fn map_tcp_error(error: TcpConnectError) -> ConnectionError {
+        let message = error.to_string();
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("dns") || lower.contains("resolve") || lower.contains("srv") {
+            ConnectionError::DnsResolutionFailed(message)
+        } else {
+            ConnectionError::TransportError(message)
+        }
+    }
+
+    fn parse_bool_flag(value: &str) -> bool {
+        let normalized = value.trim().to_ascii_lowercase();
+        !normalized.is_empty()
+            && normalized != "0"
+            && normalized != "false"
+            && normalized != "no"
+            && normalized != "off"
+    }
+
+    fn insecure_tcp_env_override() -> Option<bool> {
+        std::env::var(INSECURE_TCP_ENV)
+            .ok()
+            .map(|value| parse_bool_flag(&value))
+    }
+
+    fn is_loopback_host(host: &str) -> bool {
+        let host = host.trim();
+        let host = host
+            .split_once("://")
+            .map(|(_, remainder)| remainder)
+            .unwrap_or(host);
+        let host = host.split('/').next().unwrap_or(host);
+
+        let host_without_port = if host.starts_with('[') {
+            host.find(']').map(|end| &host[1..end]).unwrap_or(host)
+        } else if host.matches(':').count() == 1 {
+            host.split_once(':').map(|(name, _)| name).unwrap_or(host)
+        } else {
+            host
+        };
+
+        if let Ok(address) = host_without_port.parse::<std::net::IpAddr>() {
+            return address.is_loopback();
+        }
+
+        let normalized = host_without_port.trim_end_matches('.').to_ascii_lowercase();
+        normalized == "localhost" || normalized.ends_with(".localhost")
+    }
+
+    fn is_local_loopback_target(config: &ConnectionConfig, jid: &Jid) -> bool {
+        let host = config
+            .server
+            .clone()
+            .unwrap_or_else(|| jid.domain().to_string());
+        is_loopback_host(&host)
+    }
+
+    fn insecure_tcp_target(config: &ConnectionConfig, jid: &Jid) -> String {
+        let host = config
+            .server
+            .clone()
+            .unwrap_or_else(|| jid.domain().to_string());
+        let port = config.port.unwrap_or(DEFAULT_XMPP_PORT);
+        format!("{host}:{port}")
+    }
+
     fn map_io_error(error: std::io::Error) -> ConnectionError {
         ConnectionError::TransportError(error.to_string())
+    }
+
+    fn map_authentication_error(error: ConnectionError) -> ConnectionError {
+        match error {
+            ConnectionError::AuthenticationFailed(_) => error,
+            other => ConnectionError::StreamError(format!("SASL negotiation failed: {other}")),
+        }
+    }
+
+    fn prime_inbound_codec() -> XmppCodec {
+        let mut codec = XmppCodec::new();
+        let mut bootstrap = BytesMut::from(STREAM_PRIME.as_bytes());
+        let _ = codec.decode(&mut bootstrap);
+        codec
+    }
+
+    fn serialize_packet(packet: Packet) -> Result<Option<Vec<u8>>, ConnectionError> {
+        match packet {
+            Packet::Stanza(element) => {
+                let mut payload = Vec::new();
+                element
+                    .write_to(&mut payload)
+                    .map_err(|error| ConnectionError::TransportError(error.to_string()))?;
+                Ok(Some(payload))
+            }
+            Packet::Text(_) => Ok(None),
+            Packet::StreamStart(_) => Ok(None),
+            Packet::StreamEnd => Err(ConnectionError::TransportError(
+                "XMPP transport closed by peer".to_string(),
+            )),
+        }
+    }
+
+    async fn authenticate_stream<S>(
+        xmpp_stream: XMPPStream<S>,
+        username: &str,
+        password: &str,
+        io_timeout: Duration,
+    ) -> Result<(Box<dyn AsyncReadAndWrite>, bool), ConnectionError>
+    where
+        S: AsyncReadAndWrite + 'static,
+    {
+        let authenticated = timeout(
+            io_timeout,
+            crate::sasl::authenticate(xmpp_stream, username, password),
+        )
+        .await
+        .map_err(|_| ConnectionError::Timeout)?
+        .map_err(map_authentication_error)?;
+
+        Ok((
+            Box::new(authenticated.stream),
+            authenticated.stream_management_supported,
+        ))
+    }
+
+    async fn connect_via_starttls(
+        config: &ConnectionConfig,
+        jid: &Jid,
+        username: &str,
+        io_timeout: Duration,
+    ) -> Result<(Box<dyn AsyncReadAndWrite>, bool), ConnectionError> {
+        let server_config = to_server_config(config);
+        let xmpp_stream = timeout(io_timeout, server_config.connect(jid, ns::JABBER_CLIENT))
+            .await
+            .map_err(|_| ConnectionError::Timeout)?
+            .map_err(map_starttls_error)?;
+
+        authenticate_stream(xmpp_stream, username, &config.password, io_timeout).await
+    }
+
+    async fn connect_via_insecure_tcp(
+        config: &ConnectionConfig,
+        jid: &Jid,
+        username: &str,
+        io_timeout: Duration,
+    ) -> Result<(Box<dyn AsyncReadAndWrite>, bool), ConnectionError> {
+        let address = insecure_tcp_target(config, jid);
+        let connector = TcpServerConnector::new(address);
+        let xmpp_stream = timeout(io_timeout, connector.connect(jid, ns::JABBER_CLIENT))
+            .await
+            .map_err(|_| ConnectionError::Timeout)?
+            .map_err(map_tcp_error)?;
+
+        authenticate_stream(xmpp_stream, username, &config.password, io_timeout).await
     }
 
     impl XmppTransport for NativeTcpTransport {
         async fn connect(config: &ConnectionConfig) -> Result<Self, ConnectionError> {
             let jid = parse_jid(&config.jid)?;
-            let server_config = to_server_config(config);
             let io_timeout = connect_timeout(config);
-
-            let xmpp_stream = timeout(io_timeout, server_config.connect(&jid, ns::JABBER_CLIENT))
-                .await
-                .map_err(|_| ConnectionError::Timeout)?
-                .map_err(map_starttls_error)?;
 
             let username = jid.node().ok_or_else(|| {
                 ConnectionError::AuthenticationFailed(format!(
@@ -114,20 +275,48 @@ mod native {
                 ))
             })?;
 
-            let raw_stream = timeout(
-                io_timeout,
-                crate::sasl::authenticate(xmpp_stream, username.as_str(), &config.password),
-            )
-            .await
-            .map_err(|_| ConnectionError::Timeout)?
-            .map_err(|e| match e {
-                ConnectionError::AuthenticationFailed(_) => e,
-                other => ConnectionError::StreamError(format!("SASL negotiation failed: {other}")),
-            })?;
+            let insecure_override = insecure_tcp_env_override();
+            let loopback_target = is_local_loopback_target(config, &jid);
+            let prefer_insecure = insecure_override == Some(true)
+                || (insecure_override.is_none()
+                    && loopback_target
+                    && LOOPBACK_TLS_FAILED.load(Ordering::Relaxed));
+
+            let (stream, stream_management_supported): (Box<dyn AsyncReadAndWrite>, bool) =
+                if prefer_insecure {
+                    connect_via_insecure_tcp(config, &jid, username.as_str(), io_timeout).await?
+                } else {
+                    match connect_via_starttls(config, &jid, username.as_str(), io_timeout).await {
+                        Ok(result) => {
+                            if loopback_target {
+                                LOOPBACK_TLS_FAILED.store(false, Ordering::Relaxed);
+                            }
+                            result
+                        }
+                        Err(error)
+                            if insecure_override.is_none()
+                                && loopback_target
+                                && matches!(error, ConnectionError::TlsHandshakeFailed(_)) =>
+                        {
+                            LOOPBACK_TLS_FAILED.store(true, Ordering::Relaxed);
+                            warn!(
+                                reason = %error,
+                                env = INSECURE_TCP_ENV,
+                                "TLS failed against loopback target; retrying with insecure TCP"
+                            );
+                            connect_via_insecure_tcp(config, &jid, username.as_str(), io_timeout)
+                                .await?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
 
             Ok(Self {
-                stream: Box::new(raw_stream),
+                stream,
                 io_timeout,
+                stream_management_supported,
+                inbound_codec: prime_inbound_codec(),
+                inbound_buffer: BytesMut::with_capacity(RECV_BUFFER_SIZE),
             })
         }
 
@@ -150,20 +339,31 @@ mod native {
         }
 
         async fn recv(&mut self) -> Result<Vec<u8>, ConnectionError> {
-            let mut buffer = vec![0_u8; RECV_BUFFER_SIZE];
-            let bytes_read = timeout(self.io_timeout, self.stream.read(&mut buffer))
-                .await
-                .map_err(|_| ConnectionError::Timeout)?
-                .map_err(map_io_error)?;
+            loop {
+                if let Some(packet) = self
+                    .inbound_codec
+                    .decode(&mut self.inbound_buffer)
+                    .map_err(|error| ConnectionError::TransportError(error.to_string()))?
+                {
+                    if let Some(payload) = serialize_packet(packet)? {
+                        return Ok(payload);
+                    }
+                }
 
-            if bytes_read == 0 {
-                return Err(ConnectionError::TransportError(
-                    "XMPP transport closed by peer".to_string(),
-                ));
+                let mut chunk = vec![0_u8; RECV_BUFFER_SIZE];
+                let bytes_read = timeout(self.io_timeout, self.stream.read(&mut chunk))
+                    .await
+                    .map_err(|_| ConnectionError::Timeout)?
+                    .map_err(map_io_error)?;
+
+                if bytes_read == 0 {
+                    return Err(ConnectionError::TransportError(
+                        "XMPP transport closed by peer".to_string(),
+                    ));
+                }
+
+                self.inbound_buffer.extend_from_slice(&chunk[..bytes_read]);
             }
-
-            buffer.truncate(bytes_read);
-            Ok(buffer)
         }
 
         async fn close(&mut self) -> Result<(), ConnectionError> {
@@ -172,6 +372,10 @@ mod native {
                 .map_err(|_| ConnectionError::Timeout)?
                 .map_err(map_io_error)?;
             Ok(())
+        }
+
+        fn supports_stream_management(&self) -> bool {
+            self.stream_management_supported
         }
     }
 }
@@ -466,6 +670,10 @@ mod web {
             })
             .await
         }
+
+        fn supports_stream_management(&self) -> bool {
+            false
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -596,6 +804,10 @@ mod web {
                 .send(WebSocketCommand::Close)
                 .map_err(|error| ConnectionError::TransportError(error.to_string()))?;
             Ok(())
+        }
+
+        fn supports_stream_management(&self) -> bool {
+            false
         }
     }
 

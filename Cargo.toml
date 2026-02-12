@@ -23,7 +23,7 @@ semver = "1"
 
 # Date/time and identifiers
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
 
 # Logging / diagnostics
 tracing = "0.1"

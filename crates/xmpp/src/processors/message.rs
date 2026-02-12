@@ -45,7 +45,11 @@ impl StanzaProcessor for MessageProcessor {
             debug!(id = %received.id, "delivery receipt received");
             #[cfg(feature = "native")]
             {
-                let to = msg.from.as_ref().map(|j| j.to_string()).unwrap_or_default();
+                let to = msg
+                    .from
+                    .as_ref()
+                    .map(|j| j.to_bare().to_string())
+                    .unwrap_or_default();
                 let _ = self.event_bus.publish(Event::new(
                     Channel::new("xmpp.message.delivered").unwrap(),
                     EventSource::Xmpp,
@@ -65,8 +69,16 @@ impl StanzaProcessor for MessageProcessor {
 
         let chat_message = ChatMessage {
             id: msg.id.as_ref().map(|id| id.0.clone()).unwrap_or_default(),
-            from: msg.from.as_ref().map(|j| j.to_string()).unwrap_or_default(),
-            to: msg.to.as_ref().map(|j| j.to_string()).unwrap_or_default(),
+            from: msg
+                .from
+                .as_ref()
+                .map(|j| j.to_bare().to_string())
+                .unwrap_or_default(),
+            to: msg
+                .to
+                .as_ref()
+                .map(|j| j.to_bare().to_string())
+                .unwrap_or_default(),
             body,
             timestamp: Utc::now(),
             message_type: match msg.type_ {

@@ -5,6 +5,10 @@ allow_registration = true
 registration_throttle_max = 0
 c2s_require_encryption = false
 s2s_require_encryption = false
+consider_websocket_secure = true
+cross_domain_websocket = true
+http_ports = { 5280 }
+https_ports = {}
 
 modules_enabled = {
     "roster";
@@ -16,11 +20,12 @@ modules_enabled = {
     "pep";
     "register";
     "mam";
-    "muc";
-    "muc_mam";
+    "smacks";
     "ping";
     "time";
     "version";
+    "bosh";
+    "websocket";
 }
 
 storage = "internal"

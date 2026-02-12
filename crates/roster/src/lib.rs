@@ -343,9 +343,32 @@ impl<D: Database> RosterManager<D> {
                 }
             }
             EventPayload::SubscriptionRequest { from } => {
-                debug!(from = %from, "inbound subscription request received");
-                // The UI layer should prompt the user; we just log it here.
-                // Approval/denial is handled via approve_subscription/deny_subscription.
+                debug!(from = %from, "inbound subscription request received, auto-approving");
+
+                // Auto-approve the incoming subscription request
+                if let Err(e) = self.approve_subscription(from).await {
+                    error!(error = %e, from = %from, "failed to approve subscription");
+                }
+
+                // Reciprocally subscribe so both sides see each other
+                if let Err(e) = self.request_subscription(from).await {
+                    error!(error = %e, from = %from, "failed to send reciprocal subscription");
+                }
+
+                // Ensure the contact exists in local storage
+                let existing: Result<StoredRosterItem, StorageError> = self
+                    .db
+                    .query_one(
+                        "SELECT jid, name, subscription, groups FROM roster WHERE jid = ?1",
+                        &[&from.to_string()],
+                    )
+                    .await;
+
+                if existing.is_err() {
+                    if let Err(e) = self.add_contact(from, None, &[]).await {
+                        error!(error = %e, from = %from, "failed to add contact from subscription");
+                    }
+                }
             }
             EventPayload::SubscriptionApproved { jid } => {
                 debug!(jid = %jid, "subscription approved");

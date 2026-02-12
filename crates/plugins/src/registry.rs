@@ -4,9 +4,13 @@ use std::sync::RwLock;
 
 use chrono::Utc;
 use glob::Pattern;
+#[cfg(feature = "native")]
 use oci_distribution::Reference;
+#[cfg(feature = "native")]
 use oci_distribution::client::{Client, ClientConfig};
+#[cfg(feature = "native")]
 use oci_distribution::manifest::OciImageManifest;
+#[cfg(feature = "native")]
 use oci_distribution::secrets::RegistryAuth;
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -14,9 +18,13 @@ use tracing::{debug, info, warn};
 
 const VALID_EVENT_DOMAINS: &[&str] = &["system", "xmpp", "ui", "plugin"];
 
+#[cfg(feature = "native")]
 const MEDIA_TYPE_MANIFEST: &str = "application/vnd.waddle.plugin.manifest.v1+toml";
+#[cfg(feature = "native")]
 const MEDIA_TYPE_WASM: &str = "application/vnd.waddle.plugin.wasm.v1+wasm";
+#[cfg(feature = "native")]
 const MEDIA_TYPE_VUE: &str = "application/vnd.waddle.plugin.vue.v1+tar";
+#[cfg(feature = "native")]
 const MEDIA_TYPE_ASSETS: &str = "application/vnd.waddle.plugin.assets.v1+tar";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +344,9 @@ pub enum RegistryError {
     #[error("registry authentication failed for {registry}: {reason}")]
     AuthenticationFailed { registry: String, reason: String },
 
+    #[error("unsupported on this platform: {0}")]
+    Unsupported(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -405,6 +416,7 @@ impl PluginRegistry {
         self.install_from_oci(reference, false, None).await
     }
 
+    #[cfg(feature = "native")]
     async fn install_from_oci(
         &self,
         reference: &str,
@@ -483,6 +495,18 @@ impl PluginRegistry {
 
         info!(plugin_id = %plugin_id, "plugin installed");
         Ok(entry)
+    }
+
+    #[cfg(not(feature = "native"))]
+    async fn install_from_oci(
+        &self,
+        _reference: &str,
+        _allow_replace: bool,
+        _expected_plugin_id: Option<&str>,
+    ) -> Result<InstalledPlugin, RegistryError> {
+        Err(RegistryError::Unsupported(
+            "OCI plugin installation is only available with the native feature".to_string(),
+        ))
     }
 
     async fn install_from_local(&self, path: &str) -> Result<InstalledPlugin, RegistryError> {
@@ -569,6 +593,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(feature = "native")]
     pub async fn update(&self, plugin_id: &str) -> Result<Option<InstalledPlugin>, RegistryError> {
         let (source, current_version) = {
             let index = self
@@ -626,6 +651,14 @@ impl PluginRegistry {
         Ok(Some(result))
     }
 
+    #[cfg(not(feature = "native"))]
+    pub async fn update(&self, _plugin_id: &str) -> Result<Option<InstalledPlugin>, RegistryError> {
+        Err(RegistryError::Unsupported(
+            "plugin update requires native OCI registry support".to_string(),
+        ))
+    }
+
+    #[cfg(feature = "native")]
     pub async fn search(
         &self,
         registry: &str,
@@ -672,6 +705,17 @@ impl PluginRegistry {
         }
 
         Ok(summaries)
+    }
+
+    #[cfg(not(feature = "native"))]
+    pub async fn search(
+        &self,
+        _registry: &str,
+        _query: &str,
+    ) -> Result<Vec<PluginSummary>, RegistryError> {
+        Err(RegistryError::Unsupported(
+            "plugin search requires native OCI registry support".to_string(),
+        ))
     }
 
     pub fn list_installed(&self) -> Result<Vec<InstalledPlugin>, RegistryError> {
@@ -724,6 +768,7 @@ impl PluginRegistry {
         })
     }
 
+    #[cfg(feature = "native")]
     pub async fn list_versions(&self, reference: &str) -> Result<Vec<String>, RegistryError> {
         let oci_ref = self.resolve_reference(reference)?;
         let ref_str = oci_ref.whole();
@@ -754,6 +799,14 @@ impl PluginRegistry {
         Ok(versions)
     }
 
+    #[cfg(not(feature = "native"))]
+    pub async fn list_versions(&self, _reference: &str) -> Result<Vec<String>, RegistryError> {
+        Err(RegistryError::Unsupported(
+            "listing registry versions requires native OCI support".to_string(),
+        ))
+    }
+
+    #[cfg(feature = "native")]
     fn resolve_reference(&self, reference: &str) -> Result<Reference, RegistryError> {
         let expanded = if reference.contains('/') {
             reference.to_string()
@@ -769,6 +822,7 @@ impl PluginRegistry {
         )
     }
 
+    #[cfg(feature = "native")]
     async fn pull_layers(
         &self,
         client: &Client,

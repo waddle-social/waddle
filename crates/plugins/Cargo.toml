@@ -13,6 +13,7 @@ native = [
     "waddle-storage/native",
     "dep:tokio",
     "dep:wasmtime",
+    "dep:oci-distribution",
 ]
 web = ["waddle-core/web", "waddle-storage/web"]
 
@@ -31,7 +32,7 @@ chrono = { workspace = true }
 sha2 = "0.10"
 tar = "0.4"
 wasmtime = { workspace = true, optional = true }
-oci-distribution = { workspace = true }
+oci-distribution = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

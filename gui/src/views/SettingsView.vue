@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-
 import { useSettingsStore, type ThemeChoice } from '../stores/settings';
 
 const settingsStore = useSettingsStore();
@@ -13,37 +12,73 @@ function onThemeChange(event: Event): void {
 </script>
 
 <template>
-  <section class="space-y-4">
-    <header>
-      <h1 class="text-2xl font-semibold">Settings</h1>
-      <p class="text-sm text-muted">Appearance and notification preferences.</p>
+  <div class="flex h-full flex-col">
+    <!-- Header bar -->
+    <header class="flex h-12 flex-shrink-0 items-center border-b border-border px-4 shadow-sm">
+      <svg class="mr-2 h-5 w-5 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+      <h2 class="text-base font-semibold text-foreground">Settings</h2>
     </header>
 
-    <div class="grid gap-4 md:grid-cols-2">
-      <label class="rounded-xl border border-border bg-surface p-4 text-sm">
-        <span class="mb-2 block text-muted">Locale</span>
-        <input v-model="locale" class="w-full rounded border border-border px-2 py-1" />
-      </label>
+    <!-- Settings content -->
+    <div class="flex-1 overflow-y-auto p-6">
+      <div class="mx-auto max-w-2xl space-y-6">
+        <!-- Appearance section -->
+        <section>
+          <h3 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Appearance</h3>
+          <div class="space-y-3">
+            <label class="flex items-center justify-between rounded-lg bg-surface px-4 py-3">
+              <div>
+                <p class="text-sm font-medium text-foreground">Theme</p>
+                <p class="text-xs text-muted">Choose your preferred colour scheme</p>
+              </div>
+              <select
+                :value="theme"
+                class="rounded bg-surface-raised px-3 py-1.5 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent"
+                @change="onThemeChange"
+              >
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+                <option value="system">System</option>
+              </select>
+            </label>
 
-      <label class="rounded-xl border border-border bg-surface p-4 text-sm">
-        <span class="mb-2 block text-muted">Theme</span>
-        <select
-          :value="theme"
-          class="w-full rounded border border-border bg-surface px-2 py-1"
-          @change="onThemeChange"
-        >
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-          <option value="system">System</option>
-        </select>
-      </label>
+            <label class="flex items-center justify-between rounded-lg bg-surface px-4 py-3">
+              <div>
+                <p class="text-sm font-medium text-foreground">Locale</p>
+                <p class="text-xs text-muted">Language and region for dates and times</p>
+              </div>
+              <input
+                v-model="locale"
+                class="w-32 rounded bg-surface-raised px-3 py-1.5 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent"
+              />
+            </label>
+          </div>
+        </section>
 
-      <label class="rounded-xl border border-border bg-surface p-4 text-sm md:col-span-2">
-        <span class="flex items-center justify-between">
-          <span>Enable desktop notifications</span>
-          <input v-model="notificationsEnabled" type="checkbox" class="h-4 w-4" />
-        </span>
-      </label>
+        <!-- Notifications section -->
+        <section>
+          <h3 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Notifications</h3>
+          <label class="flex items-center justify-between rounded-lg bg-surface px-4 py-3">
+            <div>
+              <p class="text-sm font-medium text-foreground">Desktop Notifications</p>
+              <p class="text-xs text-muted">Show system notifications for new messages</p>
+            </div>
+            <div
+              class="relative h-6 w-11 cursor-pointer rounded-full transition-colors"
+              :class="notificationsEnabled ? 'bg-accent' : 'bg-border'"
+              @click="notificationsEnabled = !notificationsEnabled"
+            >
+              <div
+                class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform"
+                :class="notificationsEnabled ? 'translate-x-5' : 'translate-x-0'"
+              ></div>
+            </div>
+          </label>
+        </section>
+      </div>
     </div>
-  </section>
+  </div>
 </template>

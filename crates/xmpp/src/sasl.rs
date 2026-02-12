@@ -85,14 +85,24 @@ mod native {
     use sasl::common::{ChannelBinding, Credentials};
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio_xmpp::Packet;
-    use tokio_xmpp::parsers::sasl::{
-        Auth, Challenge, Failure, Mechanism as SaslMechanism, Response, Success,
+    use tokio_xmpp::parsers::{
+        bind::{BindQuery, BindResponse},
+        iq::{Iq, IqType},
+        ns,
+        sasl::{Auth, Challenge, Failure, Mechanism as SaslMechanism, Response, Success},
     };
     use tokio_xmpp::xmpp_stream::XMPPStream;
     use tracing::{debug, warn};
 
     use super::{build_mechanism, select_mechanism};
     use crate::error::ConnectionError;
+
+    const BIND_REQUEST_ID: &str = "resource-bind";
+
+    pub struct AuthenticatedStream<S> {
+        pub stream: S,
+        pub stream_management_supported: bool,
+    }
 
     pub(crate) fn map_failure(failure: &Failure) -> ConnectionError {
         let condition = format!("{:?}", failure.defined_condition);
@@ -105,11 +115,86 @@ mod native {
         }
     }
 
+    fn stream_management_supported<S>(stream: &XMPPStream<S>) -> bool
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        stream.stream_features.0.get_child("sm", ns::SM).is_some()
+    }
+
+    async fn restart_and_bind<S>(
+        stream: XMPPStream<S>,
+    ) -> Result<(XMPPStream<S>, bool), ConnectionError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut stream = stream.restart().await.map_err(|error| {
+            ConnectionError::StreamError(format!(
+                "failed to restart stream after SASL authentication: {error}"
+            ))
+        })?;
+
+        let stream_management_supported = stream_management_supported(&stream);
+
+        if !stream.stream_features.can_bind() {
+            return Ok((stream, stream_management_supported));
+        }
+
+        let resource = stream.jid.resource().map(|resource| resource.to_string());
+        let bind_iq = Iq::from_set(BIND_REQUEST_ID, BindQuery::new(resource));
+        stream.send_stanza(bind_iq).await.map_err(|error| {
+            ConnectionError::StreamError(format!("failed to send resource bind request: {error}"))
+        })?;
+
+        loop {
+            match stream.next().await {
+                Some(Ok(Packet::Stanza(stanza))) => {
+                    if let Ok(iq) = Iq::try_from(stanza) {
+                        if iq.id != BIND_REQUEST_ID {
+                            continue;
+                        }
+
+                        match iq.payload {
+                            IqType::Result(payload) => {
+                                if let Some(payload) = payload {
+                                    let bind =
+                                        BindResponse::try_from(payload).map_err(|error| {
+                                            ConnectionError::StreamError(format!(
+                                                "invalid resource bind response payload: {error}"
+                                            ))
+                                        })?;
+                                    stream.jid = bind.into();
+                                }
+                                return Ok((stream, stream_management_supported));
+                            }
+                            _ => {
+                                return Err(ConnectionError::StreamError(
+                                    "invalid response to resource binding".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    return Err(ConnectionError::StreamError(format!(
+                        "stream error during resource binding: {error}"
+                    )));
+                }
+                None => {
+                    return Err(ConnectionError::TransportError(
+                        "connection closed during resource binding".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     pub async fn authenticate<S>(
         mut stream: XMPPStream<S>,
         username: &str,
         password: &str,
-    ) -> Result<S, ConnectionError>
+    ) -> Result<AuthenticatedStream<S>, ConnectionError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -190,7 +275,12 @@ mod native {
                         }
 
                         debug!("SASL authentication succeeded");
-                        return Ok(stream.into_inner());
+                        let (stream, stream_management_supported) =
+                            restart_and_bind(stream).await?;
+                        return Ok(AuthenticatedStream {
+                            stream: stream.into_inner(),
+                            stream_management_supported,
+                        });
                     } else if let Ok(failure) = Failure::try_from(stanza) {
                         debug!(condition = ?failure.defined_condition, "SASL authentication failed");
                         return Err(map_failure(&failure));
@@ -213,7 +303,7 @@ mod native {
 }
 
 #[cfg(feature = "native")]
-pub use native::authenticate;
+pub use native::{AuthenticatedStream, authenticate};
 
 #[cfg(test)]
 mod tests {

@@ -1998,8 +1998,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -7137,8 +7139,10 @@ dependencies = [
 name = "waddle-xmpp"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "futures",
+ "getrandom 0.2.17",
  "mockall",
  "rustls",
  "sasl",
@@ -7148,6 +7152,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-test",
  "tokio-tungstenite",
+ "tokio-util",
  "tokio-xmpp",
  "tracing",
  "tracing-test",

@@ -26,9 +26,9 @@ use waddle_presence::PresenceManager;
 use waddle_roster::RosterManager;
 use waddle_storage::{self, NativeDatabase, StorageError};
 use waddle_xmpp::{
-    ChatStateProcessor, ConnectionConfig, ConnectionManager, MamProcessor, MessageProcessor,
-    MucProcessor, OutboundRouter, PresenceProcessor, RosterProcessor, StanzaPipeline,
-    stanza_channel,
+    ChatStateProcessor, ConnectionConfig, ConnectionManager, ConnectionState, MamProcessor,
+    MessageProcessor, MucProcessor, OutboundRouter, PresenceProcessor, RosterProcessor,
+    StanzaPipeline, stanza_channel,
 };
 
 #[cfg(debug_assertions)]
@@ -137,6 +137,41 @@ impl PluginInfoResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionStateResponse {
+    status: String,
+    jid: Option<String>,
+    attempt: Option<u32>,
+}
+
+impl ConnectionStateResponse {
+    fn from_connection_state(state: ConnectionState, own_jid: &str) -> Self {
+        match state {
+            ConnectionState::Connected => Self {
+                status: "connected".to_string(),
+                jid: Some(own_jid.split('/').next().unwrap_or(own_jid).to_string()),
+                attempt: None,
+            },
+            ConnectionState::Connecting => Self {
+                status: "connecting".to_string(),
+                jid: None,
+                attempt: None,
+            },
+            ConnectionState::Reconnecting { attempt } => Self {
+                status: "reconnecting".to_string(),
+                jid: None,
+                attempt: Some(attempt),
+            },
+            ConnectionState::Disconnected => Self {
+                status: "offline".to_string(),
+                jid: None,
+                attempt: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 enum PluginAction {
@@ -147,8 +182,10 @@ enum PluginAction {
 }
 
 struct AppState {
+    own_jid: String,
     ui_config: UiConfigResponse,
     event_bus: Arc<dyn EventBus>,
+    connection_manager: Arc<Mutex<ConnectionManager>>,
     roster_manager: Arc<RosterManager<NativeDatabase>>,
     message_manager: Arc<MessageManager<NativeDatabase>>,
     muc_manager: Arc<MucManager<NativeDatabase>>,
@@ -172,11 +209,59 @@ async fn send_message(
 
 #[tauri::command]
 async fn get_roster(state: State<'_, AppState>) -> Result<Vec<RosterItem>, String> {
-    state
+    let mut items = state
         .roster_manager
         .get_roster()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    // Inject a synthetic entry for the connected user so they always see themselves
+    let bare_jid = state.own_jid.split('/').next().unwrap_or(&state.own_jid);
+    let self_already_present = items.iter().any(|item| item.jid == bare_jid);
+    if !self_already_present && !bare_jid.is_empty() {
+        let localpart = bare_jid.split('@').next().unwrap_or(bare_jid);
+        items.insert(
+            0,
+            RosterItem {
+                jid: bare_jid.to_string(),
+                name: Some(localpart.to_string()),
+                subscription: waddle_core::event::Subscription::Both,
+                groups: vec!["Self".to_string()],
+            },
+        );
+    }
+
+    Ok(items)
+}
+
+#[tauri::command]
+async fn add_contact(jid: String, state: State<'_, AppState>) -> Result<(), String> {
+    // Add to local roster storage and send roster-set IQ to the server
+    state
+        .roster_manager
+        .add_contact(&jid, None, &[])
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // Request a presence subscription so both sides can see each other
+    state
+        .roster_manager
+        .request_subscription(&jid)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_connection_state(
+    state: State<'_, AppState>,
+) -> Result<ConnectionStateResponse, String> {
+    let connection = state.connection_manager.lock().await;
+    Ok(ConnectionStateResponse::from_connection_state(
+        connection.state(),
+        &state.own_jid,
+    ))
 }
 
 #[tauri::command]
@@ -295,6 +380,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             send_message,
             get_roster,
+            add_contact,
+            get_connection_state,
             set_presence,
             join_room,
             leave_room,
@@ -305,11 +392,11 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build Tauri application");
 
-    let event_bus = app.state::<AppState>().event_bus.clone();
-
-    app.run(move |_app_handle, event| {
+    app.run(move |app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
-            let _ = publish_shutdown_requested(&event_bus, "application exit requested");
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                let _ = publish_shutdown_requested(&state.event_bus, "application exit requested");
+            }
         }
     });
 }
@@ -398,7 +485,7 @@ async fn initialize_backend(app_handle: AppHandle) -> Result<AppState, GuiBacken
     let (wire_sender, wire_receiver) = stanza_channel(WIRE_CHANNEL_CAPACITY);
     let outbound_router = Arc::new(OutboundRouter::new(
         event_bus.clone(),
-        pipeline,
+        pipeline.clone(),
         wire_sender,
     ));
 
@@ -413,6 +500,7 @@ async fn initialize_backend(app_handle: AppHandle) -> Result<AppState, GuiBacken
     )));
 
     spawn_wire_pump(connection.clone(), wire_receiver, event_bus.clone());
+    spawn_inbound_pump(connection.clone(), pipeline, event_bus.clone());
     spawn_connection_control(connection.clone(), event_bus.clone());
 
     spawn_notifications(event_bus.clone(), config.clone());
@@ -425,11 +513,13 @@ async fn initialize_backend(app_handle: AppHandle) -> Result<AppState, GuiBacken
         EventPayload::StartupComplete,
     )?;
 
-    spawn_initial_connection(connection, event_bus.clone());
+    spawn_initial_connection(connection.clone(), event_bus.clone());
 
     Ok(AppState {
+        own_jid: config.account.jid.clone(),
         ui_config,
         event_bus,
+        connection_manager: connection,
         roster_manager,
         message_manager,
         muc_manager,
@@ -510,6 +600,105 @@ fn spawn_wire_pump(
         }
 
         debug!("wire pump stopped");
+    });
+}
+
+fn spawn_inbound_pump(
+    connection: Arc<Mutex<ConnectionManager>>,
+    pipeline: Arc<StanzaPipeline>,
+    event_bus: Arc<dyn EventBus>,
+) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let frame_result = {
+                let mut manager = connection.lock().await;
+                manager
+                    .recv_frame_with_timeout(Duration::from_millis(50))
+                    .await
+            };
+
+            let frame = match frame_result {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    warn!(%reason, "failed to receive stanza from XMPP transport");
+                    emit_component_error(&event_bus, "xmpp", reason.clone(), error.is_retryable());
+
+                    let recover_result = {
+                        let mut manager = connection.lock().await;
+                        manager.recover_after_network_interruption(reason).await
+                    };
+
+                    if let Err(recover_error) = recover_result {
+                        emit_component_error(
+                            &event_bus,
+                            "xmpp",
+                            recover_error.to_string(),
+                            recover_error.is_retryable(),
+                        );
+                    }
+
+                    continue;
+                }
+            };
+
+            let stream_management_handled = {
+                let mut manager = connection.lock().await;
+                match manager.handle_stream_management_frame(&frame).await {
+                    Ok(handled) => handled,
+                    Err(error) => {
+                        let reason = error.to_string();
+                        warn!(%reason, "failed to handle stream-management frame");
+                        emit_component_error(
+                            &event_bus,
+                            "xmpp",
+                            reason.clone(),
+                            error.is_retryable(),
+                        );
+
+                        let recover_result =
+                            manager.recover_after_network_interruption(reason).await;
+                        if let Err(recover_error) = recover_result {
+                            emit_component_error(
+                                &event_bus,
+                                "xmpp",
+                                recover_error.to_string(),
+                                recover_error.is_retryable(),
+                            );
+                        }
+
+                        continue;
+                    }
+                }
+            };
+
+            if stream_management_handled {
+                continue;
+            }
+
+            let carbons_handled = {
+                let mut manager = connection.lock().await;
+                manager.handle_carbons_iq_response(&frame)
+            };
+
+            if carbons_handled {
+                let mut manager = connection.lock().await;
+                manager.mark_inbound_stanza_handled();
+                continue;
+            }
+
+            if let Err(error) = pipeline.process_inbound(&frame).await {
+                warn!(error = %error, "failed to process inbound stanza");
+                continue;
+            }
+
+            let mut manager = connection.lock().await;
+            manager.mark_inbound_stanza_handled();
+        }
     });
 }
 
@@ -694,6 +883,10 @@ fn spawn_connection_control(
     });
 }
 
+fn frontend_event_name(channel: &str) -> String {
+    channel.replace('.', ":")
+}
+
 fn spawn_event_forwarder(event_bus: Arc<dyn EventBus>, app_handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut subscription = match event_bus.subscribe("{xmpp,system,plugin}.**") {
@@ -708,8 +901,9 @@ fn spawn_event_forwarder(event_bus: Arc<dyn EventBus>, app_handle: AppHandle) {
             match subscription.recv().await {
                 Ok(event) => {
                     let channel = event.channel.as_str().to_string();
-                    if let Err(error) = app_handle.emit(channel.as_str(), &event) {
-                        warn!(channel, %error, "failed to forward event to frontend");
+                    let frontend_channel = frontend_event_name(channel.as_str());
+                    if let Err(error) = app_handle.emit(frontend_channel.as_str(), &event) {
+                        warn!(channel, frontend_channel, %error, "failed to forward event to frontend");
                     }
                 }
                 Err(waddle_core::error::EventBusError::Lagged(count)) => {
