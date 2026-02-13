@@ -109,6 +109,14 @@ enum Commands {
         #[arg(short = 'D', long)]
         disabled_specs: Option<String>,
 
+        /// Comma-separated enabled Smack SINT test classes
+        #[arg(long)]
+        enabled_tests: Option<String>,
+
+        /// Comma-separated disabled Smack SINT test classes
+        #[arg(long)]
+        disabled_tests: Option<String>,
+
         /// Directory for logs/artifacts written by the harness
         #[arg(short = 'l', long, default_value = "./test-logs")]
         artifact_dir: String,
@@ -523,6 +531,8 @@ async fn main() -> Result<()> {
             admin_password,
             enabled_specs,
             disabled_specs,
+            enabled_tests,
+            disabled_tests,
             artifact_dir,
             keep_containers,
         }) => {
@@ -535,6 +545,8 @@ async fn main() -> Result<()> {
                 &admin_password,
                 enabled_specs.as_deref(),
                 disabled_specs.as_deref(),
+                enabled_tests.as_deref(),
+                disabled_tests.as_deref(),
                 &artifact_dir,
                 keep_containers,
             );
@@ -634,6 +646,8 @@ fn run_compliance(
     admin_password: &str,
     enabled_specs: Option<&str>,
     disabled_specs: Option<&str>,
+    enabled_tests: Option<&str>,
+    disabled_tests: Option<&str>,
     artifact_dir: &str,
     keep_containers: bool,
 ) -> Result<()> {
@@ -663,6 +677,18 @@ fn run_compliance(
         }
     );
     println!("  Artifacts:    {}", resolved_artifact_dir.display());
+    if let Some(value) = enabled_specs {
+        println!("  Enabled specs: {value}");
+    }
+    if let Some(value) = disabled_specs {
+        println!("  Disabled specs: {value}");
+    }
+    if let Some(value) = enabled_tests {
+        println!("  Enabled tests: {value}");
+    }
+    if let Some(value) = disabled_tests {
+        println!("  Disabled tests: {value}");
+    }
 
     let mut command = std::process::Command::new("cargo");
     command
@@ -704,6 +730,12 @@ fn run_compliance(
     }
     if let Some(value) = disabled_specs {
         command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", value);
+    }
+    if let Some(value) = enabled_tests {
+        command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", value);
+    }
+    if let Some(value) = disabled_tests {
+        command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", value);
     }
 
     let status = command

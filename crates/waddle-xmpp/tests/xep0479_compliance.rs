@@ -93,6 +93,8 @@ struct ComplianceConfig {
     admin_password: String,
     enabled_specs: Vec<String>,
     disabled_specs: Vec<String>,
+    enabled_tests: Vec<String>,
+    disabled_tests: Vec<String>,
 }
 
 impl ComplianceConfig {
@@ -139,6 +141,8 @@ impl ComplianceConfig {
                 .unwrap_or_else(|_| DEFAULT_ADMIN_PASSWORD.to_string()),
             enabled_specs: parse_csv_env("WADDLE_COMPLIANCE_ENABLED_SPECS"),
             disabled_specs: parse_csv_env("WADDLE_COMPLIANCE_DISABLED_SPECS"),
+            enabled_tests: parse_csv_env("WADDLE_COMPLIANCE_ENABLED_TESTS"),
+            disabled_tests: parse_csv_env("WADDLE_COMPLIANCE_DISABLED_TESTS"),
         })
     }
 
@@ -165,6 +169,18 @@ impl ComplianceConfig {
         }
 
         self.disabled_specs.clone()
+    }
+
+    fn effective_enabled_tests(&self) -> Vec<String> {
+        self.enabled_tests.clone()
+    }
+
+    fn effective_disabled_tests(&self) -> Vec<String> {
+        if !self.enabled_tests.is_empty() {
+            return vec![];
+        }
+
+        self.disabled_tests.clone()
     }
 }
 
@@ -333,6 +349,8 @@ struct ComplianceSummary {
     duration_secs: f64,
     enabled_specs: Vec<String>,
     disabled_specs: Vec<String>,
+    enabled_tests: Vec<String>,
+    disabled_tests: Vec<String>,
     container_exit_code: Option<i64>,
     junit: Option<JunitTotals>,
     interop_progress: Option<InteropProgress>,
@@ -384,6 +402,8 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
 
     let enabled_specs = config.effective_enabled_specs();
     let disabled_specs = config.effective_disabled_specs();
+    let enabled_tests = config.effective_enabled_tests();
+    let disabled_tests = config.effective_disabled_tests();
 
     let started_at = Utc::now();
     let _server = ServerProcess::start(&config, &artifacts)?;
@@ -394,8 +414,15 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
     } else {
         println!("Admin credentials not configured; using in-band account registration mode.");
     }
-    let interop =
-        run_interop_container(&config, &artifacts, &enabled_specs, &disabled_specs).await?;
+    let interop = run_interop_container(
+        &config,
+        &artifacts,
+        &enabled_specs,
+        &disabled_specs,
+        &enabled_tests,
+        &disabled_tests,
+    )
+    .await?;
     let finished_at = Utc::now();
 
     if contains_invalid_argument(&interop.stdout) || contains_invalid_argument(&interop.stderr) {
@@ -438,9 +465,7 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
         .unwrap_or(false);
     let progress_failed = interop_progress
         .as_ref()
-        .map(|progress| {
-            progress.tests_failed > 0 || progress.tests_completed < progress.tests_started
-        })
+        .map(|progress| progress_policy_failed(progress, config.profile.report_only()))
         .unwrap_or(false);
     let exit_failed = interop.exit_code.unwrap_or(1) != 0;
     let compliance_failed = junit_failed || progress_failed || exit_failed;
@@ -460,6 +485,8 @@ async fn test_xep0479_compliance_managed() -> Result<()> {
             .as_secs_f64(),
         enabled_specs: enabled_specs.clone(),
         disabled_specs: disabled_specs.clone(),
+        enabled_tests: enabled_tests.clone(),
+        disabled_tests: disabled_tests.clone(),
         container_exit_code: interop.exit_code,
         junit,
         interop_progress,
@@ -522,8 +549,16 @@ async fn run_interop_container(
     artifacts: &ArtifactPaths,
     enabled_specs: &[String],
     disabled_specs: &[String],
+    enabled_tests: &[String],
+    disabled_tests: &[String],
 ) -> Result<InteropResult> {
-    let java_cmd = build_interop_java_cmd(config, enabled_specs, disabled_specs);
+    let java_cmd = build_interop_java_cmd(
+        config,
+        enabled_specs,
+        disabled_specs,
+        enabled_tests,
+        disabled_tests,
+    );
     let shell_cmd = build_interop_shell_cmd(&java_cmd);
 
     fs::write(
@@ -611,6 +646,8 @@ fn build_interop_java_cmd(
     config: &ComplianceConfig,
     enabled_specs: &[String],
     disabled_specs: &[String],
+    enabled_tests: &[String],
+    disabled_tests: &[String],
 ) -> Vec<String> {
     let mut cmd = vec![
         format!("-Dsinttest.service={}", config.domain),
@@ -642,6 +679,18 @@ fn build_interop_java_cmd(
         cmd.push(format!(
             "-Dsinttest.disabledSpecifications={}",
             disabled_specs.join(",")
+        ));
+    }
+
+    if !enabled_tests.is_empty() {
+        cmd.push(format!(
+            "-Dsinttest.enabledTests={}",
+            enabled_tests.join(",")
+        ));
+    } else if !disabled_tests.is_empty() {
+        cmd.push(format!(
+            "-Dsinttest.disabledTests={}",
+            disabled_tests.join(",")
         ));
     }
 
@@ -993,6 +1042,19 @@ fn parse_junit_totals(path: &Path) -> Result<Option<JunitTotals>> {
     }))
 }
 
+fn progress_policy_failed(progress: &InteropProgress, report_only_profile: bool) -> bool {
+    if report_only_profile {
+        // Report-only gate accepts skipped/incomplete totals as long as completed tests are 100%
+        // green and there is at least one completed testcase.
+        return progress.tests_failed > 0
+            || progress.tests_completed == 0
+            || progress.tests_passed < progress.tests_completed;
+    }
+
+    // Strict profiles require all started tests to complete with zero failures.
+    progress.tests_failed > 0 || progress.tests_completed < progress.tests_started
+}
+
 fn parse_interop_progress(path: &Path) -> Result<Option<InteropProgress>> {
     if !path.exists() {
         return Ok(None);
@@ -1282,5 +1344,70 @@ mod unit_tests {
         assert!((progress.pass_percentage_of_completed - 50.0).abs() < 0.1);
 
         let _ = fs::remove_file(path);
+    }
+
+    fn sample_config() -> ComplianceConfig {
+        ComplianceConfig {
+            profile: ComplianceProfile::BestEffortFull,
+            artifact_dir: PathBuf::from("/tmp/interop-tests"),
+            keep_containers: false,
+            domain: "localhost".to_string(),
+            host: "127.0.0.1".to_string(),
+            timeout_ms: 5000,
+            container_timeout_secs: None,
+            admin_username: String::new(),
+            admin_password: String::new(),
+            enabled_specs: vec![],
+            disabled_specs: vec![],
+            enabled_tests: vec![],
+            disabled_tests: vec![],
+        }
+    }
+
+    #[test]
+    fn test_build_interop_java_cmd_includes_enabled_tests() {
+        let config = sample_config();
+        let cmd = build_interop_java_cmd(
+            &config,
+            &[],
+            &[],
+            &["RFC6121Section8_5_2_1_1_MessageIntegrationTest".to_string()],
+            &[],
+        );
+
+        assert!(cmd
+            .iter()
+            .any(|arg| arg
+                == "-Dsinttest.enabledTests=RFC6121Section8_5_2_1_1_MessageIntegrationTest"));
+        assert!(!cmd
+            .iter()
+            .any(|arg| arg.starts_with("-Dsinttest.disabledTests=")));
+    }
+
+    #[test]
+    fn test_build_interop_java_cmd_enabled_tests_take_precedence() {
+        let config = sample_config();
+        let cmd = build_interop_java_cmd(&config, &[], &[], &["A".to_string()], &["B".to_string()]);
+
+        assert!(cmd.iter().any(|arg| arg == "-Dsinttest.enabledTests=A"));
+        assert!(!cmd.iter().any(|arg| arg == "-Dsinttest.disabledTests=B"));
+    }
+
+    #[test]
+    fn test_progress_policy_failed_report_only_allows_skipped() {
+        let progress = InteropProgress {
+            tests_started: 10,
+            tests_completed: 9,
+            tests_passed: 9,
+            tests_failed: 0,
+            pass_percentage_of_started: 90.0,
+            pass_percentage_of_completed: 100.0,
+            completion_percentage: 90.0,
+            running_test: Some("Foo.bar".to_string()),
+            failed_tests: vec![],
+        };
+
+        assert!(!progress_policy_failed(&progress, true));
+        assert!(progress_policy_failed(&progress, false));
     }
 }

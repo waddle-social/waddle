@@ -6,6 +6,8 @@ on:
     paths:
       - 'crates/waddle-server/**'
       - 'crates/waddle-xmpp/**'
+      - 'crates/waddle-cli/**'
+      - 'Justfile'
       - '.github/workflows/xmpp-compliance.yml'
       - '.github/actions/xmpp-interop-tests-action/**'
   pull_request:
@@ -13,8 +15,13 @@ on:
     paths:
       - 'crates/waddle-server/**'
       - 'crates/waddle-xmpp/**'
+      - 'crates/waddle-cli/**'
+      - 'Justfile'
       - '.github/workflows/xmpp-compliance.yml'
       - '.github/actions/xmpp-interop-tests-action/**'
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,11 +60,64 @@ jobs:
           path: target/release/waddle-server
           retention-days: 1
 
-  xmpp-interop:
-    name: XMPP Interop Tests (Action)
+  quick-caas:
+    name: Quick CAAS Smoke
+    if: ${{ github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-quick-caas-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run quick CAAS smoke
+        run: just quick-caas test-logs/quick-caas-ci
+
+      - name: Upload quick CAAS logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-caas-logs
+          path: test-logs/quick-caas-ci
+          retention-days: 7
+
+  xmpp-interop-fast:
+    name: XMPP Interop Fast (${{ matrix.shard.name }})
+    if: ${{ github.event_name != 'schedule' }}
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: core-nonheavy
+            timeout_ms: '2000'
+            enabled_tests: ''
+            disabled_tests: >-
+              RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest,RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest
+          - name: heavy-a
+            timeout_ms: '2000'
+            enabled_tests: >-
+              RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest
+            disabled_tests: ''
+          - name: heavy-b
+            timeout_ms: '2000'
+            enabled_tests: >-
+              RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest
+            disabled_tests: ''
 
     steps:
       - uses: actions/checkout@v4
@@ -73,12 +133,13 @@ jobs:
 
       - name: Start Waddle server
         run: |
-          mkdir -p xmpp-interop-logs
+          LOG_DIR="./xmpp-interop-logs-${{ matrix.shard.name }}"
+          mkdir -p "$LOG_DIR"
 
           RUST_LOG=warn \
           WADDLE_MODE=standalone \
           WADDLE_BASE_URL=http://127.0.0.1:3000 \
-          WADDLE_DB_PATH=./xmpp-interop-logs/compliance.db \
+          WADDLE_DB_PATH="$LOG_DIR/compliance.db" \
           WADDLE_XMPP_ENABLED=true \
           WADDLE_XMPP_DOMAIN=localhost \
           WADDLE_XMPP_C2S_ADDR=0.0.0.0:5222 \
@@ -89,13 +150,15 @@ jobs:
           WADDLE_XMPP_ISR_IN_SASL_SUCCESS=false \
           WADDLE_REGISTRATION_ENABLED=true \
           ./target/release/waddle-server \
-            > ./xmpp-interop-logs/waddle-server.log \
+            > "$LOG_DIR/waddle-server.log" \
             2>&1 &
 
-          echo $! > ./xmpp-interop-logs/waddle-server.pid
+          echo $! > "$LOG_DIR/waddle-server.pid"
 
       - name: Wait for server readiness
         run: |
+          LOG_DIR="./xmpp-interop-logs-${{ matrix.shard.name }}"
+
           for i in $(seq 1 90); do
             if nc -z 127.0.0.1 5222 >/dev/null 2>&1 && \
                curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
@@ -106,36 +169,43 @@ jobs:
           done
 
           echo "Server failed to start within timeout"
-          tail -n 200 ./xmpp-interop-logs/waddle-server.log || true
+          tail -n 200 "$LOG_DIR/waddle-server.log" || true
           exit 1
 
       - name: Run XMPP Interop Tests
         uses: ./.github/actions/xmpp-interop-tests-action
         with:
-          testId: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          testId: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard.name }}
           host: '127.0.0.1'
           domain: 'localhost'
-          timeout: '5000'
+          timeout: ${{ matrix.shard.timeout_ms }}
           securityMode: 'required'
           trustedCertPath: 'certs/server.crt'
           enabledSpecifications: 'RFC6120,RFC6121,XEP-0030'
+          enabledTests: ${{ matrix.shard.enabled_tests }}
+          disabledTests: ${{ matrix.shard.disabled_tests }}
           failOnImpossibleTest: 'false'
-          logDir: './xmpp-interop-logs'
+          logDir: ./xmpp-interop-logs-${{ matrix.shard.name }}
 
       - name: Summarize failing tests
         if: always()
+        env:
+          JUNIT_PATH: ./xmpp-interop-logs-${{ matrix.shard.name }}/test-results.xml
+          SHARD_NAME: ${{ matrix.shard.name }}
         run: |
           python - <<'PY'
           import os
           import pathlib
           import xml.etree.ElementTree as ET
 
-          junit = pathlib.Path('xmpp-interop-logs/test-results.xml')
+          junit = pathlib.Path(os.environ['JUNIT_PATH'])
+          shard_name = os.environ.get('SHARD_NAME', 'unknown')
+
           if not junit.exists():
               print('No JUnit report found at', junit)
               if os.environ.get('GITHUB_STEP_SUMMARY'):
                   with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-                      f.write('## XMPP interop summary\n\nNo `test-results.xml` produced.\n')
+                      f.write(f"## XMPP interop summary ({shard_name})\n\nNo `test-results.xml` produced.\n")
               raise SystemExit(0)
 
           root = ET.parse(junit).getroot()
@@ -151,7 +221,7 @@ jobs:
                   failed.append(tc.attrib.get('name', '<unknown>'))
 
           lines = [
-              '## XMPP interop summary',
+              f'## XMPP interop summary ({shard_name})',
               '',
               f'- total testcases: **{total}**',
               f'- failed testcases: **{len(failed)}**',
@@ -178,8 +248,10 @@ jobs:
       - name: Stop Waddle server
         if: always()
         run: |
-          if [[ -f ./xmpp-interop-logs/waddle-server.pid ]]; then
-            pid="$(cat ./xmpp-interop-logs/waddle-server.pid)"
+          LOG_DIR="./xmpp-interop-logs-${{ matrix.shard.name }}"
+
+          if [[ -f "$LOG_DIR/waddle-server.pid" ]]; then
+            pid="$(cat "$LOG_DIR/waddle-server.pid")"
             kill "$pid" >/dev/null 2>&1 || true
             wait "$pid" 2>/dev/null || true
           fi
@@ -188,12 +260,158 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: waddle-server-logs
-          path: ./xmpp-interop-logs/waddle-server.log
+          name: waddle-server-logs-${{ matrix.shard.name }}
+          path: ./xmpp-interop-logs-${{ matrix.shard.name }}/waddle-server.log
+          retention-days: 7
+
+  xmpp-interop-nightly:
+    name: XMPP Interop Nightly (Full)
+    if: ${{ github.event_name == 'schedule' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: waddle-server
+          path: target/release
+
+      - name: Make server binary executable
+        run: chmod +x target/release/waddle-server
+
+      - name: Start Waddle server
+        run: |
+          mkdir -p xmpp-interop-logs-nightly
+
+          RUST_LOG=warn \
+          WADDLE_MODE=standalone \
+          WADDLE_BASE_URL=http://127.0.0.1:3000 \
+          WADDLE_DB_PATH=./xmpp-interop-logs-nightly/compliance.db \
+          WADDLE_XMPP_ENABLED=true \
+          WADDLE_XMPP_DOMAIN=localhost \
+          WADDLE_XMPP_C2S_ADDR=0.0.0.0:5222 \
+          WADDLE_XMPP_TLS_CERT=certs/server.crt \
+          WADDLE_XMPP_TLS_KEY=certs/server.key \
+          WADDLE_XMPP_S2S_ENABLED=false \
+          WADDLE_NATIVE_AUTH_ENABLED=true \
+          WADDLE_XMPP_ISR_IN_SASL_SUCCESS=false \
+          WADDLE_REGISTRATION_ENABLED=true \
+          ./target/release/waddle-server \
+            > ./xmpp-interop-logs-nightly/waddle-server.log \
+            2>&1 &
+
+          echo $! > ./xmpp-interop-logs-nightly/waddle-server.pid
+
+      - name: Wait for server readiness
+        run: |
+          for i in $(seq 1 90); do
+            if nc -z 127.0.0.1 5222 >/dev/null 2>&1 && \
+               curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
+              echo "Server is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Server failed to start within timeout"
+          tail -n 200 ./xmpp-interop-logs-nightly/waddle-server.log || true
+          exit 1
+
+      - name: Run XMPP Interop Tests (nightly full)
+        uses: ./.github/actions/xmpp-interop-tests-action
+        with:
+          testId: nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          host: '127.0.0.1'
+          domain: 'localhost'
+          timeout: '5000'
+          securityMode: 'required'
+          trustedCertPath: 'certs/server.crt'
+          enabledSpecifications: 'RFC6120,RFC6121,XEP-0030'
+          failOnImpossibleTest: 'false'
+          logDir: './xmpp-interop-logs-nightly'
+
+      - name: Summarize failing tests
+        if: always()
+        env:
+          JUNIT_PATH: ./xmpp-interop-logs-nightly/test-results.xml
+          SHARD_NAME: nightly-full
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          junit = pathlib.Path(os.environ['JUNIT_PATH'])
+          shard_name = os.environ.get('SHARD_NAME', 'unknown')
+
+          if not junit.exists():
+              print('No JUnit report found at', junit)
+              if os.environ.get('GITHUB_STEP_SUMMARY'):
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                      f.write(f"## XMPP interop summary ({shard_name})\n\nNo `test-results.xml` produced.\n")
+              raise SystemExit(0)
+
+          root = ET.parse(junit).getroot()
+          failed = []
+          total = 0
+          skipped = 0
+
+          for tc in root.iter('testcase'):
+              total += 1
+              if tc.find('skipped') is not None:
+                  skipped += 1
+              if tc.find('failure') is not None or tc.find('error') is not None:
+                  failed.append(tc.attrib.get('name', '<unknown>'))
+
+          lines = [
+              f'## XMPP interop summary ({shard_name})',
+              '',
+              f'- total testcases: **{total}**',
+              f'- failed testcases: **{len(failed)}**',
+              f'- skipped testcases: **{skipped}**',
+              ''
+          ]
+
+          if failed:
+              lines.append('### Failed tests')
+              lines.append('')
+              for name in failed:
+                  lines.append(f'- `{name}`')
+          else:
+              lines.append('No failed tests reported in JUnit output.')
+
+          summary = '\n'.join(lines) + '\n'
+          print(summary)
+
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                  f.write(summary)
+          PY
+
+      - name: Stop Waddle server
+        if: always()
+        run: |
+          if [[ -f ./xmpp-interop-logs-nightly/waddle-server.pid ]]; then
+            pid="$(cat ./xmpp-interop-logs-nightly/waddle-server.pid)"
+            kill "$pid" >/dev/null 2>&1 || true
+            wait "$pid" 2>/dev/null || true
+          fi
+
+      - name: Upload Waddle server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: waddle-server-logs-nightly
+          path: ./xmpp-interop-logs-nightly/waddle-server.log
           retention-days: 7
 
   unit-tests:
     name: Unit Tests
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -220,6 +438,7 @@ jobs:
 
   lint:
     name: Lint & Format
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

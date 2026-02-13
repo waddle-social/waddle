@@ -10,5 +10,6 @@ Why we keep a local wrapper:
 Local deltas:
 - Added `securityMode` input (default: `required`).
 - Added `trustedCertPath` input to import a self-signed cert into Java cacerts.
+- Added `accountRegistration` passthrough (default: `inBandRegistration`).
 
 When upstream supports configurable security mode and cert trust directly, we can switch back to using upstream action verbatim.

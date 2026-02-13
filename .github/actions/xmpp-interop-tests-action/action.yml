@@ -21,6 +21,10 @@ inputs:
     description: 'Smack security mode (required, ifpossible, disabled).'
     required: false
     default: 'required'
+  accountRegistration:
+    description: 'Account registration strategy (for example inBandRegistration or serviceAdministration).'
+    required: false
+    default: 'inBandRegistration'
   adminAccountUsername:
     description: 'Account name of a pre-existing user that is allowed to create other users, per XEP-0133.'
     required: false
@@ -141,6 +145,9 @@ runs:
         JAVACMD+=("-Dsinttest.service=${{ inputs.domain }}")
         JAVACMD+=("-Dsinttest.host=${{ inputs.host }}")
         JAVACMD+=("-Dsinttest.securityMode=${{ inputs.securityMode }}")
+        if [ "${{ inputs.accountRegistration }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountRegistration=${{ inputs.accountRegistration }}")
+        fi
         JAVACMD+=("-Dsinttest.replyTimeout=${{ inputs.timeout }}")
         JAVACMD+=("-Dsinttest.testPackages=com,org,net,biz,info,dev,io,uk,ch,fr,de,dk,in")
 

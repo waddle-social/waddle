@@ -12,11 +12,19 @@
 - Full scoped compliance (RFC6120,RFC6121,XEP-0030)
   - Command: `... --enabled-specs RFC6120,RFC6121,XEP-0030 ...`
   - Latest duration: **11,267.63s** (**~3h 07m 48s**)
+- Fast sharded gate (timeout 2000ms, 3 shards)
+  - `core-nonheavy` (`--disabled-tests=<6 heavy suites>`): **54.66s**
+  - `heavy-b` (`--enabled-tests=<3 suites>`): **782.91s** (~13m 03s)
+  - `heavy-a` (`--enabled-tests=<3 suites>`): **1500.09s** (~25m 00s)
+  - Expected wall-clock in CI (parallel shards): **~25–30m**
 
 Artifacts:
 - `test-logs/quick-caas/summary.json`
 - `test-logs/rka-dev-xep0030-check-1/summary.json`
 - `test-logs/rka-dev-full-final-6/summary.json`
+- `test-logs/todo-shard-core-nonheavy/summary.json`
+- `test-logs/todo-shard-heavy-a/summary.json`
+- `test-logs/todo-shard-heavy-b/summary.json`
 
 ---
 
@@ -44,6 +52,8 @@ Current full runs use `--timeout-ms 10000` (`sinttest.replyTimeout=10000`).
 - [ ] Calibrate at `--timeout-ms 1500`
 - [ ] Track pass/fail flake rate per setting across 3 consecutive runs
 
+Progress note: `timeout-ms=2000` is now validated for all three CI shards (no failures across the latest shard runs).
+
 Rule of thumb from current timing: runtime scales roughly with timeout.
 Estimated total runtime:
 - 3000ms → ~56m
@@ -62,17 +72,23 @@ WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance 
 
 ### Step 2: shard heavy suites across parallel jobs
 
-- [ ] Add CLI/harness support for Smack `enabledTests` / `disabledTests` passthrough (`-Dsinttest.enabledTests=...`).
-- [ ] Split the six heavy suites into at least 2 shards and run in parallel CI jobs.
-- [ ] Keep a small non-heavy shard for the rest.
+- [x] Add CLI/harness support for Smack `enabledTests` / `disabledTests` passthrough (`-Dsinttest.enabledTests=...`).
+- [x] Split the six heavy suites into at least 2 shards and run in parallel CI jobs.
+- [x] Keep a small non-heavy shard for the rest.
 
-Expected: 2-way sharding + `timeout-ms=2000` should land around or below 30m wall-clock.
+Status (implemented):
+- `waddle compliance` now supports `--enabled-tests` / `--disabled-tests`.
+- Harness env passthrough: `WADDLE_COMPLIANCE_ENABLED_TESTS` / `WADDLE_COMPLIANCE_DISABLED_TESTS`.
+- CI fast matrix now uses 3 shards at `timeout=2000ms`: `core-nonheavy`, `heavy-a`, `heavy-b`.
+- Latest shard aggregate: `tests=422`, `failed=0`, `errors=0`, `skipped=8` (matches full scoped inventory).
+
+Measured with 3-way sharding at `timeout-ms=2000`: max shard is ~1500s (~25m), so expected CI wall-clock is ~25–30m.
 
 ### Step 3: CI policy split
 
-- [ ] PR gate: `just quick-caas` + fast compliance shard(s)
-- [ ] Nightly gate: full, unsharded reference run (for drift detection)
-- [ ] Fail PR only on fast-gate regressions; alert on nightly regressions
+- [x] PR gate: `just quick-caas` + fast compliance shard(s)
+- [x] Nightly gate: full, unsharded reference run (for drift detection)
+- [x] Fail PR only on fast-gate regressions; alert on nightly regressions
 
 ---
 
@@ -107,7 +123,9 @@ So there are **no currently failing tests** in the latest completed full run.
   - `RFC6121Section2_5_DeleteIntegrationTest.testRosterDeleteGeneratesPushToInterestedResourceOtherResourceWithoutInitialPresence`
 
 ### 3) Compliance gating
-- [ ] Decide CI acceptance rule for report-only mode:
-  - Option A: `tests_failed == 0` and `pass_percentage_of_completed == 100`
-  - Option B: require `skipped == 0` (stricter)
-- [ ] Encode final rule in CI and documentation.
+- [x] Decide CI acceptance rule for report-only mode:
+  - Selected Option A: `tests_failed == 0` and completed testcases are 100% passing (`tests_passed == tests_completed`), with `tests_completed > 0`.
+  - Option B (`skipped == 0`) remains too strict for current harness behavior.
+- [x] Encode final rule in CI and documentation.
+  - Harness `compliance_failed` logic now applies Option A semantics in report-only profiles.
+  - CI summaries continue reporting skipped counts for visibility.
