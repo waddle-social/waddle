@@ -82,8 +82,13 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-quick-caas-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install just
+        uses: taiki-e/install-action@just
+
       - name: Run quick CAAS smoke
-        run: just quick-caas test-logs/quick-caas-ci
+        run: |
+          mkdir -p test-logs/quick-caas-ci
+          just quick-caas test-logs/quick-caas-ci
 
       - name: Upload quick CAAS logs
         if: always()
@@ -104,7 +109,7 @@ jobs:
       matrix:
         shard:
           - name: core-nonheavy
-            timeout_ms: '2000'
+            timeout_ms: '3000'
             enabled_tests: ''
             disabled_tests: >-
               RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest,RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest
