@@ -1813,7 +1813,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     self.select_bare_message_targets(&recipient_bare, bare_delivery);
                 for resource_jid in fallback_resources {
                     let stanza = Stanza::Message(msg_with_from.clone());
-                    match self.connection_registry.send_to(&resource_jid, stanza).await {
+                    match self
+                        .connection_registry
+                        .send_to(&resource_jid, stanza)
+                        .await
+                    {
                         SendResult::Sent => {
                             delivered = true;
                             delivered_resources.push(resource_jid.clone());
@@ -2851,7 +2855,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // respond with <presence type='unsubscribed'> per RFC 6121 §4.3.
         if to.domain().as_str() == self.domain {
             if !self.local_user_exists(&to).await? {
-                let mut unsubscribed = xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribed);
+                let mut unsubscribed =
+                    xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribed);
                 unsubscribed.from = Some(to.clone().into());
                 unsubscribed.to = Some(from.clone().into());
                 self.route_stanza_to_bare_jid(&from, Stanza::Presence(unsubscribed))
@@ -3438,13 +3443,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
             // Query to a bare JID (user@domain) - PEP service (XEP-0163)
             Some(target) if target.contains('@') && !target.contains('/') => {
-                let requester = self
-                    .jid
-                    .as_ref()
-                    .map(|jid| jid.to_bare())
-                    .ok_or_else(|| {
-                        XmppError::not_authorized(Some("Session not established".to_string()))
-                    })?;
+                let requester = self.jid.as_ref().map(|jid| jid.to_bare()).ok_or_else(|| {
+                    XmppError::not_authorized(Some("Session not established".to_string()))
+                })?;
 
                 let target_bare: jid::BareJid = target.parse().map_err(|e| {
                     XmppError::bad_request(Some(format!("Invalid bare JID '{}': {}", target, e)))
@@ -4715,8 +4716,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         .remove_roster_item(&sender_bare, &item.jid)
                         .await?;
 
-                    self.handle_roster_remove_side_effects(&sender_jid, &sender_bare, &existing_item)
-                        .await?;
+                    self.handle_roster_remove_side_effects(
+                        &sender_jid,
+                        &sender_bare,
+                        &existing_item,
+                    )
+                    .await?;
 
                     RosterItem::new(item.jid.clone()).set_subscription(Subscription::Remove)
                 }
@@ -4784,7 +4789,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         removed_item: &RosterItem,
     ) -> Result<(), XmppError> {
         let contact_jid = removed_item.jid.clone();
-        let send_unsubscribe = matches!(removed_item.subscription, Subscription::To | Subscription::Both);
+        let send_unsubscribe = matches!(
+            removed_item.subscription,
+            Subscription::To | Subscription::Both
+        );
         let send_unsubscribed = matches!(
             removed_item.subscription,
             Subscription::From | Subscription::Both

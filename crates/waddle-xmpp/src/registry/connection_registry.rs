@@ -618,14 +618,12 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let bare: BareJid = "user@example.com".parse().unwrap();
 
-        let mut subscribe = xmpp_parsers::presence::Presence::new(
-            xmpp_parsers::presence::Type::Subscribe,
-        );
+        let mut subscribe =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Subscribe);
         subscribe.to = Some(jid::Jid::from(bare.clone()));
 
-        let mut unsubscribed = xmpp_parsers::presence::Presence::new(
-            xmpp_parsers::presence::Type::Unsubscribed,
-        );
+        let mut unsubscribed =
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unsubscribed);
         unsubscribed.to = Some(jid::Jid::from(bare.clone()));
 
         registry.queue_pending_subscription_stanza(&bare, Stanza::Presence(subscribe));
@@ -633,8 +631,12 @@ mod tests {
 
         let drained = registry.drain_pending_subscription_stanzas(&bare);
         assert_eq!(drained.len(), 2);
-        assert!(matches!(&drained[0], Stanza::Presence(p) if p.type_ == xmpp_parsers::presence::Type::Subscribe));
-        assert!(matches!(&drained[1], Stanza::Presence(p) if p.type_ == xmpp_parsers::presence::Type::Unsubscribed));
+        assert!(
+            matches!(&drained[0], Stanza::Presence(p) if p.type_ == xmpp_parsers::presence::Type::Subscribe)
+        );
+        assert!(
+            matches!(&drained[1], Stanza::Presence(p) if p.type_ == xmpp_parsers::presence::Type::Unsubscribed)
+        );
 
         // Draining again should be empty.
         assert!(registry
