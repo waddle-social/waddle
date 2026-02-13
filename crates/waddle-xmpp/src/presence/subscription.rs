@@ -146,7 +146,11 @@ pub enum PresenceAction {
     /// This is a regular presence update (available, unavailable, etc.).
     PresenceUpdate(Presence),
     /// This is a presence probe request.
-    Probe { from: BareJid, to: BareJid },
+    Probe {
+        from: BareJid,
+        to: BareJid,
+        to_was_full: bool,
+    },
 }
 
 /// Parse a presence stanza and determine if it's subscription-related.
@@ -163,13 +167,14 @@ pub fn parse_subscription_presence(
         let to = pres.to.as_ref().ok_or_else(|| {
             XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string()))
         })?;
-        let to_bare = match to.clone().try_into_full() {
-            Ok(full) => full.to_bare(),
-            Err(bare) => bare,
+        let (to_bare, to_was_full) = match to.clone().try_into_full() {
+            Ok(full) => (full.to_bare(), true),
+            Err(bare) => (bare, false),
         };
         return Ok(PresenceAction::Probe {
             from: sender_jid.clone(),
             to: to_bare,
+            to_was_full,
         });
     }
 
@@ -666,9 +671,38 @@ mod tests {
         let action = parse_subscription_presence(&pres, &sender).unwrap();
 
         match action {
-            PresenceAction::Probe { from, to } => {
+            PresenceAction::Probe {
+                from,
+                to,
+                to_was_full,
+            } => {
                 assert_eq!(from, sender);
                 assert_eq!(to, target);
+                assert!(!to_was_full);
+            }
+            _ => panic!("Expected Probe action"),
+        }
+    }
+
+    #[test]
+    fn test_parse_probe_presence_full_jid() {
+        let sender: BareJid = "user@example.com".parse().unwrap();
+        let target: jid::FullJid = "contact@example.com/resource".parse().unwrap();
+
+        let mut pres = Presence::new(PresenceType::Probe);
+        pres.to = Some(Jid::from(target.clone()));
+
+        let action = parse_subscription_presence(&pres, &sender).unwrap();
+
+        match action {
+            PresenceAction::Probe {
+                from,
+                to,
+                to_was_full,
+            } => {
+                assert_eq!(from, sender);
+                assert_eq!(to, target.to_bare());
+                assert!(to_was_full);
             }
             _ => panic!("Expected Probe action"),
         }

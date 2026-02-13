@@ -120,6 +120,8 @@ pub enum SendResult {
 pub struct ConnectionRegistry {
     /// Map of full JID to connection entry (includes sender and carbons status)
     connections: DashMap<FullJid, ConnectionEntry>,
+    /// Pending subscription stanzas for offline users (RFC 6121).
+    pending_subscription_stanzas: DashMap<BareJid, Vec<Stanza>>,
 }
 
 impl ConnectionRegistry {
@@ -128,6 +130,7 @@ impl ConnectionRegistry {
         info!("Creating connection registry");
         Self {
             connections: DashMap::new(),
+            pending_subscription_stanzas: DashMap::new(),
         }
     }
 
@@ -267,6 +270,24 @@ impl ConnectionRegistry {
             .filter(|entry| entry.key().to_bare() == *bare_jid)
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// Queue a subscription stanza for an offline bare JID.
+    ///
+    /// These stanzas are delivered when the user next becomes available.
+    pub fn queue_pending_subscription_stanza(&self, bare_jid: &BareJid, stanza: Stanza) {
+        self.pending_subscription_stanzas
+            .entry(bare_jid.clone())
+            .or_default()
+            .push(stanza);
+    }
+
+    /// Drain and return all pending subscription stanzas for a bare JID.
+    pub fn drain_pending_subscription_stanzas(&self, bare_jid: &BareJid) -> Vec<Stanza> {
+        self.pending_subscription_stanzas
+            .remove(bare_jid)
+            .map(|(_, stanzas)| stanzas)
+            .unwrap_or_default()
     }
 
     /// Update presence state for a connected resource.
@@ -590,5 +611,34 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let missing: FullJid = "missing@example.com/resource".parse().unwrap();
         assert!(!registry.update_presence(&missing, true, 1));
+    }
+
+    #[test]
+    fn test_queue_and_drain_pending_subscription_stanzas() {
+        let registry = ConnectionRegistry::new();
+        let bare: BareJid = "user@example.com".parse().unwrap();
+
+        let mut subscribe = xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::Subscribe,
+        );
+        subscribe.to = Some(jid::Jid::from(bare.clone()));
+
+        let mut unsubscribed = xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::Unsubscribed,
+        );
+        unsubscribed.to = Some(jid::Jid::from(bare.clone()));
+
+        registry.queue_pending_subscription_stanza(&bare, Stanza::Presence(subscribe));
+        registry.queue_pending_subscription_stanza(&bare, Stanza::Presence(unsubscribed));
+
+        let drained = registry.drain_pending_subscription_stanzas(&bare);
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(&drained[0], Stanza::Presence(p) if p.type_ == xmpp_parsers::presence::Type::Subscribe));
+        assert!(matches!(&drained[1], Stanza::Presence(p) if p.type_ == xmpp_parsers::presence::Type::Unsubscribed));
+
+        // Draining again should be empty.
+        assert!(registry
+            .drain_pending_subscription_stanzas(&bare)
+            .is_empty());
     }
 }

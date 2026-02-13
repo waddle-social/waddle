@@ -262,18 +262,27 @@ impl XmlParser {
             ("<inactive", parse_csi_inactive),
         ];
 
+        // Find the earliest matching pattern in the buffer.
+        // Ties (same start position) are broken by pattern list order,
+        // which ensures e.g. "<resume" is preferred over "<r".
+        let mut best: Option<(usize, &str, StanzaParser)> = None;
         for (pattern, parser) in stanza_patterns {
             if let Some(start) = data.find(pattern) {
-                // Find the end of this stanza
-                let tag_name = &pattern[1..].trim(); // Strip leading < and any trailing space
-                if let Some(end) = find_stanza_end(&data, start, tag_name) {
-                    let stanza_xml = &data[start..end];
-                    let result = parser(stanza_xml)?;
-
-                    // Remove parsed data from buffer
-                    self.buffer = data.as_bytes()[end..].to_vec();
-                    return Ok(Some(result));
+                if best.is_none() || start < best.unwrap().0 {
+                    best = Some((start, pattern, *parser));
                 }
+            }
+        }
+
+        if let Some((start, pattern, parser)) = best {
+            let tag_name = &pattern[1..].trim(); // Strip leading < and any trailing space
+            if let Some(end) = find_stanza_end(&data, start, tag_name) {
+                let stanza_xml = &data[start..end];
+                let result = parser(stanza_xml)?;
+
+                // Remove parsed data from buffer
+                self.buffer = data.as_bytes()[end..].to_vec();
+                return Ok(Some(result));
             }
         }
 
@@ -971,5 +980,62 @@ mod tests {
         } else {
             panic!("Expected SmResume");
         }
+    }
+
+    #[test]
+    fn test_parser_presence_then_iq_in_order() {
+        let mut parser = XmlParser::new();
+        parser.feed(
+            b"<presence xmlns='jabber:client' from='alice@example.com' type='available'/>\
+              <iq xmlns='jabber:client' type='get' id='q1'><query xmlns='jabber:iq:roster'/></iq>",
+        );
+
+        // First call must return the presence (earliest in buffer)
+        let first = parser.next_stanza().unwrap();
+        match first {
+            Some(ParsedStanza::Presence(ref el)) => {
+                assert_eq!(el.name(), "presence");
+                assert_eq!(el.attr("from"), Some("alice@example.com"));
+            }
+            other => panic!("Expected Presence, got {:?}", other),
+        }
+
+        // Second call must return the iq
+        let second = parser.next_stanza().unwrap();
+        match second {
+            Some(ParsedStanza::Iq(ref el)) => {
+                assert_eq!(el.name(), "iq");
+                assert_eq!(el.attr("id"), Some("q1"));
+            }
+            other => panic!("Expected Iq, got {:?}", other),
+        }
+
+        // Buffer should now be empty
+        assert!(parser.next_stanza().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parser_earliest_position_wins_over_pattern_order() {
+        // iq appears before presence in the pattern list, but presence
+        // appears first in the buffer — presence must be returned first.
+        let mut parser = XmlParser::new();
+        parser.feed(
+            b"<presence xmlns='jabber:client' type='unavailable'/>\
+              <iq xmlns='jabber:client' type='result' id='x1'/>",
+        );
+
+        let first = parser.next_stanza().unwrap();
+        assert!(
+            matches!(first, Some(ParsedStanza::Presence(_))),
+            "Expected Presence first, got {:?}",
+            first
+        );
+
+        let second = parser.next_stanza().unwrap();
+        assert!(
+            matches!(second, Some(ParsedStanza::Iq(_))),
+            "Expected Iq second, got {:?}",
+            second
+        );
     }
 }

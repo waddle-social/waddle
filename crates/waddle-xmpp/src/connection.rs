@@ -13,6 +13,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
+use xmpp_parsers::presence::Type as PresenceType;
 
 use crate::carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
@@ -62,7 +63,7 @@ use crate::pubsub::{
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::roster::{
     build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
-    is_roster_set, parse_roster_get, parse_roster_set, RosterItem,
+    is_roster_set, parse_roster_get, parse_roster_set, RosterItem, Subscription,
 };
 use crate::routing::StanzaRouter;
 use crate::stream::{PreAuthResult, SaslAuthResult, XmppStream};
@@ -1362,8 +1363,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .await
             }
             MessageType::Error => {
-                self.handle_direct_message(msg, sender_jid, BareMessageDelivery::AllNonNegative)
-                    .await
+                let to_full = msg
+                    .to
+                    .as_ref()
+                    .and_then(|jid| jid.clone().try_into_full().ok());
+
+                if to_full.is_some() {
+                    // RFC 6121: full-JID delivery for message type='error' is supported.
+                    self.handle_direct_message(msg, sender_jid, BareMessageDelivery::AllNonNegative)
+                        .await
+                } else {
+                    // RFC 6121 Section 8.5.2.1.1: bare-JID delivery of message type='error'
+                    // MUST NOT be delivered to client resources.
+                    debug!(from = %sender_jid, to = ?msg.to, "Dropping bare-JID message type='error'");
+                    Ok(())
+                }
             }
         }
     }
@@ -1758,6 +1772,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         if let Some(recipient_full) = recipient_full {
             let stanza = Stanza::Message(msg_with_from.clone());
+            let mut should_fallback_to_bare = false;
+
             match self
                 .connection_registry
                 .send_to(&recipient_full, stanza)
@@ -1771,8 +1787,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 SendResult::NotConnected => {
                     debug!(
                         to = %recipient_full,
-                        "Recipient full JID is not connected, message not delivered"
+                        "Recipient full JID is not connected"
                     );
+                    should_fallback_to_bare = true;
                 }
                 SendResult::ChannelFull => {
                     warn!(
@@ -1783,8 +1800,32 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 SendResult::ChannelClosed => {
                     debug!(
                         to = %recipient_full,
-                        "Recipient full JID channel closed, message not delivered"
+                        "Recipient full JID channel closed"
                     );
+                    should_fallback_to_bare = true;
+                }
+            }
+
+            // RFC 6121: if a full-JID target is unavailable, only `type='chat'`
+            // is rerouted as bare-JID delivery.
+            if should_fallback_to_bare && matches!(msg.type_, MessageType::Chat) {
+                let fallback_resources =
+                    self.select_bare_message_targets(&recipient_bare, bare_delivery);
+                for resource_jid in fallback_resources {
+                    let stanza = Stanza::Message(msg_with_from.clone());
+                    match self.connection_registry.send_to(&resource_jid, stanza).await {
+                        SendResult::Sent => {
+                            delivered = true;
+                            delivered_resources.push(resource_jid.clone());
+                            debug!(to = %resource_jid, "Message delivered via bare-JID fallback");
+                        }
+                        SendResult::NotConnected | SendResult::ChannelClosed => {
+                            debug!(to = %resource_jid, "Fallback recipient unavailable");
+                        }
+                        SendResult::ChannelFull => {
+                            warn!(to = %resource_jid, "Fallback recipient channel full");
+                        }
+                    }
                 }
             }
         } else {
@@ -1989,8 +2030,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             PresenceAction::Subscription(request) => {
                 return self.handle_subscription_presence(request).await;
             }
-            PresenceAction::Probe { from, to } => {
-                return self.handle_presence_probe(from, to).await;
+            PresenceAction::Probe {
+                from,
+                to,
+                to_was_full,
+            } => {
+                return self.handle_presence_probe(from, to, to_was_full).await;
             }
             PresenceAction::PresenceUpdate(pres) => {
                 // Continue with MUC/regular presence handling below
@@ -2790,6 +2835,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         &mut self,
         from: jid::BareJid,
         to: jid::BareJid,
+        _to_was_full: bool,
     ) -> Result<(), XmppError> {
         debug!(
             from = %from,
@@ -2801,11 +2847,30 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // to receive the target's presence (subscription=to or both)
         // For now, we'll respond with current presence if the target is connected
 
+        // If target is a local bare JID and the account does not exist,
+        // respond with <presence type='unsubscribed'> per RFC 6121 §4.3.
+        if to.domain().as_str() == self.domain {
+            if !self.local_user_exists(&to).await? {
+                let mut unsubscribed = xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribed);
+                unsubscribed.from = Some(to.clone().into());
+                unsubscribed.to = Some(from.clone().into());
+                self.route_stanza_to_bare_jid(&from, Stanza::Presence(unsubscribed))
+                    .await?;
+
+                debug!(
+                    from = %from,
+                    to = %to,
+                    "Sent unsubscribed presence in response to probe (account does not exist)"
+                );
+                return Ok(());
+            }
+        }
+
         // Get all connected resources for the target user
         let resources = self.connection_registry.get_resources_for_user(&to);
 
         if resources.is_empty() {
-            // User is offline - send unavailable presence
+            // User exists but is offline: return unavailable presence.
             let unavailable = build_unavailable_presence(&to, &from);
             let stanza = Stanza::Presence(unavailable);
             self.route_stanza_to_bare_jid(&from, stanza).await?;
@@ -2872,9 +2937,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // not roster subscribers.
         if let Some(target) = pres_clone.to.clone() {
             if let Ok(target_full) = target.clone().try_into_full() {
-                let stanza = Stanza::Presence(pres_clone);
-                let _ = self.connection_registry.send_to(&target_full, stanza).await;
-                return Ok(());
+                let stanza = Stanza::Presence(pres_clone.clone());
+                match self.connection_registry.send_to(&target_full, stanza).await {
+                    SendResult::Sent => return Ok(()),
+                    SendResult::NotConnected | SendResult::ChannelClosed => {
+                        // Full-JID target is gone; silently drop.
+                        return Ok(());
+                    }
+                    SendResult::ChannelFull => {
+                        warn!(to = %target_full, "Directed presence dropped: recipient channel full");
+                        return Ok(());
+                    }
+                }
             }
 
             let target_bare = target.to_bare();
@@ -2882,9 +2956,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 .connection_registry
                 .get_available_resources_for_user(&target_bare);
             for (target_full, _) in available_targets {
-                let mut routed = pres_clone.clone();
-                routed.to = Some(target_full.clone().into());
-                let stanza = Stanza::Presence(routed);
+                // Preserve the original bare-JID 'to' value per RFC 6121.
+                let stanza = Stanza::Presence(pres_clone.clone());
                 let _ = self.connection_registry.send_to(&target_full, stanza).await;
             }
             return Ok(());
@@ -2899,6 +2972,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         if is_available {
             self.last_available_presence = Some(pres_clone.clone());
+            self.deliver_pending_subscription_stanzas(&sender_bare)
+                .await;
             info!(
                 sender = %sender_bare,
                 avatar_hash = ?self.avatar_hash,
@@ -2933,28 +3008,88 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
-    /// Route a stanza to a bare JID (all connected resources or offline storage).
+    /// Deliver queued subscription stanzas for a user that just became available.
+    async fn deliver_pending_subscription_stanzas(&self, user_bare: &jid::BareJid) {
+        let pending = self
+            .connection_registry
+            .drain_pending_subscription_stanzas(user_bare);
+        if pending.is_empty() {
+            return;
+        }
+
+        let resources = self
+            .connection_registry
+            .get_available_resources_for_user(user_bare);
+        if resources.is_empty() {
+            // User became unavailable again before we could deliver; re-queue stanzas.
+            for stanza in pending {
+                self.connection_registry
+                    .queue_pending_subscription_stanza(user_bare, stanza);
+            }
+            return;
+        }
+
+        debug!(
+            user = %user_bare,
+            stanza_count = pending.len(),
+            resource_count = resources.len(),
+            "Delivering queued subscription stanzas"
+        );
+
+        for stanza in pending {
+            for (resource_jid, _) in &resources {
+                let _ = self
+                    .connection_registry
+                    .send_to(resource_jid, stanza.clone())
+                    .await;
+            }
+        }
+    }
+
+    fn is_queueable_subscription_stanza(stanza: &Stanza) -> bool {
+        matches!(
+            stanza,
+            Stanza::Presence(pres)
+                if matches!(
+                    pres.type_,
+                    PresenceType::Subscribe
+                        | PresenceType::Subscribed
+                        | PresenceType::Unsubscribe
+                        | PresenceType::Unsubscribed
+                )
+        )
+    }
+
+    /// Route a stanza to a bare JID (all connected resources or queued for offline delivery).
     ///
-    /// Helper method to route presence and other stanzas to users.
+    /// Subscription presence stanzas are queued when the target user is offline and
+    /// delivered when the user next becomes available.
     async fn route_stanza_to_bare_jid(
         &self,
         target: &jid::BareJid,
         stanza: Stanza,
     ) -> Result<(), XmppError> {
-        // Get all connected resources for the target
+        // Get all connected resources for the target.
         let resources = self.connection_registry.get_resources_for_user(target);
 
         if resources.is_empty() {
-            // User is offline - presence stanzas are typically not stored
-            // but subscription stanzas should be queued
-            debug!(
-                target = %target,
-                "Target user offline, stanza not delivered"
-            );
+            if Self::is_queueable_subscription_stanza(&stanza) {
+                self.connection_registry
+                    .queue_pending_subscription_stanza(target, stanza);
+                debug!(
+                    target = %target,
+                    "Queued subscription stanza for offline user"
+                );
+            } else {
+                debug!(
+                    target = %target,
+                    "Target user offline, stanza not delivered"
+                );
+            }
             return Ok(());
         }
 
-        // Send to all connected resources
+        // Send to all connected resources.
         for resource_jid in resources {
             let _ = self
                 .connection_registry
@@ -3198,6 +3333,28 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
+    /// Check if a local bare JID corresponds to an existing local user account.
+    async fn local_user_exists(&self, bare_jid: &jid::BareJid) -> Result<bool, XmppError> {
+        if bare_jid.domain().as_str() != self.domain {
+            return Ok(false);
+        }
+
+        // Online users are known to exist.
+        if !self
+            .connection_registry
+            .get_resources_for_user(bare_jid)
+            .is_empty()
+        {
+            return Ok(true);
+        }
+
+        let Some(node) = bare_jid.node() else {
+            return Ok(false);
+        };
+
+        self.app_state.native_user_exists(node.as_str()).await
+    }
+
     /// Handle a disco#info query.
     ///
     /// Returns identity and supported features for:
@@ -3280,12 +3437,60 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
             // Query to a bare JID (user@domain) - PEP service (XEP-0163)
-            Some(target)
-                if target.contains('@')
-                    && !target.contains('/')
-                    && target.ends_with(&format!("@{}", self.domain)) =>
-            {
-                debug!(target = %target, "disco#info query to bare JID (PEP)");
+            Some(target) if target.contains('@') && !target.contains('/') => {
+                let requester = self
+                    .jid
+                    .as_ref()
+                    .map(|jid| jid.to_bare())
+                    .ok_or_else(|| {
+                        XmppError::not_authorized(Some("Session not established".to_string()))
+                    })?;
+
+                let target_bare: jid::BareJid = target.parse().map_err(|e| {
+                    XmppError::bad_request(Some(format!("Invalid bare JID '{}': {}", target, e)))
+                })?;
+
+                if target_bare.domain().as_str() != self.domain {
+                    return Err(XmppError::service_unavailable(Some(format!(
+                        "Unsupported disco#info target {}",
+                        target_bare
+                    ))));
+                }
+
+                if !self.local_user_exists(&target_bare).await? {
+                    return Err(XmppError::service_unavailable(Some(format!(
+                        "Entity {} not found",
+                        target_bare
+                    ))));
+                }
+
+                // Non-self bare-JID queries without a node are not supported
+                if requester != target_bare && query.node.is_none() {
+                    return Err(XmppError::service_unavailable(Some(format!(
+                        "disco#info on bare JID {} without node is not supported for other users",
+                        target_bare
+                    ))));
+                }
+
+                if requester != target_bare {
+                    let has_presence_access = self
+                        .app_state
+                        .get_roster_item(&target_bare, &requester)
+                        .await?
+                        .map(|item| {
+                            matches!(item.subscription, Subscription::From | Subscription::Both)
+                        })
+                        .unwrap_or(false);
+
+                    if !has_presence_access {
+                        return Err(XmppError::service_unavailable(Some(format!(
+                            "PEP info for {} requires presence subscription",
+                            target_bare
+                        ))));
+                    }
+                }
+
+                debug!(target = %target_bare, requester = %requester, "disco#info query to bare JID (PEP)");
                 (
                     vec![crate::pubsub::pep::build_pep_identity()],
                     crate::pubsub::pep::pep_features(),
@@ -3596,6 +3801,28 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                     let response = build_ping_result(&iq);
                     self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // IQ ping to a local bare JID of a non-existing user MUST return an error.
+        if let Some(to) = &iq.to {
+            if to.domain().as_str() == self.domain && to.node().is_some() && to.resource().is_none()
+            {
+                let target_bare = to.to_bare();
+                if !self.local_user_exists(&target_bare).await? {
+                    let error_to = iq.from.as_ref().map(|j| j.to_string());
+                    let error_from = iq.to.as_ref().map(|j| j.to_string());
+                    let error = crate::generate_iq_error(
+                        &iq.id,
+                        error_to.as_deref(),
+                        error_from.as_deref(),
+                        crate::StanzaErrorCondition::ServiceUnavailable,
+                        crate::StanzaErrorType::Cancel,
+                        None,
+                    );
+                    self.stream.write_raw(&error).await?;
                     return Ok(());
                 }
             }
@@ -4475,14 +4702,58 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing roster item"
         );
 
-        if item.subscription.is_remove() {
+        let push_item = if item.subscription.is_remove() {
+            let existing_item = self
+                .app_state
+                .get_roster_item(&sender_bare, &item.jid)
+                .await?;
+
+            match existing_item {
+                Some(existing_item) => {
+                    let _ = self
+                        .app_state
+                        .remove_roster_item(&sender_bare, &item.jid)
+                        .await?;
+
+                    self.handle_roster_remove_side_effects(&sender_jid, &sender_bare, &existing_item)
+                        .await?;
+
+                    RosterItem::new(item.jid.clone()).set_subscription(Subscription::Remove)
+                }
+                None if item.name.is_some() || !item.groups.is_empty() => {
+                    // Some clients resend remove requests with legacy metadata (name/groups).
+                    // Treat these as idempotent no-op removals.
+                    RosterItem::new(item.jid.clone()).set_subscription(Subscription::Remove)
+                }
+                None => {
+                    return Err(XmppError::item_not_found(Some(format!(
+                        "Roster item {} not found",
+                        item.jid
+                    ))));
+                }
+            }
+        } else {
+            let existing = self
+                .app_state
+                .get_roster_item(&sender_bare, &item.jid)
+                .await?;
+
+            // Client-provided subscription/ask values are ignored for roster set updates.
+            let mut effective_item = item.clone();
+            if let Some(existing_item) = existing {
+                effective_item.subscription = existing_item.subscription;
+                effective_item.ask = existing_item.ask;
+            } else {
+                effective_item.subscription = Subscription::None;
+                effective_item.ask = None;
+            }
+
             let _ = self
                 .app_state
-                .remove_roster_item(&sender_bare, &item.jid)
+                .set_roster_item(&sender_bare, &effective_item)
                 .await?;
-        } else {
-            let _ = self.app_state.set_roster_item(&sender_bare, item).await?;
-        }
+            effective_item
+        };
 
         // Send empty result to acknowledge the roster set
         let response = build_roster_result_empty(&iq);
@@ -4490,13 +4761,81 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // RFC 6121: Send roster push to all connected resources
         // This notifies all user's clients about the roster change
-        self.send_roster_push(item).await;
+        self.send_roster_push(&push_item).await;
 
         info!(
-            contact = %item.jid,
-            subscription = %item.subscription,
+            contact = %push_item.jid,
+            subscription = %push_item.subscription,
             "Roster set processed"
         );
+
+        Ok(())
+    }
+
+    /// Apply RFC 6121 side effects when removing a roster item.
+    ///
+    /// Depending on the previous subscription state, this may emit
+    /// `<presence type='unsubscribe'/>` and/or `<presence type='unsubscribed'/>`
+    /// and update the contact-side roster state.
+    async fn handle_roster_remove_side_effects(
+        &self,
+        sender_full: &FullJid,
+        sender_bare: &jid::BareJid,
+        removed_item: &RosterItem,
+    ) -> Result<(), XmppError> {
+        let contact_jid = removed_item.jid.clone();
+        let send_unsubscribe = matches!(removed_item.subscription, Subscription::To | Subscription::Both);
+        let send_unsubscribed = matches!(
+            removed_item.subscription,
+            Subscription::From | Subscription::Both
+        );
+
+        if send_unsubscribe {
+            let mut unsubscribe = xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribe);
+            unsubscribe.from = Some(sender_full.clone().into());
+            unsubscribe.to = Some(contact_jid.clone().into());
+            self.route_stanza_to_bare_jid(&contact_jid, Stanza::Presence(unsubscribe))
+                .await?;
+        }
+
+        if send_unsubscribed {
+            let mut unsubscribed =
+                xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribed);
+            unsubscribed.from = Some(sender_full.clone().into());
+            unsubscribed.to = Some(contact_jid.clone().into());
+            self.route_stanza_to_bare_jid(&contact_jid, Stanza::Presence(unsubscribed))
+                .await?;
+        }
+
+        // Keep contact-side roster state in sync with the generated subscription stanzas.
+        if send_unsubscribe || send_unsubscribed {
+            if let Some(mut contact_item) = self
+                .app_state
+                .get_roster_item(&contact_jid, sender_bare)
+                .await?
+            {
+                let before = contact_item.clone();
+
+                // Contact receives an inbound <unsubscribe/> from sender.
+                if send_unsubscribe {
+                    SubscriptionStateMachine::apply_outbound_unsubscribed(&mut contact_item);
+                }
+
+                // Contact receives an inbound <unsubscribed/> from sender.
+                if send_unsubscribed {
+                    SubscriptionStateMachine::apply_outbound_unsubscribe(&mut contact_item);
+                }
+
+                if contact_item != before {
+                    let _ = self
+                        .app_state
+                        .set_roster_item(&contact_jid, &contact_item)
+                        .await?;
+                    self.send_roster_push_for_user(&contact_jid, &contact_item)
+                        .await;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -4524,9 +4863,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return;
         }
 
+        let roster_version = match self.app_state.get_roster_version(bare_jid).await {
+            Ok(ver) => ver,
+            Err(error) => {
+                warn!(user = %bare_jid, error = %error, "Failed to fetch roster version for push");
+                None
+            }
+        };
+
         debug!(
             resource_count = resources.len(),
             contact = %item.jid,
+            ver = ?roster_version,
             "Sending roster push to connected resources"
         );
 
@@ -4538,7 +4886,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 &push_id,
                 &resource_jid.to_string(),
                 item,
-                None, // No versioning for now
+                roster_version.as_deref(),
             );
 
             let stanza = Stanza::Iq(push);

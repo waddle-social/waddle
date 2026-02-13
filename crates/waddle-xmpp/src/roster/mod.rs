@@ -408,11 +408,13 @@ pub fn parse_roster_set(iq: &Iq) -> Result<RosterQuery, XmppError> {
 
     let ver = query_elem.attr("ver").map(|s| s.to_string());
 
-    // Parse item elements
+    // Parse item elements. For roster set operations, client-provided
+    // subscription/ask values are ignored except for subscription='remove'
+    // per RFC 6121 Section 2.1.2.
     let items: Result<Vec<RosterItem>, XmppError> = query_elem
         .children()
         .filter(|c| c.name() == "item" && c.ns() == ROSTER_NS)
-        .map(RosterItem::from_element)
+        .map(parse_roster_set_item)
         .collect();
 
     let items = items?;
@@ -432,6 +434,56 @@ pub fn parse_roster_set(iq: &Iq) -> Result<RosterQuery, XmppError> {
     );
 
     Ok(RosterQuery { ver, items })
+}
+
+/// Parse a roster set item per RFC 6121 semantics.
+///
+/// Client-provided `subscription` and `ask` values are server-controlled and
+/// therefore ignored, except for `subscription='remove'` which requests item
+/// deletion.
+fn parse_roster_set_item(elem: &Element) -> Result<RosterItem, XmppError> {
+    let jid_str = elem.attr("jid").ok_or_else(|| {
+        XmppError::bad_request(Some("Roster item missing 'jid' attribute".to_string()))
+    })?;
+
+    let jid: BareJid = jid_str
+        .parse()
+        .map_err(|e| XmppError::bad_request(Some(format!("Invalid JID '{}': {}", jid_str, e))))?;
+
+    let name = elem.attr("name").map(|s| s.to_string());
+
+    let subscription = match elem.attr("subscription") {
+        Some("remove") => Subscription::Remove,
+        _ => Subscription::None,
+    };
+
+    let mut groups = Vec::new();
+    let mut seen_groups = HashSet::new();
+    for group_elem in elem
+        .children()
+        .filter(|c| c.name() == "group" && c.ns() == ROSTER_NS)
+    {
+        let group = group_elem.text();
+        if group.trim().is_empty() {
+            return Err(XmppError::not_acceptable(Some(
+                "Roster group name must not be empty".to_string(),
+            )));
+        }
+        if !seen_groups.insert(group.clone()) {
+            return Err(XmppError::bad_request(Some(
+                "Roster group names must be unique".to_string(),
+            )));
+        }
+        groups.push(group);
+    }
+
+    Ok(RosterItem {
+        jid,
+        name,
+        subscription,
+        ask: None,
+        groups,
+    })
 }
 
 /// Build a roster result IQ response.
@@ -778,7 +830,7 @@ mod tests {
         assert_eq!(query.items.len(), 1);
         assert_eq!(query.items[0].jid.to_string(), "contact@example.com");
         assert_eq!(query.items[0].name, Some("Alice".to_string()));
-        assert_eq!(query.items[0].subscription, Subscription::Both);
+        assert_eq!(query.items[0].subscription, Subscription::None);
     }
 
     #[test]
@@ -801,6 +853,28 @@ mod tests {
         let query = parse_roster_set(&iq).unwrap();
         assert_eq!(query.items.len(), 1);
         assert!(query.items[0].subscription.is_remove());
+    }
+
+    #[test]
+    fn test_parse_roster_set_invalid_subscription_ignored() {
+        let query_elem = Element::builder("query", ROSTER_NS)
+            .append(
+                Element::builder("item", ROSTER_NS)
+                    .attr("jid", "contact@example.com")
+                    .attr("subscription", "foobar")
+                    .build(),
+            )
+            .build();
+        let iq = Iq {
+            from: Some("user@example.com".parse().unwrap()),
+            to: Some("example.com".parse().unwrap()),
+            id: "roster-1".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(query_elem),
+        };
+
+        let query = parse_roster_set(&iq).unwrap();
+        assert_eq!(query.items.len(), 1);
+        assert_eq!(query.items[0].subscription, Subscription::None);
     }
 
     #[test]

@@ -1,0 +1,216 @@
+name: 'XMPP Interoperability Tests (Local Wrapper)'
+description: 'Verifies functional behavior of an XMPP server by executing interoperability tests.'
+inputs:
+  testId:
+    description: 'An optional identifier that will be used in the naming of artifacts.'
+    required: false
+    default: 'default'
+  host:
+    description: 'IP address or DNS name of the XMPP service to run the tests on.'
+    required: true
+    default: '127.0.0.1'
+  domain:
+    description: 'XMPP domain name of server under test.'
+    required: true
+    default: 'example.org'
+  timeout:
+    description: 'Amount of milliseconds after which an XMPP action (typically an IQ request) is considered timed out.'
+    required: false
+    default: '5000'
+  securityMode:
+    description: 'Smack security mode (required, ifpossible, disabled).'
+    required: false
+    default: 'required'
+  adminAccountUsername:
+    description: 'Account name of a pre-existing user that is allowed to create other users, per XEP-0133.'
+    required: false
+  adminAccountPassword:
+    description: 'Password for the admin account.'
+    required: false
+  accountOneUsername:
+    description: 'The first account name of a set of three accounts used for testing.'
+    required: false
+  accountOnePassword:
+    description: 'The password of the accountOneUsername account'
+    required: false
+  accountTwoUsername:
+    description: 'The second account name of a set of three accounts used for testing.'
+    required: false
+  accountTwoPassword:
+    description: 'The password of the accountTwoUsername account'
+    required: false
+  accountThreeUsername:
+    description: 'The third account name of a set of three accounts used for testing.'
+    required: false
+  accountThreePassword:
+    description: 'The password of the accountThreeUsername account'
+    required: false
+  disabledSpecifications:
+    description: 'Comma-separated list of specifications for which tests are to be skipped (eg: "XEP-0045,XEP-0060")'
+    required: false
+  disabledTests:
+    description: 'Comma-separated list of tests that are to be skipped (eg: "EntityCapsTest,SoftwareInfoIntegrationTest")'
+    required: false
+  enabledSpecifications:
+    description: 'Comma-separated list of specifications for which tests are to be run (eg: "XEP-0045,XEP-0060")'
+    required: false
+  enabledTests:
+    description: 'Comma-separated list of tests that are to be run (eg: "EntityCapsTest,SoftwareInfoIntegrationTest")'
+    required: false
+  failOnImpossibleTest:
+    description: 'If set to "true", fails the test run if any configured tests were impossible to execute.'
+    required: false
+    default: 'false'
+  extensionJar:
+    description: 'A single JAR file to load custom test extensions or additional test logic. Only one JAR may be specified.'
+    required: false
+  javaVersion:
+    description: 'The Java version to use for running the tests (useful when extensionJar is compiled against a newer Java version than the default).'
+    required: false
+    default: '11'
+  trustedCertPath:
+    description: 'Optional path to a PEM certificate to import into Java cacerts before running tests (useful with securityMode=required and self-signed certs).'
+    required: false
+    default: ''
+  logDir:
+    description: 'The directory in which the test output and logs are to be stored. This directory will be created, if it does not already exist.'
+    required: false
+    default: './output'
+
+branding:
+  icon: 'book-open'
+  color: 'orange'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.javaVersion }}
+        distribution: zulu
+
+    - uses: dsaltares/fetch-gh-release-asset@1.1.2
+      with:
+        repo: 'XMPP-Interop-Testing/smack-sint-server-extensions'
+        version: 'tags/v1.7.2'
+        file: 'smack-sint-server-extensions-1.7.2-jar-with-dependencies.jar'
+
+    - name: Optionally merge extensionJar into test JAR
+      if: ${{ inputs.extensionJar != '' }}
+      run: |
+        set -euo pipefail
+
+        EXT_JAR="${{ inputs.extensionJar }}"
+        TARGET_JAR="smack-sint-server-extensions-1.7.2-jar-with-dependencies.jar"
+
+        mkdir -p tmp_extended
+        pushd tmp_extended > /dev/null
+
+        jar xf "../$EXT_JAR"
+        rm -f META-INF/MANIFEST.MF
+
+        popd > /dev/null
+
+        jar uf "$TARGET_JAR" -C tmp_extended .
+
+        # Remove signature files
+        zip -d "$TARGET_JAR" "META-INF/*.SF" "META-INF/*.RSA" "META-INF/*.DSA" || true
+      shell: bash
+
+    - name: Optionally trust server certificate
+      if: ${{ inputs.trustedCertPath != '' }}
+      run: |
+        set -euo pipefail
+        CACERTS="$JAVA_HOME/lib/security/cacerts"
+        CERT_PATH="${{ inputs.trustedCertPath }}"
+        CERT_ALIAS="waddle-xmpp-interop-ci-cert"
+
+        if [ ! -f "$CERT_PATH" ]; then
+          echo "trustedCertPath does not exist: $CERT_PATH" >&2
+          exit 1
+        fi
+
+        keytool -delete -storepass changeit -alias "$CERT_ALIAS" -keystore "$CACERTS" >/dev/null 2>&1 || true
+        keytool -importcert -noprompt -storepass changeit -alias "$CERT_ALIAS" -file "$CERT_PATH" -keystore "$CACERTS" >/dev/null
+      shell: bash
+
+    - name: Execute interop tests
+      run: |
+        JAVACMD=()
+        JAVACMD+=("java")
+        JAVACMD+=("-Dsinttest.service=${{ inputs.domain }}")
+        JAVACMD+=("-Dsinttest.host=${{ inputs.host }}")
+        JAVACMD+=("-Dsinttest.securityMode=${{ inputs.securityMode }}")
+        JAVACMD+=("-Dsinttest.replyTimeout=${{ inputs.timeout }}")
+        JAVACMD+=("-Dsinttest.testPackages=com,org,net,biz,info,dev,io,uk,ch,fr,de,dk,in")
+
+        if [ "${{ inputs.adminAccountUsername }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.adminAccountUsername=${{ inputs.adminAccountUsername }}")
+        fi
+        if [ "${{ inputs.adminAccountPassword }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.adminAccountPassword=${{ inputs.adminAccountPassword }}")
+        fi
+        if [ "${{ inputs.accountOneUsername }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountOneUsername=${{ inputs.accountOneUsername }}")
+        fi
+        if [ "${{ inputs.accountOnePassword }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountOnePassword=${{ inputs.accountOnePassword }}")
+        fi
+        if [ "${{ inputs.accountTwoUsername }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountTwoUsername=${{ inputs.accountTwoUsername }}")
+        fi
+        if [ "${{ inputs.accountTwoPassword }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountTwoPassword=${{ inputs.accountTwoPassword }}")
+        fi
+        if [ "${{ inputs.accountThreeUsername }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountThreeUsername=${{ inputs.accountThreeUsername }}")
+        fi
+        if [ "${{ inputs.accountThreePassword }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.accountThreePassword=${{ inputs.accountThreePassword }}")
+        fi
+
+        JAVACMD+=("-Dsinttest.enabledConnections=tcp")
+        JAVACMD+=("-Dsinttest.dnsResolver=javax")
+
+        if [ "${{ inputs.disabledSpecifications }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.disabledSpecifications=${{ inputs.disabledSpecifications }}")
+        fi
+        if [ "${{ inputs.disabledTests }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.disabledTests=${{ inputs.disabledTests }}")
+        fi
+        if [ "${{ inputs.enabledSpecifications }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.enabledSpecifications=${{ inputs.enabledSpecifications }}")
+        fi
+        if [ "${{ inputs.enabledTests }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.enabledTests=${{ inputs.enabledTests }}")
+        fi
+        if [ "${{ inputs.failOnImpossibleTest }}" != "" ]; then
+          JAVACMD+=("-Dsinttest.failOnImpossibleTest=${{ inputs.failOnImpossibleTest }}")
+        fi
+
+        JAVACMD+=("-Dsinttest.testRunResultProcessors=org.igniterealtime.smack.inttest.util.StdOutTestRunResultProcessor,org.igniterealtime.smack.inttest.util.JUnitXmlTestRunResultProcessor")
+        JAVACMD+=("-Dsinttest.debugger=org.igniterealtime.smack.inttest.util.ModifiedStandardSinttestDebuggerMetaFactory")
+        JAVACMD+=("-DlogDir=${{ inputs.logDir }}")
+        JAVACMD+=("-jar")
+        JAVACMD+=("smack-sint-server-extensions-1.7.2-jar-with-dependencies.jar")
+
+        echo "Running ${JAVACMD[@]}"
+        "${JAVACMD[@]}"
+      shell: bash
+
+    - name: Upload XMPP debug logs as an artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: XMPP debug logs (for test ID '${{ inputs.testId }}')
+        path: '${{ inputs.logDir }}'
+
+    - name: Publish test report
+      if: always()
+      uses: mikepenz/action-junit-report@v4
+      with:
+        report_paths: '${{ inputs.logDir }}/test-results.xml'
+        suite_regex: '*'
+        include_passed: false
+        detailed_summary: true
+        annotate_only: true

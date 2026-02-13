@@ -7,12 +7,14 @@ on:
       - 'crates/waddle-server/**'
       - 'crates/waddle-xmpp/**'
       - '.github/workflows/xmpp-compliance.yml'
+      - '.github/actions/xmpp-interop-tests-action/**'
   pull_request:
     branches: [main]
     paths:
       - 'crates/waddle-server/**'
       - 'crates/waddle-xmpp/**'
       - '.github/workflows/xmpp-compliance.yml'
+      - '.github/actions/xmpp-interop-tests-action/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -52,44 +54,142 @@ jobs:
           retention-days: 1
 
   xmpp-interop:
-    name: XMPP Interop Tests
+    name: XMPP Interop Tests (Action)
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Download server binary
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-xmpp-interop-${{ hashFiles('**/Cargo.lock') }}
+          name: waddle-server
+          path: target/release
 
-      - name: Run Rust Compliance Harness
-        run: cargo test --package waddle-xmpp --test xep0479_compliance -- --ignored --nocapture
-        env:
-          WADDLE_COMPLIANCE_PROFILE: best_effort_full
-          WADDLE_COMPLIANCE_DOMAIN: localhost
-          WADDLE_COMPLIANCE_HOST: host.docker.internal
-          WADDLE_COMPLIANCE_TIMEOUT_MS: 10000
-          WADDLE_COMPLIANCE_ADMIN_USERNAME: admin
-          WADDLE_COMPLIANCE_ADMIN_PASSWORD: interop-test-password
-          WADDLE_COMPLIANCE_ARTIFACT_DIR: ./xmpp-interop-logs
-        continue-on-error: true
+      - name: Make server binary executable
+        run: chmod +x target/release/waddle-server
 
-      - name: Upload XMPP Interop Test Results
-        uses: actions/upload-artifact@v4
+      - name: Start Waddle server
+        run: |
+          mkdir -p xmpp-interop-logs
+
+          RUST_LOG=warn \
+          WADDLE_MODE=standalone \
+          WADDLE_BASE_URL=http://127.0.0.1:3000 \
+          WADDLE_DB_PATH=./xmpp-interop-logs/compliance.db \
+          WADDLE_XMPP_ENABLED=true \
+          WADDLE_XMPP_DOMAIN=localhost \
+          WADDLE_XMPP_C2S_ADDR=0.0.0.0:5222 \
+          WADDLE_XMPP_TLS_CERT=certs/server.crt \
+          WADDLE_XMPP_TLS_KEY=certs/server.key \
+          WADDLE_XMPP_S2S_ENABLED=false \
+          WADDLE_NATIVE_AUTH_ENABLED=true \
+          WADDLE_XMPP_ISR_IN_SASL_SUCCESS=false \
+          WADDLE_REGISTRATION_ENABLED=true \
+          ./target/release/waddle-server \
+            > ./xmpp-interop-logs/waddle-server.log \
+            2>&1 &
+
+          echo $! > ./xmpp-interop-logs/waddle-server.pid
+
+      - name: Wait for server readiness
+        run: |
+          for i in $(seq 1 90); do
+            if nc -z 127.0.0.1 5222 >/dev/null 2>&1 && \
+               curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
+              echo "Server is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Server failed to start within timeout"
+          tail -n 200 ./xmpp-interop-logs/waddle-server.log || true
+          exit 1
+
+      - name: Run XMPP Interop Tests
+        uses: ./.github/actions/xmpp-interop-tests-action
+        with:
+          testId: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          host: '127.0.0.1'
+          domain: 'localhost'
+          timeout: '5000'
+          securityMode: 'required'
+          trustedCertPath: 'certs/server.crt'
+          enabledSpecifications: 'RFC6120,RFC6121,XEP-0030'
+          failOnImpossibleTest: 'false'
+          logDir: './xmpp-interop-logs'
+
+      - name: Summarize failing tests
         if: always()
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          junit = pathlib.Path('xmpp-interop-logs/test-results.xml')
+          if not junit.exists():
+              print('No JUnit report found at', junit)
+              if os.environ.get('GITHUB_STEP_SUMMARY'):
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                      f.write('## XMPP interop summary\n\nNo `test-results.xml` produced.\n')
+              raise SystemExit(0)
+
+          root = ET.parse(junit).getroot()
+          failed = []
+          total = 0
+          skipped = 0
+
+          for tc in root.iter('testcase'):
+              total += 1
+              if tc.find('skipped') is not None:
+                  skipped += 1
+              if tc.find('failure') is not None or tc.find('error') is not None:
+                  failed.append(tc.attrib.get('name', '<unknown>'))
+
+          lines = [
+              '## XMPP interop summary',
+              '',
+              f'- total testcases: **{total}**',
+              f'- failed testcases: **{len(failed)}**',
+              f'- skipped testcases: **{skipped}**',
+              ''
+          ]
+
+          if failed:
+              lines.append('### Failed tests')
+              lines.append('')
+              for name in failed:
+                  lines.append(f'- `{name}`')
+          else:
+              lines.append('No failed tests reported in JUnit output.')
+
+          summary = '\n'.join(lines) + '\n'
+          print(summary)
+
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                  f.write(summary)
+          PY
+
+      - name: Stop Waddle server
+        if: always()
+        run: |
+          if [[ -f ./xmpp-interop-logs/waddle-server.pid ]]; then
+            pid="$(cat ./xmpp-interop-logs/waddle-server.pid)"
+            kill "$pid" >/dev/null 2>&1 || true
+            wait "$pid" 2>/dev/null || true
+          fi
+
+      - name: Upload Waddle server logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: xmpp-interop-test-results
-          path: ./xmpp-interop-logs/
+          name: waddle-server-logs
+          path: ./xmpp-interop-logs/waddle-server.log
           retention-days: 7
 
   unit-tests:
