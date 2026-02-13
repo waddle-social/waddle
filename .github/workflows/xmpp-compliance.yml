@@ -109,7 +109,7 @@ jobs:
       matrix:
         shard:
           - name: core-nonheavy
-            timeout_ms: '3000'
+            timeout_ms: '3500'
             enabled_tests: ''
             disabled_tests: >-
               RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest,RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest

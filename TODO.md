@@ -13,7 +13,7 @@
   - Command: `... --enabled-specs RFC6120,RFC6121,XEP-0030 ...`
   - Latest duration: **11,267.63s** (**~3h 07m 48s**)
 - Fast sharded gate (3 shards, mixed timeout)
-  - `core-nonheavy` (`--disabled-tests=<6 heavy suites>`, `timeout-ms=3000`): **62.90s** (latest; two local passes: 62.90s, 79.77s)
+  - `core-nonheavy` (`--disabled-tests=<6 heavy suites>`, `timeout-ms=3500`): **73.60s** (latest at 3500; prior 3000 local passes were 62.90s and 79.77s)
   - `heavy-b` (`--enabled-tests=<3 suites>`, `timeout-ms=2000`): **782.91s** (~13m 03s)
   - `heavy-a` (`--enabled-tests=<3 suites>`, `timeout-ms=2000`): **1500.09s** (~25m 00s)
   - Expected wall-clock in CI (parallel shards): **~25–30m**
@@ -27,6 +27,7 @@ Artifacts:
 - `test-logs/todo-shard-heavy-b/summary.json`
 - `test-logs/rka-dev-core-nonheavy-3000-check-1/summary.json`
 - `test-logs/rka-dev-core-nonheavy-3000-check-2/summary.json`
+- `test-logs/rka-dev-core-nonheavy-3500-check-1/summary.json`
 
 ---
 
@@ -54,7 +55,7 @@ Current full runs use `--timeout-ms 10000` (`sinttest.replyTimeout=10000`).
 - [ ] Calibrate at `--timeout-ms 1500`
 - [ ] Track pass/fail flake rate per setting across 3 consecutive runs
 
-Progress note: CI is now tuned to `core-nonheavy=3000ms` and `heavy-a/heavy-b=2000ms`; core-nonheavy has 2 consecutive local passes at 3000ms.
+Progress note: CI now uses `core-nonheavy=3500ms` and `heavy-a/heavy-b=2000ms`; core has local pass at 3500 and prior passes at 3000.
 
 Rule of thumb from current timing: runtime scales roughly with timeout.
 Estimated total runtime:
@@ -81,10 +82,10 @@ WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance 
 Status (implemented):
 - `waddle compliance` now supports `--enabled-tests` / `--disabled-tests`.
 - Harness env passthrough: `WADDLE_COMPLIANCE_ENABLED_TESTS` / `WADDLE_COMPLIANCE_DISABLED_TESTS`.
-- CI fast matrix now uses 3 shards with mixed timeout: `core-nonheavy=3000ms`, `heavy-a=2000ms`, `heavy-b=2000ms`.
+- CI fast matrix now uses 3 shards with mixed timeout: `core-nonheavy=3500ms`, `heavy-a=2000ms`, `heavy-b=2000ms`.
 - Latest shard aggregate: `tests=422`, `failed=0`, `errors=0`, `skipped=8` (matches full scoped inventory).
 
-Measured with 3-way sharding (`core-nonheavy=3000`, `heavy-a/heavy-b=2000`): max shard is still ~1500s (~25m), so expected CI wall-clock remains ~25–30m.
+Measured with 3-way sharding (`core-nonheavy=3500`, `heavy-a/heavy-b=2000`): max shard is still ~1500s (~25m), so expected CI wall-clock remains ~25–30m.
 
 ### Step 3: CI policy split
 
@@ -92,8 +93,8 @@ Measured with 3-way sharding (`core-nonheavy=3000`, `heavy-a/heavy-b=2000`): max
 - [x] Nightly gate: full, unsharded reference run (for drift detection)
 - [x] Fail PR only on fast-gate regressions; alert on nightly regressions
 - [x] Fallback criteria defined for core shard stability:
-  - If `core-nonheavy` fails due timeout in 2 consecutive CI runs at 3000ms, raise to 3500ms.
-  - If still flaky after that, isolate `SubscriptionIntegrationTest.testSubscriptionRequestWithExtension` into a dedicated shard.
+  - ~~If `core-nonheavy` fails due timeout in 2 consecutive CI runs at 3000ms, raise to 3500ms.~~ **Done** — 3500ms fallback applied after CI flake at 3000.
+  - If flake persists at 3500ms, isolate failing subscription delivery test into a dedicated shard.
 
 ---
 
