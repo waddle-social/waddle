@@ -546,7 +546,12 @@ pub fn build_roster_result_empty(original_iq: &Iq) -> Iq {
 ///   </query>
 /// </iq>
 /// ```
-pub fn build_roster_push(push_id: &str, to_jid: &str, item: &RosterItem, ver: Option<&str>) -> Iq {
+pub fn build_roster_push(
+    push_id: &str,
+    to_jid: &str,
+    item: &RosterItem,
+    ver: Option<&str>,
+) -> Result<Iq, jid::Error> {
     let mut query_builder = Element::builder("query", ROSTER_NS);
 
     if let Some(v) = ver {
@@ -557,12 +562,12 @@ pub fn build_roster_push(push_id: &str, to_jid: &str, item: &RosterItem, ver: Op
 
     let query = query_builder.build();
 
-    Iq {
+    Ok(Iq {
         from: None, // Server to client, no from
-        to: Some(to_jid.parse().expect("Invalid JID for roster push")),
+        to: Some(to_jid.parse()?),
         id: push_id.to_string(),
         payload: xmpp_parsers::iq::IqType::Set(query),
-    }
+    })
 }
 
 /// Result of a roster set operation.
@@ -1004,7 +1009,8 @@ mod tests {
         let item = RosterItem::with_name("contact@example.com".parse().unwrap(), "Alice")
             .set_subscription(Subscription::Both);
 
-        let push = build_roster_push("push-1", "user@example.com/resource", &item, Some("ver456"));
+        let push = build_roster_push("push-1", "user@example.com/resource", &item, Some("ver456"))
+            .expect("valid JID should succeed");
 
         assert_eq!(push.id, "push-1");
         assert_eq!(
@@ -1039,5 +1045,14 @@ mod tests {
         let removed = RosterSetResult::Removed(jid.clone());
         let push_item = removed.to_push_item();
         assert_eq!(push_item.subscription, Subscription::Remove);
+    }
+
+    #[test]
+    fn test_build_roster_push_invalid_jid() {
+        let item = RosterItem::with_name("contact@example.com".parse().unwrap(), "Alice")
+            .set_subscription(Subscription::Both);
+
+        let result = build_roster_push("push-1", "@", &item, None);
+        assert!(result.is_err(), "Empty-local JID should return Err");
     }
 }

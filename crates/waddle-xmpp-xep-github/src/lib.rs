@@ -39,9 +39,9 @@ pub mod detect;
 pub mod embed;
 pub mod enrich;
 
-pub use embed::*;
-pub use detect::GitHubLink;
 pub use client::GitHubClient;
+pub use detect::GitHubLink;
+pub use embed::*;
 pub use enrich::MessageEnricher;
 
 /// Namespace for the Waddle GitHub embed extension.

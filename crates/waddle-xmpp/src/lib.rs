@@ -459,5 +459,12 @@ pub async fn start<S: AppState>(
     s2s_listener: Option<tokio::net::TcpListener>,
     shutdown_token: tokio_util::sync::CancellationToken,
 ) -> Result<XmppServer<S>, XmppError> {
-    XmppServer::new(config, app_state, c2s_listener, s2s_listener, shutdown_token).await
+    XmppServer::new(
+        config,
+        app_state,
+        c2s_listener,
+        s2s_listener,
+        shutdown_token,
+    )
+    .await
 }

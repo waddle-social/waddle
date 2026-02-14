@@ -140,18 +140,22 @@ pub fn should_copy_message(msg: &Message) -> bool {
 ///   </sent>
 /// </message>
 /// ```
-pub fn build_sent_carbon(original_msg: &Message, from_jid: &str, to_jid: &str) -> Message {
+pub fn build_sent_carbon(
+    original_msg: &Message,
+    from_jid: &str,
+    to_jid: &str,
+) -> Result<Message, jid::Error> {
     let forwarded = build_forwarded_element(original_msg);
 
     let sent = Element::builder("sent", CARBONS_NS)
         .append(forwarded)
         .build();
 
-    let mut carbon_msg = Message::new(Some(to_jid.parse().unwrap()));
-    carbon_msg.from = Some(from_jid.parse().unwrap());
+    let mut carbon_msg = Message::new(Some(to_jid.parse()?));
+    carbon_msg.from = Some(from_jid.parse()?);
     carbon_msg.payloads.push(sent);
 
-    carbon_msg
+    Ok(carbon_msg)
 }
 
 /// Build a "received" carbon message wrapper.
@@ -167,18 +171,22 @@ pub fn build_sent_carbon(original_msg: &Message, from_jid: &str, to_jid: &str) -
 ///   </received>
 /// </message>
 /// ```
-pub fn build_received_carbon(original_msg: &Message, from_jid: &str, to_jid: &str) -> Message {
+pub fn build_received_carbon(
+    original_msg: &Message,
+    from_jid: &str,
+    to_jid: &str,
+) -> Result<Message, jid::Error> {
     let forwarded = build_forwarded_element(original_msg);
 
     let received = Element::builder("received", CARBONS_NS)
         .append(forwarded)
         .build();
 
-    let mut carbon_msg = Message::new(Some(to_jid.parse().unwrap()));
-    carbon_msg.from = Some(from_jid.parse().unwrap());
+    let mut carbon_msg = Message::new(Some(to_jid.parse()?));
+    carbon_msg.from = Some(from_jid.parse()?);
     carbon_msg.payloads.push(received);
 
-    carbon_msg
+    Ok(carbon_msg)
 }
 
 /// Build a <forwarded/> element containing the original message.
@@ -356,7 +364,8 @@ mod tests {
             &original,
             "sender@example.com",
             "sender@example.com/resource2",
-        );
+        )
+        .expect("valid JIDs should succeed");
 
         assert_eq!(
             carbon.to.as_ref().unwrap().to_string(),
@@ -393,7 +402,8 @@ mod tests {
         );
 
         let carbon =
-            build_received_carbon(&original, "user@example.com", "user@example.com/resource2");
+            build_received_carbon(&original, "user@example.com", "user@example.com/resource2")
+                .expect("valid JIDs should succeed");
 
         assert_eq!(
             carbon.to.as_ref().unwrap().to_string(),
@@ -406,5 +416,26 @@ mod tests {
             .iter()
             .find(|p| p.name() == "received" && p.ns() == CARBONS_NS);
         assert!(received.is_some());
+    }
+
+    #[test]
+    fn test_build_sent_carbon_invalid_jid() {
+        let original = Message::new(Some("recipient@example.com".parse().unwrap()));
+        // Empty string is not a valid JID
+        let result = build_sent_carbon(&original, "@", "valid@example.com/res");
+        assert!(result.is_err(), "Empty-local JID should return Err");
+
+        let result = build_sent_carbon(&original, "valid@example.com", "@");
+        assert!(result.is_err(), "Empty-local to_jid should return Err");
+    }
+
+    #[test]
+    fn test_build_received_carbon_invalid_jid() {
+        let original = Message::new(Some("recipient@example.com".parse().unwrap()));
+        let result = build_received_carbon(&original, "@", "valid@example.com/res");
+        assert!(result.is_err(), "Empty-local JID should return Err");
+
+        let result = build_received_carbon(&original, "valid@example.com", "@");
+        assert!(result.is_err(), "Empty-local to_jid should return Err");
     }
 }

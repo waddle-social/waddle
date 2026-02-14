@@ -85,13 +85,13 @@ use crate::xep::xep0191::{
 };
 use crate::xep::xep0199::{build_ping_result, is_ping};
 use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
-use waddle_xmpp_xep_github::MessageEnricher;
 use crate::xep::xep0363::{
     build_upload_error, build_upload_slot_response, is_upload_request, parse_upload_request,
     UploadError, UploadSlot,
 };
 use crate::xep::xep0398::AvatarConversion;
 use crate::{AppState, Session, XmppError};
+use waddle_xmpp_xep_github::MessageEnricher;
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
@@ -213,7 +213,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             avatar_hash: None,   // XEP-0153: computed on bind from stored vCard
             last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
-            github_enricher,     // GitHub link enrichment (optional)
+            github_enricher,          // GitHub link enrichment (optional)
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -1596,7 +1596,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 message_type: "groupchat".to_string(),
             };
 
-            match self.mam_storage.store_message(&room_jid.to_string(), &archived_msg).await {
+            match self
+                .mam_storage
+                .store_message(&room_jid.to_string(), &archived_msg)
+                .await
+            {
                 Ok(id) => {
                     debug!(
                         archive_id = %id,
@@ -3199,13 +3203,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         } else {
             // User is online - send available presence from each resource
             for resource_jid in resources {
-                let available = build_available_presence(
-                    &resource_jid,
-                    &from,
-                    None, // TODO: Get actual show state
-                    None, // TODO: Get actual status
-                    0,    // TODO: Get actual priority
-                );
+                let ps = self.connection_registry.get_presence_state(&resource_jid);
+                let (show, status, priority) = match ps {
+                    Some(ref s) => (s.show.as_deref(), s.status.as_deref(), s.priority),
+                    None => (None, None, 0),
+                };
+                let available =
+                    build_available_presence(&resource_jid, &from, show, status, priority);
                 let stanza = Stanza::Presence(available);
                 self.route_stanza_to_bare_jid(&from, stanza).await?;
             }
@@ -3286,6 +3290,30 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .connection_registry
             .update_presence(&sender_jid, is_available, priority);
 
+        // Store full presence state (show/status/priority) for probe responses.
+        if is_available {
+            let show_str = pres.show.as_ref().map(|s| {
+                match s {
+                    xmpp_parsers::presence::Show::Away => "away",
+                    xmpp_parsers::presence::Show::Chat => "chat",
+                    xmpp_parsers::presence::Show::Dnd => "dnd",
+                    xmpp_parsers::presence::Show::Xa => "xa",
+                }
+                .to_string()
+            });
+            let status_str = pres
+                .statuses
+                .get("")
+                .or_else(|| pres.statuses.values().next())
+                .cloned();
+            self.connection_registry.update_presence_state(
+                &sender_jid,
+                show_str,
+                status_str,
+                priority,
+            );
+        }
+
         if is_available {
             self.last_available_presence = Some(pres_clone.clone());
             self.deliver_pending_subscription_stanzas(&sender_bare)
@@ -3298,6 +3326,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             );
         } else if matches!(pres.type_, xmpp_parsers::presence::Type::Unavailable) {
             self.last_available_presence = None;
+            // Clear stored presence state so probes don't return stale data.
+            self.connection_registry.clear_presence_state(&sender_jid);
             info!(sender = %sender_bare, "User sent unavailable presence");
         }
 
@@ -4794,7 +4824,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in other_resources {
-            let carbon = build_sent_carbon(msg, &bare_jid.to_string(), &resource_jid.to_string());
+            let carbon =
+                match build_sent_carbon(msg, &bare_jid.to_string(), &resource_jid.to_string()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to build sent carbon: invalid JID");
+                        continue;
+                    }
+                };
 
             let stanza = Stanza::Message(carbon);
             let _ = self
@@ -4833,8 +4870,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in other_resources {
-            let carbon =
-                build_received_carbon(msg, &bare_jid.to_string(), &resource_jid.to_string());
+            let carbon = match build_received_carbon(
+                msg,
+                &bare_jid.to_string(),
+                &resource_jid.to_string(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "Failed to build received carbon: invalid JID");
+                    continue;
+                }
+            };
 
             let stanza = Stanza::Message(carbon);
             let _ = self
@@ -4895,8 +4941,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         for resource_jid in other_resources {
-            let carbon =
-                build_received_carbon(msg, &recipient_bare.to_string(), &resource_jid.to_string());
+            let carbon = match build_received_carbon(
+                msg,
+                &recipient_bare.to_string(),
+                &resource_jid.to_string(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "Failed to build received carbon: invalid JID");
+                    continue;
+                }
+            };
 
             let stanza = Stanza::Message(carbon);
             let _ = self.connection_registry.send_to(resource_jid, stanza).await;
@@ -4914,9 +4969,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// </iq>
     /// ```
     ///
-    /// Note: This is a stub implementation that returns an empty roster.
-    /// Full roster storage integration requires AppState to implement
-    /// roster storage methods.
+    /// Retrieves the full roster from database-backed storage via
+    /// `AppState::get_roster()`. Supports roster versioning (XEP-0237).
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
     async fn handle_roster_get(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let sender_jid = match &self.jid {
@@ -4972,12 +5026,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             let current_ver = roster_version.as_deref().unwrap_or("0");
             for item in &items {
                 let push_id = format!("rp-{}", uuid::Uuid::new_v4());
-                let push = build_roster_push(
+                let push = match build_roster_push(
                     &push_id,
                     &sender_jid.to_string(),
                     item,
                     Some(current_ver),
-                );
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(error = %e, "Skipping roster push: invalid JID");
+                        continue;
+                    }
+                };
                 self.stream.write_stanza(&Stanza::Iq(push)).await?;
             }
 
@@ -4995,11 +5055,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // No version provided: send full roster result (initial roster fetch)
-        let response = build_roster_result(
-            &iq,
-            &items,
-            roster_version.as_deref(),
-        );
+        let response = build_roster_result(&iq, &items, roster_version.as_deref());
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
         debug!(
@@ -5013,12 +5069,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
     /// Handle RFC 6121 roster set request.
     ///
-    /// Processes add, update, or remove operations on roster items.
-    /// After processing, sends roster push to all connected resources.
-    ///
-    /// Note: This is a stub implementation that acknowledges the request
-    /// but does not persist changes. Full roster storage integration
-    /// requires AppState to implement roster storage methods.
+    /// Processes add, update, or remove operations on roster items via
+    /// `AppState::set_roster_item()` / `AppState::remove_roster_item()`,
+    /// which persist to SQLite. After processing, sends roster push to
+    /// all connected resources.
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
     async fn handle_roster_set(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let sender_jid = match &self.jid {
@@ -5255,12 +5309,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Generate a unique push ID
             let push_id = format!("push-{}", uuid::Uuid::new_v4());
 
-            let push = build_roster_push(
+            let push = match build_roster_push(
                 &push_id,
                 &resource_jid.to_string(),
                 item,
                 roster_version.as_deref(),
-            );
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(to = %resource_jid, error = %e, "Skipping roster push: invalid JID");
+                    continue;
+                }
+            };
 
             let stanza = Stanza::Iq(push);
             let result = self
@@ -5613,7 +5673,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Check if this is a role query (has role attribute) or affiliation query
             let requested_role = query.items.first().and_then(|item| item.role);
 
-            if requested_role.is_some() {
+            if let Some(role) = requested_role {
                 // Role query - moderators and above can query
                 if sender_role < Role::Moderator
                     && !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
@@ -5631,7 +5691,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
 
                 // Build role list response
-                let role = requested_role.unwrap();
                 let items: Vec<(String, Role, Option<jid::BareJid>)> = room
                     .occupants
                     .values()

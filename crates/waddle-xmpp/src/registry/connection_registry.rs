@@ -117,11 +117,24 @@ pub enum SendResult {
 /// // When a connection closes:
 /// registry.unregister(&full_jid);
 /// ```
+/// Presence state for a connected resource (show, status, priority).
+#[derive(Debug, Clone, Default)]
+pub struct PresenceState {
+    /// Presence show value (away, chat, dnd, xa) or None for default "available"
+    pub show: Option<String>,
+    /// Presence status text
+    pub status: Option<String>,
+    /// Presence priority (-128..127)
+    pub priority: i8,
+}
+
 pub struct ConnectionRegistry {
     /// Map of full JID to connection entry (includes sender and carbons status)
     connections: DashMap<FullJid, ConnectionEntry>,
     /// Pending subscription stanzas for offline users (RFC 6121).
     pending_subscription_stanzas: DashMap<BareJid, Vec<Stanza>>,
+    /// Per-resource presence state (show/status/priority) for probe responses.
+    presence_states: DashMap<FullJid, PresenceState>,
 }
 
 impl ConnectionRegistry {
@@ -131,6 +144,7 @@ impl ConnectionRegistry {
         Self {
             connections: DashMap::new(),
             pending_subscription_stanzas: DashMap::new(),
+            presence_states: DashMap::new(),
         }
     }
 
@@ -162,6 +176,7 @@ impl ConnectionRegistry {
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove(jid);
         if removed.is_some() {
+            self.presence_states.remove(jid);
             debug!("Unregistered connection");
         } else {
             debug!("Connection was not registered");
@@ -307,6 +322,34 @@ impl ConnectionRegistry {
         } else {
             false
         }
+    }
+
+    /// Update full presence state (show/status/priority) for a connected resource.
+    pub fn update_presence_state(
+        &self,
+        jid: &FullJid,
+        show: Option<String>,
+        status: Option<String>,
+        priority: i8,
+    ) {
+        self.presence_states.insert(
+            jid.clone(),
+            PresenceState {
+                show,
+                status,
+                priority,
+            },
+        );
+    }
+
+    /// Get the stored presence state for a connected resource.
+    pub fn get_presence_state(&self, jid: &FullJid) -> Option<PresenceState> {
+        self.presence_states.get(jid).map(|r| r.value().clone())
+    }
+
+    /// Clear the stored presence state for a resource (e.g. on unavailable presence).
+    pub fn clear_presence_state(&self, jid: &FullJid) {
+        self.presence_states.remove(jid);
     }
 
     /// Get all available resources for a bare JID with their priorities.
@@ -642,5 +685,41 @@ mod tests {
         assert!(registry
             .drain_pending_subscription_stanzas(&bare)
             .is_empty());
+    }
+
+    #[test]
+    fn test_presence_state_tracking() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "user@example.com/resource".parse().unwrap();
+
+        let (tx, _rx) = mpsc::channel(16);
+        registry.register(jid.clone(), tx);
+
+        // No state initially
+        assert!(registry.get_presence_state(&jid).is_none());
+
+        // Store presence state
+        registry.update_presence_state(
+            &jid,
+            Some("away".to_string()),
+            Some("Gone fishing".to_string()),
+            5,
+        );
+
+        let state = registry.get_presence_state(&jid).expect("should exist");
+        assert_eq!(state.show.as_deref(), Some("away"));
+        assert_eq!(state.status.as_deref(), Some("Gone fishing"));
+        assert_eq!(state.priority, 5);
+
+        // Update with different values
+        registry.update_presence_state(&jid, None, None, 0);
+        let state = registry.get_presence_state(&jid).expect("should exist");
+        assert!(state.show.is_none());
+        assert!(state.status.is_none());
+        assert_eq!(state.priority, 0);
+
+        // Clean up on unregister
+        registry.unregister(&jid);
+        assert!(registry.get_presence_state(&jid).is_none());
     }
 }

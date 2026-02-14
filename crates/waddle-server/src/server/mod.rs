@@ -275,7 +275,14 @@ pub async fn start_with_config(
     let http_server_config = server_config.clone();
     let http_stop = stop_token.clone();
     let http_handle = tokio::spawn(async move {
-        start_http_server(http_state, http_server_config, xmpp_native_auth_enabled, http_listener, http_stop).await
+        start_http_server(
+            http_state,
+            http_server_config,
+            xmpp_native_auth_enabled,
+            http_listener,
+            http_stop,
+        )
+        .await
     });
 
     // Start XMPP server
@@ -285,7 +292,14 @@ pub async fn start_with_config(
         let c2s = c2s_listener.expect("XMPP enabled but no C2S listener");
 
         Some(tokio::spawn(async move {
-            start_xmpp_server(xmpp_server_config, xmpp_app_state, c2s, s2s_listener, xmpp_stop).await
+            start_xmpp_server(
+                xmpp_server_config,
+                xmpp_app_state,
+                c2s,
+                s2s_listener,
+                xmpp_stop,
+            )
+            .await
         }))
     } else {
         info!("XMPP server disabled");
@@ -396,6 +410,35 @@ async fn start_xmpp_server(
 #[derive(Clone)]
 struct ServerInfoState {
     server_info: ServerInfo,
+}
+
+/// Configure CORS layer.
+///
+/// If `WADDLE_CORS_ORIGINS` is set (comma-separated list of origins),
+/// only those origins are allowed. Otherwise, falls back to permissive
+/// CORS (suitable for development).
+fn configure_cors() -> CorsLayer {
+    use tower_http::cors::AllowOrigin;
+
+    match std::env::var("WADDLE_CORS_ORIGINS") {
+        Ok(origins) if !origins.is_empty() => {
+            let allowed: Vec<_> = origins
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            if allowed.is_empty() {
+                warn!("WADDLE_CORS_ORIGINS set but no valid origins parsed, falling back to permissive CORS");
+                CorsLayer::permissive()
+            } else {
+                info!(origins = ?allowed, "Configured CORS with explicit allowed origins");
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::list(allowed))
+                    .allow_methods(tower_http::cors::Any)
+                    .allow_headers(tower_http::cors::Any)
+            }
+        }
+        _ => CorsLayer::permissive(),
+    }
 }
 
 /// Create the Axum router with all routes and middleware
@@ -521,7 +564,7 @@ fn create_router(
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .layer(CompressionLayer::new())
-        .layer(CorsLayer::permissive()) // TODO: Configure proper CORS in production
+        .layer(configure_cors())
 }
 
 /// Handler for the /api/v1/server-info endpoint
@@ -668,7 +711,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        Arc::new(AppState::new(Arc::new(db_pool), ServerConfig::test_homeserver()))
+        Arc::new(AppState::new(
+            Arc::new(db_pool),
+            ServerConfig::test_homeserver(),
+        ))
     }
 
     #[tokio::test]

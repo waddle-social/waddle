@@ -355,7 +355,9 @@ impl MucRoom {
         };
 
         self.occupants.insert(nick.clone(), occupant);
-        self.occupants.get(&nick).unwrap()
+        self.occupants
+            .get(&nick)
+            .expect("occupant just inserted on previous line")
     }
 
     /// Update affiliations from a resolver (async operation).

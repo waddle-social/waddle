@@ -591,7 +591,9 @@ fn test_self_leave_presence() {
     let room = create_test_room();
     let leaving_jid: FullJid = "alice@example.com/desktop".parse().unwrap();
 
-    let result = room.build_self_leave_presence(&leaving_jid, "alice", Affiliation::Member);
+    let result = room
+        .build_self_leave_presence(&leaving_jid, "alice", Affiliation::Member)
+        .expect("valid nick should succeed");
 
     assert_eq!(result.to, leaving_jid);
     assert_eq!(

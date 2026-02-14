@@ -386,7 +386,11 @@ pub fn build_destroy_notification(
     // Build the room JID with occupant's nick
     let from_room_jid = room_jid
         .with_resource_str(occupant_nick)
-        .unwrap_or_else(|_| room_jid.with_resource_str("unknown").unwrap());
+        .unwrap_or_else(|_| {
+            room_jid
+                .with_resource_str("unknown")
+                .expect("literal 'unknown' is always a valid resource")
+        });
 
     let mut presence = Presence::new(xmpp_parsers::presence::Type::Unavailable);
     presence.from = Some(Jid::from(from_room_jid));

@@ -364,7 +364,8 @@ mod tests {
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
             body: "Hello, world!".to_string(),
-            stanza_id: None, ..Default::default()
+            stanza_id: None,
+            ..Default::default()
         };
 
         let msg = build_result_message("query-1", "user@example.com", &archived);

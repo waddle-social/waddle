@@ -555,15 +555,18 @@ mod tests {
 
     #[test]
     fn test_repo_roundtrip() {
-        let mut embed = GitHubRepoEmbed::new(
-            "https://github.com/rust-lang/rust",
-            "rust-lang",
-            "rust",
-        );
+        let mut embed =
+            GitHubRepoEmbed::new("https://github.com/rust-lang/rust", "rust-lang", "rust");
         embed.description = Some("The Rust programming language".into());
         embed.languages = vec![
-            Language { name: "Rust".into(), bytes: 100_000 },
-            Language { name: "Python".into(), bytes: 5_000 },
+            Language {
+                name: "Rust".into(),
+                bytes: 100_000,
+            },
+            Language {
+                name: "Python".into(),
+                bytes: 5_000,
+            },
         ];
         embed.stars = Some(100_000);
         embed.forks = Some(12_000);
@@ -578,11 +581,7 @@ mod tests {
 
     #[test]
     fn test_repo_minimal() {
-        let embed = GitHubRepoEmbed::new(
-            "https://github.com/a/b",
-            "a",
-            "b",
-        );
+        let embed = GitHubRepoEmbed::new("https://github.com/a/b", "a", "b");
         let element = build_repo_element(&embed);
         let parsed = parse_repo_element(&element).unwrap();
         assert_eq!(embed, parsed);

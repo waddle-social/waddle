@@ -563,10 +563,14 @@ async fn handle_muc_join(
                 ..Default::default()
             };
 
+            // Derive waddle_id and channel_id from the room JID node.
+            // Convention: node is "waddle_channel" (underscore-separated).
+            let (waddle_id, channel_id) = parse_room_jid_context(room_jid);
+
             match state.muc_registry.get_or_create_room(
                 room_jid.clone(),
-                "default".to_string(), // waddle_id placeholder
-                "default".to_string(), // channel_id placeholder
+                waddle_id,
+                channel_id,
                 config,
             ) {
                 Ok(_handle) => state
@@ -1033,10 +1037,62 @@ fn extract_element_text(xml: &str, element: &str) -> Option<String> {
     None
 }
 
+/// Derive waddle_id and channel_id from a room's bare JID node.
+///
+/// Convention: node is "waddleId_channelId" (first underscore separates).
+/// Falls back to ("default", "default") if the node can't be parsed.
+fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
+    if let Some(node) = room_jid.node() {
+        let node_str = node.as_str();
+        if let Some(idx) = node_str.find('_') {
+            let waddle = &node_str[..idx];
+            let channel = &node_str[idx + 1..];
+            if !waddle.is_empty() && !channel.is_empty() {
+                return (waddle.to_string(), channel.to_string());
+            }
+        }
+    }
+    ("default".to_string(), "default".to_string())
+}
+
 /// Extract domain from base URL
 fn extract_domain(base_url: &str) -> String {
     url::Url::parse(base_url)
         .ok()
         .and_then(|u| u.host_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "localhost".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_room_jid_valid() {
+        let jid: jid::BareJid = "waddle123_channel456@muc.example.com".parse().unwrap();
+        let (waddle, channel) = parse_room_jid_context(&jid);
+        assert_eq!(waddle, "waddle123");
+        assert_eq!(channel, "channel456");
+    }
+
+    #[test]
+    fn test_parse_room_jid_fallback() {
+        // No underscore
+        let jid: jid::BareJid = "singlename@muc.example.com".parse().unwrap();
+        let (waddle, channel) = parse_room_jid_context(&jid);
+        assert_eq!(waddle, "default");
+        assert_eq!(channel, "default");
+
+        // Leading underscore (empty waddle)
+        let jid: jid::BareJid = "_channel@muc.example.com".parse().unwrap();
+        let (waddle, channel) = parse_room_jid_context(&jid);
+        assert_eq!(waddle, "default");
+        assert_eq!(channel, "default");
+
+        // Trailing underscore (empty channel)
+        let jid: jid::BareJid = "waddle_@muc.example.com".parse().unwrap();
+        let (waddle, channel) = parse_room_jid_context(&jid);
+        assert_eq!(waddle, "default");
+        assert_eq!(channel, "default");
+    }
 }

@@ -123,21 +123,21 @@ impl MessageEnricher {
     async fn build_embed_for_link(&self, link: &GitHubLink) -> MaybeElement {
         match link {
             GitHubLink::Repo { owner, repo } => self.build_repo_embed(owner, repo).await,
-            GitHubLink::Issue { owner, repo, number } => {
-                self.build_issue_embed(owner, repo, *number).await
-            }
-            GitHubLink::PullRequest { owner, repo, number } => {
-                self.build_pr_embed(owner, repo, *number).await
-            }
+            GitHubLink::Issue {
+                owner,
+                repo,
+                number,
+            } => self.build_issue_embed(owner, repo, *number).await,
+            GitHubLink::PullRequest {
+                owner,
+                repo,
+                number,
+            } => self.build_pr_embed(owner, repo, *number).await,
         }
     }
 
     /// Build a `<repo>` embed element by fetching repo + languages concurrently.
-    async fn build_repo_embed(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Option<minidom::Element> {
+    async fn build_repo_embed(&self, owner: &str, repo: &str) -> Option<minidom::Element> {
         // Fetch repo metadata and languages in parallel
         let (repo_info, languages) = tokio::join!(
             self.client.fetch_repo(owner, repo),
@@ -250,8 +250,10 @@ mod tests {
         let enricher = MessageEnricher::new(client);
 
         let mut msg = Message::new(None);
-        msg.bodies
-            .insert(String::new(), xmpp_parsers::message::Body("Hello world".into()));
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello world".into()),
+        );
         let count = enricher.enrich_message(&mut msg).await;
         assert_eq!(count, 0);
     }

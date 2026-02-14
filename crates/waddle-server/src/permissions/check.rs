@@ -189,7 +189,11 @@ impl PermissionChecker {
                         },
                         &tuple_subject.id,
                     );
-                    let userset_relation = tuple_subject.relation.as_ref().unwrap();
+                    let userset_relation = tuple_subject.relation.as_ref().ok_or_else(|| {
+                        PermissionError::InvalidTuple(
+                            "relation required for userset subject".into(),
+                        )
+                    })?;
 
                     if self
                         .tuple_store
@@ -254,7 +258,12 @@ impl PermissionChecker {
                                     },
                                     &tuple_subject.id,
                                 );
-                                let userset_relation = tuple_subject.relation.as_ref().unwrap();
+                                let userset_relation =
+                                    tuple_subject.relation.as_ref().ok_or_else(|| {
+                                        PermissionError::InvalidTuple(
+                                            "relation required for userset subject".into(),
+                                        )
+                                    })?;
 
                                 if self
                                     .tuple_store

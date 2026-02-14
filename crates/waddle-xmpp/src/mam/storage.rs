@@ -528,7 +528,8 @@ mod tests {
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
             body: "Hello, world!".to_string(),
-            stanza_id: Some("abc123".to_string()), ..Default::default()
+            stanza_id: Some("abc123".to_string()),
+            ..Default::default()
         };
 
         let archive_id = storage
@@ -560,7 +561,8 @@ mod tests {
                 from: format!("user{}@example.com/nick", i),
                 to: room.to_string(),
                 body: format!("Message {}", i),
-                stanza_id: None, ..Default::default()
+                stanza_id: None,
+                ..Default::default()
             };
             storage.store_message(room, &msg).await.unwrap();
         }
@@ -588,7 +590,8 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("Message {}", i),
-                stanza_id: None, ..Default::default()
+                stanza_id: None,
+                ..Default::default()
             };
             storage.store_message(room, &msg).await.unwrap();
         }
@@ -617,7 +620,8 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("Message {}", i),
-                stanza_id: None, ..Default::default()
+                stanza_id: None,
+                ..Default::default()
             };
             storage.store_message(room, &msg).await.unwrap();
         }
@@ -642,7 +646,8 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("Old message {}", i),
-                stanza_id: None, ..Default::default()
+                stanza_id: None,
+                ..Default::default()
             };
             storage.store_message(room, &msg).await.unwrap();
         }
@@ -655,7 +660,8 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("New message {}", i),
-                stanza_id: None, ..Default::default()
+                stanza_id: None,
+                ..Default::default()
             };
             storage.store_message(room, &msg).await.unwrap();
         }

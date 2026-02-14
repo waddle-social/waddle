@@ -622,7 +622,10 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(Arc::new(db_pool), ServerConfig::test_homeserver()));
+        let app_state = Arc::new(AppState::new(
+            Arc::new(db_pool),
+            ServerConfig::test_homeserver(),
+        ));
 
         // Create upload state with temp directory
         let upload_dir = std::env::temp_dir().join(format!("waddle-test-{}", uuid::Uuid::new_v4()));

@@ -10,10 +10,7 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHubLink {
     /// A repository link: `github.com/{owner}/{repo}`
-    Repo {
-        owner: String,
-        repo: String,
-    },
+    Repo { owner: String, repo: String },
     /// An issue link: `github.com/{owner}/{repo}/issues/{number}`
     Issue {
         owner: String,
@@ -35,10 +32,18 @@ impl GitHubLink {
             GitHubLink::Repo { owner, repo } => {
                 format!("https://github.com/{owner}/{repo}")
             }
-            GitHubLink::Issue { owner, repo, number } => {
+            GitHubLink::Issue {
+                owner,
+                repo,
+                number,
+            } => {
                 format!("https://github.com/{owner}/{repo}/issues/{number}")
             }
-            GitHubLink::PullRequest { owner, repo, number } => {
+            GitHubLink::PullRequest {
+                owner,
+                repo,
+                number,
+            } => {
                 format!("https://github.com/{owner}/{repo}/pull/{number}")
             }
         }
@@ -177,8 +182,16 @@ pub fn detect_github_links(body: &str, max_links: usize) -> Vec<GitHubLink> {
                     Err(_) => continue,
                 };
                 match kind.as_str() {
-                    "issues" => GitHubLink::Issue { owner, repo, number },
-                    "pull" => GitHubLink::PullRequest { owner, repo, number },
+                    "issues" => GitHubLink::Issue {
+                        owner,
+                        repo,
+                        number,
+                    },
+                    "pull" => GitHubLink::PullRequest {
+                        owner,
+                        repo,
+                        number,
+                    },
                     _ => continue,
                 }
             }
@@ -252,10 +265,8 @@ mod tests {
 
     #[test]
     fn test_detect_issue_link() {
-        let links = detect_github_links(
-            "See https://github.com/owner/repo/issues/42 for details",
-            3,
-        );
+        let links =
+            detect_github_links("See https://github.com/owner/repo/issues/42 for details", 3);
         assert_eq!(links.len(), 1);
         assert_eq!(
             links[0],
@@ -306,14 +317,20 @@ mod tests {
     fn test_skip_code_block() {
         let body = "text ```\nhttps://github.com/a/b\n``` more text";
         let links = detect_github_links(body, 3);
-        assert!(links.is_empty(), "Should not detect links inside fenced code blocks");
+        assert!(
+            links.is_empty(),
+            "Should not detect links inside fenced code blocks"
+        );
     }
 
     #[test]
     fn test_skip_inline_code() {
         let body = "Use `https://github.com/a/b` for reference";
         let links = detect_github_links(body, 3);
-        assert!(links.is_empty(), "Should not detect links inside inline code");
+        assert!(
+            links.is_empty(),
+            "Should not detect links inside inline code"
+        );
     }
 
     #[test]

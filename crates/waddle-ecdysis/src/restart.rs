@@ -132,15 +132,11 @@ pub fn restart(listeners: Vec<(String, TcpListener)>) -> ! {
 
 /// Execute a new process image with additional environment variables.
 /// Does not return on success. Panics on failure.
-fn exec_with_env(
-    exe: &std::path::Path,
-    args: &[String],
-    extra_env: &[(&str, &str)],
-) -> ! {
+fn exec_with_env(exe: &std::path::Path, args: &[String], extra_env: &[(&str, &str)]) -> ! {
     use std::ffi::CString;
 
-    let c_exe = CString::new(exe.to_string_lossy().as_bytes())
-        .expect("Executable path contains null byte");
+    let c_exe =
+        CString::new(exe.to_string_lossy().as_bytes()).expect("Executable path contains null byte");
 
     let c_args: Vec<CString> = args
         .iter()

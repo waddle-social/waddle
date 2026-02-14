@@ -24,6 +24,31 @@ use tracing::{error, info, instrument, warn};
 /// In production, consider using Redis or database storage
 pub type PendingAuthStore = Arc<DashMap<String, PendingAuthorization>>;
 
+/// Pending XMPP OAuth client state stored during the ATProto OAuth roundtrip.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // client_code_challenge stored for future PKCE wiring
+pub struct XmppPendingState {
+    /// The XMPP client's redirect URI
+    pub client_redirect_uri: String,
+    /// The XMPP client's state parameter (CSRF)
+    pub client_state: Option<String>,
+    /// The XMPP client's PKCE code challenge
+    pub client_code_challenge: Option<String>,
+    /// When this entry was created (for TTL enforcement)
+    pub created_at: std::time::Instant,
+}
+
+impl XmppPendingState {
+    /// Check if this pending state has expired (5 minute timeout,
+    /// matching `PendingAuthorization::is_expired()`).
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > std::time::Duration::from_secs(300)
+    }
+}
+
+/// In-memory store for pending XMPP OAuth states (ATProto state key -> XmppPendingState)
+pub type XmppPendingStateStore = Arc<DashMap<String, XmppPendingState>>;
+
 /// Extended application state for auth routes
 pub struct AuthState {
     /// Core app state (kept for future use accessing database directly)
@@ -35,6 +60,8 @@ pub struct AuthState {
     pub session_manager: SessionManager,
     /// Pending authorizations (state -> PendingAuthorization)
     pub pending_auths: PendingAuthStore,
+    /// Pending XMPP OAuth client states (ATProto state -> XmppPendingState)
+    pub xmpp_pending_states: XmppPendingStateStore,
     /// Server base URL for OAuth client metadata
     pub base_url: String,
 }
@@ -65,6 +92,7 @@ impl AuthState {
             oauth_client,
             session_manager,
             pending_auths: Arc::new(DashMap::new()),
+            xmpp_pending_states: Arc::new(DashMap::new()),
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }

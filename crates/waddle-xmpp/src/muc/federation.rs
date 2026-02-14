@@ -352,17 +352,18 @@ pub fn build_s2s_muc_message(
     sender_nick: &str,
     to_occupant: &Occupant,
     original_message: &Message,
-) -> OutboundMucMessage {
-    let from_room_jid = room_jid
-        .with_resource_str(sender_nick)
-        .expect("Nick should be valid resource");
+) -> Result<OutboundMucMessage, jid::Error> {
+    let from_room_jid = room_jid.with_resource_str(sender_nick)?;
 
     let mut broadcast_msg = original_message.clone();
     broadcast_msg.type_ = MessageType::Groupchat;
     broadcast_msg.from = Some(Jid::from(from_room_jid));
     broadcast_msg.to = Some(Jid::from(to_occupant.real_jid.clone()));
 
-    OutboundMucMessage::new(to_occupant.real_jid.clone(), broadcast_msg)
+    Ok(OutboundMucMessage::new(
+        to_occupant.real_jid.clone(),
+        broadcast_msg,
+    ))
 }
 
 /// Build a presence stanza for a remote occupant via S2S.
@@ -387,10 +388,8 @@ pub fn build_s2s_occupant_presence(
     role: Role,
     is_self: bool,
     real_jid: Option<&FullJid>,
-) -> OutboundMucPresence {
-    let from_room_jid = room_jid
-        .with_resource_str(from_nick)
-        .expect("Nick should be valid resource");
+) -> Result<OutboundMucPresence, jid::Error> {
+    let from_room_jid = room_jid.with_resource_str(from_nick)?;
 
     let presence = build_occupant_presence(
         &from_room_jid,
@@ -401,7 +400,10 @@ pub fn build_s2s_occupant_presence(
         real_jid,
     );
 
-    OutboundMucPresence::new(to_occupant.real_jid.clone(), presence)
+    Ok(OutboundMucPresence::new(
+        to_occupant.real_jid.clone(),
+        presence,
+    ))
 }
 
 /// Build a leave presence stanza for a remote occupant via S2S.
@@ -421,15 +423,16 @@ pub fn build_s2s_leave_presence(
     to_occupant: &Occupant,
     affiliation: Affiliation,
     is_self: bool,
-) -> OutboundMucPresence {
-    let from_room_jid = room_jid
-        .with_resource_str(leaving_nick)
-        .expect("Nick should be valid resource");
+) -> Result<OutboundMucPresence, jid::Error> {
+    let from_room_jid = room_jid.with_resource_str(leaving_nick)?;
 
     let presence =
         build_leave_presence(&from_room_jid, &to_occupant.real_jid, affiliation, is_self);
 
-    OutboundMucPresence::new(to_occupant.real_jid.clone(), presence)
+    Ok(OutboundMucPresence::new(
+        to_occupant.real_jid.clone(),
+        presence,
+    ))
 }
 
 impl MucRoom {
@@ -579,15 +582,12 @@ impl MucRoom {
         leaving_jid: &FullJid,
         nick: &str,
         affiliation: Affiliation,
-    ) -> OutboundMucPresence {
-        let from_room_jid = self
-            .room_jid
-            .with_resource_str(nick)
-            .expect("Nick should be valid resource");
+    ) -> Result<OutboundMucPresence, jid::Error> {
+        let from_room_jid = self.room_jid.with_resource_str(nick)?;
 
         let presence = build_leave_presence(&from_room_jid, leaving_jid, affiliation, true);
 
-        OutboundMucPresence::new(leaving_jid.clone(), presence)
+        Ok(OutboundMucPresence::new(leaving_jid.clone(), presence))
     }
 
     // === Federated Message Broadcasting ===
@@ -907,7 +907,9 @@ mod tests {
         let room = create_test_room();
         let leaving_jid: FullJid = "alice@example.com/desktop".parse().unwrap();
 
-        let result = room.build_self_leave_presence(&leaving_jid, "alice", Affiliation::Member);
+        let result = room
+            .build_self_leave_presence(&leaving_jid, "alice", Affiliation::Member)
+            .expect("valid nick should succeed");
 
         assert_eq!(result.to, leaving_jid);
         assert_eq!(result.presence.type_, PresenceType::Unavailable);
@@ -959,7 +961,8 @@ mod tests {
             Role::Participant,
             false,
             None,
-        );
+        )
+        .expect("valid nick should succeed");
 
         assert_eq!(result.to, to_occupant.real_jid);
         assert_eq!(result.presence.type_, PresenceType::None);
@@ -983,7 +986,8 @@ mod tests {
             &to_occupant,
             Affiliation::Member,
             false,
-        );
+        )
+        .expect("valid nick should succeed");
 
         assert_eq!(result.to, to_occupant.real_jid);
         assert_eq!(result.presence.type_, PresenceType::Unavailable);
@@ -1271,7 +1275,8 @@ mod tests {
         let original_message = make_test_message("Hello from sender!");
 
         let result =
-            build_s2s_muc_message(&room_jid, "sender_nick", &to_occupant, &original_message);
+            build_s2s_muc_message(&room_jid, "sender_nick", &to_occupant, &original_message)
+                .expect("valid nick should succeed");
 
         assert_eq!(result.to, to_occupant.real_jid);
         assert_eq!(result.message.type_, MessageType::Groupchat);
@@ -1295,5 +1300,47 @@ mod tests {
 
         assert_eq!(outbound.to, to);
         assert_eq!(outbound.message.id, message.id);
+    }
+
+    #[test]
+    fn test_build_s2s_muc_message_invalid_nick() {
+        let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+        let to_occupant = Occupant {
+            real_jid: "user@remote.example.org/client".parse().unwrap(),
+            nick: "remote_user".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: true,
+            home_server: Some("remote.example.org".to_string()),
+        };
+        let original_message = make_test_message("Hello!");
+
+        // Empty nick is not a valid resource
+        let result = build_s2s_muc_message(&room_jid, "", &to_occupant, &original_message);
+        assert!(result.is_err(), "Empty nick should return Err");
+    }
+
+    #[test]
+    fn test_build_s2s_occupant_presence_invalid_nick() {
+        let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+        let to_occupant = Occupant {
+            real_jid: "user@remote.example.org/client".parse().unwrap(),
+            nick: "remote_user".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: true,
+            home_server: Some("remote.example.org".to_string()),
+        };
+
+        let result = build_s2s_occupant_presence(
+            &room_jid,
+            "",
+            &to_occupant,
+            Affiliation::Member,
+            Role::Participant,
+            false,
+            None,
+        );
+        assert!(result.is_err(), "Empty nick should return Err");
     }
 }

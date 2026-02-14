@@ -8,7 +8,7 @@
 //! This enables standard XMPP clients (Conversations, Gajim, Dino, etc.) to
 //! authenticate via OAuth with ATProto as the identity provider.
 
-use super::auth::AuthState;
+use super::auth::{AuthState, XmppPendingState};
 use crate::auth::session::PendingAuthorization;
 use axum::{
     extract::{Query, State},
@@ -177,29 +177,29 @@ pub async fn xmpp_authorize_handler(
             // Store pending authorization with XMPP client's redirect info
             let pending = PendingAuthorization::from_authorization_request(&auth_request);
 
-            // Store XMPP client info in the pending auth
-            // We'll use this in the callback to redirect back to the XMPP client
-            // For now, we encode it in the state parameter
+            // Store XMPP client info keyed by ATProto state so we can
+            // retrieve it in the callback after the ATProto OAuth roundtrip.
             let xmpp_state = XmppPendingState {
                 client_redirect_uri: params.redirect_uri,
                 client_state: params.state,
                 client_code_challenge: params.code_challenge,
+                created_at: std::time::Instant::now(),
             };
 
-            // Store both the ATProto pending auth and XMPP client info
+            // Store ATProto pending auth
             state
                 .pending_auths
                 .insert(auth_request.state.clone(), pending);
 
-            // Store XMPP state separately (keyed by ATProto state)
-            // In production, use a proper store; for now we use a simple approach
-            // by encoding in a cookie or storing in the pending_auths with a prefix
-            let _xmpp_state_key = format!("xmpp:{}", auth_request.state);
-            if let Ok(xmpp_json) = serde_json::to_string(&xmpp_state) {
-                // Store as a "fake" pending auth (hacky but works for now)
-                // In production, use a separate store
-                debug!(xmpp_state = %xmpp_json, "Stored XMPP pending state");
-            }
+            // Store XMPP client state keyed by ATProto state
+            state
+                .xmpp_pending_states
+                .insert(auth_request.state.clone(), xmpp_state);
+
+            debug!(
+                atproto_state = %auth_request.state,
+                "Stored XMPP pending state for ATProto OAuth roundtrip"
+            );
 
             info!(
                 handle = %handle,
@@ -224,22 +224,17 @@ pub async fn xmpp_authorize_handler(
     }
 }
 
-/// Pending state for XMPP OAuth clients
-#[derive(Debug, Serialize, Deserialize)]
-struct XmppPendingState {
-    client_redirect_uri: String,
-    client_state: Option<String>,
-    client_code_challenge: Option<String>,
-}
-
 /// Query parameters for XMPP callback endpoint
 #[derive(Debug, Deserialize)]
 pub struct XmppCallbackQuery {
     /// Session ID from our auth system
     pub session_id: String,
-    /// Original state from XMPP client (passed through)
+    /// ATProto state key to look up stored XMPP client state
+    #[serde(default)]
+    pub atproto_state: Option<String>,
+    /// Original state from XMPP client (fallback if no stored state)
     pub state: Option<String>,
-    /// Original redirect URI (passed through)
+    /// Original redirect URI (fallback if no stored state)
     pub redirect_uri: String,
 }
 
@@ -256,9 +251,31 @@ pub async fn xmpp_callback_handler(
     State(state): State<Arc<AuthState>>,
     Query(params): Query<XmppCallbackQuery>,
 ) -> impl IntoResponse {
+    // Resolve XMPP client redirect_uri and state:
+    // Prefer stored state (keyed by ATProto state) over query params.
+    let (redirect_uri, client_state) = if let Some(ref atproto_state_key) = params.atproto_state {
+        match state.xmpp_pending_states.remove(atproto_state_key) {
+            Some((_, xmpp_state)) if !xmpp_state.is_expired() => {
+                debug!(atproto_state = %atproto_state_key, "Retrieved stored XMPP pending state");
+                (xmpp_state.client_redirect_uri, xmpp_state.client_state)
+            }
+            Some(_) => {
+                warn!(atproto_state = %atproto_state_key, "XMPP pending state expired");
+                (params.redirect_uri.clone(), params.state.clone())
+            }
+            None => {
+                warn!(atproto_state = %atproto_state_key, "XMPP pending state not found, falling back to query params");
+                (params.redirect_uri.clone(), params.state.clone())
+            }
+        }
+    } else {
+        // No ATProto state key — fall back to query params (backwards compat)
+        (params.redirect_uri.clone(), params.state.clone())
+    };
+
     info!(
-        session_id_prefix = %&params.session_id[..params.session_id.len().min(8)],
-        redirect_uri = %params.redirect_uri,
+        session_id_prefix = %params.session_id.get(..8).unwrap_or(&params.session_id),
+        redirect_uri = %redirect_uri,
         "XMPP OAuth callback"
     );
 
@@ -270,7 +287,7 @@ pub async fn xmpp_callback_handler(
     {
         Ok(session) => {
             // Build redirect URL to XMPP client
-            let mut redirect_url = params.redirect_uri.clone();
+            let mut redirect_url = redirect_uri.clone();
 
             // Add query parameters
             let separator = if redirect_url.contains('?') { "&" } else { "?" };
@@ -279,10 +296,9 @@ pub async fn xmpp_callback_handler(
             redirect_url
                 .push_str(&utf8_percent_encode(&params.session_id, NON_ALPHANUMERIC).to_string());
 
-            if let Some(client_state) = &params.state {
+            if let Some(ref cs) = client_state {
                 redirect_url.push_str("&state=");
-                redirect_url
-                    .push_str(&utf8_percent_encode(client_state, NON_ALPHANUMERIC).to_string());
+                redirect_url.push_str(&utf8_percent_encode(cs, NON_ALPHANUMERIC).to_string());
             }
 
             info!(
@@ -297,7 +313,7 @@ pub async fn xmpp_callback_handler(
             warn!(error = %err, "Session validation failed in XMPP callback");
 
             // Build error redirect
-            let mut redirect_url = params.redirect_uri.clone();
+            let mut redirect_url = redirect_uri.clone();
             let separator = if redirect_url.contains('?') { "&" } else { "?" };
             redirect_url.push_str(separator);
             redirect_url.push_str("error=access_denied");
@@ -306,10 +322,9 @@ pub async fn xmpp_callback_handler(
                 &utf8_percent_encode("Session validation failed", NON_ALPHANUMERIC).to_string(),
             );
 
-            if let Some(client_state) = &params.state {
+            if let Some(ref cs) = client_state {
                 redirect_url.push_str("&state=");
-                redirect_url
-                    .push_str(&utf8_percent_encode(client_state, NON_ALPHANUMERIC).to_string());
+                redirect_url.push_str(&utf8_percent_encode(cs, NON_ALPHANUMERIC).to_string());
             }
 
             Redirect::temporary(&redirect_url).into_response()
@@ -410,6 +425,59 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "login_hint_required");
+    }
+
+    #[test]
+    fn test_xmpp_pending_state_store_retrieve() {
+        let store: super::super::auth::XmppPendingStateStore =
+            std::sync::Arc::new(dashmap::DashMap::new());
+
+        let xmpp_state = super::super::auth::XmppPendingState {
+            client_redirect_uri: "xmpp://callback".to_string(),
+            client_state: Some("csrf-token-123".to_string()),
+            client_code_challenge: Some("challenge-abc".to_string()),
+            created_at: std::time::Instant::now(),
+        };
+
+        store.insert("atproto-state-key".to_string(), xmpp_state);
+
+        // Retrieve and verify
+        let (_, retrieved) = store.remove("atproto-state-key").expect("should exist");
+        assert_eq!(retrieved.client_redirect_uri, "xmpp://callback");
+        assert_eq!(retrieved.client_state.as_deref(), Some("csrf-token-123"));
+        assert_eq!(
+            retrieved.client_code_challenge.as_deref(),
+            Some("challenge-abc")
+        );
+        assert!(!retrieved.is_expired());
+
+        // Should be removed after retrieval
+        assert!(store.get("atproto-state-key").is_none());
+    }
+
+    #[test]
+    fn test_xmpp_pending_state_expired() {
+        let state = super::super::auth::XmppPendingState {
+            client_redirect_uri: "xmpp://callback".to_string(),
+            client_state: None,
+            client_code_challenge: None,
+            // Simulate creation 10 minutes ago
+            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+        };
+
+        assert!(
+            state.is_expired(),
+            "State created 10m ago should be expired"
+        );
+
+        // Fresh state should not be expired
+        let fresh = super::super::auth::XmppPendingState {
+            client_redirect_uri: "xmpp://callback".to_string(),
+            client_state: None,
+            client_code_challenge: None,
+            created_at: std::time::Instant::now(),
+        };
+        assert!(!fresh.is_expired(), "Fresh state should not be expired");
     }
 
     #[tokio::test]

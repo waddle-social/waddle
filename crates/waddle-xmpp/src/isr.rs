@@ -215,7 +215,10 @@ impl IsrTokenStore {
 
     /// Store a token in the store.
     fn store_token(&self, token: IsrToken) {
-        let mut tokens = self.tokens.write().expect("ISR token store lock poisoned");
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
+            warn!("ISR token store write lock was poisoned, recovering");
+            e.into_inner()
+        });
 
         // Clean up expired tokens if we're at capacity
         if tokens.len() >= self.max_tokens {
@@ -242,7 +245,10 @@ impl IsrTokenStore {
     /// Returns the token if valid, or None if expired/not found.
     /// The token is NOT removed - use `consume_token` to remove after successful resume.
     pub fn validate_token(&self, token_str: &str) -> Option<IsrToken> {
-        let tokens = self.tokens.read().expect("ISR token store lock poisoned");
+        let tokens = self.tokens.read().unwrap_or_else(|e| {
+            warn!("ISR token store read lock was poisoned, recovering");
+            e.into_inner()
+        });
 
         match tokens.get(token_str) {
             Some(token) => {
@@ -265,7 +271,10 @@ impl IsrTokenStore {
     ///
     /// This prevents token reuse.
     pub fn consume_token(&self, token_str: &str) -> Option<IsrToken> {
-        let mut tokens = self.tokens.write().expect("ISR token store lock poisoned");
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
+            warn!("ISR token store write lock was poisoned, recovering");
+            e.into_inner()
+        });
         let token = tokens.remove(token_str);
 
         if token.is_some() {
@@ -277,7 +286,10 @@ impl IsrTokenStore {
 
     /// Update SM state for an existing token.
     pub fn update_sm_state(&self, token_str: &str, inbound: u32, outbound: u32) -> bool {
-        let mut tokens = self.tokens.write().expect("ISR token store lock poisoned");
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
+            warn!("ISR token store write lock was poisoned, recovering");
+            e.into_inner()
+        });
 
         if let Some(token) = tokens.get_mut(token_str) {
             token.update_sm_state(inbound, outbound);
@@ -299,7 +311,10 @@ impl IsrTokenStore {
     pub fn refresh_token(&self, old_token_str: &str) -> Option<IsrToken> {
         // First validate and get the old token
         let old_token = {
-            let tokens = self.tokens.read().expect("ISR token store lock poisoned");
+            let tokens = self.tokens.read().unwrap_or_else(|e| {
+                warn!("ISR token store read lock was poisoned, recovering");
+                e.into_inner()
+            });
             tokens.get(old_token_str).cloned()
         };
 
@@ -320,7 +335,10 @@ impl IsrTokenStore {
 
                 // Remove old token
                 {
-                    let mut tokens = self.tokens.write().expect("ISR token store lock poisoned");
+                    let mut tokens = self.tokens.write().unwrap_or_else(|e| {
+                        warn!("ISR token store write lock was poisoned, recovering");
+                        e.into_inner()
+                    });
                     tokens.remove(old_token_str);
                 }
 
@@ -345,7 +363,10 @@ impl IsrTokenStore {
 
     /// Remove all tokens for a specific DID (e.g., on logout).
     pub fn revoke_tokens_for_did(&self, did: &str) {
-        let mut tokens = self.tokens.write().expect("ISR token store lock poisoned");
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
+            warn!("ISR token store write lock was poisoned, recovering");
+            e.into_inner()
+        });
         let initial_count = tokens.len();
         tokens.retain(|_, t| t.did != did);
         let removed = initial_count - tokens.len();
@@ -357,7 +378,10 @@ impl IsrTokenStore {
 
     /// Clean up expired tokens.
     pub fn cleanup_expired(&self) {
-        let mut tokens = self.tokens.write().expect("ISR token store lock poisoned");
+        let mut tokens = self.tokens.write().unwrap_or_else(|e| {
+            warn!("ISR token store write lock was poisoned, recovering");
+            e.into_inner()
+        });
         self.cleanup_expired_internal(&mut tokens);
     }
 
@@ -376,7 +400,10 @@ impl IsrTokenStore {
     pub fn token_count(&self) -> usize {
         self.tokens
             .read()
-            .expect("ISR token store lock poisoned")
+            .unwrap_or_else(|e| {
+                warn!("ISR token store read lock was poisoned, recovering");
+                e.into_inner()
+            })
             .len()
     }
 }
