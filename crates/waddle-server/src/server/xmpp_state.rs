@@ -9,8 +9,10 @@ use tracing::{debug, warn};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
 use crate::auth::{did_to_jid, jid_to_did, NativeUserStore, RegisterRequest, SessionManager};
-use crate::db::Database;
+use crate::db::{Database, DatabasePool, MigrationRunner};
 use crate::permissions::{Object, PermissionService, Subject};
+use crate::server::routes::channels::list_channels_from_db as list_channels_for_waddle_from_db;
+use crate::server::routes::waddles::list_user_waddles as list_user_waddles_from_db;
 use crate::vcard::VCardStore;
 
 /// XMPP application state that bridges to waddle-server services.
@@ -34,6 +36,8 @@ pub struct XmppAppState {
     vcard_store: VCardStore,
     /// Database for upload slots and other direct DB operations
     db: Arc<Database>,
+    /// Database pool for per-waddle database access (auto-join enumeration)
+    db_pool: Option<Arc<DatabasePool>>,
 }
 
 impl XmppAppState {
@@ -57,7 +61,17 @@ impl XmppAppState {
             native_user_store,
             vcard_store,
             db,
+            db_pool: None,
         }
+    }
+
+    /// Set the database pool for per-waddle database access.
+    ///
+    /// This enables auto-join channel enumeration by providing access
+    /// to per-waddle SQLite databases.
+    pub fn with_db_pool(mut self, db_pool: Arc<DatabasePool>) -> Self {
+        self.db_pool = Some(db_pool);
+        self
     }
 
     /// Parse a resource string into an Object.
@@ -988,6 +1002,100 @@ impl waddle_xmpp::AppState for XmppAppState {
         }
 
         Ok(())
+    }
+
+    // =========================================================================
+    // Auto-Join: Waddle & Channel Enumeration
+    // =========================================================================
+
+    /// List all waddles a user belongs to.
+    async fn list_user_waddles(
+        &self,
+        did: &str,
+    ) -> Result<Vec<waddle_xmpp::WaddleInfo>, XmppError> {
+        debug!(did = %did, "Listing user waddles for auto-join");
+
+        // Reuse shared query helper from waddles routes to avoid SQL duplication.
+        const PAGE_SIZE: usize = 200;
+        let mut offset = 0usize;
+        let mut result = Vec::new();
+
+        loop {
+            let page = list_user_waddles_from_db(self.db.as_ref(), did, PAGE_SIZE, offset)
+                .await
+                .map_err(|e| {
+                    warn!(did = %did, error = %e, "Failed to list user waddles");
+                    XmppError::internal(format!("Failed to list user waddles: {}", e))
+                })?;
+
+            let page_len = page.len();
+            result.extend(page.into_iter().map(|w| waddle_xmpp::WaddleInfo {
+                id: w.id,
+                name: w.name,
+            }));
+
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            offset += PAGE_SIZE;
+        }
+
+        debug!(did = %did, count = result.len(), "Found user waddles");
+        Ok(result)
+    }
+
+    /// List all channels in a waddle.
+    async fn list_waddle_channels(
+        &self,
+        waddle_id: &str,
+    ) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
+        debug!(waddle_id = %waddle_id, "Listing waddle channels for auto-join");
+
+        let db_pool = self.db_pool.as_ref().ok_or_else(|| {
+            warn!("Database pool not configured for auto-join channel enumeration");
+            XmppError::internal("Database pool not configured".to_string())
+        })?;
+
+        let waddle_db = db_pool.get_waddle_db(waddle_id).await.map_err(|e| {
+            warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle database");
+            XmppError::internal(format!("Failed to access waddle database: {}", e))
+        })?;
+
+        // Ensure migrations are run on the waddle DB
+        let runner = MigrationRunner::waddle();
+        if let Err(e) = runner.run(&waddle_db).await {
+            warn!(waddle_id = %waddle_id, error = %e, "Failed to run waddle DB migrations");
+            // Continue anyway - table may already exist
+        }
+
+        // Reuse shared query helper from channels routes to avoid SQL duplication.
+        const PAGE_SIZE: usize = 200;
+        let mut offset = 0usize;
+        let mut result = Vec::new();
+
+        loop {
+            let page = list_channels_for_waddle_from_db(&waddle_db, waddle_id, PAGE_SIZE, offset)
+                .await
+                .map_err(|e| {
+                    warn!(waddle_id = %waddle_id, error = %e, "Failed to list channels");
+                    XmppError::internal(format!("Failed to list channels: {}", e))
+                })?;
+
+            let page_len = page.len();
+            result.extend(page.into_iter().map(|c| waddle_xmpp::ChannelInfo {
+                id: c.id,
+                name: c.name,
+                channel_type: c.channel_type,
+            }));
+
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            offset += PAGE_SIZE;
+        }
+
+        debug!(waddle_id = %waddle_id, count = result.len(), "Found waddle channels");
+        Ok(result)
     }
 }
 

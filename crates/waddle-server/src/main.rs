@@ -19,9 +19,7 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    // Initialize telemetry (OpenTelemetry + tracing)
-    // Use OTEL_EXPORTER_OTLP_ENDPOINT env var to configure OTLP endpoint
-    // Falls back to local-only logging if OTLP is not available
+    // Initialize telemetry
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         telemetry::init().map_err(|e| anyhow::anyhow!("Failed to init telemetry: {}", e))?;
     } else {
@@ -33,11 +31,17 @@ async fn main() -> Result<()> {
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     info!("License: AGPL-3.0");
 
-    // Load and log server configuration
+    // Check for inherited listeners (Ecdysis restart from parent process)
+    let inherited = waddle_ecdysis::ListenerSet::from_env();
+    if inherited.is_some() {
+        info!("Inherited listeners from parent process (Ecdysis graceful restart)");
+    }
+
+    // Load configuration
     let server_config = ServerConfig::from_env();
     server_config.log_config();
 
-    // Initialize database pool
+    // Initialize database
     let db_config = if let Ok(db_path) = std::env::var("WADDLE_DB_PATH") {
         info!("Using file-based database at: {}", db_path);
         db::DatabaseConfig::development(&db_path)
@@ -51,7 +55,6 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
 
-    // Run global database migrations
     let migration_runner = db::MigrationRunner::global();
     migration_runner
         .run(db_pool.global())
@@ -60,10 +63,9 @@ async fn main() -> Result<()> {
 
     info!("Database initialized and migrations complete");
 
-    // Start the HTTP server with server configuration
-    server::start(db_pool, server_config).await?;
+    // Start the server
+    server::start(db_pool, server_config, inherited).await?;
 
-    // Shutdown telemetry on exit
     telemetry::shutdown();
 
     Ok(())

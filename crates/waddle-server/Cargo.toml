@@ -10,6 +10,7 @@ description = "Waddle Social - Backend HTTP/XMPP server"
 [dependencies]
 # Core Runtime & Async
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tower = { workspace = true }
 futures = { workspace = true }
 
@@ -27,6 +28,9 @@ kameo = { workspace = true }
 
 # XMPP Server
 waddle-xmpp = { path = "../waddle-xmpp" }
+
+# Graceful restart (Ecdysis pattern)
+waddle-ecdysis = { path = "../waddle-ecdysis" }
 jid = { workspace = true }
 dashmap = { workspace = true }
 

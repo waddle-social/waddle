@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/waddle-ecdysis",
     "crates/waddle-server",
     "crates/waddle-cli",
     "crates/waddle-xmpp",
@@ -16,6 +17,7 @@ repository = "https://github.com/waddle-social/waddle"
 [workspace.dependencies]
 # Core Runtime & Async
 tokio = { version = "1.43", features = ["full"] }
+tokio-util = "0.7"
 tower = "0.5"
 futures = "0.3"
 

@@ -49,16 +49,29 @@ pub struct S2sListener {
     metrics: Arc<S2sMetrics>,
     /// Stanza router for routing incoming stanzas to local users.
     stanza_router: Option<Arc<StanzaRouter>>,
+    /// Pre-bound listener — passed in by the caller.
+    listener: TcpListener,
+    /// Shutdown token — when cancelled, the accept loop stops.
+    shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 impl S2sListener {
-    /// Create a new S2S listener with the given configuration.
-    pub fn new(config: S2sListenerConfig, tls_acceptor: TlsAcceptor) -> Self {
+    /// Create a new S2S listener.
+    ///
+    /// Requires a pre-bound listener and a shutdown token.
+    pub fn new(
+        config: S2sListenerConfig,
+        tls_acceptor: TlsAcceptor,
+        listener: TcpListener,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
         Self {
             config,
             tls_acceptor,
             metrics: Arc::new(S2sMetrics::new()),
             stanza_router: None,
+            listener,
+            shutdown_token,
         }
     }
 
@@ -73,53 +86,67 @@ impl S2sListener {
     /// This method runs indefinitely, accepting connections and spawning
     /// connection actors to handle each one.
     pub async fn run(self) -> Result<(), XmppError> {
-        let listener = TcpListener::bind(&self.config.addr).await?;
-        info!(addr = %self.config.addr, "XMPP S2S server listening");
+        let listener = self.listener;
+        let addr = listener.local_addr().ok();
+        info!(addr = ?addr, "XMPP S2S server listening");
+
+        let shutdown_token = self.shutdown_token;
 
         // Initialize metrics
         self.metrics.record_listener_start();
 
         loop {
-            match listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    let tls_acceptor = self.tls_acceptor.clone();
-                    let domain = self.config.domain.clone();
-                    let dialback_secret = self.config.dialback_secret.clone();
-                    let metrics = Arc::clone(&self.metrics);
-                    let stanza_router = self.stanza_router.clone();
-
-                    // Record incoming connection
-                    metrics.record_connection_attempt();
-
-                    tokio::spawn(
-                        async move {
-                            if let Err(e) = S2sConnectionActor::handle_connection(
-                                stream,
-                                peer_addr,
-                                tls_acceptor,
-                                domain,
-                                metrics,
-                                &dialback_secret,
-                                stanza_router,
-                            )
-                            .await
-                            {
-                                warn!(error = %e, peer = %peer_addr, "S2S connection error");
-                            }
+            let (stream, peer_addr) = tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to accept S2S connection");
+                            continue;
                         }
-                        .instrument(info_span!(
-                            "xmpp.s2s.connection.lifecycle",
-                            peer_ip = %peer_addr,
-                            transport = "tcp+tls",
-                            remote_domain = tracing::field::Empty,
-                        )),
-                    );
+                    }
                 }
-                Err(e) => {
-                    warn!(error = %e, "Failed to accept S2S connection");
+                _ = shutdown_token.cancelled() => {
+                    info!("S2S accept loop stopped (shutdown token cancelled)");
+                    break;
                 }
-            }
+            };
+
+            let tls_acceptor = self.tls_acceptor.clone();
+            let domain = self.config.domain.clone();
+            let dialback_secret = self.config.dialback_secret.clone();
+            let metrics = Arc::clone(&self.metrics);
+            let stanza_router = self.stanza_router.clone();
+
+            // Record incoming connection
+            metrics.record_connection_attempt();
+
+            tokio::spawn(
+                async move {
+                    if let Err(e) = S2sConnectionActor::handle_connection(
+                        stream,
+                        peer_addr,
+                        tls_acceptor,
+                        domain,
+                        metrics,
+                        &dialback_secret,
+                        stanza_router,
+                    )
+                    .await
+                    {
+                        warn!(error = %e, peer = %peer_addr, "S2S connection error");
+                    }
+                }
+                .instrument(info_span!(
+                    "xmpp.s2s.connection.lifecycle",
+                    peer_ip = %peer_addr,
+                    transport = "tcp+tls",
+                    remote_domain = tracing::field::Empty,
+                )),
+            );
         }
+
+        Ok(())
     }
 
     /// Get the listener's metrics.

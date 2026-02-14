@@ -1399,7 +1399,7 @@ async fn delete_waddle_from_db(db: &Database, waddle_id: &str) -> Result<(), Str
 }
 
 /// List waddles the user is a member of
-async fn list_user_waddles(
+pub(crate) async fn list_user_waddles(
     db: &Database,
     user_did: &str,
     limit: usize,
@@ -1896,7 +1896,7 @@ mod tests {
         runner.run(db_pool.global()).await.unwrap();
 
         let app_state = Arc::new(AppState::new(
-            db_pool,
+            Arc::new(db_pool),
             crate::config::ServerConfig::test_homeserver(),
         ));
         Arc::new(WaddleState::new(

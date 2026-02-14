@@ -33,12 +33,34 @@ pub struct ArchivedMessage {
     pub timestamp: DateTime<Utc>,
     /// Sender JID
     pub from: String,
-    /// Recipient JID (room JID for MUC)
+    /// Recipient JID (room JID for MUC, or contact bare JID for 1:1)
     pub to: String,
     /// Message body
     pub body: String,
     /// Original stanza ID (if present)
     pub stanza_id: Option<String>,
+    /// Message type ("chat", "groupchat", "normal", etc.)
+    /// Defaults to "chat" if not set.
+    #[serde(default = "default_message_type")]
+    pub message_type: String,
+}
+
+fn default_message_type() -> String {
+    "chat".to_string()
+}
+
+impl Default for ArchivedMessage {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            timestamp: Utc::now(),
+            from: String::new(),
+            to: String::new(),
+            body: String::new(),
+            stanza_id: None,
+            message_type: default_message_type(),
+        }
+    }
 }
 
 /// MAM query parameters.

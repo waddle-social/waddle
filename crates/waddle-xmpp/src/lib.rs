@@ -367,6 +367,48 @@ pub trait AppState: Send + Sync + 'static {
         namespace: &str,
         xml_content: &str,
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
+
+    // =========================================================================
+    // Auto-Join: Waddle & Channel Enumeration
+    // =========================================================================
+
+    /// List all waddles a user belongs to.
+    ///
+    /// Used for auto-joining all channels on login (Slack-like semantics).
+    /// Returns a list of (waddle_id, waddle_name) pairs.
+    fn list_user_waddles(
+        &self,
+        did: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<WaddleInfo>, XmppError>> + Send;
+
+    /// List all channels in a waddle.
+    ///
+    /// Used for auto-joining all channels on login (Slack-like semantics).
+    /// Returns a list of channel info for the given waddle.
+    fn list_waddle_channels(
+        &self,
+        waddle_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<ChannelInfo>, XmppError>> + Send;
+}
+
+/// Basic waddle information for auto-join enumeration.
+#[derive(Debug, Clone)]
+pub struct WaddleInfo {
+    /// Waddle ID
+    pub id: String,
+    /// Waddle name
+    pub name: String,
+}
+
+/// Basic channel information for auto-join enumeration.
+#[derive(Debug, Clone)]
+pub struct ChannelInfo {
+    /// Channel ID
+    pub id: String,
+    /// Channel name (used to derive MUC room JID local part)
+    pub name: String,
+    /// Channel type (e.g., "text", "voice")
+    pub channel_type: String,
 }
 
 /// Information about a created upload slot (XEP-0363).
@@ -409,10 +451,13 @@ pub struct ScramCredentials {
     pub iterations: u32,
 }
 
-/// Start the XMPP server with the given configuration and application state.
+/// Start the XMPP server with the given configuration, state, listeners, and shutdown token.
 pub async fn start<S: AppState>(
     config: XmppServerConfig,
     app_state: Arc<S>,
+    c2s_listener: tokio::net::TcpListener,
+    s2s_listener: Option<tokio::net::TcpListener>,
+    shutdown_token: tokio_util::sync::CancellationToken,
 ) -> Result<XmppServer<S>, XmppError> {
-    XmppServer::new(config, app_state).await
+    XmppServer::new(config, app_state, c2s_listener, s2s_listener, shutdown_token).await
 }

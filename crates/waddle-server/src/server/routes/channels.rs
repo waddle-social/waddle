@@ -872,7 +872,7 @@ async fn get_channel_from_db(
 }
 
 /// List channels from the per-waddle database
-async fn list_channels_from_db(
+pub(crate) async fn list_channels_from_db(
     db: &Database,
     waddle_id: &str,
     limit: usize,
@@ -1052,7 +1052,7 @@ mod tests {
         runner.run(db_pool.global()).await.unwrap();
 
         let app_state = Arc::new(AppState::new(
-            db_pool,
+            Arc::new(db_pool),
             crate::config::ServerConfig::test_homeserver(),
         ));
         Arc::new(ChannelState::new(

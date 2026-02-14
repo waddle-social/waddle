@@ -79,11 +79,27 @@ pub struct XmppServer<S: AppState> {
     sm_session_registry: Arc<dyn SmSessionRegistry>,
     /// XEP-0060/0163 PubSub/PEP storage shared across all connections
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
+    /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
+    c2s_listener: TcpListener,
+    /// S2S listener — passed in if S2S federation is enabled.
+    s2s_listener: Option<TcpListener>,
+    /// Shutdown token — when cancelled, the accept loop stops.
+    shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 impl<S: AppState> XmppServer<S> {
     /// Create a new XMPP server instance.
-    pub async fn new(config: XmppServerConfig, app_state: Arc<S>) -> Result<Self, XmppError> {
+    ///
+    /// Requires a pre-bound C2S listener and a shutdown token.
+    /// The listener may be inherited from a parent process (Ecdysis) or freshly bound.
+    /// The shutdown token controls when the accept loop stops.
+    pub async fn new(
+        config: XmppServerConfig,
+        app_state: Arc<S>,
+        c2s_listener: TcpListener,
+        s2s_listener: Option<TcpListener>,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, XmppError> {
         let tls_acceptor = Self::load_tls_config(&config)?;
 
         // Create the MUC room registry with the MUC domain
@@ -120,6 +136,9 @@ impl<S: AppState> XmppServer<S> {
             isr_token_store,
             sm_session_registry,
             pubsub_storage,
+            c2s_listener,
+            s2s_listener,
+            shutdown_token,
         })
     }
 
@@ -201,15 +220,14 @@ impl<S: AppState> XmppServer<S> {
     /// When S2S is enabled, this runs both C2S and S2S listeners concurrently.
     /// Either listener failing will return an error.
     pub async fn run(self) -> Result<(), XmppError> {
-        // Start S2S listener if enabled
-        let s2s_handle = if self.config.s2s_enabled {
+        // Start S2S listener if enabled and listener was provided
+        let s2s_handle = if let Some(s2s_tcp_listener) = self.s2s_listener {
             let s2s_addr = self
                 .config
                 .s2s_addr
                 .unwrap_or_else(|| "0.0.0.0:5269".parse().unwrap());
 
             // Generate a dialback secret for this server instance
-            // In production, this should be persisted and loaded from configuration
             let mut dialback_secret = vec![0u8; 32];
             {
                 use rand::RngCore;
@@ -230,8 +248,13 @@ impl<S: AppState> XmppServer<S> {
                 None, // S2S pool not needed for inbound routing
             ));
 
-            let s2s_listener = S2sListener::new(s2s_config, self.tls_acceptor.clone())
-                .with_stanza_router(stanza_router);
+            let s2s_listener = S2sListener::new(
+                s2s_config,
+                self.tls_acceptor.clone(),
+                s2s_tcp_listener,
+                self.shutdown_token.clone(),
+            )
+            .with_stanza_router(stanza_router);
 
             info!(
                 addr = %s2s_addr,
@@ -247,9 +270,11 @@ impl<S: AppState> XmppServer<S> {
 
         // Start C2S listener
         let c2s_handle = {
-            let listener = TcpListener::bind(&self.config.c2s_addr).await?;
-            info!(addr = %self.config.c2s_addr, "XMPP C2S server listening");
+            let listener = self.c2s_listener;
+            let addr = listener.local_addr().ok();
+            info!(addr = ?addr, "XMPP C2S server listening");
 
+            let shutdown_token = self.shutdown_token;
             let app_state = self.app_state;
             let tls_acceptor = self.tls_acceptor;
             let domain = self.config.domain;
@@ -263,11 +288,19 @@ impl<S: AppState> XmppServer<S> {
 
             tokio::spawn(async move {
                 loop {
-                    let (stream, peer_addr) = match listener.accept().await {
-                        Ok(conn) => conn,
-                        Err(e) => {
-                            warn!(error = %e, "Failed to accept C2S connection");
-                            continue;
+                    let (stream, peer_addr) = tokio::select! {
+                        result = listener.accept() => {
+                            match result {
+                                Ok(conn) => conn,
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to accept C2S connection");
+                                    continue;
+                                }
+                            }
+                        }
+                        _ = shutdown_token.cancelled() => {
+                            info!("C2S accept loop stopped (shutdown token cancelled)");
+                            break;
                         }
                     };
 
@@ -317,8 +350,10 @@ impl<S: AppState> XmppServer<S> {
         tokio::select! {
             result = c2s_handle => {
                 match result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(e),
+                    Ok(()) => {
+                        info!("C2S listener task completed");
+                        Ok(())
+                    },
                     Err(e) => Err(XmppError::internal(format!("C2S listener task failed: {}", e))),
                 }
             }

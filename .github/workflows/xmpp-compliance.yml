@@ -22,6 +22,15 @@ on:
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Which test suite to run'
+        required: true
+        default: 'nightly'
+        type: choice
+        options:
+          - fast
+          - nightly
 
 env:
   CARGO_TERM_COLOR: always
@@ -62,7 +71,7 @@ jobs:
 
   quick-caas:
     name: Quick CAAS Smoke
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -100,7 +109,7 @@ jobs:
 
   xmpp-interop-fast:
     name: XMPP Interop Fast (${{ matrix.shard.name }})
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly') }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -271,7 +280,7 @@ jobs:
 
   xmpp-interop-nightly:
     name: XMPP Interop Nightly (Full)
-    if: ${{ github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly') }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -416,7 +425,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -443,7 +452,7 @@ jobs:
 
   lint:
     name: Lint & Format
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

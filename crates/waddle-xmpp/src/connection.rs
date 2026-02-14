@@ -295,6 +295,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
+        // Auto-join all channels the user has access to (Slack-like semantics)
+        // This runs after bind but before the main stanza loop so the user
+        // is already in all rooms when the client starts sending stanzas.
+        if let Err(e) = self.auto_join_all_channels().await {
+            warn!(jid = %full_jid, error = %e, "Auto-join failed (non-fatal, continuing)");
+        }
+
         // Main stanza processing loop
         let result = self.process_stanzas().await;
 
@@ -1570,9 +1577,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 to: room_jid.to_string(),
                 body,
                 stanza_id: muc_msg.message.id.clone(),
+                message_type: "groupchat".to_string(),
             };
 
-            match self.mam_storage.store_message(&archived_msg).await {
+            match self.mam_storage.store_message(&room_jid.to_string(), &archived_msg).await {
                 Ok(id) => {
                     debug!(
                         archive_id = %id,
@@ -1764,6 +1772,54 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 self.send_sent_carbons(&msg_with_from).await;
             }
             return Ok(());
+        }
+
+        // Archive 1:1 messages to both sender's and recipient's personal MAM archives.
+        // Messages with a body are archived so clients can retrieve conversation history.
+        let body_text = msg.bodies.get("").or_else(|| msg.bodies.values().next());
+        if let Some(body) = body_text {
+            let archive_id = uuid::Uuid::new_v4().to_string();
+            let now = Utc::now();
+
+            // Archive under sender's personal archive (keyed by sender bare JID)
+            let sender_archived = ArchivedMessage {
+                id: archive_id.clone(),
+                timestamp: now,
+                from: sender_jid.to_string(),
+                to: recipient_bare.to_string(),
+                body: body.0.clone(),
+                stanza_id: msg.id.clone(),
+                message_type: "chat".to_string(),
+            };
+            if let Err(e) = self
+                .mam_storage
+                .store_message(&sender_bare.to_string(), &sender_archived)
+                .await
+            {
+                warn!(error = %e, "Failed to archive 1:1 message for sender");
+            } else {
+                // Add stanza-id to outbound message for sender's archive
+                add_stanza_id(&mut msg_with_from, &archive_id, &sender_bare.to_string());
+            }
+
+            // Archive under recipient's personal archive (keyed by recipient bare JID)
+            let recipient_archive_id = uuid::Uuid::new_v4().to_string();
+            let recipient_archived = ArchivedMessage {
+                id: recipient_archive_id.clone(),
+                timestamp: now,
+                from: sender_jid.to_string(),
+                to: recipient_bare.to_string(),
+                body: body.0.clone(),
+                stanza_id: msg.id.clone(),
+                message_type: "chat".to_string(),
+            };
+            if let Err(e) = self
+                .mam_storage
+                .store_message(&recipient_bare.to_string(), &recipient_archived)
+                .await
+            {
+                warn!(error = %e, "Failed to archive 1:1 message for recipient");
+            }
         }
 
         let recipient_full = recipient_jid.clone().try_into_full().ok();
@@ -2428,7 +2484,246 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.stream.write_stanza(&Stanza::Message(message)).await
     }
 
-    /// Handle a MUC leave request.
+    /// Auto-join all channels the user has access to (Slack-like semantics).
+    ///
+    /// Called after resource bind to automatically place the user in every
+    /// MUC room corresponding to channels in their waddles. This provides
+    /// Slack-like behavior where users see all channels immediately on login.
+    ///
+    /// Joins are batched (groups of 10 with a short delay between batches)
+    /// to avoid presence storms. Individual join failures are logged and
+    /// skipped — they never fail the connection.
+    ///
+    /// Also writes XEP-0402 PEP bookmarks with `autojoin=true` for each
+    /// successfully joined room to keep XMPP clients in sync.
+    #[instrument(skip(self), fields(jid = %self.jid.as_ref().map(|j| j.to_string()).unwrap_or_default()))]
+    async fn auto_join_all_channels(&mut self) -> Result<(), XmppError> {
+        let full_jid = match self.jid.as_ref() {
+            Some(jid) => jid.clone(),
+            None => return Ok(()), // No JID bound yet, skip
+        };
+
+        let did = match self.session.as_ref() {
+            Some(session) => session.did.clone(),
+            None => return Ok(()), // No session, skip
+        };
+
+        info!(did = %did, "Auto-joining all channels");
+
+        // Step 1: Get the user's waddles
+        let waddles = match self.app_state.list_user_waddles(&did).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(did = %did, error = %e, "Failed to list user waddles for auto-join");
+                return Ok(()); // Non-fatal
+            }
+        };
+
+        if waddles.is_empty() {
+            debug!(did = %did, "User has no waddles, skipping auto-join");
+            return Ok(());
+        }
+
+        let muc_domain = self.room_registry.muc_domain().to_string();
+
+        // Derive nick from JID localpart (e.g., "alice" from "alice@waddle.social/res")
+        let nick = full_jid
+            .node()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "user".to_string());
+
+        // Collect all (waddle_id, channel) pairs
+        let mut all_channels: Vec<(String, crate::ChannelInfo)> = Vec::new();
+        for waddle in &waddles {
+            match self.app_state.list_waddle_channels(&waddle.id).await {
+                Ok(channels) => {
+                    for channel in channels {
+                        all_channels.push((waddle.id.clone(), channel));
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        waddle_id = %waddle.id,
+                        error = %e,
+                        "Failed to list channels for waddle, skipping"
+                    );
+                }
+            }
+        }
+
+        if all_channels.is_empty() {
+            debug!(did = %did, "No channels to auto-join");
+            return Ok(());
+        }
+
+        info!(
+            did = %did,
+            channel_count = all_channels.len(),
+            waddle_count = waddles.len(),
+            "Auto-joining channels"
+        );
+
+        let mut joined_rooms: Vec<(jid::BareJid, String)> = Vec::new();
+        let batch_size = 10;
+
+        for (batch_idx, batch) in all_channels.chunks(batch_size).enumerate() {
+            // Inter-batch delay to avoid presence storms (skip first batch)
+            if batch_idx > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+
+            for (waddle_id, channel) in batch {
+                // Derive room JID: channel_id@muc.domain
+                // Using channel ID (UUID) as the room local part for uniqueness
+                let room_jid_str = format!("{}@{}", channel.id, muc_domain);
+                let room_jid: jid::BareJid = match room_jid_str.parse() {
+                    Ok(jid) => jid,
+                    Err(e) => {
+                        warn!(
+                            channel_id = %channel.id,
+                            error = ?e,
+                            "Invalid room JID, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Ensure the room exists in the registry with proper waddle/channel metadata
+                if self.room_registry.get_room_data(&room_jid).is_none() {
+                    let config = crate::muc::RoomConfig {
+                        name: channel.name.clone(),
+                        ..Default::default()
+                    };
+                    if let Err(e) = self.room_registry.get_or_create_room(
+                        room_jid.clone(),
+                        waddle_id.clone(),
+                        channel.id.clone(),
+                        config,
+                    ) {
+                        warn!(
+                            room = %room_jid,
+                            error = %e,
+                            "Failed to create room for auto-join, skipping"
+                        );
+                        continue;
+                    }
+                }
+
+                // Build a MUC join request
+                // Use nick with suffix if there's a conflict
+                let mut effective_nick = nick.clone();
+                if let Some(room_data) = self.room_registry.get_room_data(&room_jid) {
+                    let room = room_data.read().await;
+                    if let Some(existing) = room.get_occupant(&effective_nick) {
+                        if existing.real_jid != full_jid {
+                            // Nick conflict — append a suffix to make unique
+                            effective_nick = format!("{}_2", nick);
+                        }
+                    }
+                }
+
+                let join_req = MucJoinRequest {
+                    room_jid: room_jid.clone(),
+                    nick: effective_nick.clone(),
+                    sender_jid: full_jid.clone(),
+                    password: None,
+                    history: Some(crate::muc::HistoryRequest {
+                        maxstanzas: Some(0), // Don't send history on auto-join (client fetches via MAM)
+                        ..Default::default()
+                    }),
+                };
+
+                match self.handle_muc_join(join_req).await {
+                    Ok(()) => {
+                        debug!(room = %room_jid, "Auto-joined room");
+                        joined_rooms.push((room_jid, channel.name.clone()));
+                    }
+                    Err(e) => {
+                        warn!(
+                            room = %room_jid,
+                            error = %e,
+                            "Failed to auto-join room, skipping"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Write XEP-0402 PEP bookmarks for all successfully joined rooms
+        if !joined_rooms.is_empty() {
+            self.write_autojoin_bookmarks(&full_jid, &nick, &joined_rooms)
+                .await;
+        }
+
+        info!(
+            did = %did,
+            joined = joined_rooms.len(),
+            total = all_channels.len(),
+            "Auto-join complete"
+        );
+
+        Ok(())
+    }
+
+    /// Write XEP-0402 PEP bookmarks for auto-joined rooms.
+    ///
+    /// Stores bookmarks with `autojoin=true` so compliant XMPP clients
+    /// recognize these rooms on subsequent logins.
+    async fn write_autojoin_bookmarks(
+        &self,
+        full_jid: &jid::FullJid,
+        nick: &str,
+        rooms: &[(jid::BareJid, String)],
+    ) {
+        let bare_jid = full_jid.to_bare();
+
+        // Batch bookmark writes to avoid long uninterrupted publish loops.
+        const BOOKMARK_BATCH_SIZE: usize = 10;
+        const BOOKMARK_BATCH_DELAY_MS: u64 = 25;
+
+        for (batch_idx, batch) in rooms.chunks(BOOKMARK_BATCH_SIZE).enumerate() {
+            if batch_idx > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(BOOKMARK_BATCH_DELAY_MS))
+                    .await;
+            }
+
+            for (room_jid, room_name) in batch {
+                let bookmark = crate::xep::xep0402::Bookmark {
+                    jid: room_jid.clone(),
+                    name: Some(room_name.clone()),
+                    autojoin: true,
+                    nick: Some(nick.to_string()),
+                    password: None,
+                    extensions: Vec::new(),
+                };
+
+                let bookmark_elem = crate::xep::xep0402::build_bookmark_element(&bookmark);
+                let item = crate::pubsub::PubSubItem {
+                    id: Some(room_jid.to_string()),
+                    payload: Some(bookmark_elem),
+                };
+
+                if let Err(e) = self
+                    .pubsub_storage
+                    .publish_item(
+                        &bare_jid,
+                        crate::xep::xep0402::PEP_NODE,
+                        &item,
+                        Some(&bare_jid),
+                        true, // auto_create node if it doesn't exist
+                    )
+                    .await
+                {
+                    warn!(
+                        room = %room_jid,
+                        error = %e,
+                        "Failed to write bookmark for auto-joined room"
+                    );
+                }
+            }
+        }
+    }
+
     ///
     /// Per XEP-0045:
     /// - Removes the user from the room
@@ -3489,6 +3784,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             target_bare
                         ))));
                     }
+
+                    // For queries with a node from other users, check if the
+                    // target is online and we actually have entity capabilities
+                    // cached for that node.  We don't implement caps caching,
+                    // so node queries to other users always return item-not-found.
+                    if query.node.is_some() {
+                        return Err(XmppError::item_not_found(Some(format!(
+                            "No cached capabilities for {} node '{}'",
+                            target_bare,
+                            query.node.as_deref().unwrap_or("")
+                        ))));
+                    }
                 }
 
                 debug!(target = %target_bare, requester = %requester, "disco#info query to bare JID (PEP)");
@@ -3632,20 +3939,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        // Extract the room JID from the 'to' attribute of the IQ
-        let room_jid = match &iq.to {
+        // Extract the archive JID from the 'to' attribute of the IQ.
+        // Per XEP-0313:
+        //   - With 'to': query a specific archive (e.g., MUC room)
+        //   - Without 'to': query the user's personal archive (1:1 messages)
+        let archive_jid = match &iq.to {
             Some(jid) => jid.to_string(),
             None => {
-                warn!("MAM query missing 'to' attribute");
-                return Err(XmppError::bad_request(Some(
-                    "MAM query must specify target archive (to attribute)".to_string(),
-                )));
+                // Personal archive query - use sender's bare JID as archive key
+                sender_jid.to_bare().to_string()
             }
         };
 
         debug!(
             sender = %sender_jid,
-            room = %room_jid,
+            archive = %archive_jid,
             "Processing MAM query"
         );
 
@@ -3661,7 +3969,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Execute the query against MAM storage
         let result = self
             .mam_storage
-            .query_messages(&room_jid, &mam_query)
+            .query_messages(&archive_jid, &mam_query)
             .await
             .map_err(|e| {
                 warn!(error = %e, "MAM query failed");
@@ -4629,11 +4937,52 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let items = self.app_state.get_roster(&sender_bare).await?;
         let roster_version = self.app_state.get_roster_version(&sender_bare).await?;
 
-        // Build and send the roster result
+        // RFC 6121 §2.6: Roster Versioning
+        // When the client provides a 'ver' attribute and it matches the current
+        // version, respond with an empty result (no roster body).
+        // When the version differs, send individual roster pushes for each item
+        // followed by an empty result IQ.
+        if let Some(ref client_ver) = query.ver {
+            if roster_version.as_deref() == Some(client_ver.as_str()) {
+                // Client is up-to-date; send empty result
+                let response = build_roster_result_empty(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                debug!(ver = %client_ver, "Roster version matches; sent empty result");
+                return Ok(());
+            }
+
+            // Version differs: send individual roster pushes then empty result.
+            // Since we don't track per-item changes, we send all items as pushes.
+            let current_ver = roster_version.as_deref().unwrap_or("0");
+            for item in &items {
+                let push_id = format!("rp-{}", uuid::Uuid::new_v4());
+                let push = build_roster_push(
+                    &push_id,
+                    &sender_jid.to_string(),
+                    item,
+                    Some(current_ver),
+                );
+                self.stream.write_stanza(&Stanza::Iq(push)).await?;
+            }
+
+            // Finish with empty result IQ
+            let response = build_roster_result_empty(&iq);
+            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+            debug!(
+                item_count = items.len(),
+                client_ver = %client_ver,
+                server_ver = ?roster_version,
+                "Sent roster pushes for version diff"
+            );
+            return Ok(());
+        }
+
+        // No version provided: send full roster result (initial roster fetch)
         let response = build_roster_result(
             &iq,
             &items,
-            roster_version.as_deref().or(query.ver.as_deref()),
+            roster_version.as_deref(),
         );
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 

@@ -382,6 +382,22 @@ impl AppState for MockAppState {
         // Mock private XML storage always succeeds
         async { Ok(()) }
     }
+
+    fn list_user_waddles(
+        &self,
+        _did: &str,
+    ) -> impl Future<Output = Result<Vec<waddle_xmpp::WaddleInfo>, XmppError>> + Send {
+        // Mock returns no waddles — auto-join is a no-op in tests by default
+        async { Ok(Vec::new()) }
+    }
+
+    fn list_waddle_channels(
+        &self,
+        _waddle_id: &str,
+    ) -> impl Future<Output = Result<Vec<waddle_xmpp::ChannelInfo>, XmppError>> + Send {
+        // Mock returns no channels
+        async { Ok(Vec::new()) }
+    }
 }
 
 /// Generated TLS credentials for testing.

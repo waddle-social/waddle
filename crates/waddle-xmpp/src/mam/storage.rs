@@ -44,15 +44,27 @@ impl From<libsql::Error> for MamStorageError {
 pub trait MamStorage: Send + Sync {
     /// Store a message in the archive.
     ///
+    /// The `archive_jid` identifies which archive to store in:
+    /// - For MUC messages: the room bare JID
+    /// - For 1:1 messages: the user's bare JID (personal archive)
+    ///
     /// Returns the unique archive ID assigned to the message.
-    async fn store_message(&self, message: &ArchivedMessage) -> Result<String, MamStorageError>;
+    async fn store_message(
+        &self,
+        archive_jid: &str,
+        message: &ArchivedMessage,
+    ) -> Result<String, MamStorageError>;
 
     /// Query messages from the archive.
+    ///
+    /// The `archive_jid` identifies which archive to query:
+    /// - For MUC archives: the room bare JID
+    /// - For personal archives: the user's bare JID
     ///
     /// Supports filtering by time range, sender, and RSM pagination.
     async fn query_messages(
         &self,
-        room_jid: &str,
+        archive_jid: &str,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError>;
 
@@ -167,8 +179,12 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_id
 
 #[async_trait]
 impl MamStorage for LibSqlMamStorage {
-    #[instrument(skip(self, message), fields(room = %message.to))]
-    async fn store_message(&self, message: &ArchivedMessage) -> Result<String, MamStorageError> {
+    #[instrument(skip(self, message), fields(archive = %archive_jid))]
+    async fn store_message(
+        &self,
+        archive_jid: &str,
+        message: &ArchivedMessage,
+    ) -> Result<String, MamStorageError> {
         self.initialize().await?;
 
         // Use provided ID or generate a new one
@@ -190,7 +206,7 @@ impl MamStorage for LibSqlMamStorage {
             "#,
             (
                 archive_id.as_str(),
-                message.to.as_str(),
+                archive_jid,
                 timestamp.as_str(),
                 message.from.as_str(),
                 message.to.as_str(),
@@ -241,10 +257,14 @@ impl MamStorage for LibSqlMamStorage {
             param_index += 1;
         }
 
-        // Sender filter
+        // "with" filter: matches either sender or recipient (for personal archives,
+        // this filters by conversation partner; for MUC archives, by sender).
         if let Some(ref with) = query.with {
-            conditions.push(format!("from_jid LIKE ?{}", param_index));
-            params.push(format!("%{}%", with));
+            conditions.push(format!(
+                "(from_jid LIKE ?{idx} OR to_jid LIKE ?{idx})",
+                idx = param_index
+            ));
+            params.push(format!("{}%", with));
             param_index += 1;
         }
 
@@ -357,6 +377,7 @@ impl MamStorage for LibSqlMamStorage {
                 to,
                 body,
                 stanza_id,
+                message_type: crate::mam::default_message_type(),
             });
         }
 
@@ -431,6 +452,7 @@ impl MamStorage for LibSqlMamStorage {
                 to,
                 body,
                 stanza_id,
+                message_type: crate::mam::default_message_type(),
             }))
         } else {
             Ok(None)
@@ -506,10 +528,13 @@ mod tests {
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
             body: "Hello, world!".to_string(),
-            stanza_id: Some("abc123".to_string()),
+            stanza_id: Some("abc123".to_string()), ..Default::default()
         };
 
-        let archive_id = storage.store_message(&msg).await.unwrap();
+        let archive_id = storage
+            .store_message("room@conference.example.com", &msg)
+            .await
+            .unwrap();
         assert!(!archive_id.is_empty());
 
         let retrieved = storage.get_message(&archive_id).await.unwrap();
@@ -535,9 +560,9 @@ mod tests {
                 from: format!("user{}@example.com/nick", i),
                 to: room.to_string(),
                 body: format!("Message {}", i),
-                stanza_id: None,
+                stanza_id: None, ..Default::default()
             };
-            storage.store_message(&msg).await.unwrap();
+            storage.store_message(room, &msg).await.unwrap();
         }
 
         // Query all messages
@@ -563,9 +588,9 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("Message {}", i),
-                stanza_id: None,
+                stanza_id: None, ..Default::default()
             };
-            storage.store_message(&msg).await.unwrap();
+            storage.store_message(room, &msg).await.unwrap();
         }
 
         // Query with limit
@@ -592,9 +617,9 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("Message {}", i),
-                stanza_id: None,
+                stanza_id: None, ..Default::default()
             };
-            storage.store_message(&msg).await.unwrap();
+            storage.store_message(room, &msg).await.unwrap();
         }
 
         let count = storage.count_messages(room).await.unwrap();
@@ -617,9 +642,9 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("Old message {}", i),
-                stanza_id: None,
+                stanza_id: None, ..Default::default()
             };
-            storage.store_message(&msg).await.unwrap();
+            storage.store_message(room, &msg).await.unwrap();
         }
 
         // Store new messages
@@ -630,9 +655,9 @@ mod tests {
                 from: "user@example.com/nick".to_string(),
                 to: room.to_string(),
                 body: format!("New message {}", i),
-                stanza_id: None,
+                stanza_id: None, ..Default::default()
             };
-            storage.store_message(&msg).await.unwrap();
+            storage.store_message(room, &msg).await.unwrap();
         }
 
         // Delete old messages

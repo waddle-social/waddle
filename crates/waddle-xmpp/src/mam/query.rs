@@ -207,11 +207,16 @@ pub fn build_result_messages(
 
 /// Build a single MAM result message.
 fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage) -> Message {
-    // Build the inner message element
+    // Build the inner message element with the original message type.
+    let msg_type = if archived.message_type.is_empty() {
+        "chat"
+    } else {
+        &archived.message_type
+    };
     let inner_msg = Element::builder("message", "jabber:client")
         .attr("from", &archived.from)
         .attr("to", &archived.to)
-        .attr("type", "groupchat")
+        .attr("type", msg_type)
         .append(Element::builder("body", "jabber:client").append(archived.body.clone()))
         .build();
 
@@ -359,7 +364,7 @@ mod tests {
             from: "user@example.com/nick".to_string(),
             to: "room@conference.example.com".to_string(),
             body: "Hello, world!".to_string(),
-            stanza_id: None,
+            stanza_id: None, ..Default::default()
         };
 
         let msg = build_result_message("query-1", "user@example.com", &archived);

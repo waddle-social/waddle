@@ -343,7 +343,7 @@ mod tests {
         runner.run(db_pool.global()).await.unwrap();
 
         let app_state = Arc::new(crate::server::AppState::new(
-            db_pool,
+            Arc::new(db_pool),
             crate::config::ServerConfig::test_homeserver(),
         ));
         Arc::new(AuthState::new(

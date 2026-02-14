@@ -10,6 +10,7 @@ description = "Waddle Social - Native XMPP server library"
 [dependencies]
 # Core Runtime & Async
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 futures = { workspace = true }
 async-trait = "0.1"
 
