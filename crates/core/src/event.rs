@@ -422,6 +422,16 @@ impl std::str::FromStr for Subscription {
     }
 }
 
+/// Structured embed attached to a message by a plugin (e.g. GitHub repo card).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageEmbed {
+    /// XML namespace or plugin-defined identifier for this embed type.
+    pub namespace: String,
+    /// Arbitrary structured data for the embed, interpreted by the owning plugin.
+    pub data: serde_json::Value,
+}
+
 /// A chat message (1:1 or MUC).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -446,6 +456,10 @@ pub struct ChatMessage {
 
     /// Thread ID for conversation threading, if present
     pub thread: Option<String>,
+
+    /// Plugin-generated rich embeds (e.g. GitHub repo cards).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embeds: Vec<MessageEmbed>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -831,6 +845,7 @@ mod tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
             corr_id,
@@ -906,6 +921,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -975,6 +991,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -1048,6 +1065,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -1076,6 +1094,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -1123,6 +1142,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -1165,6 +1185,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -1198,6 +1219,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         ))
@@ -1284,6 +1306,7 @@ mod event_bus_tests {
                         timestamp: Utc::now(),
                         message_type: MessageType::Chat,
                         thread: None,
+                        embeds: vec![],
                     },
                 },
             ))
@@ -1373,6 +1396,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
             corr_id,
@@ -1442,6 +1466,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
             target_corr,
@@ -1460,6 +1485,7 @@ mod event_bus_tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
             other_corr,
@@ -1657,5 +1683,52 @@ mod event_bus_tests {
         assert!(!has_glob_meta("xmpp"));
         assert!(!has_glob_meta("system"));
         assert!(!has_glob_meta("plain123"));
+    }
+
+    #[test]
+    fn chat_message_serde_round_trip_with_embeds() {
+        let msg = ChatMessage {
+            id: "msg-1".into(),
+            from: "alice@example.com".into(),
+            to: "bob@example.com".into(),
+            body: "Check this repo".into(),
+            timestamp: chrono::Utc::now(),
+            message_type: MessageType::Chat,
+            thread: None,
+            embeds: vec![MessageEmbed {
+                namespace: "urn:waddle:github:0".into(),
+                data: serde_json::json!({"owner": "cuenv", "name": "cuenv", "stars": 42}),
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ChatMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.embeds.len(), 1);
+        assert_eq!(parsed.embeds[0].namespace, "urn:waddle:github:0");
+        assert_eq!(parsed.embeds[0].data["owner"], "cuenv");
+        assert_eq!(parsed.embeds[0].data["stars"], 42);
+    }
+
+    #[test]
+    fn chat_message_serde_no_embeds_field_when_empty() {
+        let msg = ChatMessage {
+            id: "msg-2".into(),
+            from: "a@b".into(),
+            to: "c@d".into(),
+            body: "hi".into(),
+            timestamp: chrono::Utc::now(),
+            message_type: MessageType::Chat,
+            thread: None,
+            embeds: vec![],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // The embeds field should be skipped when empty
+        assert!(!json.contains("embeds"));
+    }
+
+    #[test]
+    fn chat_message_deserializes_without_embeds_field() {
+        let json = r#"{"id":"m","from":"a","to":"b","body":"hi","timestamp":"2025-01-01T00:00:00Z","messageType":"chat"}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.embeds.is_empty());
     }
 }

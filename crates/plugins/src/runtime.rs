@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 #[cfg(feature = "native")]
 use std::collections::{BTreeSet, VecDeque};
+#[cfg(feature = "native")]
+use std::io::Read as _;
 use std::sync::Arc;
 #[cfg(feature = "native")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,6 +128,8 @@ pub enum PluginCapability {
     StanzaProcessor { priority: i32 },
     TuiRenderer,
     GuiMetadata,
+    GuiRenderer,
+    MessageTransformer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +149,13 @@ pub enum PluginHook {
     OutboundStanza(String),
     TuiRender { width: u16, height: u16 },
     GuiGetComponentInfo,
+    /// Transform a message body: detect URLs, produce embed descriptors.
+    /// Returns JSON: `{"embeds":[{"namespace":"...","data":{...}}]}`
+    MessageTransform { body: String },
+    /// Render an embed for the TUI. Returns JSON array of styled spans.
+    RenderTui { embed_json: String, width: u16 },
+    /// Render an embed for the GUI. Returns an HTML fragment string.
+    RenderGui { embed_json: String },
 }
 
 #[cfg(feature = "native")]
@@ -155,6 +166,12 @@ struct PluginStoreState {
     declared_event_subscriptions: Vec<String>,
     event_subscription_patterns: Vec<String>,
     event_subscriptions: Vec<Pattern>,
+    /// Allowed HTTP hosts for host-http.fetch calls.
+    http_hosts: Vec<String>,
+    /// Buffer for last host-http response body.
+    http_response_body: Vec<u8>,
+    /// Status code of last host-http response.
+    http_response_status: i32,
 }
 
 #[cfg(feature = "native")]
@@ -179,11 +196,16 @@ enum RuntimeHook {
 #[cfg(feature = "native")]
 struct LoadedPlugin {
     store: Store<PluginStoreState>,
-    _instance: Instance,
+    instance: Instance,
     shutdown: LifecycleShutdown,
     event_handler: Option<RuntimeHook>,
     process_inbound: Option<RuntimeHook>,
     process_outbound: Option<RuntimeHook>,
+    message_transform: Option<TypedFunc<(i32, i32), i32>>,
+    render_tui: Option<TypedFunc<(i32, i32, i32), i32>>,
+    render_gui: Option<TypedFunc<(i32, i32), i32>>,
+    /// guest_alloc(size) -> ptr — plugin-exported allocator for passing data in.
+    guest_alloc: Option<TypedFunc<i32, i32>>,
 }
 
 #[cfg(feature = "native")]
@@ -275,6 +297,184 @@ impl LoadedPlugin {
                 }
             }
         }
+    }
+
+    /// Write bytes into guest memory via guest_alloc, returning (ptr, len).
+    fn write_guest_bytes(&mut self, data: &[u8]) -> Result<(i32, i32), PluginError> {
+        let plugin_id = self.store.data().plugin_id.clone();
+        let Some(alloc) = &self.guest_alloc else {
+            return Err(PluginError::InvocationFailed {
+                id: plugin_id,
+                reason: "plugin does not export guest_alloc".to_string(),
+            });
+        };
+        let alloc = alloc.clone();
+        let len = i32::try_from(data.len()).map_err(|_| PluginError::InvocationFailed {
+            id: plugin_id.clone(),
+            reason: "data too large for guest memory".to_string(),
+        })?;
+        let ptr = alloc
+            .call(&mut self.store, len)
+            .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+
+        // Write data into guest memory at ptr
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .ok_or_else(|| PluginError::InvocationFailed {
+                id: plugin_id.clone(),
+                reason: "guest module does not export memory".to_string(),
+            })?;
+
+        let mem_data = memory.data_mut(&mut self.store);
+        let start = usize::try_from(ptr).map_err(|_| PluginError::MemoryLimitExceeded {
+            id: plugin_id.clone(),
+            reason: "write_guest_bytes: negative pointer from guest_alloc".to_string(),
+        })?;
+        let end = start.checked_add(data.len()).ok_or_else(|| {
+            PluginError::MemoryLimitExceeded {
+                id: plugin_id.clone(),
+                reason: "write_guest_bytes: pointer + length overflow".to_string(),
+            }
+        })?;
+        if end > mem_data.len() {
+            return Err(PluginError::MemoryLimitExceeded {
+                id: plugin_id,
+                reason: "write_guest_bytes: out of bounds".to_string(),
+            });
+        }
+        mem_data[start..end].copy_from_slice(data);
+        Ok((ptr, len))
+    }
+
+    /// Read the result buffer from guest memory via get_result_ptr/get_result_len exports.
+    fn read_guest_result(&mut self) -> Result<Option<String>, PluginError> {
+        let plugin_id = self.store.data().plugin_id.clone();
+        let get_ptr = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "get_result_ptr");
+        let get_len = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, "get_result_len");
+
+        let (Ok(get_ptr), Ok(get_len)) = (get_ptr, get_len) else {
+            return Ok(None);
+        };
+
+        let ptr = get_ptr
+            .call(&mut self.store, ())
+            .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+        let len = get_len
+            .call(&mut self.store, ())
+            .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+
+        if len <= 0 || ptr < 0 {
+            return Ok(None);
+        }
+
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .ok_or_else(|| PluginError::InvocationFailed {
+                id: plugin_id.clone(),
+                reason: "guest module does not export memory".to_string(),
+            })?;
+        let data = memory.data(&self.store);
+        // ptr and len are guaranteed non-negative by the guard above,
+        // so the `as usize` casts are value-preserving.  Use checked_add
+        // to prevent overflow from a malicious guest returning huge values.
+        let start = ptr as usize;
+        let end = start.checked_add(len as usize).ok_or_else(|| {
+            PluginError::MemoryLimitExceeded {
+                id: plugin_id.clone(),
+                reason: "read_guest_result: pointer + length overflow".to_string(),
+            }
+        })?;
+        if end > data.len() {
+            return Err(PluginError::MemoryLimitExceeded {
+                id: plugin_id,
+                reason: "read_guest_result: out of bounds".to_string(),
+            });
+        }
+        let result = std::str::from_utf8(&data[start..end])
+            .map_err(|error| PluginError::InvocationFailed {
+                id: plugin_id,
+                reason: format!("result is not valid UTF-8: {error}"),
+            })?;
+        Ok(Some(result.to_string()))
+    }
+
+    /// Invoke message_transform: write body to guest, call plugin_transform_message, read result.
+    fn invoke_message_transform(
+        &mut self,
+        body: &str,
+        fuel: u64,
+    ) -> Result<Option<String>, PluginError> {
+        let Some(func) = self.message_transform.clone() else {
+            return Ok(None);
+        };
+        let plugin_id = self.store.data().plugin_id.clone();
+        let (ptr, len) = self.write_guest_bytes(body.as_bytes())?;
+        prepare_invocation(&mut self.store, &plugin_id, fuel)?;
+        let status = func
+            .call(&mut self.store, (ptr, len))
+            .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+        if status != 0 {
+            return Err(PluginError::InvocationFailed {
+                id: plugin_id,
+                reason: format!("non-zero message_transform status: {status}"),
+            });
+        }
+        self.read_guest_result()
+    }
+
+    /// Invoke render_tui: write embed JSON to guest, call plugin_render_tui, read result.
+    fn invoke_render_tui(
+        &mut self,
+        embed_json: &str,
+        width: u16,
+        fuel: u64,
+    ) -> Result<Option<String>, PluginError> {
+        let Some(func) = self.render_tui.clone() else {
+            return Ok(None);
+        };
+        let plugin_id = self.store.data().plugin_id.clone();
+        let (ptr, len) = self.write_guest_bytes(embed_json.as_bytes())?;
+        prepare_invocation(&mut self.store, &plugin_id, fuel)?;
+        let status = func
+            .call(&mut self.store, (ptr, len, i32::from(width)))
+            .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+        if status != 0 {
+            return Err(PluginError::InvocationFailed {
+                id: plugin_id,
+                reason: format!("non-zero render_tui status: {status}"),
+            });
+        }
+        self.read_guest_result()
+    }
+
+    /// Invoke render_gui: write embed JSON to guest, call plugin_render_gui, read result.
+    fn invoke_render_gui(
+        &mut self,
+        embed_json: &str,
+        fuel: u64,
+    ) -> Result<Option<String>, PluginError> {
+        let Some(func) = self.render_gui.clone() else {
+            return Ok(None);
+        };
+        let plugin_id = self.store.data().plugin_id.clone();
+        let (ptr, len) = self.write_guest_bytes(embed_json.as_bytes())?;
+        prepare_invocation(&mut self.store, &plugin_id, fuel)?;
+        let status = func
+            .call(&mut self.store, (ptr, len))
+            .map_err(|error| classify_invocation_error(&plugin_id, error))?;
+        if status != 0 {
+            return Err(PluginError::InvocationFailed {
+                id: plugin_id,
+                reason: format!("non-zero render_gui status: {status}"),
+            });
+        }
+        self.read_guest_result()
     }
 }
 
@@ -604,18 +804,25 @@ impl<D: Database> PluginRuntime<D> {
         self.plugins.get(plugin_id)
     }
 
-    pub async fn invoke_hook(&mut self, hook: PluginHook) -> Result<(), PluginError> {
+    /// Invoke a hook on all matching plugins. Fire-and-forget hooks return `None`.
+    /// Bidirectional hooks (`MessageTransform`, `RenderTui`, `RenderGui`) return
+    /// the result from the **first** plugin that produces output.
+    pub async fn invoke_hook(
+        &mut self,
+        hook: PluginHook,
+    ) -> Result<Option<String>, PluginError> {
         #[cfg(feature = "native")]
         {
             if self.runtime_plugins.is_empty() {
-                return Ok(());
+                return Ok(None);
             }
 
             let plugin_ids: Vec<String> = self.runtime_plugins.keys().cloned().collect();
             let mut failures = Vec::new();
+            let mut result: Option<String> = None;
 
             for plugin_id in plugin_ids {
-                let invocation_result = match &hook {
+                let invocation_result: Result<Option<String>, PluginError> = match &hook {
                     PluginHook::Event(event) => {
                         let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
                             continue;
@@ -623,25 +830,55 @@ impl<D: Database> PluginRuntime<D> {
                         if !plugin.matches_event_subscription(event.channel.as_str()) {
                             continue;
                         }
-                        plugin.invoke_event_handler(self.config.fuel_per_invocation)
+                        plugin
+                            .invoke_event_handler(self.config.fuel_per_invocation)
+                            .map(|_| None)
                     }
                     PluginHook::InboundStanza(_xml) => {
                         let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
                             continue;
                         };
-                        plugin.invoke_inbound_stanza(self.config.fuel_per_invocation)
+                        plugin
+                            .invoke_inbound_stanza(self.config.fuel_per_invocation)
+                            .map(|_| None)
                     }
                     PluginHook::OutboundStanza(_xml) => {
                         let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
                             continue;
                         };
-                        plugin.invoke_outbound_stanza(self.config.fuel_per_invocation)
+                        plugin
+                            .invoke_outbound_stanza(self.config.fuel_per_invocation)
+                            .map(|_| None)
                     }
-                    PluginHook::TuiRender { .. } | PluginHook::GuiGetComponentInfo => Ok(()),
+                    PluginHook::TuiRender { .. } | PluginHook::GuiGetComponentInfo => Ok(None),
+                    PluginHook::MessageTransform { body } => {
+                        let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
+                            continue;
+                        };
+                        plugin.invoke_message_transform(body, self.config.fuel_per_invocation)
+                    }
+                    PluginHook::RenderTui { embed_json, width } => {
+                        let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
+                            continue;
+                        };
+                        plugin.invoke_render_tui(embed_json, *width, self.config.fuel_per_render)
+                    }
+                    PluginHook::RenderGui { embed_json } => {
+                        let Some(plugin) = self.runtime_plugins.get_mut(&plugin_id) else {
+                            continue;
+                        };
+                        plugin.invoke_render_gui(embed_json, self.config.fuel_per_render)
+                    }
                 };
 
-                if let Err(error) = invocation_result {
-                    failures.push((plugin_id, error));
+                match invocation_result {
+                    Ok(Some(output)) if result.is_none() => {
+                        result = Some(output);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        failures.push((plugin_id, error));
+                    }
                 }
             }
 
@@ -655,7 +892,7 @@ impl<D: Database> PluginRuntime<D> {
                 }
             }
 
-            Ok(())
+            Ok(result)
         }
 
         #[cfg(not(feature = "native"))]
@@ -781,6 +1018,8 @@ fn map_capabilities(manifest: &PluginManifest) -> Vec<PluginCapability> {
             }
             ManifestCapability::TuiRenderer => Some(PluginCapability::TuiRenderer),
             ManifestCapability::GuiMetadata => Some(PluginCapability::GuiMetadata),
+            ManifestCapability::GuiRenderer => Some(PluginCapability::GuiRenderer),
+            ManifestCapability::MessageTransformer => Some(PluginCapability::MessageTransformer),
             ManifestCapability::KvStorage => None,
         })
         .collect()
@@ -815,6 +1054,9 @@ fn compile_and_init_plugin(
             declared_event_subscriptions: manifest.permissions.event_subscriptions.clone(),
             event_subscription_patterns: Vec::new(),
             event_subscriptions: Vec::new(),
+            http_hosts: manifest.permissions.http_hosts.clone(),
+            http_response_body: Vec::new(),
+            http_response_status: 0,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -822,6 +1064,7 @@ fn compile_and_init_plugin(
 
     let mut linker = Linker::new(&engine);
     bind_host_events(&mut linker, &plugin_id)?;
+    bind_host_http(&mut linker, &plugin_id)?;
     let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|error| map_instantiation_error(&plugin_id, error.to_string()))?;
@@ -864,13 +1107,45 @@ fn compile_and_init_plugin(
         None
     };
 
+    let message_transform = if manifest.hooks.message_transformer {
+        instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "plugin_transform_message")
+            .ok()
+    } else {
+        None
+    };
+
+    let render_tui = if manifest.hooks.tui_renderer {
+        instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut store, "plugin_render_tui")
+            .ok()
+    } else {
+        None
+    };
+
+    let render_gui = if manifest.hooks.gui_renderer {
+        instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "plugin_render_gui")
+            .ok()
+    } else {
+        None
+    };
+
+    let guest_alloc = instance
+        .get_typed_func::<i32, i32>(&mut store, "guest_alloc")
+        .ok();
+
     Ok(LoadedPlugin {
         store,
-        _instance: instance,
+        instance,
         shutdown,
         event_handler,
         process_inbound,
         process_outbound,
+        message_transform,
+        render_tui,
+        render_gui,
+        guest_alloc,
     })
 }
 
@@ -989,6 +1264,173 @@ fn bind_host_events(
         })?;
 
     Ok(())
+}
+
+/// Maximum response body size for host-http.fetch (64 KiB).
+#[cfg(feature = "native")]
+const HOST_HTTP_MAX_RESPONSE_BYTES: usize = 65_536;
+
+/// Default timeout for host-http.fetch requests (5 seconds).
+#[cfg(feature = "native")]
+const HOST_HTTP_TIMEOUT_MS: u64 = 5_000;
+
+#[cfg(feature = "native")]
+fn bind_host_http(
+    linker: &mut Linker<PluginStoreState>,
+    plugin_id: &str,
+) -> Result<(), PluginError> {
+    // host-http.fetch(url_ptr, url_len, timeout_ms) -> status_code (negative = error)
+    linker
+        .func_wrap(
+            "host-http",
+            "fetch",
+            |mut caller: Caller<'_, PluginStoreState>,
+             url_ptr: i32,
+             url_len: i32,
+             _timeout_ms: i32|
+             -> i32 {
+                host_http_fetch(&mut caller, url_ptr, url_len).unwrap_or(-1)
+            },
+        )
+        .map_err(|error| PluginError::InstantiationFailed {
+            id: plugin_id.to_string(),
+            reason: error.to_string(),
+        })?;
+
+    // host-http.response_ptr() -> i32
+    linker
+        .func_wrap(
+            "host-http",
+            "response_ptr",
+            |mut caller: Caller<'_, PluginStoreState>| -> i32 {
+                let state = caller.data();
+                let body = &state.http_response_body;
+                if body.is_empty() {
+                    return 0;
+                }
+                // Write response into guest memory via guest_alloc if available
+                let plugin_id = state.plugin_id.clone();
+                let body_clone = body.clone();
+                let instance = match caller.get_export("guest_alloc") {
+                    Some(export) => export,
+                    None => return 0,
+                };
+                let alloc = match instance.into_func() {
+                    Some(func) => func,
+                    None => return 0,
+                };
+                let alloc = match alloc.typed::<i32, i32>(&caller) {
+                    Ok(f) => f,
+                    Err(_) => return 0,
+                };
+                let len = body_clone.len() as i32;
+                let ptr = match alloc.call(&mut caller, len) {
+                    Ok(p) => p,
+                    Err(_) => return 0,
+                };
+                // Write body into guest memory
+                // Validate pointer before writing into guest memory
+                let Ok(start) = usize::try_from(ptr) else {
+                    return 0;
+                };
+                let Some(end) = start.checked_add(body_clone.len()) else {
+                    return 0;
+                };
+                if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    let data = memory.data_mut(&mut caller);
+                    if end <= data.len() {
+                        data[start..end].copy_from_slice(&body_clone);
+                    }
+                }
+                let _ = plugin_id;
+                ptr
+            },
+        )
+        .map_err(|error| PluginError::InstantiationFailed {
+            id: plugin_id.to_string(),
+            reason: error.to_string(),
+        })?;
+
+    // host-http.response_len() -> i32
+    linker
+        .func_wrap(
+            "host-http",
+            "response_len",
+            |caller: Caller<'_, PluginStoreState>| -> i32 {
+                caller.data().http_response_body.len() as i32
+            },
+        )
+        .map_err(|error| PluginError::InstantiationFailed {
+            id: plugin_id.to_string(),
+            reason: error.to_string(),
+        })?;
+
+    Ok(())
+}
+
+#[cfg(feature = "native")]
+fn host_http_fetch(
+    caller: &mut Caller<'_, PluginStoreState>,
+    url_ptr: i32,
+    url_len: i32,
+) -> Result<i32, String> {
+    let url = read_guest_string(caller, url_ptr, url_len)?;
+
+    // Parse URL and validate against allowed hosts
+    let parsed = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| "only http/https URLs are supported".to_string())?;
+    let host = parsed
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+
+    let state = caller.data();
+    if !state.http_hosts.iter().any(|h| h == host) {
+        return Err(format!(
+            "host '{host}' is not in the allowed http_hosts list"
+        ));
+    }
+
+    // Perform synchronous HTTP GET (we're already on the blocking pool)
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_millis(HOST_HTTP_TIMEOUT_MS)))
+            .build(),
+    );
+    let response = agent.get(&url).call();
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status().as_u16() as i32;
+            let mut body = Vec::new();
+            let _ = resp
+                .into_body()
+                .as_reader()
+                .take(HOST_HTTP_MAX_RESPONSE_BYTES as u64)
+                .read_to_end(&mut body);
+            let state = caller.data_mut();
+            state.http_response_body = body;
+            state.http_response_status = status;
+            Ok(status)
+        }
+        Err(ureq::Error::StatusCode(code)) => {
+            let state = caller.data_mut();
+            state.http_response_body.clear();
+            state.http_response_status = code as i32;
+            Ok(code as i32)
+        }
+        Err(_) => {
+            let state = caller.data_mut();
+            state.http_response_body.clear();
+            state.http_response_status = -1;
+            Ok(-1)
+        }
+    }
 }
 
 #[cfg(feature = "native")]

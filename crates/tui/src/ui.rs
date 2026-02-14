@@ -314,6 +314,11 @@ fn draw_conversation(frame: &mut Frame, state: &AppState, area: Rect, palette: &
                 }
 
                 lines.push(Line::from(spans));
+
+                // Render plugin embeds as inline cards below the message
+                for embed in &msg.embeds {
+                    render_embed_lines(&mut lines, embed, palette);
+                }
             }
 
             let skip = if lines.len() > visible_height + state.scroll_offset as usize {
@@ -428,5 +433,131 @@ fn draw_input(frame: &mut Frame, state: &AppState, area: Rect, palette: &Palette
         let cursor_x = area.x + 1 + prefix.len() as u16 + state.input_buffer.len() as u16;
         let cursor_y = area.y + 1;
         frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+/// Maximum number of lines a single embed card can occupy in the TUI.
+const MAX_EMBED_LINES: usize = 20;
+
+/// Render a `MessageEmbed` as styled inline lines (a simple card).
+///
+/// If a plugin runtime is available and has a `render_tui` export, it would
+/// be called here. For now we render a built-in card for known namespaces
+/// and a generic fallback for unknown ones.
+fn render_embed_lines(
+    lines: &mut Vec<Line<'_>>,
+    embed: &waddle_core::event::MessageEmbed,
+    palette: &Palette,
+) {
+    let data = &embed.data;
+    let mut card_lines: Vec<Line<'_>> = Vec::new();
+
+    match embed.namespace.as_str() {
+        // ── GitHub repo embed ──────────────────────────────────────────
+        "urn:waddle:github:0" if data.get("type").and_then(|v| v.as_str()) == Some("repo")
+            || data.get("owner").is_some() =>
+        {
+            let owner = data
+                .get("owner")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let desc = data
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let stars = data
+                .get("stars")
+                .and_then(|v| v.as_u64())
+                .map(|n| format!("⭐ {n}"))
+                .unwrap_or_default();
+            let lang = data
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            card_lines.push(Line::from(Span::styled(
+                format!("  ┌─ {owner}/{name}"),
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if !desc.is_empty() {
+                // Truncate description to a reasonable length
+                let truncated: String = desc.chars().take(80).collect();
+                card_lines.push(Line::from(Span::styled(
+                    format!("  │ {truncated}"),
+                    Style::default().fg(palette.foreground),
+                )));
+            }
+            let mut meta_parts = Vec::new();
+            if !stars.is_empty() {
+                meta_parts.push(stars);
+            }
+            if !lang.is_empty() {
+                meta_parts.push(lang.to_string());
+            }
+            if let Some(license) = data.get("license").and_then(|v| v.as_str()) {
+                meta_parts.push(format!("📄 {license}"));
+            }
+            if !meta_parts.is_empty() {
+                card_lines.push(Line::from(Span::styled(
+                    format!("  │ {}", meta_parts.join(" · ")),
+                    Style::default().fg(palette.muted),
+                )));
+            }
+            card_lines.push(Line::from(Span::styled(
+                "  └───",
+                Style::default().fg(palette.border),
+            )));
+        }
+
+        // ── GitHub issue embed ─────────────────────────────────────────
+        "urn:waddle:github:0" if data.get("type").and_then(|v| v.as_str()) == Some("issue")
+            || data.get("number").is_some() && data.get("title").is_some() =>
+        {
+            let repo = data.get("repo").and_then(|v| v.as_str()).unwrap_or("?");
+            let number = data
+                .get("number")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let state_val = data
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("open");
+            let icon = if state_val == "closed" { "🟣" } else { "🟢" };
+
+            card_lines.push(Line::from(Span::styled(
+                format!("  ┌─ {icon} {repo}#{number}"),
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if !title.is_empty() {
+                let truncated: String = title.chars().take(80).collect();
+                card_lines.push(Line::from(Span::styled(
+                    format!("  │ {truncated}"),
+                    Style::default().fg(palette.foreground),
+                )));
+            }
+            card_lines.push(Line::from(Span::styled(
+                "  └───",
+                Style::default().fg(palette.border),
+            )));
+        }
+
+        // ── Generic fallback ───────────────────────────────────────────
+        _ => {
+            card_lines.push(Line::from(Span::styled(
+                format!("  [📎 embed: {}]", embed.namespace),
+                Style::default().fg(palette.muted),
+            )));
+        }
+    }
+
+    // Cap the output
+    for line in card_lines.into_iter().take(MAX_EMBED_LINES) {
+        lines.push(line);
     }
 }

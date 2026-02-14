@@ -6794,12 +6794,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdc97a28575b85cfedf2a7e7d3cc64b3e11bd8ac766666318003abbacc7a21fc"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "log",
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
  "ureq-proto",
  "utf-8",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -6964,6 +6966,7 @@ name = "waddle-integration"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde_json",
  "tempfile",
  "tokio",
  "uuid",
@@ -7047,6 +7050,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-test",
+ "ureq",
  "waddle-core",
  "waddle-storage",
  "wasmtime",
@@ -7147,6 +7151,7 @@ dependencies = [
  "rustls",
  "sasl",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",

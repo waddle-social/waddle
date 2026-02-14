@@ -1,5 +1,8 @@
+
 #[cfg(all(test, feature = "native"))]
 mod tests {
+    #[cfg(test)]
+    mod github_test;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -49,6 +52,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Chat,
             thread: None,
+            embeds: vec![],
         }
     }
 
@@ -499,6 +503,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Groupchat,
             thread: None,
+            embeds: vec![],
         };
         let msg_event = make_xmpp_event(
             "xmpp.muc.message.received",
@@ -868,6 +873,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Chat,
             thread: None,
+            embeds: vec![],
         };
 
         // First mark second as sent
@@ -1519,6 +1525,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Groupchat,
             thread: None,
+            embeds: vec![],
         };
         let muc_recv = make_xmpp_event(
             "xmpp.muc.message.received",

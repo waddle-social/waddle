@@ -14,6 +14,7 @@ native = [
     "dep:tokio",
     "dep:wasmtime",
     "dep:oci-distribution",
+    "dep:ureq",
 ]
 web = ["waddle-core/web", "waddle-storage/web"]
 
@@ -33,6 +34,7 @@ sha2 = "0.10"
 tar = "0.4"
 wasmtime = { workspace = true, optional = true }
 oci-distribution = { workspace = true, optional = true }
+ureq = { version = "3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

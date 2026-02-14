@@ -455,6 +455,7 @@ mod tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Chat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         )
@@ -473,6 +474,7 @@ mod tests {
                     timestamp: Utc::now(),
                     message_type: MessageType::Groupchat,
                     thread: None,
+                    embeds: vec![],
                 },
             },
         )

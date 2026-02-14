@@ -9,6 +9,8 @@ use waddle_core::event::{
     Channel, ChatMessage, Event, EventPayload, EventSource, MessageType as CoreMessageType,
 };
 
+use super::message::parse_embeds_from_payloads;
+
 #[cfg(feature = "native")]
 use waddle_core::event::EventBus;
 
@@ -57,6 +59,8 @@ impl StanzaProcessor for MamProcessor {
                     .map(|(_, b)| b.clone())
                     .unwrap_or_default();
 
+                let embeds = parse_embeds_from_payloads(&forwarded_msg.payloads);
+
                 let chat_message = ChatMessage {
                     id: result.id.clone(),
                     from: forwarded_msg
@@ -79,6 +83,7 @@ impl StanzaProcessor for MamProcessor {
                         xmpp_parsers::message::MessageType::Error => CoreMessageType::Error,
                     },
                     thread: forwarded_msg.thread.as_ref().map(|t| t.id.clone()),
+                    embeds,
                 };
 
                 let query_id = result

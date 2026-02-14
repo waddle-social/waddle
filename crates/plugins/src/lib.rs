@@ -9,6 +9,7 @@ pub use registry::{
     PluginGui, PluginHooks, PluginManifest, PluginMetadata, PluginPermissions, PluginRegistry,
     PluginSummary, RegistryConfig, RegistryError,
 };
+pub use waddle_core::event::MessageEmbed;
 pub use runtime::{
     PluginCapability, PluginError, PluginHandle, PluginHook, PluginInfo, PluginRuntime,
     PluginRuntimeConfig, PluginStatus,

@@ -232,6 +232,7 @@ impl OutboundRouter {
             timestamp: chrono::Utc::now(),
             message_type: message_type.clone(),
             thread: None,
+            embeds: vec![],
         };
 
         let sent_event = if let Some(corr) = event.correlation_id {

@@ -358,6 +358,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 3,
         sql: include_str!("../migrations/003_add_offline_queue.sql"),
     },
+    Migration {
+        version: 4,
+        sql: include_str!("../migrations/004_add_embeds_column.sql"),
+    },
 ];
 
 #[cfg(feature = "native")]

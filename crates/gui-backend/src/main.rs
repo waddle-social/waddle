@@ -1089,6 +1089,8 @@ fn capability_label(capability: &PluginCapability) -> String {
         }
         PluginCapability::TuiRenderer => "tui-renderer".to_string(),
         PluginCapability::GuiMetadata => "gui-metadata".to_string(),
+        PluginCapability::GuiRenderer => "gui-renderer".to_string(),
+        PluginCapability::MessageTransformer => "message-transformer".to_string(),
     }
 }
 

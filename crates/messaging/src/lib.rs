@@ -9,7 +9,7 @@ use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use waddle_core::event::{
-    ChatMessage, ChatState, Event, EventPayload, MessageType, MucOccupant, MucRole,
+    ChatMessage, ChatState, Event, EventPayload, MessageType, MucOccupant, MucRole, MessageEmbed,
 };
 use waddle_storage::{Database, FromRow, Row, SqlValue, StorageError};
 use waddle_xmpp::Stanza;
@@ -40,6 +40,7 @@ struct StoredMessage {
     timestamp: String,
     message_type: String,
     thread: Option<String>,
+    embeds: Option<String>,
 }
 
 impl FromRow for StoredMessage {
@@ -89,6 +90,11 @@ impl FromRow for StoredMessage {
             Some(SqlValue::Null) | None => None,
             _ => None,
         };
+        let embeds = match row.get(7) {
+            Some(SqlValue::Text(s)) => Some(s.clone()),
+            Some(SqlValue::Null) | None => None,
+            _ => None,
+        };
         Ok(StoredMessage {
             id,
             from_jid,
@@ -97,6 +103,7 @@ impl FromRow for StoredMessage {
             timestamp,
             message_type,
             thread,
+            embeds,
         })
     }
 }
@@ -115,6 +122,13 @@ impl StoredMessage {
             .timestamp
             .parse::<DateTime<Utc>>()
             .unwrap_or_else(|_| Utc::now());
+            
+        let embeds = if let Some(json) = self.embeds {
+            serde_json::from_str(&json).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        
         ChatMessage {
             id: self.id,
             from: self.from_jid,
@@ -123,6 +137,7 @@ impl StoredMessage {
             timestamp,
             message_type,
             thread: self.thread,
+            embeds,
         }
     }
 }
@@ -252,6 +267,7 @@ impl<D: Database> MessageManager<D> {
             timestamp: now,
             message_type: MessageType::Chat,
             thread: None,
+            embeds: vec![],
         };
 
         self.persist_message(&message).await?;
@@ -315,7 +331,7 @@ impl<D: Database> MessageManager<D> {
             let before_s = before_ts.to_string();
             self.db
                 .query(
-                    "SELECT id, from_jid, to_jid, body, timestamp, message_type, thread \
+                    "SELECT id, from_jid, to_jid, body, timestamp, message_type, thread, embeds \
                      FROM messages \
                      WHERE (from_jid = ?1 OR to_jid = ?1) AND message_type = 'chat' AND timestamp < ?2 \
                      ORDER BY timestamp DESC \
@@ -326,7 +342,7 @@ impl<D: Database> MessageManager<D> {
         } else {
             self.db
                 .query(
-                    "SELECT id, from_jid, to_jid, body, timestamp, message_type, thread \
+                    "SELECT id, from_jid, to_jid, body, timestamp, message_type, thread, embeds \
                      FROM messages \
                      WHERE (from_jid = ?1 OR to_jid = ?1) AND message_type = 'chat' \
                      ORDER BY timestamp DESC \
@@ -360,12 +376,18 @@ impl<D: Database> MessageManager<D> {
         let mt = message_type_to_str(&message.message_type).to_string();
         let thread = message.thread.clone();
         let read = 0_i64;
+        
+        let embeds = if message.embeds.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&message.embeds).unwrap_or_default())
+        };
 
         self.db
             .execute(
-                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                &[&id, &from, &to, &body, &ts, &mt, &thread, &read],
+                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read, embeds) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                &[&id, &from, &to, &body, &ts, &mt, &thread, &read, &embeds],
             )
             .await?;
         Ok(())
@@ -419,6 +441,7 @@ impl<D: Database> MessageManager<D> {
                 timestamp: Utc::now(),
                 message_type: message_type.clone(),
                 thread: None,
+                embeds: vec![],
             };
             self.persist_message(&message).await?;
         }
@@ -1040,12 +1063,18 @@ impl<D: Database> MucManager<D> {
         let mt = message_type_to_str(&message.message_type).to_string();
         let thread = message.thread.clone();
         let read = 0_i64;
+        
+        let embeds = if message.embeds.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&message.embeds).unwrap_or_default())
+        };
 
         self.db
             .execute(
-                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                &[&id, &from, &to, &body, &ts, &mt, &thread, &read],
+                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read, embeds) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                &[&id, &from, &to, &body, &ts, &mt, &thread, &read, &embeds],
             )
             .await?;
         Ok(())
@@ -1232,6 +1261,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Chat,
             thread: None,
+            embeds: vec![],
         }
     }
 
@@ -1384,6 +1414,7 @@ mod tests {
                 timestamp: Utc::now() + chrono::Duration::seconds(i),
                 message_type: MessageType::Chat,
                 thread: None,
+                embeds: vec![],
             };
             manager.persist_message(&msg).await.unwrap();
         }
@@ -1410,6 +1441,7 @@ mod tests {
                 timestamp: base + chrono::Duration::seconds(i),
                 message_type: MessageType::Chat,
                 thread: None,
+                embeds: vec![],
             };
             manager.persist_message(&msg).await.unwrap();
         }
@@ -1511,6 +1543,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Chat,
             thread: Some("thread-123".to_string()),
+            embeds: vec![],
         };
         manager.persist_message(&msg).await.unwrap();
 
@@ -1535,6 +1568,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Chat,
             thread: None,
+            embeds: vec![],
         };
         manager.persist_message(&chat_msg).await.unwrap();
 
@@ -1546,6 +1580,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Groupchat,
             thread: None,
+            embeds: vec![],
         };
         manager.persist_message(&gc_msg).await.unwrap();
 
@@ -1817,6 +1852,7 @@ mod tests {
             timestamp: Utc::now(),
             message_type: MessageType::Chat,
             thread: None,
+            embeds: vec![],
         };
 
         manager
@@ -1878,6 +1914,7 @@ mod muc_tests {
             timestamp: Utc::now(),
             message_type: MessageType::Groupchat,
             thread: None,
+            embeds: vec![],
         }
     }
 
@@ -2067,6 +2104,7 @@ mod muc_tests {
             timestamp: Utc::now(),
             message_type: MessageType::Groupchat,
             thread: None,
+            embeds: vec![],
         };
 
         let event = make_event(
@@ -2285,6 +2323,7 @@ mod muc_tests {
                 timestamp: base + chrono::Duration::seconds(i),
                 message_type: MessageType::Groupchat,
                 thread: None,
+                embeds: vec![],
             };
             let event = make_event(
                 "xmpp.muc.message.received",

@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router';
 
 import { useRouter } from 'vue-router';
 import { type ChatMessage, type UnlistenFn, useWaddle } from '../composables/useWaddle';
+import EmbedCard from '../components/EmbedCard.vue';
 import { useRuntimeStore, type MessageDeliveryStatus } from '../stores/runtime';
 import { useRoomsStore } from '../stores/rooms';
 import { useAuthStore } from '../stores/auth';
@@ -389,6 +390,11 @@ watch(jid, () => {
                   </span>
                 </div>
                 <p class="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{{ message.body }}</p>
+                <EmbedCard
+                  v-for="(embed, embedIdx) in (message.embeds ?? [])"
+                  :key="`${message.id}-embed-${embedIdx}`"
+                  :embed="embed"
+                />
               </div>
             </div>
 
@@ -401,6 +407,11 @@ watch(jid, () => {
               </div>
               <div class="min-w-0 flex-1">
                 <p class="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{{ message.body }}</p>
+                <EmbedCard
+                  v-for="(embed, embedIdx) in (message.embeds ?? [])"
+                  :key="`${message.id}-embed-c-${embedIdx}`"
+                  :embed="embed"
+                />
               </div>
             </div>
           </div>

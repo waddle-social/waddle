@@ -11,6 +11,9 @@ use waddle_core::event::{
     MucAffiliation as CoreAffiliation, MucOccupant as CoreOccupant, MucRole as CoreRole,
 };
 
+// Re-use the embed parser from the message processor
+use super::message::parse_embeds_from_payloads;
+
 #[cfg(feature = "native")]
 use waddle_core::event::EventBus;
 
@@ -73,6 +76,8 @@ impl StanzaProcessor for MucProcessor {
                     .map(|j| j.to_bare().to_string())
                     .unwrap_or_default();
 
+                let embeds = parse_embeds_from_payloads(&msg.payloads);
+
                 let chat_message = ChatMessage {
                     id: msg.id.as_ref().map(|id| id.0.clone()).unwrap_or_default(),
                     from: msg.from.as_ref().map(|j| j.to_string()).unwrap_or_default(),
@@ -81,6 +86,7 @@ impl StanzaProcessor for MucProcessor {
                     timestamp: Utc::now(),
                     message_type: CoreMessageType::Groupchat,
                     thread: msg.thread.as_ref().map(|t| t.id.clone()),
+                    embeds,
                 };
 
                 debug!(room = %room, "MUC message received");

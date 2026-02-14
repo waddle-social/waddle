@@ -115,6 +115,14 @@ impl PluginManifest {
             capabilities.push(ManifestCapability::GuiMetadata);
         }
 
+        if self.hooks.gui_renderer {
+            capabilities.push(ManifestCapability::GuiRenderer);
+        }
+
+        if self.hooks.message_transformer {
+            capabilities.push(ManifestCapability::MessageTransformer);
+        }
+
         if self.permissions.kv_storage {
             capabilities.push(ManifestCapability::KvStorage);
         }
@@ -187,6 +195,9 @@ pub struct PluginPermissions {
     pub event_subscriptions: Vec<String>,
     #[serde(default)]
     pub kv_storage: bool,
+    /// Hosts this plugin is allowed to contact via host-http (e.g. `["api.github.com"]`).
+    #[serde(default)]
+    pub http_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -201,6 +212,12 @@ pub struct PluginHooks {
     pub tui_renderer: bool,
     #[serde(default)]
     pub gui_metadata: bool,
+    /// Plugin can transform messages (detect URLs, produce embeds).
+    #[serde(default)]
+    pub message_transformer: bool,
+    /// Plugin can render embeds for the GUI.
+    #[serde(default)]
+    pub gui_renderer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -221,6 +238,8 @@ pub enum ManifestCapability {
     StanzaProcessor { priority: i32 },
     TuiRenderer,
     GuiMetadata,
+    GuiRenderer,
+    MessageTransformer,
     KvStorage,
 }
 
@@ -1122,6 +1141,19 @@ fn validate_hooks(
         });
     }
 
+    if hooks.message_transformer && !permissions.stanza_access {
+        return Err(ManifestError::InvalidCapability {
+            reason: "hooks.message_transformer requires permissions.stanza_access = true"
+                .to_string(),
+        });
+    }
+
+    if !permissions.http_hosts.is_empty() && !hooks.message_transformer {
+        return Err(ManifestError::InvalidCapability {
+            reason: "permissions.http_hosts requires hooks.message_transformer = true".to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -1575,6 +1607,75 @@ gui_metadata = false
             error,
             PermissionPolicyError::InvalidOverride { permission, .. } if permission == "kv_storage"
         ));
+    }
+
+    #[test]
+    fn message_transformer_requires_stanza_access() {
+        let toml = r#"
+[plugin]
+id = "com.waddle.test.transform"
+name = "Test Transform"
+version = "1.0.0"
+description = "Test message transformer"
+license = "MIT"
+
+[permissions]
+stanza_access = false
+
+[hooks]
+message_transformer = true
+"#;
+        let error = PluginManifest::from_toml_str(toml).unwrap_err();
+        assert!(matches!(error, ManifestError::InvalidCapability { .. }));
+    }
+
+    #[test]
+    fn http_hosts_requires_message_transformer() {
+        let toml = r#"
+[plugin]
+id = "com.waddle.test.http"
+name = "Test HTTP"
+version = "1.0.0"
+description = "Test HTTP hosts"
+license = "MIT"
+
+[permissions]
+stanza_access = true
+http_hosts = ["api.github.com"]
+
+[hooks]
+stanza_processor = true
+stanza_priority = 0
+"#;
+        let error = PluginManifest::from_toml_str(toml).unwrap_err();
+        assert!(matches!(error, ManifestError::InvalidCapability { .. }));
+    }
+
+    #[test]
+    fn valid_message_transformer_manifest() {
+        let toml = r#"
+[plugin]
+id = "com.waddle.github"
+name = "GitHub Embeds"
+version = "1.0.0"
+description = "Enrich messages with GitHub link previews"
+license = "MIT"
+
+[permissions]
+stanza_access = true
+http_hosts = ["api.github.com"]
+
+[hooks]
+message_transformer = true
+tui_renderer = true
+gui_renderer = true
+"#;
+        let manifest = PluginManifest::from_toml_str(toml).unwrap();
+        let caps = manifest.capabilities();
+        assert!(caps.contains(&ManifestCapability::MessageTransformer));
+        assert!(caps.contains(&ManifestCapability::TuiRenderer));
+        assert!(caps.contains(&ManifestCapability::GuiRenderer));
+        assert_eq!(manifest.permissions.http_hosts, vec!["api.github.com"]);
     }
 
     #[test]
