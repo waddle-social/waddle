@@ -145,6 +145,12 @@ impl MessageEnricher {
         );
         let repo_info = repo_info?;
 
+        // Never expose private repository metadata
+        if repo_info.private {
+            debug!(owner = %owner, repo = %repo, "Skipping embed for private repository");
+            return None;
+        }
+
         let mut embed = GitHubRepoEmbed::new(
             format!("https://github.com/{owner}/{repo}"),
             owner,

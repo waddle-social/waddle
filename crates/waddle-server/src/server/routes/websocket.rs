@@ -23,6 +23,8 @@ use waddle_xmpp::{
     Affiliation, Role,
 };
 
+use waddle_xmpp_xep_github::MessageEnricher;
+
 use super::auth::AuthState;
 
 /// WebSocket state containing all necessary registries for message routing
@@ -33,6 +35,8 @@ pub struct WebSocketState {
     pub connection_registry: Arc<ConnectionRegistry>,
     /// Registry for MUC rooms
     pub muc_registry: Arc<MucRoomRegistry>,
+    /// GitHub link enricher for message embeds
+    pub github_enricher: Arc<MessageEnricher>,
 }
 
 /// Create the WebSocket router
@@ -186,92 +190,18 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
 }
 
 /// Convert a Stanza to XML string for WebSocket transmission
+/// Serialize a stanza to XML by converting it to a `minidom::Element` via
+/// `xmpp_parsers`' own `From<T> for Element` impls.  This ensures every field
+/// — bodies, payloads (embeds), thread, etc. — is faithfully serialized
+/// without hand-rolled format strings.
 fn stanza_to_xml(stanza: &Stanza) -> String {
-    match stanza {
-        Stanza::Message(msg) => {
-            // Build XML for message
-            let to = msg
-                .to
-                .as_ref()
-                .map(|j| format!(" to=\"{}\"", j))
-                .unwrap_or_default();
-            let from = msg
-                .from
-                .as_ref()
-                .map(|j| format!(" from=\"{}\"", j))
-                .unwrap_or_default();
-            let id = msg
-                .id
-                .as_ref()
-                .map(|i| format!(" id=\"{}\"", i))
-                .unwrap_or_default();
-            let msg_type = match msg.type_ {
-                xmpp_parsers::message::MessageType::Chat => " type=\"chat\"",
-                xmpp_parsers::message::MessageType::Groupchat => " type=\"groupchat\"",
-                xmpp_parsers::message::MessageType::Normal => " type=\"normal\"",
-                xmpp_parsers::message::MessageType::Headline => " type=\"headline\"",
-                xmpp_parsers::message::MessageType::Error => " type=\"error\"",
-            };
-
-            let body = msg
-                .bodies
-                .get("")
-                .or_else(|| msg.bodies.values().next())
-                .map(|b| format!("<body>{}</body>", escape_xml(&b.0)))
-                .unwrap_or_default();
-
-            format!(
-                "<message{}{}{}{}>{}</message>",
-                to, from, id, msg_type, body
-            )
-        }
-        Stanza::Presence(pres) => {
-            let to = pres
-                .to
-                .as_ref()
-                .map(|j| format!(" to=\"{}\"", j))
-                .unwrap_or_default();
-            let from = pres
-                .from
-                .as_ref()
-                .map(|j| format!(" from=\"{}\"", j))
-                .unwrap_or_default();
-            let pres_type = match pres.type_ {
-                xmpp_parsers::presence::Type::None => "",
-                xmpp_parsers::presence::Type::Unavailable => " type=\"unavailable\"",
-                _ => "",
-            };
-            format!("<presence{}{}{}/>", to, from, pres_type)
-        }
-        Stanza::Iq(iq) => {
-            let to = iq
-                .to
-                .as_ref()
-                .map(|j| format!(" to=\"{}\"", j))
-                .unwrap_or_default();
-            let from = iq
-                .from
-                .as_ref()
-                .map(|j| format!(" from=\"{}\"", j))
-                .unwrap_or_default();
-            let iq_type = match iq.payload {
-                xmpp_parsers::iq::IqType::Get(_) => "get",
-                xmpp_parsers::iq::IqType::Set(_) => "set",
-                xmpp_parsers::iq::IqType::Result(_) => "result",
-                xmpp_parsers::iq::IqType::Error(_) => "error",
-            };
-            format!("<iq{}{} id=\"{}\" type=\"{}\"/>", to, from, iq.id, iq_type)
-        }
-    }
-}
-
-/// Escape XML special characters
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let element = stanza.to_element();
+    let mut buf = Vec::new();
+    // write_to cannot fail on a Vec<u8> in practice.
+    element
+        .write_to(&mut buf)
+        .expect("serializing stanza to Vec<u8> should not fail");
+    String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
 }
 
 /// Handle an XMPP frame per RFC 7395
@@ -852,40 +782,42 @@ async fn handle_message(
 
         drop(room);
 
-        // Build the message from the room JID with sender's nick
+        // Build a prototype message, enrich once, then fan out to all occupants.
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
         let msg_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let body_text = body.unwrap_or_default();
 
+        let mut prototype =
+            xmpp_parsers::message::Message::new(None);
+        if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
+            prototype.from = Some(jid::Jid::from(from_jid));
+        } else {
+            prototype.from = Some(jid::Jid::from(sender_jid.clone()));
+        }
+        prototype.id = Some(msg_id.clone());
+        prototype.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        prototype.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body(body_text.clone()),
+        );
+
+        // Enrich: detect GitHub links and append embed XML elements (fail-open)
+        let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
+
         // Send to all occupants
         let mut echo_response = None;
         for (occupant_jid, _) in &occupants {
-            let msg_xml = format!(
-                r#"<message from="{}" to="{}" id="{}" type="groupchat"><body>{}</body></message>"#,
-                from_room_jid,
-                occupant_jid,
-                msg_id,
-                escape_xml(&body_text)
-            );
-
             if occupant_jid == sender_jid {
-                // This is the echo back to the sender
-                echo_response = Some(msg_xml);
+                // Echo back to sender — serialize the enriched prototype
+                let stanza = {
+                    let mut msg = prototype.clone();
+                    msg.to = Some(jid::Jid::from(occupant_jid.clone()));
+                    Stanza::Message(msg)
+                };
+                echo_response = Some(stanza_to_xml(&stanza));
             } else {
-                // Route to other occupants via the connection registry
-                let mut msg =
-                    xmpp_parsers::message::Message::new(Some(jid::Jid::from(occupant_jid.clone())));
-                if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
-                    msg.from = Some(jid::Jid::from(from_jid));
-                } else {
-                    msg.from = Some(jid::Jid::from(sender_jid.clone()));
-                }
-                msg.id = Some(msg_id.clone());
-                msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
-                msg.bodies.insert(
-                    String::new(),
-                    xmpp_parsers::message::Body(body_text.clone()),
-                );
+                let mut msg = prototype.clone();
+                msg.to = Some(jid::Jid::from(occupant_jid.clone()));
                 let stanza = Stanza::Message(msg);
                 let _ = state
                     .connection_registry
@@ -910,38 +842,39 @@ async fn handle_message(
         if let Some(ref to_jid_str) = to {
             debug!(to = %to_jid_str, from = %sender_jid, "Direct chat message");
 
-            // Try to parse as FullJid first, then BareJid
+            // Build a prototype message and enrich it with embeds before routing.
+            // Enrichment is fail-open: errors are logged but never block delivery.
+            let mut prototype =
+                xmpp_parsers::message::Message::new(None);
+            prototype.from = Some(jid::Jid::from(sender_jid.clone()));
+            prototype.id = id.clone();
+            prototype.type_ = xmpp_parsers::message::MessageType::Chat;
+            if let Some(ref b) = body {
+                prototype.bodies.insert(
+                    String::new(),
+                    xmpp_parsers::message::Body(b.clone()),
+                );
+            }
+
+            // Enrich: detect GitHub links and append embed XML elements
+            let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
+
+            // Route the enriched message
             if let Ok(to_full_jid) = to_jid_str.parse::<FullJid>() {
-                let mut msg =
-                    xmpp_parsers::message::Message::new(Some(jid::Jid::from(to_full_jid.clone())));
-                msg.from = Some(jid::Jid::from(sender_jid.clone()));
-                msg.id = id.clone();
-                msg.type_ = xmpp_parsers::message::MessageType::Chat;
-                if let Some(b) = body {
-                    msg.bodies
-                        .insert(String::new(), xmpp_parsers::message::Body(b));
-                }
+                let mut msg = prototype.clone();
+                msg.to = Some(jid::Jid::from(to_full_jid.clone()));
                 let stanza = Stanza::Message(msg);
                 let _ = state
                     .connection_registry
                     .send_to(&to_full_jid, stanza)
                     .await;
             } else if let Ok(to_bare_jid) = to_jid_str.parse::<BareJid>() {
-                // Route to all resources of this bare JID
                 let resources = state
                     .connection_registry
                     .get_resources_for_user(&to_bare_jid);
                 for resource_jid in resources {
-                    let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
-                        resource_jid.clone(),
-                    )));
-                    msg.from = Some(jid::Jid::from(sender_jid.clone()));
-                    msg.id = id.clone();
-                    msg.type_ = xmpp_parsers::message::MessageType::Chat;
-                    if let Some(ref b) = body {
-                        msg.bodies
-                            .insert(String::new(), xmpp_parsers::message::Body(b.clone()));
-                    }
+                    let mut msg = prototype.clone();
+                    msg.to = Some(jid::Jid::from(resource_jid.clone()));
                     let stanza = Stanza::Message(msg);
                     let _ = state
                         .connection_registry
@@ -1094,5 +1027,68 @@ mod tests {
         let (waddle, channel) = parse_room_jid_context(&jid);
         assert_eq!(waddle, "default");
         assert_eq!(channel, "default");
+    }
+
+    #[test]
+    fn stanza_to_xml_includes_payloads() {
+        let mut msg = xmpp_parsers::message::Message::new(Some(
+            jid::Jid::from("bob@example.com".parse::<jid::BareJid>().unwrap()),
+        ));
+        msg.from = Some(jid::Jid::from(
+            "alice@example.com".parse::<jid::BareJid>().unwrap(),
+        ));
+        msg.id = Some("test-1".into());
+        msg.type_ = xmpp_parsers::message::MessageType::Chat;
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("Hello".into()),
+        );
+
+        // Add a payload element (simulating a GitHub embed)
+        let embed = xmpp_parsers::minidom::Element::builder("repo", "urn:waddle:github:0")
+            .attr("owner", "cuenv")
+            .attr("name", "cuenv")
+            .build();
+        msg.payloads.push(embed);
+
+        let xml = stanza_to_xml(&Stanza::Message(msg));
+
+        assert!(xml.contains("<body>Hello</body>"), "body must be present");
+        assert!(
+            xml.contains("urn:waddle:github:0"),
+            "payload namespace must be serialized: {xml}"
+        );
+        assert!(
+            xml.contains("cuenv"),
+            "payload attributes must be serialized: {xml}"
+        );
+        // Must not contain XML declaration inside the message
+        assert!(
+            !xml.contains("<?xml"),
+            "payload must not include XML declaration: {xml}"
+        );
+        // The whole thing must be a single <message>...</message>
+        assert!(xml.starts_with("<message"), "must start with <message: {xml}");
+        assert!(xml.ends_with("</message>"), "must end with </message>: {xml}");
+    }
+
+    #[test]
+    fn stanza_to_xml_no_payloads_still_works() {
+        let mut msg = xmpp_parsers::message::Message::new(Some(
+            jid::Jid::from("bob@example.com".parse::<jid::BareJid>().unwrap()),
+        ));
+        msg.from = Some(jid::Jid::from(
+            "alice@example.com".parse::<jid::BareJid>().unwrap(),
+        ));
+        msg.id = Some("test-2".into());
+        msg.type_ = xmpp_parsers::message::MessageType::Chat;
+        msg.bodies.insert(
+            String::new(),
+            xmpp_parsers::message::Body("No embeds".into()),
+        );
+
+        let xml = stanza_to_xml(&Stanza::Message(msg));
+        assert!(xml.contains("<body>No embeds</body>"));
+        assert!(xml.ends_with("</message>"));
     }
 }

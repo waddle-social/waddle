@@ -28,6 +28,7 @@ kameo = { workspace = true }
 
 # XMPP Server
 waddle-xmpp = { path = "../waddle-xmpp" }
+waddle-xmpp-xep-github = { path = "../waddle-xmpp-xep-github" }
 
 # Graceful restart (Ecdysis pattern)
 waddle-ecdysis = { path = "../waddle-ecdysis" }

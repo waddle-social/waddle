@@ -119,6 +119,9 @@ pub struct RepoInfo {
     pub topics: Vec<String>,
     pub license: Option<LicenseInfo>,
     pub owner: OwnerInfo,
+    /// Whether this is a private repository.
+    #[serde(default)]
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -282,7 +285,11 @@ impl GitHubClient {
             Ok(resp) => {
                 let status = resp.status();
                 warn!(status = %status, repo = %key, "GitHub API returned error for repo");
-                self.record_failure();
+                // 404 (not found) and 403 (private/rate-limited) are expected
+                // for bad links or private repos — don't trip the circuit breaker.
+                if !status.is_client_error() {
+                    self.record_failure();
+                }
                 None
             }
             Err(e) => {
@@ -340,8 +347,11 @@ impl GitHubClient {
                 }
             }
             Ok(resp) => {
-                warn!(status = %resp.status(), "GitHub API error for languages");
-                self.record_failure();
+                let status = resp.status();
+                warn!(status = %status, "GitHub API error for languages");
+                if !status.is_client_error() {
+                    self.record_failure();
+                }
                 Vec::new()
             }
             Err(e) => {
@@ -394,8 +404,11 @@ impl GitHubClient {
                 }
             }
             Ok(resp) => {
-                warn!(status = %resp.status(), issue = %key, "GitHub API error for issue");
-                self.record_failure();
+                let status = resp.status();
+                warn!(status = %status, issue = %key, "GitHub API error for issue");
+                if !status.is_client_error() {
+                    self.record_failure();
+                }
                 None
             }
             Err(e) => {
@@ -453,8 +466,11 @@ impl GitHubClient {
                 }
             }
             Ok(resp) => {
-                warn!(status = %resp.status(), "GitHub API error for PR");
-                self.record_failure();
+                let status = resp.status();
+                warn!(status = %status, "GitHub API error for PR");
+                if !status.is_client_error() {
+                    self.record_failure();
+                }
                 None
             }
             Err(e) => {

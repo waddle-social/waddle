@@ -175,6 +175,11 @@ pub fn detect_github_links(body: &str, max_links: usize) -> Vec<GitHubLink> {
             continue;
         }
 
+        // Guard against path traversal segments (e.g. ".." or ".")
+        if owner.contains("..") || repo.contains("..") || owner == "." || repo == "." {
+            continue;
+        }
+
         let link = match (cap.get(3), cap.get(4)) {
             (Some(kind), Some(num)) => {
                 let number: u64 = match num.as_str().parse() {
@@ -423,5 +428,23 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].owner(), "my.org");
         assert_eq!(links[0].repo(), "my_repo.rs");
+    }
+
+    #[test]
+    fn test_path_traversal_blocked() {
+        let links = detect_github_links("https://github.com/../foo", 3);
+        assert!(links.is_empty(), "Should block .. in owner segment");
+
+        let links = detect_github_links("https://github.com/owner/..", 3);
+        assert!(links.is_empty(), "Should block .. in repo segment");
+
+        let links = detect_github_links("https://github.com/a..b/repo", 3);
+        assert!(links.is_empty(), "Should block segments containing ..");
+    }
+
+    #[test]
+    fn test_single_dot_segment_blocked() {
+        let links = detect_github_links("https://github.com/./repo", 3);
+        assert!(links.is_empty(), "Should block . as owner segment");
     }
 }
