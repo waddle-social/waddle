@@ -58,6 +58,9 @@ hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 
+# GitHub link enrichment
+waddle-xmpp-xep-github = { path = "../waddle-xmpp-xep-github" }
+
 # Database
 libsql = { workspace = true }
 

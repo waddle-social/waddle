@@ -5,6 +5,7 @@ members = [
     "crates/waddle-server",
     "crates/waddle-cli",
     "crates/waddle-xmpp",
+    "crates/waddle-xmpp-xep-github",
 ]
 
 [workspace.package]
@@ -95,6 +96,7 @@ rand = "0.9"
 hex = "0.4"
 hickory-resolver = "0.25"
 lru = "0.12"
+regex = "1.10"
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"

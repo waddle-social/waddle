@@ -79,6 +79,8 @@ pub struct XmppServer<S: AppState> {
     sm_session_registry: Arc<dyn SmSessionRegistry>,
     /// XEP-0060/0163 PubSub/PEP storage shared across all connections
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
+    /// GitHub link enricher shared across all connections
+    github_enricher: Option<Arc<waddle_xmpp_xep_github::MessageEnricher>>,
     /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
     c2s_listener: TcpListener,
     /// S2S listener — passed in if S2S federation is enabled.
@@ -126,6 +128,18 @@ impl<S: AppState> XmppServer<S> {
             Arc::new(InMemoryPubSubStorage::new());
         info!("PubSub storage initialized");
 
+        // Create the GitHub link enricher from environment
+        let github_enricher = {
+            let enricher = waddle_xmpp_xep_github::MessageEnricher::from_env();
+            if enricher.is_enabled() {
+                info!("GitHub link enrichment enabled");
+                Some(Arc::new(enricher))
+            } else {
+                info!("GitHub link enrichment disabled");
+                None
+            }
+        };
+
         Ok(Self {
             config,
             app_state,
@@ -136,6 +150,7 @@ impl<S: AppState> XmppServer<S> {
             isr_token_store,
             sm_session_registry,
             pubsub_storage,
+            github_enricher,
             c2s_listener,
             s2s_listener,
             shutdown_token,
@@ -285,6 +300,7 @@ impl<S: AppState> XmppServer<S> {
             let sm_session_registry = self.sm_session_registry;
             let pubsub_storage = self.pubsub_storage;
             let registration_enabled = self.config.registration_enabled;
+            let github_enricher = self.github_enricher;
 
             tokio::spawn(async move {
                 loop {
@@ -313,6 +329,7 @@ impl<S: AppState> XmppServer<S> {
                     let isr_token_store = Arc::clone(&isr_token_store);
                     let sm_session_registry = Arc::clone(&sm_session_registry);
                     let pubsub_storage = Arc::clone(&pubsub_storage);
+                    let github_enricher = github_enricher.clone();
 
                     tokio::spawn(
                         async move {
@@ -329,6 +346,7 @@ impl<S: AppState> XmppServer<S> {
                                 sm_session_registry,
                                 registration_enabled,
                                 pubsub_storage,
+                                github_enricher,
                             )
                             .await
                             {

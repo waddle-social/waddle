@@ -85,6 +85,7 @@ use crate::xep::xep0191::{
 };
 use crate::xep::xep0199::{build_ping_result, is_ping};
 use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
+use waddle_xmpp_xep_github::MessageEnricher;
 use crate::xep::xep0363::{
     build_upload_error, build_upload_slot_response, is_upload_request, parse_upload_request,
     UploadError, UploadSlot,
@@ -159,13 +160,15 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     last_available_presence: Option<xmpp_parsers::presence::Presence>,
     /// XEP-0398 guard flag to prevent infinite avatar conversion loops
     converting_avatar: bool,
+    /// GitHub link enricher for expanding GitHub URLs in messages
+    github_enricher: Option<Arc<MessageEnricher>>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -182,6 +185,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         sm_session_registry: Arc<dyn SmSessionRegistry>,
         registration_enabled: bool,
         pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
+        github_enricher: Option<Arc<MessageEnricher>>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -209,6 +213,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             avatar_hash: None,   // XEP-0153: computed on bind from stored vCard
             last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
+            github_enricher,     // GitHub link enrichment (optional)
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -1329,6 +1334,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check for XEP-0249 Direct MUC Invitation (can be in normal or chat messages)
         if let Some(invite) = parse_direct_invite_from_message(&msg) {
             return self.handle_direct_invite(msg, invite, sender_jid).await;
+        }
+
+        // GitHub link enrichment: detect GitHub URLs in body and append metadata
+        // elements. Done once here before fan-out (carbons, MAM, routing).
+        // Fail-open: errors are logged but never block message delivery.
+        let mut msg = msg;
+        if let Some(ref enricher) = self.github_enricher {
+            let start = std::time::Instant::now();
+            let embeds = enricher.enrich_message(&mut msg).await;
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            crate::metrics::record_github_enrichment(elapsed_ms, embeds as u64);
         }
 
         // Route based on message type

@@ -574,7 +574,7 @@ async fn run_test_server<S: AppState>(
                         let registration_enabled = true;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None
                             ).await;
                         });
                     }

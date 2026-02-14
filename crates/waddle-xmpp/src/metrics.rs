@@ -154,6 +154,40 @@ pub fn record_muc_occupant_count(count: i64, room: &str) {
 }
 
 // ============================================================================
+// GitHub Enrichment Metrics
+// ============================================================================
+
+/// Histogram for GitHub enrichment latency.
+pub fn github_enrichment_latency() -> Histogram<f64> {
+    meter()
+        .f64_histogram("xmpp.github.enrichment.latency")
+        .with_description("GitHub link enrichment latency")
+        .with_unit("ms")
+        .build()
+}
+
+/// Counter for GitHub embeds added to messages.
+pub fn github_embeds_added() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.github.embeds.added")
+        .with_description("GitHub embed elements added to messages")
+        .with_unit("embed")
+        .build()
+}
+
+/// Record a GitHub enrichment event.
+pub fn record_github_enrichment(latency_ms: f64, embeds: u64) {
+    github_enrichment_latency().record(latency_ms, &[]);
+    if embeds > 0 {
+        github_embeds_added().add(embeds, &[]);
+    }
+}
+
+// Note: GitHub API cache hit/miss and error metrics are tracked via structured
+// tracing (warn!/debug! in waddle-xmpp-xep-github client.rs). OTel counters
+// can be added here when the github crate gains an opentelemetry dependency.
+
+// ============================================================================
 // S2S Metrics
 // ============================================================================
 
