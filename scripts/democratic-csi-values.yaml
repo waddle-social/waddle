@@ -1,0 +1,48 @@
+csiDriver:
+  name: "org.democratic-csi.iscsi"
+
+storageClasses:
+  - name: zfs-iscsi
+    defaultClass: true
+    reclaimPolicy: Delete
+    volumeBindingMode: Immediate
+    allowVolumeExpansion: true
+    parameters:
+      fsType: ext4
+
+driver:
+  config:
+    driver: zfs-generic-iscsi
+    sshConnection:
+      host: 10.10.0.1
+      port: 22
+      username: root
+      # Use SSH key auth (key must be provided at install time)
+      # privateKey: |
+      #   -----BEGIN OPENSSH PRIVATE KEY-----
+      #   ...
+      #   -----END OPENSSH PRIVATE KEY-----
+    zfs:
+      datasetParentName: rpool/k8s-csi
+      detachedSnapshotsDatasetParentName: rpool/k8s-csi-snaps
+      zvolCompression: ""
+      zvolDedup: ""
+      zvolEnableReservation: false
+      zvolBlocksize: ""
+    iscsi:
+      targetPortal: "10.10.0.1:3260"
+      targetPortals: []
+      interface: ""
+      namePrefix: "csi-"
+      nameSuffix: ""
+      targetGroups:
+        - targetGroupPortalGroup: 1
+          targetGroupInitiatorGroup: 1
+          targetGroupAuthType: None
+          targetGroupAuthGroup:
+      extentInsecureTpc: true
+      extentXenCompat: false
+      extentDisablePhysicalBlocksize: true
+      extentBlocksize: 512
+      extentRpm: "SSD"
+      extentAvailThreshold: 0

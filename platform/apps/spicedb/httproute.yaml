@@ -1,0 +1,16 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: spicedb
+  namespace: spicedb
+spec:
+  parentRefs:
+    - name: waddle-gateway
+      namespace: default
+      sectionName: https
+  hostnames:
+    - spicedb.apps.waddle.social
+  rules:
+    - backendRefs:
+        - name: spicedb
+          port: 50051

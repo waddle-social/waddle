@@ -1,0 +1,33 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: external-dns
+  namespace: external-dns
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: external-dns
+      version: "1.20.x"
+      sourceRef:
+        kind: HelmRepository
+        name: external-dns
+      interval: 12h
+  values:
+    provider:
+      name: cloudflare
+    env:
+      - name: CF_API_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: cloudflare-api-token
+            key: api-token
+    domainFilters:
+      - apps.waddle.social
+    policy: sync
+    sources:
+      - gateway-httproute
+      - gateway-grpcroute
+      - gateway-tcproute
+      - gateway-udproute
+    txtOwnerId: waddle-cluster
