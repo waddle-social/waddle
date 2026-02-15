@@ -82,6 +82,7 @@ waddle-infra/
 │   └── apps/
 │       └── spicedb/                      # SpiceDB + PG cluster + backup + network policy
 ├── scripts/                               # Bootstrap and operational scripts
+│   ├── tofu.sh                          # Wrapper: fetches S3 creds from 1Password, runs tofu
 │   ├── bootstrap-talos.sh               # Phase 4: generate configs, apply, bootstrap
 │   ├── bootstrap-k8s.sh                 # Phase 5: Cilium, democratic-csi, Flux, secrets
 │   ├── setup-teleport-kube.sh           # Phase 7: Teleport K8s + Talos integration
@@ -157,11 +158,11 @@ The following secrets are needed across phases. Store them in the `waddle-platfo
 
 Set up the S3 backend so state is stored remotely from the start.
 
-**1. Export Scaleway credentials for the state bucket:**
+**1. Install the 1Password CLI (`op`):**
 
 ```bash
-export AWS_ACCESS_KEY_ID="<scaleway-access-key>"
-export AWS_SECRET_ACCESS_KEY="<scaleway-secret-key>"
+brew install 1password-cli
+op signin --account waddle-social.1password.eu
 ```
 
 **2. Create your `terraform.tfvars`:**
@@ -187,9 +188,10 @@ Required variables (see `terraform.tfvars.example` for format):
 
 **3. Initialize OpenTofu:**
 
+The wrapper script `scripts/tofu.sh` fetches Scaleway S3 credentials from 1Password automatically. Use it for all tofu commands:
+
 ```bash
-cd tofu
-tofu init
+./scripts/tofu.sh init
 ```
 
 Verify it connects to the S3 backend without errors.
@@ -264,9 +266,8 @@ netfilter-persistent save
 This creates the internal bridge and enables the Proxmox firewall:
 
 ```bash
-cd tofu
-tofu plan -target=module.network
-tofu apply -target=module.network
+./scripts/tofu.sh plan -target=module.network
+./scripts/tofu.sh apply -target=module.network
 ```
 
 What it creates:
@@ -291,9 +292,8 @@ pvesh get /cluster/firewall/options   # should show enabled
 Deploys the public-facing L4 TCP proxy that routes traffic based on SNI headers.
 
 ```bash
-cd tofu
-tofu plan -target=module.haproxy
-tofu apply -target=module.haproxy
+./scripts/tofu.sh plan -target=module.haproxy
+./scripts/tofu.sh apply -target=module.haproxy
 ```
 
 What it creates:
@@ -336,9 +336,8 @@ sudo ss -tlnp | grep 443                       # listening
 Deploys the Teleport access gateway on the internal network only.
 
 ```bash
-cd tofu
-tofu plan -target=module.teleport
-tofu apply -target=module.teleport
+./scripts/tofu.sh plan -target=module.teleport
+./scripts/tofu.sh apply -target=module.teleport
 ```
 
 What it creates:
@@ -392,9 +391,8 @@ talos_schematic_id = "<your-schematic-id>"
 #### Deploy Talos VMs
 
 ```bash
-cd tofu
-tofu plan -target=module.talos_cluster
-tofu apply -target=module.talos_cluster
+./scripts/tofu.sh plan -target=module.talos_cluster
+./scripts/tofu.sh apply -target=module.talos_cluster
 ```
 
 What it creates:
@@ -667,7 +665,7 @@ If the entire Proxmox host is lost:
 
 1. Provision a new Scaleway Elastic Metal server
 2. Complete Phase 1 manual steps (secure host, create API user, ZFS, iSCSI)
-3. Run `tofu apply` -- recreates all VMs (network, HAProxy, Teleport, Talos nodes)
+3. Run `./scripts/tofu.sh apply` -- recreates all VMs (network, HAProxy, Teleport, Talos nodes)
 4. Run `scripts/bootstrap-talos.sh` -- re-bootstrap the Talos cluster
 5. Run `scripts/bootstrap-k8s.sh` -- re-install Cilium, democratic-csi, Flux, bootstrap secrets
 6. Flux syncs from Git -- all infrastructure and apps are restored
