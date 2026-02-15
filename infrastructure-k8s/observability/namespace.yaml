@@ -1,9 +1,0 @@
-# Observability namespace for LGTM stack components
-# All observability components (Grafana, Loki, Tempo, Mimir, OTel Collector) deploy here
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: observability
-  labels:
-    app.kubernetes.io/part-of: observability
-    pod-security.kubernetes.io/enforce: baseline
