@@ -1,8 +1,0 @@
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: authzed
-  namespace: spicedb-operator
-spec:
-  interval: 24h
-  url: https://authzed.github.io/helm-charts
