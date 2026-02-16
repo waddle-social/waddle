@@ -209,15 +209,29 @@ impl Database {
         })
     }
 
+    /// Whether this is a file-based database (needs per-connection busy_timeout).
+    fn is_file_based(&self) -> bool {
+        self.persistent_conn.is_none()
+    }
+
     /// Get a connection to the database.
     ///
-    /// For in-memory databases, this returns a new connection from the same database.
-    /// Since we use `:memory:` with libSQL, each connection shares the same in-memory
-    /// database as long as it comes from the same `LibSqlDatabase` instance.
-    ///
-    /// For file-based databases, this creates a new connection to the file.
+    /// For file-based databases, each new connection gets `PRAGMA busy_timeout=5000`
+    /// set automatically. This is per-connection in SQLite, so it must be applied on
+    /// every new connection to prevent "database is locked" errors under concurrency.
     pub fn connect(&self) -> Result<Connection, DatabaseError> {
-        Ok(self.db.connect()?)
+        let conn = self.db.connect()?;
+        if self.is_file_based() {
+            // busy_timeout is per-connection. We need async to call query(), but
+            // connect() is sync. All callers run inside tokio, so block_in_place
+            // is safe here. The PRAGMA executes locally with no real I/O.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let _ = conn.query("PRAGMA busy_timeout=5000", ()).await;
+                })
+            });
+        }
+        Ok(conn)
     }
 
     /// Execute a callback with a connection, using the persistent connection for in-memory databases.
