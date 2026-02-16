@@ -28,6 +28,12 @@ helm upgrade --install cilium cilium/cilium \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost="${TALOS_VIP}" \
   --set k8sServicePort=6443 \
+  --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}" \
+  --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}" \
+  --set cgroup.autoMount.enabled=false \
+  --set cgroup.hostRoot=/sys/fs/cgroup \
+  --set bpf.mount.autoMount=false \
+  --set bpf.mount.path=/sys/fs/bpf \
   --wait --timeout 5m
 
 echo "==> Applying Cilium L2 announcement policy and IP pool..."
@@ -61,6 +67,9 @@ echo ""
 echo "==> [5b] Installing democratic-csi ${DEMOCRATIC_CSI_VERSION}..."
 helm repo add democratic-csi https://democratic-csi.github.io/charts/ 2>/dev/null || true
 helm repo update democratic-csi
+
+kubectl create namespace democratic-csi --dry-run=client -o yaml | kubectl apply -f -
+kubectl label namespace democratic-csi pod-security.kubernetes.io/enforce=privileged --overwrite
 
 if [ ! -f "democratic-csi-values.yaml" ]; then
   echo "ERROR: democratic-csi-values.yaml not found in current directory."
@@ -145,9 +154,9 @@ spec:
     networkPolicy: true
   sync:
     kind: GitRepository
-    url: "ssh://git@github.com/waddle-social/platform.git"
+    url: "ssh://git@github.com/waddle-social/waddle-infra.git"
     ref: "refs/heads/main"
-    path: "clusters/scaleway"
+    path: "platform/clusters/scaleway"
     pullSecret: "flux-system"
 EOF
 
