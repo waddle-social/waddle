@@ -13,4 +13,7 @@ spec:
   path: ./platform/apps
   prune: true
   dependsOn:
-    - name: infrastructure
+    - name: infra-cloudnative-pg
+    - name: infra-spicedb-operator
+    - name: infra-onepassword-connect
+    - name: infra-cilium-gateway
