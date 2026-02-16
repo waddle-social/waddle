@@ -39,19 +39,21 @@ driver:
       zvolEnableReservation: false
       zvolBlocksize: ""
     iscsi:
+      shareStrategy: targetCli
+      shareStrategyTargetCli:
+        basename: "iqn.2003-01.org.linux-iscsi.proxmox"
+        tpg:
+          attributes:
+            authentication: 0
+            generate_node_acls: 1
+            cache_dynamic_acls: 1
+            demo_mode_write_protect: 0
+          auth: {}
+          block:
+            attributes:
+              emulate_tpu: 0
       targetPortal: "10.10.0.1:3260"
       targetPortals: []
       interface: ""
       namePrefix: "csi-"
       nameSuffix: ""
-      targetGroups:
-        - targetGroupPortalGroup: 1
-          targetGroupInitiatorGroup: 1
-          targetGroupAuthType: None
-          targetGroupAuthGroup:
-      extentInsecureTpc: true
-      extentXenCompat: false
-      extentDisablePhysicalBlocksize: true
-      extentBlocksize: 512
-      extentRpm: "SSD"
-      extentAvailThreshold: 0
