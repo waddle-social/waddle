@@ -486,19 +486,36 @@ Key config choices and why they matter:
 
 #### Port Forwarding (Proxmox Host)
 
-The Proxmox host and HAProxy VM share the same public IP. Port forwarding rules on the host send ports 80 and 443 to the HAProxy VM:
+The Proxmox host and HAProxy VM share the same public IP. Port forwarding rules on the host route traffic to the correct internal VMs:
 
 ```bash
 # On Proxmox host
+
+# HTTP/HTTPS -> HAProxy VM (10.10.0.3)
 iptables -t nat -A PREROUTING -p tcp -d <public_ip> --dport 443 -j DNAT --to-destination 10.10.0.3:443
 iptables -t nat -A PREROUTING -p tcp -d <public_ip> --dport 80 -j DNAT --to-destination 10.10.0.3:80
 iptables -A FORWARD -p tcp -d 10.10.0.3 --dport 443 -j ACCEPT
 iptables -A FORWARD -p tcp -d 10.10.0.3 --dport 80 -j ACCEPT
+
+# Teleport SSH proxy + reverse tunnel -> Teleport VM (10.10.0.2)
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3023 -j DNAT --to-destination 10.10.0.2:3023
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3023 -j ACCEPT
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3024 -j DNAT --to-destination 10.10.0.2:3024
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3024 -j ACCEPT
+
+# NAT for return traffic
 iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o vmbr0 -j MASQUERADE
 
 # Persist
 netfilter-persistent save
 ```
+
+| Port | Destination | Purpose |
+|---|---|---|
+| 80 | 10.10.0.3 (HAProxy) | HTTP, forwarded to Cilium Gateway |
+| 443 | 10.10.0.3 (HAProxy) | HTTPS, SNI-routed by HAProxy |
+| 3023 | 10.10.0.2 (Teleport) | Teleport SSH proxy (`tsh ssh`, `tsh scp`) |
+| 3024 | 10.10.0.2 (Teleport) | Teleport reverse tunnel (node/app registration) |
 
 **Lockdown -- Remove temporary SSH access:**
 
@@ -537,39 +554,128 @@ talos_schematic_id = "<your-schematic-id>"
 ./scripts/tofu.sh apply -target=module.talos_cluster
 ```
 
+> **Note:** Unlike HAProxy and Teleport, the Talos VMs deploy successfully via OpenTofu's `import_from` on ZFS datastores. The `initialization` block uses `datastore_id = "local"` (not `local-lvm`, which does not exist on this host).
+
 What it creates:
 - Downloads the Talos nocloud image from Image Factory
 - Creates 3 VMs (IDs 110-112): 3 vCPU, 8 GB RAM, 10 GB disk each
 - All on `vmbr1` with static IPs: 10.10.0.10, 10.10.0.11, 10.10.0.12
+- CPU type `host` (passthrough) for x86-64-v2 support
 - DNS set to 1.1.1.1 and 8.8.8.8
 
 #### Bootstrap the Cluster
 
-After the VMs are running, generate and apply Talos machine configs:
+The bootstrap script and `talosctl` must be run from a machine on the `vmbr1` network (10.10.0.0/24) since Talos nodes have no public interface. Use the Teleport VM (10.10.0.2) as the jump host.
+
+**1. Generate configs locally:**
 
 ```bash
 ./scripts/bootstrap-talos.sh
 ```
 
-This script:
-1. Runs `talosctl gen config` to generate base configs and secrets
-2. Creates per-node patches with static IPs, VIP (10.10.0.20), disabled CNI, disabled kube-proxy, and allowed scheduling on control planes
-3. Applies the patched configs to each node via `talosctl apply-config --insecure`
-4. Bootstraps the first node with `talosctl bootstrap`
-5. Retrieves the kubeconfig
+This generates configs in `talos/generated/` but will fail at the apply step (can't reach 10.10.0.x from your Mac). That's expected.
 
-**Verify:**
+**2. Copy configs to the Teleport VM:**
 
 ```bash
-export TALOSCONFIG=talos/generated/talosconfig
-talosctl get members --nodes 10.10.0.10
-# Should show 3 members
+tsh login --proxy=teleport.waddle.social --auth=github
+tsh scp -r talos/generated/ deploy@teleport:/tmp/talos-configs/
+```
 
+**3. SSH into the Teleport VM and install tools:**
+
+```bash
+tsh ssh deploy@teleport
+
+# Install talosctl
+curl -sL https://talos.dev/install | sh
+
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+```
+
+> **Prerequisite:** The Teleport VM must use CPU type `host` (not the default `kvm64`) for `talosctl` to run. It requires x86-64-v2 microarchitecture support. If the VM was created manually, fix it on the Proxmox host:
+> ```bash
+> qm stop 101 && qm set 101 -cpu host && qm start 101
+> ```
+> Do the same for the HAProxy VM (100) for consistency.
+
+**4. Apply configs and bootstrap:**
+
+```bash
+# Apply config to each node
+talosctl apply-config --insecure --nodes 10.10.0.10 \
+  --file /tmp/talos-configs/generated/controlplane.yaml \
+  --config-patch @/tmp/talos-configs/generated/talos-cp1-patch.yaml
+
+talosctl apply-config --insecure --nodes 10.10.0.11 \
+  --file /tmp/talos-configs/generated/controlplane.yaml \
+  --config-patch @/tmp/talos-configs/generated/talos-cp2-patch.yaml
+
+talosctl apply-config --insecure --nodes 10.10.0.12 \
+  --file /tmp/talos-configs/generated/controlplane.yaml \
+  --config-patch @/tmp/talos-configs/generated/talos-cp3-patch.yaml
+
+# Wait for nodes to initialize
+sleep 30
+
+# Bootstrap first node
+export TALOSCONFIG=/tmp/talos-configs/generated/talosconfig
+talosctl config endpoint 10.10.0.10
+talosctl config node 10.10.0.10
+talosctl bootstrap
+
+# Wait for bootstrap
+sleep 60
+
+# Retrieve kubeconfig
+talosctl kubeconfig /tmp/kubeconfig --force
+
+# Verify
+export KUBECONFIG=/tmp/kubeconfig
 kubectl get nodes
 # All 3 nodes in NotReady state (expected -- Cilium not yet installed)
 ```
 
-> **Important:** The generated `talos/generated/` directory contains cluster secrets (PKI, tokens). It is gitignored. Back up `talos/generated/talosconfig` and `talos/generated/secrets.yaml` securely (e.g., in 1Password).
+**Verify:**
+
+```bash
+kubectl get nodes
+# NAME        STATUS     ROLES           AGE   VERSION
+# talos-cp1   NotReady   control-plane   ...   v1.35.0
+# talos-cp2   NotReady   control-plane   ...   v1.35.0
+# talos-cp3   NotReady   control-plane   ...   v1.35.0
+```
+
+> **Important:** The generated `talos/generated/` directory contains cluster secrets (PKI, tokens). It is gitignored. Back up `talos/generated/talosconfig` securely (e.g., in 1Password).
+
+#### Teleport Port Forwarding for `tsh`
+
+To use `tsh login`, `tsh ssh`, and `tsh scp` from your workstation, the Proxmox host must forward Teleport's SSH proxy port (3023) and reverse tunnel port (3024) to the Teleport VM. Add these rules on the Proxmox host:
+
+```bash
+# Teleport SSH proxy (tsh ssh/scp)
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3023 -j DNAT --to-destination 10.10.0.2:3023
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3023 -j ACCEPT
+
+# Teleport reverse tunnel (node/app registration)
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3024 -j DNAT --to-destination 10.10.0.2:3024
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3024 -j ACCEPT
+
+netfilter-persistent save
+```
+
+> **Note:** These rules point to 10.10.0.2 (Teleport VM), not 10.10.0.3 (HAProxy). Ports 3023/3024 are Teleport-specific protocols, not HTTP traffic.
+
+Also ensure Teleport is listening on port 3023. If not, add to `/etc/teleport.yaml` under `proxy_service`:
+
+```yaml
+  listen_addr: 0.0.0.0:3023
+  ssh_public_addr: teleport.waddle.social:3023
+```
+
+Then restart: `sudo systemctl restart teleport`
 
 ---
 
@@ -904,6 +1010,26 @@ Check `sudo journalctl -u teleport` on the Teleport VM for the real error. Commo
 The proxy's reverse tunnel listener is not running. Add `tunnel_listen_addr: 0.0.0.0:3024` to the `proxy_service` section in `/etc/teleport.yaml` and restart Teleport. Without this, the app service cannot register with the proxy.
 
 Verify it's listening: `sudo ss -tlnp | grep 3024`
+
+### talosctl / kubectl: "command not found" or "x86-64-v2" error on Teleport VM
+
+If `talosctl` prints "This program can only be run on AMD64 processors with v2 microarchitecture support", the VM's CPU type is set to `kvm64` (default for manually created VMs). Fix on the Proxmox host:
+
+```bash
+qm stop 101 && qm set 101 -cpu host && qm start 101
+```
+
+### Talos apply-config: "static hostname is already set in v1alpha1 config"
+
+`talosctl gen config` (v1.12.4+) appends a `HostnameConfig` document (`auto: stable`) to the generated `controlplane.yaml`. This conflicts with `machine.network.hostname` in the per-node patches. The bootstrap script strips this document automatically with `sed`. If applying manually, remove the trailing `---` and `HostnameConfig` block from `controlplane.yaml` before applying.
+
+### Talos apply-config: "storage 'local-lvm' does not exist"
+
+The `initialization` block in the Talos VM resource defaults to `local-lvm` for the cloud-init drive. This host does not have `local-lvm`. Set `datastore_id = "local"` in the `initialization` block.
+
+### tsh login: "dial tcp ...:3023: i/o timeout"
+
+Port 3023 (Teleport SSH proxy) is not forwarded from the Proxmox host to the Teleport VM. Add DNAT rules for ports 3023 and 3024 pointing to 10.10.0.2 (see Phase 4, "Teleport Port Forwarding for tsh").
 
 ### Teleport SSH: "unknown user"
 

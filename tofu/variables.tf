@@ -123,5 +123,5 @@ variable "operator_ip" {
 variable "talos_schematic_id" {
   description = "Talos Image Factory schematic ID (includes qemu-guest-agent + iscsi-tools extensions)"
   type        = string
-  default     = ""
+  default     = "dc7b152cb3ea99b821fcb7340ce7168313ce393d663740b791c36f6e95fc8586"
 }

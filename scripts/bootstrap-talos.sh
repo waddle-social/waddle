@@ -19,6 +19,11 @@ talosctl gen config "${CLUSTER_NAME}" "${CLUSTER_ENDPOINT}" \
   --with-examples=false \
   --force
 
+# Remove HostnameConfig document appended by talosctl gen config
+# (conflicts with hostname set in per-node patches)
+sed -i.bak '/^---$/,$ d' "${OUTPUT_DIR}/controlplane.yaml"
+rm -f "${OUTPUT_DIR}/controlplane.yaml.bak"
+
 echo "==> Generating per-node patched configs..."
 for i in "${!NODE_IPS[@]}"; do
   NODE_IP="${NODE_IPS[$i]}"

@@ -51,6 +51,7 @@ resource "proxmox_virtual_environment_vm" "talos_node" {
   }
 
   initialization {
+    datastore_id = "local"
     ip_config {
       ipv4 {
         address = "${var.node_ips[count.index]}/24"
