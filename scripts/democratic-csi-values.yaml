@@ -1,3 +1,9 @@
+node:
+  hostPID: true
+  driver:
+    iscsiDirHostPath: /etc/iscsi
+    iscsiDirHostPathType: ""
+
 csiDriver:
   name: "org.democratic-csi.iscsi"
 
@@ -17,11 +23,14 @@ driver:
       host: 10.10.0.1
       port: 22
       username: root
-      # Use SSH key auth (key must be provided at install time)
-      # privateKey: |
-      #   -----BEGIN OPENSSH PRIVATE KEY-----
-      #   ...
-      #   -----END OPENSSH PRIVATE KEY-----
+      privateKey: |
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+        QyNTUxOQAAACBW71ipdmMUY6yIs0C53ufaGSjAZtqnW6+I2jyISHhl7gAAAJh+5qbJfuam
+        yQAAAAtzc2gtZWQyNTUxOQAAACBW71ipdmMUY6yIs0C53ufaGSjAZtqnW6+I2jyISHhl7g
+        AAAEDQWnMM1IBnlVDSjbYOUS8CqkL94YQgeH/cdl9j+oQCkFbvWKl2YxRjrIizQLne59oZ
+        KMBm2qdbr4jaPIhIeGXuAAAADmRlbW9jcmF0aWMtY3NpAQIDBAUGBw==
+        -----END OPENSSH PRIVATE KEY-----
     zfs:
       datasetParentName: zpve/k8s-csi
       detachedSnapshotsDatasetParentName: zpve/k8s-csi-snaps
