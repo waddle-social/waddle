@@ -235,7 +235,29 @@ pub struct XmppCallbackQuery {
     /// Original state from XMPP client (fallback if no stored state)
     pub state: Option<String>,
     /// Original redirect URI (fallback if no stored state)
-    pub redirect_uri: String,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+/// Extract redirect_uri from query params, or return an error response if missing.
+fn fallback_to_query_params(
+    params: &XmppCallbackQuery,
+) -> Result<(String, Option<String>), axum::response::Response> {
+    match params.redirect_uri.as_deref() {
+        Some(uri) => Ok((uri.to_string(), params.state.clone())),
+        None => {
+            warn!("XMPP callback missing both stored state and redirect_uri query param");
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(XmppOAuthError {
+                    error: "missing_redirect_uri".to_string(),
+                    error_description: "Either atproto_state or redirect_uri must be provided"
+                        .to_string(),
+                }),
+            )
+                .into_response())
+        }
+    }
 }
 
 /// GET /v1/auth/xmpp/callback
@@ -250,7 +272,7 @@ pub struct XmppCallbackQuery {
 pub async fn xmpp_callback_handler(
     State(state): State<Arc<AuthState>>,
     Query(params): Query<XmppCallbackQuery>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Resolve XMPP client redirect_uri and state:
     // Prefer stored state (keyed by ATProto state) over query params.
     let (redirect_uri, client_state) = if let Some(ref atproto_state_key) = params.atproto_state {
@@ -260,17 +282,26 @@ pub async fn xmpp_callback_handler(
                 (xmpp_state.client_redirect_uri, xmpp_state.client_state)
             }
             Some(_) => {
-                warn!(atproto_state = %atproto_state_key, "XMPP pending state expired");
-                (params.redirect_uri.clone(), params.state.clone())
+                warn!(atproto_state = %atproto_state_key, "XMPP pending state expired, falling back to query params");
+                match fallback_to_query_params(&params) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                }
             }
             None => {
                 warn!(atproto_state = %atproto_state_key, "XMPP pending state not found, falling back to query params");
-                (params.redirect_uri.clone(), params.state.clone())
+                match fallback_to_query_params(&params) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                }
             }
         }
     } else {
         // No ATProto state key — fall back to query params (backwards compat)
-        (params.redirect_uri.clone(), params.state.clone())
+        match fallback_to_query_params(&params) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        }
     };
 
     info!(
@@ -478,6 +509,97 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
         assert!(!fresh.is_expired(), "Fresh state should not be expired");
+    }
+
+    #[tokio::test]
+    async fn test_xmpp_callback_with_stored_state_no_redirect_uri() {
+        use crate::auth::Session;
+        use chrono::{Duration, Utc};
+
+        let auth_state = create_test_auth_state().await;
+
+        // Pre-store an XMPP pending state
+        let xmpp_state = super::super::auth::XmppPendingState {
+            client_redirect_uri: "xmpp://my-client/callback".to_string(),
+            client_state: Some("xmpp-csrf-123".to_string()),
+            client_code_challenge: None,
+            created_at: std::time::Instant::now(),
+        };
+        auth_state
+            .xmpp_pending_states
+            .insert("atproto-state-abc".to_string(), xmpp_state);
+
+        // Pre-store a valid session
+        let session = Session {
+            id: "sess-for-xmpp-test".to_string(),
+            did: "did:plc:testuser123".to_string(),
+            handle: "testuser.bsky.social".to_string(),
+            access_token: "at-token".to_string(),
+            refresh_token: None,
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            pds_url: "https://bsky.social".to_string(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        };
+        auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+
+        let app = router(auth_state);
+
+        // Call xmpp callback with atproto_state but NO redirect_uri
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/xmpp/callback?session_id=sess-for-xmpp-test&atproto_state=atproto-state-abc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should redirect to the stored client_redirect_uri
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get("location").unwrap().to_str().unwrap();
+        assert!(
+            location.contains("xmpp://my-client/callback"),
+            "redirect should go to stored client redirect_uri, got: {location}"
+        );
+        assert!(
+            location.contains("code="),
+            "redirect should include code param, got: {location}"
+        );
+        assert!(
+            location.contains("state="),
+            "redirect should include original XMPP client state, got: {location}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_xmpp_callback_no_state_no_redirect_uri_returns_error() {
+        let auth_state = create_test_auth_state().await;
+        let app = router(auth_state);
+
+        // Call xmpp callback with no atproto_state and no redirect_uri
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/auth/xmpp/callback?session_id=some-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "missing_redirect_uri");
     }
 
     #[tokio::test]

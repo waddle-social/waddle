@@ -11,14 +11,14 @@ use crate::server::AppState;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Redirect},
     routing::{get, post},
     Router,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// In-memory store for pending OAuth authorizations
 /// In production, consider using Redis or database storage
@@ -378,6 +378,22 @@ pub async fn callback_handler(
                 Ok(()) => {
                     info!("Session created: {} for {}", session.id, pending.handle);
 
+                    // Check if this OAuth flow was initiated by an XMPP client.
+                    // Peek (don't remove) — xmpp_callback_handler owns removal.
+                    if state.xmpp_pending_states.contains_key(&query.state) {
+                        debug!(
+                            atproto_state = %query.state,
+                            "XMPP-initiated OAuth flow detected, redirecting to xmpp callback"
+                        );
+                        let redirect_url = format!(
+                            "/v1/auth/xmpp/callback?session_id={}&atproto_state={}",
+                            urlencoding::encode(&session.id),
+                            urlencoding::encode(&query.state),
+                        );
+                        return Redirect::temporary(&redirect_url).into_response();
+                    }
+
+                    debug!("Non-XMPP OAuth flow, returning JSON response");
                     (
                         StatusCode::OK,
                         Json(CallbackResponse {
