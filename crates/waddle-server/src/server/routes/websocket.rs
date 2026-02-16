@@ -787,8 +787,7 @@ async fn handle_message(
         let msg_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let body_text = body.unwrap_or_default();
 
-        let mut prototype =
-            xmpp_parsers::message::Message::new(None);
+        let mut prototype = xmpp_parsers::message::Message::new(None);
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
             prototype.from = Some(jid::Jid::from(from_jid));
         } else {
@@ -844,16 +843,14 @@ async fn handle_message(
 
             // Build a prototype message and enrich it with embeds before routing.
             // Enrichment is fail-open: errors are logged but never block delivery.
-            let mut prototype =
-                xmpp_parsers::message::Message::new(None);
+            let mut prototype = xmpp_parsers::message::Message::new(None);
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
             prototype.id = id.clone();
             prototype.type_ = xmpp_parsers::message::MessageType::Chat;
             if let Some(ref b) = body {
-                prototype.bodies.insert(
-                    String::new(),
-                    xmpp_parsers::message::Body(b.clone()),
-                );
+                prototype
+                    .bodies
+                    .insert(String::new(), xmpp_parsers::message::Body(b.clone()));
             }
 
             // Enrich: detect GitHub links and append embed XML elements
@@ -1031,18 +1028,16 @@ mod tests {
 
     #[test]
     fn stanza_to_xml_includes_payloads() {
-        let mut msg = xmpp_parsers::message::Message::new(Some(
-            jid::Jid::from("bob@example.com".parse::<jid::BareJid>().unwrap()),
-        ));
+        let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+            "bob@example.com".parse::<jid::BareJid>().unwrap(),
+        )));
         msg.from = Some(jid::Jid::from(
             "alice@example.com".parse::<jid::BareJid>().unwrap(),
         ));
         msg.id = Some("test-1".into());
         msg.type_ = xmpp_parsers::message::MessageType::Chat;
-        msg.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body("Hello".into()),
-        );
+        msg.bodies
+            .insert(String::new(), xmpp_parsers::message::Body("Hello".into()));
 
         // Add a payload element (simulating a GitHub embed)
         let embed = xmpp_parsers::minidom::Element::builder("repo", "urn:waddle:github:0")
@@ -1068,15 +1063,21 @@ mod tests {
             "payload must not include XML declaration: {xml}"
         );
         // The whole thing must be a single <message>...</message>
-        assert!(xml.starts_with("<message"), "must start with <message: {xml}");
-        assert!(xml.ends_with("</message>"), "must end with </message>: {xml}");
+        assert!(
+            xml.starts_with("<message"),
+            "must start with <message: {xml}"
+        );
+        assert!(
+            xml.ends_with("</message>"),
+            "must end with </message>: {xml}"
+        );
     }
 
     #[test]
     fn stanza_to_xml_no_payloads_still_works() {
-        let mut msg = xmpp_parsers::message::Message::new(Some(
-            jid::Jid::from("bob@example.com".parse::<jid::BareJid>().unwrap()),
-        ));
+        let mut msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(
+            "bob@example.com".parse::<jid::BareJid>().unwrap(),
+        )));
         msg.from = Some(jid::Jid::from(
             "alice@example.com".parse::<jid::BareJid>().unwrap(),
         ));

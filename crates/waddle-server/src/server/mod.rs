@@ -470,9 +470,7 @@ fn create_router(
     let muc_registry = Arc::new(MucRoomRegistry::new(muc_domain));
 
     // GitHub link enricher for message embeds (fail-open, reads GITHUB_TOKEN from env)
-    let github_enricher = Arc::new(
-        waddle_xmpp_xep_github::MessageEnricher::from_env(),
-    );
+    let github_enricher = Arc::new(waddle_xmpp_xep_github::MessageEnricher::from_env());
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {

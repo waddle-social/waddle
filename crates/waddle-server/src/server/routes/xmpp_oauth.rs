@@ -564,7 +564,12 @@ mod tests {
 
         // Should redirect to the stored client_redirect_uri
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-        let location = response.headers().get("location").unwrap().to_str().unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(
             location.contains("xmpp://my-client/callback"),
             "redirect should go to stored client redirect_uri, got: {location}"
