@@ -146,7 +146,16 @@ impl Database {
 
         let db = libsql::Builder::new_local(path).build().await?;
 
-        info!("Opened database '{}' at {:?}", name, path);
+        // Enable WAL mode and set a busy timeout for concurrent access.
+        // Without these, concurrent writers get immediate "database is locked" errors.
+        let conn = db.connect()?;
+        conn.execute("PRAGMA journal_mode=WAL", ()).await?;
+        conn.execute("PRAGMA busy_timeout=5000", ()).await?;
+
+        info!(
+            "Opened database '{}' at {:?} (WAL mode, 5s busy timeout)",
+            name, path
+        );
         Ok(Self {
             db: Arc::new(db),
             name: name.to_string(),
@@ -183,7 +192,15 @@ impl Database {
         .build()
         .await?;
 
-        info!("Opened synced database '{}' with Turso", name);
+        // Enable WAL mode and set a busy timeout for concurrent access.
+        let conn = db.connect()?;
+        conn.execute("PRAGMA journal_mode=WAL", ()).await?;
+        conn.execute("PRAGMA busy_timeout=5000", ()).await?;
+
+        info!(
+            "Opened synced database '{}' with Turso (WAL mode, 5s busy timeout)",
+            name
+        );
         Ok(Self {
             db: Arc::new(db),
             name: name.to_string(),
