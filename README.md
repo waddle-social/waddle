@@ -845,31 +845,34 @@ grpcurl -insecure \
 
 ### Phase 7 -- Teleport Kubernetes and Talos Integration
 
-After the cluster is running, configure Teleport to provide kubectl and talosctl access through its zero-trust tunnel.
+After the cluster is running, configure Teleport to provide kubectl access through its zero-trust tunnel. This script runs **on the Teleport VM** (not your workstation) since the kubeconfig and talosconfig are already there from Phase 4.
 
-**Run the setup script:**
+**1. Copy the script to the Teleport VM:**
 
 ```bash
-# Make sure you're logged into Teleport first
-tsh login --proxy=teleport.waddle.social
-
-# Run the Phase 7 script
-./scripts/setup-teleport-kube.sh
+tsh scp scripts/setup-teleport-kube.sh deploy@teleport:/tmp/setup-teleport-kube.sh
 ```
 
-This script:
-1. Generates a kubeconfig from the Talos cluster (pointing at VIP 10.10.0.20)
-2. Copies the kubeconfig to the Teleport VM via `tsh scp`
-3. Updates `/etc/teleport.yaml` on the Teleport VM to reference the kubeconfig
-4. Restarts Teleport and verifies the cluster appears in `tsh kube ls`
-5. Tests `kubectl get nodes` through the Teleport tunnel
-
-**Verify kubectl through Teleport:**
+**2. Run it on the Teleport VM:**
 
 ```bash
-tsh login --proxy=teleport.waddle.social
-tsh kube ls                                # should show waddle-cluster
-tsh kube login waddle-cluster
+tsh ssh deploy@teleport
+chmod +x /tmp/setup-teleport-kube.sh
+/tmp/setup-teleport-kube.sh /tmp/kubeconfig
+```
+
+The script:
+1. Validates the kubeconfig can reach the Talos cluster
+2. Installs the kubeconfig to `/etc/teleport/kubeconfig`
+3. Appends `kubernetes_service` to `/etc/teleport.yaml`
+4. Restarts Teleport and verifies the cluster is registered
+
+**Verify kubectl through Teleport (from your workstation):**
+
+```bash
+tsh login --proxy=teleport.waddle.social --auth=github
+tsh kube ls                                # should show waddle cluster
+tsh kube login waddle
 kubectl get nodes                          # works through Teleport
 ```
 
