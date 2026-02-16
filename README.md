@@ -40,6 +40,7 @@ HAProxy VM (public IP, vmbr0 + vmbr1)
 | Talos Linux | v1.12.4 |
 | Kubernetes | 1.35.1 |
 | Cilium | 1.19.0 |
+| Gateway API CRDs | v1.3.0 |
 | democratic-csi | 0.15.1 (Helm) |
 | Flux Operator | 0.40.0 |
 | cert-manager | 1.19.3 |
@@ -78,7 +79,8 @@ waddle-infra/
 │   │   ├── external-dns/                 # External DNS (Cloudflare)
 │   │   ├── cloudnative-pg/               # CloudNativePG operator
 │   │   ├── spicedb-operator/             # SpiceDB operator
-│   │   └── cilium-gateway/               # Gateway API + wildcard TLS cert
+│   │   ├── cert-manager-issuer/           # ClusterIssuer (split from cert-manager for CRD ordering)
+│   │   └── cilium-gateway/               # GatewayClass + Gateway API + wildcard TLS cert
 │   └── apps/
 │       └── spicedb/                      # SpiceDB + PG cluster + backup + network policy
 ├── scripts/                               # Bootstrap and operational scripts
@@ -711,15 +713,21 @@ cd scripts
 
 The script installs components in order and prompts for secrets interactively:
 
-**Step 5a -- Cilium 1.19.0:**
-- Installs Cilium CNI with kube-proxy replacement, L2 announcements, Gateway API, and external IPs
+**Step 5a -- Gateway API CRDs v1.3.0 + Cilium 1.19.0:**
+- Installs Gateway API CRDs (standard + experimental) **before** Cilium -- Cilium's operator checks for these at startup and will not register the gateway controller if they're missing
+- Installs Cilium CNI with kube-proxy replacement, L2 announcements, Gateway API, external IPs, and `gatewayAPI.hostNetwork.enabled=false`
+- Creates the `cilium` GatewayClass (Cilium 1.19 does not auto-create it)
 - Creates `CiliumL2AnnouncementPolicy` and `CiliumLoadBalancerIPPool` for the Gateway VIP (10.10.0.30)
 - Waits for all nodes to become `Ready`
 
+> **Important:** The Gateway API CRDs must be installed before Cilium starts. If Cilium starts without them, the operator logs `Required GatewayAPI resources are not found` and disables the gateway controller. Restarting the operator (`kubectl rollout restart deployment cilium-operator -n kube-system`) after installing the CRDs resolves this.
+
 **Step 5b -- democratic-csi 0.15.1:**
-- Installs the ZFS-generic-iSCSI CSI driver
+- Installs the ZFS-generic-iSCSI CSI driver with `shareStrategy: targetCli` and `shareStrategyTargetCli` config
 - Creates the `zfs-iscsi` StorageClass (set as default)
 - Reads values from `democratic-csi-values.yaml`
+
+> **Important:** The `shareStrategy` and `shareStrategyTargetCli` (with `basename`) fields are required in the values file. Without `shareStrategy`, provisioning fails with `unknown shareStrategy undefined`. Without `shareStrategyTargetCli.basename`, it fails with `Cannot read properties of undefined (reading 'basename')`.
 
 **Step 5c -- Flux Operator 0.40.0:**
 - Installs the Flux Operator into `flux-system` namespace
@@ -786,7 +794,7 @@ The `platform/` directory contains:
 | `infrastructure/external-dns/` | External DNS 1.20.0 + ExternalSecret for Cloudflare token |
 | `infrastructure/cloudnative-pg/` | CloudNativePG 1.28.1 operator |
 | `infrastructure/spicedb-operator/` | SpiceDB Operator 1.22.0 |
-| `infrastructure/cilium-gateway/` | Gateway + wildcard Certificate for `*.apps.waddle.social` |
+| `infrastructure/cilium-gateway/` | GatewayClass + Gateway + wildcard Certificate for `*.apps.waddle.social` |
 | `apps/spicedb/` | SpiceDB instance + PG Cluster (2 instances, WAL+base backup to S3) + GRPCRoute + CiliumNetworkPolicy (Cloudflare IPs only) |
 
 #### Flux Kustomization Dependency Chain
@@ -1034,3 +1042,75 @@ Port 3023 (Teleport SSH proxy) is not forwarded from the Proxmox host to the Tel
 ### Teleport SSH: "unknown user"
 
 The default `access` role uses `{{internal.logins}}` which resolves to the GitHub username (e.g. `randax`). If that user doesn't exist on the target VM, SSH fails. Create a custom role with explicit `logins` (e.g. `deploy`, `root`) and assign it via the GitHub connector's `teams_to_roles`.
+
+### Cilium Gateway: "Waiting for controller" / GatewayClass not found
+
+Cilium 1.19 does not auto-create the `cilium` GatewayClass resource. If the Gateway shows `Programmed: Unknown` and the operator logs show `GatewayClass "cilium" not found`, create it manually:
+
+```bash
+echo '{"apiVersion":"gateway.networking.k8s.io/v1","kind":"GatewayClass","metadata":{"name":"cilium"},"spec":{"controllerName":"io.cilium/gateway-controller"}}' | kubectl apply -f -
+```
+
+The bootstrap script and GitOps manifests (`infrastructure/cilium-gateway/gateway-class.yaml`) both create this resource. If the CRDs were installed after Cilium started, also restart the operator:
+
+```bash
+kubectl rollout restart deployment cilium-operator -n kube-system
+```
+
+### democratic-csi: "unknown shareStrategy undefined"
+
+The `iscsi.shareStrategy` field is required in the democratic-csi values. For Proxmox/LIO hosts, use `shareStrategy: targetCli` with a `shareStrategyTargetCli` block that includes a `basename` IQN:
+
+```yaml
+driver:
+  config:
+    iscsi:
+      shareStrategy: targetCli
+      shareStrategyTargetCli:
+        basename: "iqn.2003-01.org.linux-iscsi.proxmox"
+        tpg:
+          attributes:
+            authentication: 0
+            generate_node_acls: 1
+            cache_dynamic_acls: 1
+            demo_mode_write_protect: 0
+```
+
+### democratic-csi: "Cannot read properties of undefined (reading 'basename')"
+
+The `shareStrategyTargetCli.basename` field is missing. Add the `shareStrategyTargetCli` block with a valid IQN basename (see above).
+
+### External DNS: "failed to sync *v1alpha2.TCPRoute: context deadline exceeded"
+
+External DNS crashes if configured with `gateway-tcproute` or `gateway-udproute` sources but the corresponding CRDs (TCPRoute, UDPRoute) are not installed or the RBAC doesn't cover them. Only use sources for route types you actually need:
+
+```yaml
+sources:
+  - gateway-httproute
+  - gateway-grpcroute
+```
+
+### Flux HelmRelease stuck in "Stalled" / "RetriesExceeded"
+
+If a HelmRelease fails and exhausts retries, Flux stops reconciling it. Force a retry by annotating:
+
+```bash
+kubectl annotate helmrelease <name> -n <namespace> \
+  reconcile.fluxcd.io/requestedAt="$(date +%s)" --overwrite
+```
+
+### ExternalSecrets: "SecretSyncedError"
+
+The referenced 1Password item does not exist in the configured vault, or the field/property name doesn't match. Check:
+
+1. The item exists in the `waddle-infra` vault with the exact title referenced in `remoteRef.key`
+2. The field name matches `remoteRef.property` exactly (case-sensitive, use underscores vs hyphens as stored in 1Password)
+
+Required 1Password items for this deployment:
+
+| Item Title | Fields | Used By |
+|---|---|---|
+| `Scaleway S3` | `access_key`, `secret_key` | CNPG S3 backups |
+| `cloudflare-api-token` | `credential` | cert-manager, external-dns |
+| `cnpg-superuser` | `username`, `password` | CloudNativePG bootstrap |
+| `spicedb-preshared-key` | `credential` | SpiceDB gRPC auth |

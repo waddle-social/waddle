@@ -42,6 +42,16 @@ helm upgrade --install cilium cilium/cilium \
   --set bpf.mount.path=/sys/fs/bpf \
   --wait --timeout 5m
 
+echo "==> Creating Cilium GatewayClass..."
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: cilium
+spec:
+  controllerName: io.cilium/gateway-controller
+EOF
+
 echo "==> Applying Cilium L2 announcement policy and IP pool..."
 kubectl apply -f - <<EOF
 apiVersion: cilium.io/v2alpha1
