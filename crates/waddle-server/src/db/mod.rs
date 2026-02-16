@@ -148,9 +148,10 @@ impl Database {
 
         // Enable WAL mode and set a busy timeout for concurrent access.
         // Without these, concurrent writers get immediate "database is locked" errors.
+        // Note: journal_mode returns a row, so we must use query() not execute().
         let conn = db.connect()?;
-        conn.execute("PRAGMA journal_mode=WAL", ()).await?;
-        conn.execute("PRAGMA busy_timeout=5000", ()).await?;
+        conn.query("PRAGMA journal_mode=WAL", ()).await?;
+        conn.query("PRAGMA busy_timeout=5000", ()).await?;
 
         info!(
             "Opened database '{}' at {:?} (WAL mode, 5s busy timeout)",
@@ -194,8 +195,8 @@ impl Database {
 
         // Enable WAL mode and set a busy timeout for concurrent access.
         let conn = db.connect()?;
-        conn.execute("PRAGMA journal_mode=WAL", ()).await?;
-        conn.execute("PRAGMA busy_timeout=5000", ()).await?;
+        conn.query("PRAGMA journal_mode=WAL", ()).await?;
+        conn.query("PRAGMA busy_timeout=5000", ()).await?;
 
         info!(
             "Opened synced database '{}' with Turso (WAL mode, 5s busy timeout)",
