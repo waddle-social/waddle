@@ -28,6 +28,4 @@ spec:
     sources:
       - gateway-httproute
       - gateway-grpcroute
-      - gateway-tcproute
-      - gateway-udproute
     txtOwnerId: waddle-cluster

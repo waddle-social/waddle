@@ -4,6 +4,7 @@ set -euo pipefail
 CILIUM_VERSION="1.19.0"
 DEMOCRATIC_CSI_VERSION="0.15.1"
 FLUX_OPERATOR_VERSION="0.40.0"
+GATEWAY_API_VERSION="v1.3.0"
 
 TALOS_VIP="10.10.0.20"
 CILIUM_GW_VIP="10.10.0.30"
@@ -12,9 +13,13 @@ echo "=========================================="
 echo "  Kubernetes Bootstrap (Phase 5)"
 echo "=========================================="
 
-# ---- 5a. Cilium ----
+# ---- 5a. Gateway API CRDs + Cilium ----
 echo ""
-echo "==> [5a] Installing Cilium ${CILIUM_VERSION}..."
+echo "==> [5a] Installing Gateway API CRDs ${GATEWAY_API_VERSION}..."
+kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
+
+echo "==> Installing Cilium ${CILIUM_VERSION}..."
 helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
 helm repo update cilium
 
@@ -25,6 +30,7 @@ helm upgrade --install cilium cilium/cilium \
   --set l2announcements.enabled=true \
   --set externalIPs.enabled=true \
   --set gatewayAPI.enabled=true \
+  --set gatewayAPI.hostNetwork.enabled=false \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost="${TALOS_VIP}" \
   --set k8sServicePort=6443 \
