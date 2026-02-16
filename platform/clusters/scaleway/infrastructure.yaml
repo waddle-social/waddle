@@ -122,6 +122,24 @@ spec:
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
+  name: infra-cert-manager-issuer
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./platform/infrastructure/cert-manager-issuer
+  prune: true
+  wait: true
+  dependsOn:
+    - name: infra-cert-manager
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
   name: infra-cilium-gateway
   namespace: flux-system
 spec:
@@ -135,4 +153,4 @@ spec:
   prune: true
   wait: true
   dependsOn:
-    - name: infra-cert-manager
+    - name: infra-cert-manager-issuer

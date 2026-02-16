@@ -6,4 +6,3 @@ resources:
   - helmrelease.yaml
   - helmrepository.yaml
   - external-secret.yaml
-  - cluster-issuer.yaml
