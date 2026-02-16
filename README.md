@@ -505,6 +505,10 @@ iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3023 -j ACCEPT
 iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3024 -j DNAT --to-destination 10.10.0.2:3024
 iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3024 -j ACCEPT
 
+# Teleport kube proxy (kubectl through Teleport) -> Teleport VM (10.10.0.2)
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3033 -j DNAT --to-destination 10.10.0.2:3033
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3033 -j ACCEPT
+
 # NAT for return traffic
 iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o vmbr0 -j MASQUERADE
 
@@ -518,6 +522,7 @@ netfilter-persistent save
 | 443 | 10.10.0.3 (HAProxy) | HTTPS, SNI-routed by HAProxy |
 | 3023 | 10.10.0.2 (Teleport) | Teleport SSH proxy (`tsh ssh`, `tsh scp`) |
 | 3024 | 10.10.0.2 (Teleport) | Teleport reverse tunnel (node/app registration) |
+| 3033 | 10.10.0.2 (Teleport) | Teleport kube proxy (`tsh kube login`, `kubectl`) |
 
 **Lockdown -- Remove temporary SSH access:**
 
@@ -847,6 +852,21 @@ grpcurl -insecure \
 
 After the cluster is running, configure Teleport to provide kubectl access through its zero-trust tunnel. This script runs **on the Teleport VM** (not your workstation) since the kubeconfig and talosconfig are already there from Phase 4.
 
+#### Prerequisites
+
+Port 3033 must be forwarded on the Proxmox host before the script runs:
+
+```bash
+# On Proxmox host
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3033 -j DNAT --to-destination 10.10.0.2:3033
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3033 -j ACCEPT
+netfilter-persistent save
+```
+
+> **Why port 3033?** Teleport 18.x with ACME does not register the `teleport-kube` ALPN protocol on the web port (3080). Kube traffic cannot be multiplexed through port 443 like SSH and web traffic. A dedicated kube listener on port 3033 is required, with `kube_public_addr` set so `tsh` knows to connect there directly.
+
+#### Run the Script
+
 **1. Copy the script to the Teleport VM:**
 
 ```bash
@@ -863,30 +883,34 @@ chmod +x /tmp/setup-teleport-kube.sh
 
 The script:
 1. Validates the kubeconfig can reach the Talos cluster
-2. Installs the kubeconfig to `/etc/teleport/kubeconfig`
-3. Appends `kubernetes_service` to `/etc/teleport.yaml`
-4. Restarts Teleport and verifies the cluster is registered
+2. Installs the kubeconfig to `/etc/teleport/kubeconfig` and renames the context to match the `kube_cluster` resource name (`waddle`)
+3. Adds `kube_listen_addr` and `kube_public_addr` to the `proxy_service` section
+4. Appends `kubernetes_service` with `kubeconfig_file` and `resources` matcher
+5. Restarts Teleport and verifies it's healthy
+6. Creates the `kube_cluster` dynamic resource via `tctl create`
+7. Verifies the cluster is registered
 
-**Verify kubectl through Teleport (from your workstation):**
+#### Teleport Kube Configuration Details
+
+| Setting | Value | Why |
+|---|---|---|
+| `proxy_service.kube_listen_addr` | `0.0.0.0:3033` | Dedicated kube proxy listener (ACME blocks kube ALPN on web port) |
+| `proxy_service.kube_public_addr` | `teleport.waddle.social:3033` | Tells `tsh` where to connect for kube traffic |
+| `kubernetes_service.kubeconfig_file` | `/etc/teleport/kubeconfig` | Path to the Talos kubeconfig |
+| `kubernetes_service.resources` | `labels: {"*": "*"}` | Watch for all `kube_cluster` dynamic resources |
+| kubeconfig context name | `waddle` | Must match the `kube_cluster` resource name for Teleport to match them |
+
+> **Note:** `kubeconfig_file` and `kube_cluster_name` are mutually exclusive in Teleport 18.x. Use `kubeconfig_file` with a `resources` matcher instead. The `kube_cluster` resource must be created separately via `tctl create`.
+
+#### Verify
+
+**kubectl through Teleport (from your workstation):**
 
 ```bash
 tsh login --proxy=teleport.waddle.social --auth=github
 tsh kube ls                                # should show waddle cluster
 tsh kube login waddle
-kubectl get nodes                          # works through Teleport
-```
-
-**Verify talosctl through Teleport:**
-
-Use Teleport's kube proxy to tunnel talosctl traffic to the internal network:
-
-```bash
-# Start a Teleport kube proxy in the background
-tsh proxy kube --port=6443 &
-
-# Use talosctl through the tunnel
-talosctl --endpoints 127.0.0.1 --nodes 10.10.0.10 get members
-talosctl --endpoints 127.0.0.1 --nodes 10.10.0.10 version
+kubectl get nodes                          # works through Teleport on port 3033
 ```
 
 **Access the Proxmox host via Teleport SSH:**
@@ -1041,6 +1065,57 @@ The `initialization` block in the Talos VM resource defaults to `local-lvm` for 
 ### tsh login: "dial tcp ...:3023: i/o timeout"
 
 Port 3023 (Teleport SSH proxy) is not forwarded from the Proxmox host to the Teleport VM. Add DNAT rules for ports 3023 and 3024 pointing to 10.10.0.2 (see Phase 4, "Teleport Port Forwarding for tsh").
+
+### Teleport kube: "Internal Server Error" or kubectl timeout on port 3026
+
+Teleport 18.x with ACME enabled does **not** register the `teleport-kube` ALPN protocol handler on the web port (3080). This means kube traffic cannot be multiplexed through port 443 like SSH and web traffic. Symptoms:
+
+- `tsh kubectl get nodes` returns "Internal Server Error"
+- `kubectl get nodes` after `tsh kube login` times out on port 3026 (not forwarded)
+- `openssl s_client -alpn teleport-kube` to port 3080 returns "0 bytes read" (connection dropped)
+
+**Fix:** Add a dedicated kube listener in the `proxy_service` and forward port 3033 through the Proxmox host:
+
+```yaml
+# In /etc/teleport.yaml, under proxy_service:
+  kube_listen_addr: 0.0.0.0:3033
+  kube_public_addr: teleport.waddle.social:3033
+```
+
+```bash
+# On Proxmox host
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3033 -j DNAT --to-destination 10.10.0.2:3033
+iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3033 -j ACCEPT
+netfilter-persistent save
+```
+
+You can verify the kube listener works with: `openssl s_client -connect localhost:3033` on the Teleport VM -- it should return a Teleport Proxy certificate (not the ACME cert).
+
+### Teleport kube: "only one of configPath or clusterName can be specified"
+
+In Teleport 18.x, `kubeconfig_file` and `kube_cluster_name` are mutually exclusive in the `kubernetes_service` config. Use `kubeconfig_file` with a `resources` matcher instead:
+
+```yaml
+kubernetes_service:
+  enabled: true
+  listen_addr: 0.0.0.0:3026
+  kubeconfig_file: /etc/teleport/kubeconfig
+  resources:
+    - labels:
+        "*": "*"
+```
+
+The `kube_cluster` dynamic resource must be created separately via `tctl create`.
+
+### Teleport kube: tsh kube ls shows cluster but "not found" on login
+
+The kubeconfig context name must match the `kube_cluster` resource name. `talosctl` generates contexts like `admin@waddle-cluster`, but the `kube_cluster` resource is named `waddle`. Rename the context:
+
+```bash
+sudo kubectl --kubeconfig=/etc/teleport/kubeconfig config rename-context "admin@waddle-cluster" "waddle"
+```
+
+Then restart Teleport.
 
 ### Teleport SSH: "unknown user"
 

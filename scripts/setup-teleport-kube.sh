@@ -9,8 +9,10 @@ set -euo pipefail
 #   - Teleport is running
 #   - Talos cluster is bootstrapped
 #   - kubeconfig exists (generated during Phase 4 bootstrap)
+#   - Port 3033 forwarded on Proxmox host (iptables DNAT to 10.10.0.2:3033)
 
 TALOS_VIP="10.10.0.20"
+KUBE_CLUSTER_NAME="waddle"
 KUBECONFIG_SRC="${1:-/tmp/kubeconfig}"
 
 echo "=========================================="
@@ -43,9 +45,33 @@ sudo cp "${KUBECONFIG_SRC}" /etc/teleport/kubeconfig
 sudo chown root:root /etc/teleport/kubeconfig
 sudo chmod 600 /etc/teleport/kubeconfig
 
-# ---- Step 3: Add kubernetes_service to teleport.yaml ----
+# Rename the kubeconfig context to match the kube_cluster resource name.
+# talosctl generates contexts like "admin@waddle-cluster" -- Teleport's kubernetes_service
+# matches kube_cluster resources to kubeconfig entries by context name.
+CURRENT_CTX=$(sudo kubectl --kubeconfig=/etc/teleport/kubeconfig config current-context)
+if [ "${CURRENT_CTX}" != "${KUBE_CLUSTER_NAME}" ]; then
+  echo "    Renaming kubeconfig context '${CURRENT_CTX}' -> '${KUBE_CLUSTER_NAME}'"
+  sudo kubectl --kubeconfig=/etc/teleport/kubeconfig config rename-context "${CURRENT_CTX}" "${KUBE_CLUSTER_NAME}"
+fi
+
+# ---- Step 3: Add kube_listen_addr + kube_public_addr to proxy_service ----
+# Teleport 18.x with ACME does NOT register the teleport-kube ALPN handler on the
+# web port (3080). Kube traffic must go through a dedicated kube listener (3033).
 echo ""
-echo "==> [Step 3] Updating /etc/teleport.yaml..."
+echo "==> [Step 3] Updating proxy_service with kube listener..."
+
+if sudo grep -q 'kube_listen_addr' /etc/teleport.yaml; then
+  echo "    kube_listen_addr already present, skipping."
+else
+  sudo sed -i '/^proxy_service:/,/^[a-z]/ {
+    /^  acme:/i\  kube_listen_addr: 0.0.0.0:3033\n  kube_public_addr: teleport.waddle.social:3033
+  }' /etc/teleport.yaml
+  echo "    kube_listen_addr and kube_public_addr added to proxy_service."
+fi
+
+# ---- Step 4: Add kubernetes_service to teleport.yaml ----
+echo ""
+echo "==> [Step 4] Adding kubernetes_service..."
 
 if sudo grep -q 'kubernetes_service' /etc/teleport.yaml; then
   echo "    kubernetes_service already present, skipping."
@@ -55,16 +81,16 @@ kubernetes_service:
   enabled: true
   listen_addr: 0.0.0.0:3026
   kubeconfig_file: /etc/teleport/kubeconfig
-  labels:
-    env: production
-    cluster: waddle
+  resources:
+    - labels:
+        "*": "*"
 EOF
   echo "    kubernetes_service added."
 fi
 
-# ---- Step 4: Restart Teleport ----
+# ---- Step 5: Restart Teleport ----
 echo ""
-echo "==> [Step 4] Restarting Teleport..."
+echo "==> [Step 5] Restarting Teleport..."
 sudo systemctl restart teleport
 sleep 5
 
@@ -76,10 +102,30 @@ else
   exit 1
 fi
 
-# ---- Step 5: Verify ----
+# ---- Step 6: Register kube_cluster resource ----
 echo ""
-echo "==> [Step 5] Verifying..."
-echo "    Waiting for kubernetes service to register..."
+echo "==> [Step 6] Registering kube_cluster resource..."
+
+if sudo tctl get kube_cluster/waddle 2>/dev/null | grep -q 'waddle'; then
+  echo "    kube_cluster 'waddle' already exists, skipping."
+else
+  sudo tctl create -f <<'RESOURCE'
+kind: kube_cluster
+version: v3
+metadata:
+  name: waddle
+  labels:
+    env: production
+    cluster: waddle
+spec: {}
+RESOURCE
+  echo "    kube_cluster 'waddle' created."
+fi
+
+# ---- Step 7: Verify ----
+echo ""
+echo "==> [Step 7] Verifying..."
+echo "    Waiting for kubernetes service to pick up cluster..."
 sleep 10
 
 sudo tctl get kube_cluster 2>/dev/null && echo "    Kubernetes cluster registered in Teleport." || {
@@ -91,6 +137,11 @@ echo ""
 echo "=========================================="
 echo "  Phase 7 complete!"
 echo "=========================================="
+echo ""
+echo "IMPORTANT: Ensure port 3033 is forwarded on the Proxmox host:"
+echo "  iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 3033 -j DNAT --to-destination 10.10.0.2:3033"
+echo "  iptables -A FORWARD -i vmbr0 -o vmbr1 -p tcp --dport 3033 -j ACCEPT"
+echo "  netfilter-persistent save"
 echo ""
 echo "From your workstation:"
 echo "  tsh login --proxy=teleport.waddle.social --auth=github"
