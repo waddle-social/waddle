@@ -21,6 +21,11 @@ variable "proxmox_ssh_username" {
   default     = "root"
 }
 
+variable "proxmox_ssh_host" {
+  description = "SSH host for Proxmox (public IP, since internal IP is unreachable from workstation)"
+  type        = string
+}
+
 variable "public_ip" {
   description = "Public IP address assigned to the Scaleway Elastic Metal server"
   type        = string
@@ -94,12 +99,14 @@ variable "teleport_github_client_id" {
   description = "GitHub OAuth App client ID for Teleport"
   type        = string
   sensitive   = true
+  default     = ""
 }
 
 variable "teleport_github_client_secret" {
   description = "GitHub OAuth App client secret for Teleport"
   type        = string
   sensitive   = true
+  default     = ""
 }
 
 variable "datastore_id" {
@@ -116,4 +123,5 @@ variable "operator_ip" {
 variable "talos_schematic_id" {
   description = "Talos Image Factory schematic ID (includes qemu-guest-agent + iscsi-tools extensions)"
   type        = string
+  default     = ""
 }

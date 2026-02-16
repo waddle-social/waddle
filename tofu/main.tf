@@ -6,6 +6,10 @@ provider "proxmox" {
   ssh {
     agent    = true
     username = var.proxmox_ssh_username
+    node {
+      name    = var.proxmox_node_name
+      address = var.proxmox_ssh_host
+    }
   }
 }
 

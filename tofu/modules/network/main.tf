@@ -33,4 +33,13 @@ resource "proxmox_virtual_environment_firewall_rules" "host" {
     dport   = "22"
     proto   = "tcp"
   }
+
+  rule {
+    type    = "in"
+    action  = "ACCEPT"
+    comment = "Temporary Proxmox API from operator IP (remove after Teleport setup)"
+    source  = var.operator_ip
+    dport   = "8006"
+    proto   = "tcp"
+  }
 }

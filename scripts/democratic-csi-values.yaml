@@ -23,8 +23,8 @@ driver:
       #   ...
       #   -----END OPENSSH PRIVATE KEY-----
     zfs:
-      datasetParentName: rpool/k8s-csi
-      detachedSnapshotsDatasetParentName: rpool/k8s-csi-snaps
+      datasetParentName: zpve/k8s-csi
+      detachedSnapshotsDatasetParentName: zpve/k8s-csi-snaps
       zvolCompression: ""
       zvolDedup: ""
       zvolEnableReservation: false

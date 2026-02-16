@@ -1,9 +1,10 @@
 resource "proxmox_virtual_environment_download_file" "debian_cloud_image" {
-  content_type = "import"
-  datastore_id = "local"
-  node_name    = var.node_name
-  url          = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-  file_name    = "debian-12-generic-amd64.qcow2"
+  content_type           = "iso"
+  datastore_id           = "local"
+  node_name              = var.node_name
+  url                    = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+  file_name              = "debian-12-generic-amd64.img"
+  overwrite_unmanaged    = true
 }
 
 resource "proxmox_virtual_environment_file" "haproxy_cloud_config" {
@@ -43,13 +44,13 @@ resource "proxmox_virtual_environment_vm" "haproxy" {
   }
 
   memory {
-    dedicated = 512
+    dedicated = 2048
   }
 
   disk {
     datastore_id = var.datastore_id
-    import_from  = proxmox_virtual_environment_download_file.debian_cloud_image.id
-    interface    = "virtio0"
+    file_id      = proxmox_virtual_environment_download_file.debian_cloud_image.id
+    interface    = "scsi0"
     iothread     = true
     discard      = "on"
     size         = 8
@@ -64,6 +65,7 @@ resource "proxmox_virtual_environment_vm" "haproxy" {
   }
 
   initialization {
+    datastore_id = "local"
     ip_config {
       ipv4 {
         address = "${var.public_ip}/32"
@@ -73,7 +75,6 @@ resource "proxmox_virtual_environment_vm" "haproxy" {
     ip_config {
       ipv4 {
         address = "${var.internal_ip}/24"
-        gateway = var.internal_gateway
       }
     }
     user_data_file_id = proxmox_virtual_environment_file.haproxy_cloud_config.id

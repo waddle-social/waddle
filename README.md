@@ -224,16 +224,21 @@ systemctl restart sshd
 
 ```bash
 pveum user add tofu@pve
-pveum aclmod / -user tofu@pve -role PVEAdmin
+pveum aclmod / -user tofu@pve -role Administrator
 pveum user token add tofu@pve tofu-token --privsep 0
 ```
+
+> **Note:** The `Administrator` role is required (not `PVEAdmin`) because network and firewall operations need `Sys.Modify` privileges.
 
 Save the output token in the format `tofu@pve!tofu-token=<uuid>` -- this goes into your `terraform.tfvars` as `proxmox_api_token`.
 
 **3. Create the ZFS dataset for CSI volumes:**
 
 ```bash
-zfs create rpool/k8s-csi
+# Check your ZFS pool name first: zpool list
+# The pool name varies by installation (e.g. zpve, rpool, tank)
+zfs create <pool>/k8s-csi
+zfs create <pool>/k8s-csi-snaps
 ```
 
 **4. Install and configure iSCSI target (targetcli):**
@@ -259,6 +264,22 @@ iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o vmbr0 -j MASQUERADE
 # Persist across reboots
 apt install -y iptables-persistent
 netfilter-persistent save
+```
+
+**6. Configure Proxmox storage content types:**
+
+The `local` directory storage needs additional content types enabled for cloud images and cloud-init snippets:
+
+```bash
+pvesm set local --content iso,vztmpl,snippets,import,backup,images
+```
+
+**7. Ensure hostname resolution:**
+
+The Proxmox host must be able to resolve its own hostname:
+
+```bash
+echo "127.0.1.1 $(hostname)" >> /etc/hosts
 ```
 
 #### OpenTofu -- Network Module
@@ -291,14 +312,46 @@ pvesh get /cluster/firewall/options   # should show enabled
 
 Deploys the public-facing L4 TCP proxy that routes traffic based on SNI headers.
 
+> **Known issue:** The bpg/proxmox provider's `import_from` and `file_id` disk import methods cause kernel panics on ZFS-backed datastores. The VM must be created manually using `qm importdisk` and then imported into OpenTofu state. See the manual steps below.
+
+**1. Ensure the cloud-init snippet is uploaded (tofu handles this):**
+
 ```bash
-./scripts/tofu.sh plan -target=module.haproxy
-./scripts/tofu.sh apply -target=module.haproxy
+./scripts/tofu.sh apply -target=module.haproxy.proxmox_virtual_environment_file.haproxy_cloud_config
+./scripts/tofu.sh apply -target=module.haproxy.proxmox_virtual_environment_download_file.debian_cloud_image
+```
+
+**2. Create the VM manually on the Proxmox host:**
+
+```bash
+# Download the cloud image (if not already present)
+wget -O /tmp/debian-12-generic-amd64.qcow2 \
+  https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+
+# Create VM, import disk, configure boot
+qm create 100 --memory 2048 --cores 1 --name haproxy \
+  --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1 \
+  --scsihw virtio-scsi-pci --agent enabled=1 \
+  --onboot 1 --tags "infra;haproxy"
+qm importdisk 100 /tmp/debian-12-generic-amd64.qcow2 vmdata
+qm set 100 --scsi0 vmdata:vm-100-disk-0,discard=on,iothread=1
+qm resize 100 scsi0 8G
+qm set 100 --boot c --bootdisk scsi0
+qm set 100 --ide2 local:cloudinit
+qm set 100 --ipconfig0 ip=<public_ip>/32,gw=<public_gateway>
+qm set 100 --ipconfig1 ip=10.10.0.3/24,gw=10.10.0.1
+qm set 100 --cicustom "user=local:snippets/haproxy-cloud-init.yaml"
+qm start 100
+```
+
+**3. Import the VM into OpenTofu state:**
+
+```bash
+./scripts/tofu.sh import module.haproxy.proxmox_virtual_environment_vm.haproxy waddle-proxmox01/100
 ```
 
 What it creates:
-- Downloads Debian 12 cloud image
-- Creates a VM (ID 100): 1 vCPU, 512 MB RAM, 8 GB disk
+- Debian 12 VM (ID 100): 1 vCPU, 2 GB RAM, 8 GB disk
 - Dual-homed: `vmbr0` (public IP) + `vmbr1` (10.10.0.3)
 - Cloud-init installs HAProxy and deploys the SNI routing config
 - Hardens SSH: password auth disabled, root login disabled
@@ -324,9 +377,9 @@ Create two A records pointing to the HAProxy VM's public IP:
 **Verify:**
 
 ```bash
-ssh deploy@<public_ip>
+ssh -J root@<public_ip> deploy@10.10.0.3
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg   # config valid
-sudo ss -tlnp | grep 443                       # listening
+sudo ss -tlnp | grep -E '443|80'              # listening on both ports
 ```
 
 ---
@@ -335,32 +388,121 @@ sudo ss -tlnp | grep 443                       # listening
 
 Deploys the Teleport access gateway on the internal network only.
 
+> **Known issue:** Same bpg/proxmox ZFS kernel panic as Phase 2. Create the VM manually with `qm importdisk`, then import into tofu state.
+
+**1. Upload cloud-init snippet (tofu handles this):**
+
 ```bash
-./scripts/tofu.sh plan -target=module.teleport
-./scripts/tofu.sh apply -target=module.teleport
+./scripts/tofu.sh apply -target=module.teleport.proxmox_virtual_environment_file.teleport_cloud_config
+```
+
+**2. Create the VM manually on the Proxmox host:**
+
+```bash
+qm create 101 --memory 2048 --cores 2 --name teleport \
+  --net0 virtio,bridge=vmbr1 \
+  --scsihw virtio-scsi-pci --agent enabled=1 \
+  --onboot 1 --tags "infra;teleport"
+qm importdisk 101 /tmp/debian-12-generic-amd64.qcow2 vmdata
+qm set 101 --scsi0 vmdata:vm-101-disk-0,discard=on,iothread=1
+qm resize 101 scsi0 20G
+qm set 101 --boot c --bootdisk scsi0
+qm set 101 --ide2 local:cloudinit
+qm set 101 --ipconfig0 ip=10.10.0.2/24,gw=10.10.0.1
+qm set 101 --cicustom "user=local:snippets/teleport-cloud-init.yaml"
+qm start 101
+```
+
+**3. Import into tofu state:**
+
+```bash
+./scripts/tofu.sh import module.teleport.proxmox_virtual_environment_vm.teleport waddle-proxmox01/101
+```
+
+**4. Install packages manually (cloud-init bug):**
+
+Cloud-init on Debian 12 (v22.4.2) may skip `runcmd`. SSH in and install manually:
+
+```bash
+ssh -J root@<public_ip> deploy@10.10.0.2
+
+# Install Teleport
+curl -fsSL https://goteleport.com/static/install.sh | sudo bash -s 18
+sudo systemctl enable teleport
+sudo systemctl start teleport
+
+# Wait for auth service to start, then create the role and connector
+sleep 10
+sudo tctl create /tmp/infra-admin-role.yaml
+sudo tctl create /tmp/github-connector.yaml
 ```
 
 What it creates:
-- Creates a VM (ID 101): 2 vCPU, 2 GB RAM, 20 GB disk
+- Debian 12 VM (ID 101): 2 vCPU, 2 GB RAM, 20 GB disk
 - Internal only: `vmbr1` (10.10.0.2) -- no public interface
-- Cloud-init installs Teleport 18.x Community Edition
-- Configures:
-  - Auth service with GitHub SSO (`waddle-social` org)
-  - Proxy service with ACME/Let's Encrypt (works through HAProxy SNI passthrough)
+- Teleport 18.x Community Edition with:
+  - Auth service with GitHub SSO (`waddle-social` org, `infra` team)
+  - Proxy service with ACME/Let's Encrypt TLS (via HAProxy SNI passthrough)
+  - Reverse tunnel listener on port 3024 (required for app/SSH access)
   - SSH service for node access
-  - Kubernetes service for cluster access (connects to Talos VIP later)
   - App service: Proxmox UI at `proxmox.waddle.social` -> `https://10.10.0.1:8006`
-- Creates the GitHub SSO connector automatically on first boot
+- Custom `infra-admin` role granting SSH logins (`deploy`, `root`), full app/k8s access
+- GitHub SSO connector mapping `waddle-social/infra` team to `infra-admin` role
 
-**Verify:**
+#### GitHub SSO Setup Requirements
 
-1. Open `https://teleport.waddle.social` in your browser -- the Teleport login page should appear
-2. Log in with GitHub SSO -- your `waddle-social` org membership should grant access
-3. Navigate to `https://proxmox.waddle.social` -- the Proxmox UI should load through Teleport
+The GitHub OAuth App and org must be configured correctly for SSO to work:
+
+1. **GitHub OAuth App** must be created under the `waddle-social` org (not a personal account):
+   - Homepage URL: `https://teleport.waddle.social`
+   - Callback URL: `https://teleport.waddle.social/v1/webapi/github/callback`
+
+2. **The `waddle-social` org must have at least one team.** Teleport maps access via `teams_to_roles`, which requires team membership -- org ownership alone is not sufficient. Create a team (e.g. `infra`) and add all operators to it.
+
+3. **The OAuth App must be authorized for the org.** Go to `https://github.com/organizations/waddle-social/settings/oauth_application_policy` and ensure the Teleport OAuth App is approved. Without this, the GitHub API will not return team data for that org.
+
+4. **The `team` field in the connector must be the exact team slug** (lowercase, hyphenated). Teleport does NOT support wildcards -- `team: "*"` is treated as a literal string, not a glob. Use the actual slug, e.g. `team: infra`.
+
+#### Teleport Configuration Details
+
+Key config choices and why they matter:
+
+| Setting | Value | Why |
+|---|---|---|
+| `web_listen_addr` | `0.0.0.0:3080` | HAProxy forwards port 443 to here via TCP/SNI passthrough |
+| `tunnel_listen_addr` | `0.0.0.0:3024` | **Required.** Without this, the app service and SSH service cannot register with the proxy, causing "Unable to serve application requests" errors |
+| `public_addr` | `teleport.waddle.social:443` | Must match the external URL users access; used for ACME cert requests and OAuth redirect validation |
+| `acme.enabled` | `true` | Let's Encrypt TLS via TLS-ALPN-01 challenge; works through HAProxy because SNI passthrough preserves the ALPN negotiation |
+| `insecure_skip_verify` | `true` (proxmox app) | Proxmox uses a self-signed cert on port 8006 |
+
+#### Verify
+
+1. Open `https://teleport.waddle.social` -- accept the community edition terms, click **GitHub**
+2. Authenticate with GitHub -- you must be a member of `waddle-social/infra` team
+3. The Teleport dashboard should show:
+   - **proxmox** app (click Launch to access Proxmox UI)
+   - **teleport** SSH node (click Connect, select login `deploy`)
+4. Test app access: click Launch on `proxmox` -- the Proxmox web UI should load
+
+#### Port Forwarding (Proxmox Host)
+
+The Proxmox host and HAProxy VM share the same public IP. Port forwarding rules on the host send ports 80 and 443 to the HAProxy VM:
+
+```bash
+# On Proxmox host
+iptables -t nat -A PREROUTING -p tcp -d <public_ip> --dport 443 -j DNAT --to-destination 10.10.0.3:443
+iptables -t nat -A PREROUTING -p tcp -d <public_ip> --dport 80 -j DNAT --to-destination 10.10.0.3:80
+iptables -A FORWARD -p tcp -d 10.10.0.3 --dport 443 -j ACCEPT
+iptables -A FORWARD -p tcp -d 10.10.0.3 --dport 80 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o vmbr0 -j MASQUERADE
+
+# Persist
+netfilter-persistent save
+```
 
 **Lockdown -- Remove temporary SSH access:**
 
-After confirming Teleport works, remove the temporary SSH firewall rule. Edit the `operator_ip` variable to a non-routable address or remove the rule via Proxmox UI:
+After confirming Teleport works, remove the temporary SSH firewall rule:
 
 ```
 Proxmox UI -> Datacenter -> Firewall -> Rules -> delete the "Temporary SSH" rule
@@ -702,3 +844,67 @@ If the entire Proxmox host is lost:
 - **SSH deploy key is read-only** -- Flux cannot write to the platform repo
 - **GitHub SSO enforces 2FA** -- at the org level for all `waddle-social` members
 - **OpenTofu state is remote** -- stored in Scaleway Object Storage, not on any VM
+
+## Troubleshooting
+
+### OpenTofu can't reach Proxmox API
+
+The `proxmox_endpoint` must point to the Proxmox host's **public IP** during provisioning (not the internal `10.10.0.1`), since vmbr1 is not routable from your workstation. Set `proxmox_ssh_host` to the same public IP so the provider's SSH file uploads work.
+
+### Cluster firewall locks out API access
+
+If the cluster firewall is enabled with `input_policy = DROP` before the port 8006 allow rule exists, you'll lose API access. Recovery:
+
+```bash
+ssh root@<public_ip>
+pvesh set /cluster/firewall/options --enable 0
+```
+
+The network module now includes a temporary rule allowing port 8006 from `operator_ip`.
+
+### VM kernel panic on ZFS datastore (bpg/proxmox provider)
+
+The bpg/proxmox provider's `import_from` and `file_id` disk import methods produce kernel panics on ZFS-backed datastores (`vmdata`). The workaround is to create VMs manually using `qm importdisk` on the Proxmox host and then import them into OpenTofu state:
+
+```bash
+# On Proxmox host
+qm importdisk <vmid> /tmp/debian-12-generic-amd64.qcow2 vmdata
+qm set <vmid> --scsi0 vmdata:vm-<vmid>-disk-0
+
+# On workstation
+./scripts/tofu.sh import module.<name>.proxmox_virtual_environment_vm.<resource> waddle-proxmox01/<vmid>
+```
+
+### SSH host key verification failures
+
+VMs get new host keys when recreated. Remove stale entries:
+
+```bash
+ssh-keygen -R <ip>
+```
+
+### Cloud-init packages not installed
+
+The Debian 12 cloud image ships cloud-init v22.4.2 which sometimes skips the `packages` section. The workaround is to install packages explicitly in `runcmd` using `apt-get install -y`.
+
+### Teleport GitHub SSO: "Unable to log in"
+
+Check `sudo journalctl -u teleport` on the Teleport VM for the real error. Common causes:
+
+**"user does not belong to any teams configured in connector":**
+- The GitHub user must be a member of a **team** in the configured org. Org ownership alone is not enough.
+- The `team` field must be the exact team **slug** (lowercase). Wildcards (`*`) do NOT work -- Teleport uses exact string matching.
+- The OAuth App must be **authorized** for the org at `https://github.com/organizations/<org>/settings/oauth_application_policy`.
+
+**"acme/autocert: missing server name":**
+- Harmless when connecting to Teleport via `127.0.0.1` or an IP address. The ACME TLS handler requires SNI. Connections through HAProxy (which preserves SNI) work correctly.
+
+### Teleport: "Unable to serve application requests"
+
+The proxy's reverse tunnel listener is not running. Add `tunnel_listen_addr: 0.0.0.0:3024` to the `proxy_service` section in `/etc/teleport.yaml` and restart Teleport. Without this, the app service cannot register with the proxy.
+
+Verify it's listening: `sudo ss -tlnp | grep 3024`
+
+### Teleport SSH: "unknown user"
+
+The default `access` role uses `{{internal.logins}}` which resolves to the GitHub username (e.g. `randax`). If that user doesn't exist on the target VM, SSH fails. Create a custom role with explicit `logins` (e.g. `deploy`, `root`) and assign it via the GitHub connector's `teams_to_roles`.

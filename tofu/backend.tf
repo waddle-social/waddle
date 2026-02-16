@@ -1,6 +1,6 @@
 terraform {
   backend "s3" {
-    bucket = "waddle-tofu-state"
+    bucket = "waddle-infra-state"
     key    = "waddle-infra/terraform.tfstate"
     region = "fr-par"
 
