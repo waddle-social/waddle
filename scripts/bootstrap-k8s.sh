@@ -117,17 +117,13 @@ kubectl create secret generic onepassword-token \
   --from-literal=token="${OP_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-read -rp "Path to Flux SSH deploy key (private): " FLUX_KEY_PATH
-read -rp "Path to Flux SSH deploy key (public): " FLUX_PUB_PATH
-
-ssh-keyscan github.com > /tmp/github-known-hosts 2>/dev/null
+read -rsp "GitHub PAT (fine-grained, read-only on waddle-social/waddle-infra): " GITHUB_TOKEN
+echo
 kubectl create secret generic flux-system \
   --namespace flux-system \
-  --from-file=identity="${FLUX_KEY_PATH}" \
-  --from-file=identity.pub="${FLUX_PUB_PATH}" \
-  --from-file=known_hosts=/tmp/github-known-hosts \
+  --from-literal=username=flux \
+  --from-literal=password="${GITHUB_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
-rm -f /tmp/github-known-hosts
 
 echo "==> Bootstrap secrets created."
 
@@ -154,7 +150,7 @@ spec:
     networkPolicy: true
   sync:
     kind: GitRepository
-    url: "ssh://git@github.com/waddle-social/waddle-infra.git"
+    url: "https://github.com/waddle-social/waddle-infra.git"
     ref: "refs/heads/main"
     path: "platform/clusters/scaleway"
     pullSecret: "flux-system"
