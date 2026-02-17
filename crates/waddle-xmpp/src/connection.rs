@@ -3806,15 +3806,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     ))));
                 }
 
-                // Non-self bare-JID queries without a node are not supported
-                if requester != target_bare && query.node.is_none() {
-                    return Err(XmppError::service_unavailable(Some(format!(
-                        "disco#info on bare JID {} without node is not supported for other users",
-                        target_bare
-                    ))));
-                }
-
                 if requester != target_bare {
+                    // RFC 6121 §8.5: Always check presence subscription first
+                    // for any disco#info query to another user's bare JID,
+                    // regardless of whether a node is specified.
                     let has_presence_access = self
                         .app_state
                         .get_roster_item(&target_bare, &requester)
@@ -3824,9 +3819,25 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         })
                         .unwrap_or(false);
 
+                    debug!(
+                        requester = %requester,
+                        target = %target_bare,
+                        has_access = has_presence_access,
+                        node = ?query.node,
+                        "disco#info bare JID subscription check"
+                    );
+
                     if !has_presence_access {
                         return Err(XmppError::service_unavailable(Some(format!(
-                            "PEP info for {} requires presence subscription",
+                            "disco#info for {} requires presence subscription",
+                            target_bare
+                        ))));
+                    }
+
+                    // Non-self bare-JID queries without a node are not supported
+                    if query.node.is_none() {
+                        return Err(XmppError::service_unavailable(Some(format!(
+                            "disco#info on bare JID {} without node is not supported for other users",
                             target_bare
                         ))));
                     }
@@ -3835,13 +3846,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     // target is online and we actually have entity capabilities
                     // cached for that node.  We don't implement caps caching,
                     // so node queries to other users always return item-not-found.
-                    if query.node.is_some() {
-                        return Err(XmppError::item_not_found(Some(format!(
-                            "No cached capabilities for {} node '{}'",
-                            target_bare,
-                            query.node.as_deref().unwrap_or("")
-                        ))));
-                    }
+                    return Err(XmppError::item_not_found(Some(format!(
+                        "No cached capabilities for {} node '{}'",
+                        target_bare,
+                        query.node.as_deref().unwrap_or("")
+                    ))));
                 }
 
                 debug!(target = %target_bare, requester = %requester, "disco#info query to bare JID (PEP)");
@@ -5010,8 +5019,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // RFC 6121 §2.6: Roster Versioning
         // When the client provides a 'ver' attribute and it matches the current
         // version, respond with an empty result (no roster body).
-        // When the version differs, send individual roster pushes for each item
-        // followed by an empty result IQ.
+        // When the version differs, send the full roster in the IQ result.
+        // Per RFC 6121 §2.6.3, a server without per-item change tracking
+        // SHOULD return the complete roster (not individual pushes) when
+        // the client version is outdated.
         if let Some(ref client_ver) = query.ver {
             if roster_version.as_deref() == Some(client_ver.as_str()) {
                 // Client is up-to-date; send empty result
@@ -5021,40 +5032,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 return Ok(());
             }
 
-            // Version differs: send individual roster pushes then empty result.
-            // Since we don't track per-item changes, we send all items as pushes.
-            let current_ver = roster_version.as_deref().unwrap_or("0");
-            for item in &items {
-                let push_id = format!("rp-{}", uuid::Uuid::new_v4());
-                let push = match build_roster_push(
-                    &push_id,
-                    &sender_jid.to_string(),
-                    item,
-                    Some(current_ver),
-                ) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!(error = %e, "Skipping roster push: invalid JID");
-                        continue;
-                    }
-                };
-                self.stream.write_stanza(&Stanza::Iq(push)).await?;
-            }
-
-            // Finish with empty result IQ
-            let response = build_roster_result_empty(&iq);
-            self.stream.write_stanza(&Stanza::Iq(response)).await?;
-
+            // Version differs but we don't have per-item change tracking.
+            // Fall through to send the full roster result, which is the
+            // standard approach per RFC 6121 §2.6.3.
             debug!(
-                item_count = items.len(),
                 client_ver = %client_ver,
                 server_ver = ?roster_version,
-                "Sent roster pushes for version diff"
+                "Roster version differs; sending full roster result"
             );
-            return Ok(());
         }
 
-        // No version provided: send full roster result (initial roster fetch)
+        // Send full roster result (both initial fetch and version-mismatch)
         let response = build_roster_result(&iq, &items, roster_version.as_deref());
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
