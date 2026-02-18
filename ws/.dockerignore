@@ -1,0 +1,12 @@
+.git
+.github
+target
+test-logs
+docs
+docs/plans
+.claude
+.pi
+TODO.md
+AUDIT-PLAN.md
+deploy.sh
+docker-compose.yml

@@ -1,0 +1,136 @@
+{{- $containerExtraEnv := coalesce .Values.containerExtraEnv .Values.extraEnv -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddle-server.fullname" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "waddle-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "waddle-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.secret.create (not .Values.secret.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "waddle-server.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ include "waddle-server.name" . }}
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.ports.http }}
+              protocol: TCP
+            {{- if .Values.xmpp.enabled }}
+            - name: xmpp-c2s
+              containerPort: {{ .Values.service.ports.xmppC2S }}
+              protocol: TCP
+            {{- if .Values.xmpp.s2sEnabled }}
+            - name: xmpp-s2s
+              containerPort: {{ .Values.service.ports.xmppS2S }}
+              protocol: TCP
+            {{- end }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "waddle-server.configMapName" . }}
+            {{- if or .Values.secret.create .Values.secret.existingSecret }}
+            - secretRef:
+                name: {{ include "waddle-server.secretName" . }}
+            {{- end }}
+          env:
+            - name: WADDLE_DB_PATH
+              value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.dbFileName | quote }}
+            - name: WADDLE_XMPP_MAM_DB
+              value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.mamDbFileName | quote }}
+            - name: WADDLE_UPLOAD_DIR
+              value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.uploadSubPath | quote }}
+            {{- if and .Values.xmpp.enabled .Values.xmpp.tls.secretName }}
+            - name: WADDLE_XMPP_TLS_CERT
+              value: {{ printf "%s/%s" .Values.xmpp.tls.mountPath .Values.xmpp.tls.certKey | quote }}
+            - name: WADDLE_XMPP_TLS_KEY
+              value: {{ printf "%s/%s" .Values.xmpp.tls.mountPath .Values.xmpp.tls.keyKey | quote }}
+            {{- end }}
+            {{- with $containerExtraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- if and .Values.xmpp.enabled .Values.xmpp.tls.secretName }}
+            - name: xmpp-tls
+              mountPath: {{ .Values.xmpp.tls.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "waddle-server.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if and .Values.xmpp.enabled .Values.xmpp.tls.secretName }}
+        - name: xmpp-tls
+          secret:
+            secretName: {{ .Values.xmpp.tls.secretName }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,143 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/waddle-social/waddle-server
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+# Pod termination grace period (seconds).
+# Keep this >= config.drainTimeoutSeconds so graceful drain can complete.
+terminationGracePeriodSeconds: 35
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  annotations: {}
+  ports:
+    http: 3000
+    xmppC2S: 5222
+    xmppS2S: 5269
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: waddle.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: waddle-tls
+  #   hosts:
+  #     - waddle.local
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  annotations: {}
+  accessModes:
+    - ReadWriteOnce
+  # By default, the chart fails rendering when replicaCount > 1 and
+  # accessModes includes ReadWriteOnce. Set this true only if you know your
+  # storage backend supports this topology.
+  allowUnsafeRwoScale: false
+  size: 10Gi
+  storageClassName: ""
+  mountPath: /var/lib/waddle
+  dbFileName: waddle.db
+  mamDbFileName: mam.db
+  uploadSubPath: uploads
+
+xmpp:
+  enabled: true
+  domain: waddle.local
+  port: 5222
+  c2sAddr: 0.0.0.0:5222
+  s2sEnabled: false
+  s2sAddr: 0.0.0.0:5269
+  tls:
+    secretName: ""
+    mountPath: /etc/waddle/tls
+    certKey: tls.crt
+    keyKey: tls.key
+  nativeAuthEnabled: true
+  registrationEnabled: false
+
+config:
+  mode: homeserver
+  baseUrl: https://waddle.local
+  corsOrigins: ""
+  drainTimeoutSeconds: 30
+  rustLog: info
+  # Extra key/value env vars rendered into ConfigMap data (non-sensitive).
+  extraEnv: {}
+
+telemetry:
+  otlpEndpoint: ""
+  serviceName: waddle-server
+  serviceVersion: ""
+
+secret:
+  create: true
+  existingSecret: ""
+  sessionKey: ""
+  githubToken: ""
+
+probes:
+  liveness:
+    path: /health
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /api/v1/health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# Extra env vars rendered directly in Deployment container.env.
+# Supports both value and valueFrom entries.
+containerExtraEnv: []
+# Deprecated alias for containerExtraEnv (kept for backward compatibility).
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
