@@ -56,7 +56,7 @@ cargo test
 
 ```bash
 # Build a local runtime image
-docker build --target runtime -t waddle-server:local .
+docker build -f Containerfile --target runtime -t waddle-server:local .
 
 # Run the server container
 docker run --rm -p 3000:3000 -p 5222:5222 -p 5269:5269 waddle-server:local

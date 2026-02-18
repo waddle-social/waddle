@@ -5,9 +5,8 @@ on:
     branches: [main]
     paths:
       - "Cargo.toml"
-      - "Cargo.lock"
       - "crates/**"
-      - "Dockerfile"
+      - "Containerfile"
       - ".dockerignore"
       - ".github/workflows/container-image.yml"
   push:
@@ -42,16 +41,16 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-container-image-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-container-image-${{ hashFiles('**/Cargo.toml', 'rust-toolchain.toml') }}
 
       - name: Run tests
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build image (no push)
-        run: docker build --target runtime --tag waddle-server:ci .
+        run: docker build --file Containerfile --target runtime --tag waddle-server:ci .
 
   publish:
     name: Publish to GHCR
@@ -93,7 +92,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Containerfile
           target: runtime
           platforms: linux/amd64,linux/arm64
           push: true

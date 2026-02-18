@@ -7,10 +7,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY crates ./crates
 
-RUN cargo build --release --locked --package waddle-server --bin waddle-server
+RUN cargo build --release --package waddle-server --bin waddle-server
 
 FROM debian:bookworm-slim AS runtime
 
@@ -24,11 +24,7 @@ WORKDIR /app
 COPY --from=builder /workspace/target/release/waddle-server /usr/local/bin/waddle-server
 COPY certs ./certs
 
-ENV WADDLE_MODE=standalone \
-    WADDLE_BASE_URL=http://127.0.0.1:3000 \
-    WADDLE_DB_PATH=/var/lib/waddle/waddle.db \
-    WADDLE_XMPP_TLS_CERT=/app/certs/server.crt \
-    WADDLE_XMPP_TLS_KEY=/app/certs/server.key \
+ENV WADDLE_DB_PATH=/var/lib/waddle/waddle.db \
     RUST_LOG=info
 
 EXPOSE 3000 5222 5269
