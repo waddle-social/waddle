@@ -3810,7 +3810,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     // RFC 6121 §8.5: Always check presence subscription first
                     // for any disco#info query to another user's bare JID,
                     // regardless of whether a node is specified.
-                    let has_presence_access = self
+                    //
+                    // We require a consistent, granted subscription view from both
+                    // roster perspectives:
+                    // - requester -> target must be `to`/`both` (requester receives target presence)
+                    // - target -> requester must be `from`/`both` (target grants requester presence)
+                    //
+                    // Using both checks avoids false positives when stale/partial roster
+                    // state exists during interop test sequencing.
+                    let requester_receives_target_presence = self
+                        .app_state
+                        .get_roster_item(&requester, &target_bare)
+                        .await?
+                        .map(|item| {
+                            matches!(item.subscription, Subscription::To | Subscription::Both)
+                        })
+                        .unwrap_or(false);
+
+                    let target_grants_requester_presence = self
                         .app_state
                         .get_roster_item(&target_bare, &requester)
                         .await?
@@ -3819,9 +3836,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         })
                         .unwrap_or(false);
 
+                    let has_presence_access =
+                        requester_receives_target_presence && target_grants_requester_presence;
+
                     debug!(
                         requester = %requester,
                         target = %target_bare,
+                        requester_receives_target_presence,
+                        target_grants_requester_presence,
                         has_access = has_presence_access,
                         node = ?query.node,
                         "disco#info bare JID subscription check"
