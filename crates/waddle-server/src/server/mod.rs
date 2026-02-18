@@ -3,7 +3,7 @@ use crate::db::{DatabasePool, PoolHealth};
 use anyhow::Result;
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Json},
     routing::get,
     Router,
@@ -650,6 +650,10 @@ fn create_router(
     // Build the base router with health and server-info endpoints
     let mut router = Router::new()
         .route("/health", get(health_handler))
+        .route("/healthz", get(health_handler))
+        .route("/ready", get(readiness_handler))
+        .route("/readyz", get(readiness_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/api/v1/health", get(detailed_health_handler))
         .with_state(state)
         .route("/api/v1/server-info", get(server_info_handler))
@@ -795,6 +799,71 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
 }
 
+/// Readiness check endpoint (for orchestrators).
+///
+/// Readiness is stricter than liveness and validates overall DB pool health.
+async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.db_pool.health_check().await {
+        Ok(health) if health.is_healthy() => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "service": "waddle-server",
+                "version": env!("CARGO_PKG_VERSION"),
+                "database": "ready"
+            })),
+        ),
+        Ok(health) => {
+            warn!(
+                global_healthy = health.global_healthy,
+                waddle_dbs_healthy = health.waddle_dbs_healthy,
+                loaded_waddle_count = health.loaded_waddle_count,
+                "Readiness check: database pool not fully ready"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "service": "waddle-server",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "database": {
+                        "status": "not_ready",
+                        "global_healthy": health.global_healthy,
+                        "waddle_dbs_healthy": health.waddle_dbs_healthy,
+                        "loaded_waddle_count": health.loaded_waddle_count
+                    }
+                })),
+            )
+        }
+        Err(e) => {
+            warn!(error = %e, "Readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "service": "waddle-server",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "database": {
+                        "status": format!("error: {}", e)
+                    }
+                })),
+            )
+        }
+    }
+}
+
+/// Prometheus metrics endpoint.
+async fn metrics_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        waddle_xmpp::prometheus::render_metrics(),
+    )
+}
+
 /// Detailed health check endpoint (for monitoring)
 async fn detailed_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.db_pool.health_check().await {
@@ -847,7 +916,7 @@ mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, MigrationRunner, PoolConfig};
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -893,6 +962,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_healthz_alias_endpoint() {
+        let state = create_test_state().await;
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_detailed_health_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
@@ -917,6 +1005,81 @@ mod tests {
         assert_eq!(json["status"], "healthy");
         assert_eq!(json["database"]["status"], "healthy");
         assert!(json["database"]["global_healthy"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_ready_endpoint() {
+        let state = create_test_state().await;
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert_eq!(json["database"], "ready");
+    }
+
+    #[tokio::test]
+    async fn test_readyz_alias_endpoint() {
+        let state = create_test_state().await;
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint() {
+        let state = create_test_state().await;
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let metrics = String::from_utf8(body.to_vec()).unwrap();
+        assert!(metrics.contains("waddle_connected_users"));
+        assert!(metrics.contains("waddle_messages_per_second"));
+        assert!(metrics.contains("waddle_room_count"));
     }
 
     #[tokio::test]

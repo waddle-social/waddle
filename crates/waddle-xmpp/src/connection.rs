@@ -1331,6 +1331,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
+        crate::prometheus::record_message_processed();
+
         // Check for XEP-0249 Direct MUC Invitation (can be in normal or chat messages)
         if let Some(invite) = parse_direct_invite_from_message(&msg) {
             return self.handle_direct_invite(msg, invite, sender_jid).await;
