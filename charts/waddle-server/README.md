@@ -52,6 +52,12 @@ By default this chart creates a PVC and stores:
 - `WADDLE_XMPP_MAM_DB`: `<mountPath>/<mamDbFileName>`
 - `WADDLE_UPLOAD_DIR`: `<mountPath>/<uploadSubPath>`
 
+Scaling note:
+- The default `accessModes: [ReadWriteOnce]` is typically not compatible with `replicaCount > 1`.
+- The chart validates this combination and fails render by default.
+- To bypass this guard for storage backends that support your topology, set:
+  - `persistence.allowUnsafeRwoScale=true`
+
 To use an existing claim:
 
 ```bash
@@ -70,7 +76,9 @@ The chart supports an app secret containing:
 Default behavior:
 
 - `secret.create=true` creates a chart-managed secret
-- If `secret.sessionKey` is empty, a random value is generated at render time
+- If `secret.sessionKey` is empty:
+  - on first install, a random key is generated
+  - on upgrades, the existing `WADDLE_SESSION_KEY` is preserved (via `lookup`) when present
 
 Recommended for stable upgrades:
 
@@ -88,6 +96,24 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set secret.create=false \
   --set secret.existingSecret=waddle-app-secrets
 ```
+
+## Env overrides
+
+This chart supports two extra env mechanisms:
+
+- `config.extraEnv`:
+  - key/value map rendered into the ConfigMap (non-sensitive env)
+- `containerExtraEnv`:
+  - list rendered directly into `Deployment.spec.template.spec.containers[0].env`
+  - supports `value` and `valueFrom`
+
+`extraEnv` still works as a deprecated alias for `containerExtraEnv`.
+
+## Graceful drain
+
+- `config.drainTimeoutSeconds` sets `WADDLE_DRAIN_TIMEOUT_SECS`.
+- `terminationGracePeriodSeconds` controls Kubernetes pod termination grace period.
+- The chart validates `terminationGracePeriodSeconds >= config.drainTimeoutSeconds`.
 
 ## Probes
 

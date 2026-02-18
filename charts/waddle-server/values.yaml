@@ -20,6 +20,10 @@ podLabels: {}
 podSecurityContext:
   fsGroup: 1000
 
+# Pod termination grace period (seconds).
+# Keep this >= config.drainTimeoutSeconds so graceful drain can complete.
+terminationGracePeriodSeconds: 35
+
 securityContext:
   runAsNonRoot: true
   runAsUser: 1000
@@ -66,6 +70,10 @@ persistence:
   annotations: {}
   accessModes:
     - ReadWriteOnce
+  # By default, the chart fails rendering when replicaCount > 1 and
+  # accessModes includes ReadWriteOnce. Set this true only if you know your
+  # storage backend supports this topology.
+  allowUnsafeRwoScale: false
   size: 10Gi
   storageClassName: ""
   mountPath: /var/lib/waddle
@@ -94,6 +102,7 @@ config:
   corsOrigins: ""
   drainTimeoutSeconds: 30
   rustLog: info
+  # Extra key/value env vars rendered into ConfigMap data (non-sensitive).
   extraEnv: {}
 
 telemetry:
@@ -121,6 +130,10 @@ probes:
     timeoutSeconds: 2
     failureThreshold: 3
 
+# Extra env vars rendered directly in Deployment container.env.
+# Supports both value and valueFrom entries.
+containerExtraEnv: []
+# Deprecated alias for containerExtraEnv (kept for backward compatibility).
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
