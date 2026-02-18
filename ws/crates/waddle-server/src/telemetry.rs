@@ -36,6 +36,34 @@ fn build_resource() -> Resource {
         .build()
 }
 
+fn default_filter() -> EnvFilter {
+    // Keep historical defaults to avoid changing verbosity unexpectedly.
+    EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug")
+}
+
+fn build_log_filter() -> EnvFilter {
+    if let Ok(filter) = std::env::var("RUST_LOG") {
+        return EnvFilter::try_new(filter).unwrap_or_else(|_| default_filter());
+    }
+
+    if let Ok(level_or_filter) = std::env::var("WADDLE_LOG_LEVEL") {
+        let level_or_filter = level_or_filter.trim();
+        if !level_or_filter.is_empty() {
+            let filter = if level_or_filter.contains('=') || level_or_filter.contains(',') {
+                level_or_filter.to_string()
+            } else {
+                format!(
+                    "{level},waddle_server={level},waddle_xmpp={level}",
+                    level = level_or_filter
+                )
+            };
+            return EnvFilter::try_new(filter).unwrap_or_else(|_| default_filter());
+        }
+    }
+
+    default_filter()
+}
+
 /// Initialize OpenTelemetry tracing with OTLP export.
 ///
 /// This sets up:
@@ -110,12 +138,13 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set global meter provider
     opentelemetry::global::set_meter_provider(meter_provider);
 
-    // Build the log filter from RUST_LOG or default to info
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug"));
+    let filter = build_log_filter();
 
-    // Build the fmt layer for console output
+    // Structured JSON logs for production and local observability pipelines.
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
         .with_target(true)
         .with_thread_ids(false)
         .with_file(true)
@@ -144,22 +173,23 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// This is useful for development when you don't have an OTLP collector running.
 /// It provides console output with colored logs.
 pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug"));
+    let filter = build_log_filter();
 
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
         .with_target(true)
         .with_thread_ids(false)
         .with_file(true)
-        .with_line_number(true)
-        .pretty();
+        .with_line_number(true);
 
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)
         .init();
 
-    tracing::info!("Local telemetry initialized (no OTLP export)");
+    tracing::info!("Local telemetry initialized with JSON logging (no OTLP export)");
 
     Ok(())
 }

@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::connection::Stanza;
+use crate::prometheus;
 
 /// A stanza to be sent to a connection.
 ///
@@ -164,6 +165,7 @@ impl ConnectionRegistry {
         if existing.is_some() {
             debug!("Replaced existing connection registration");
         } else {
+            prometheus::increment_connected_users();
             debug!("Registered new connection");
         }
         carbons_handle
@@ -176,6 +178,7 @@ impl ConnectionRegistry {
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove(jid);
         if removed.is_some() {
+            prometheus::decrement_connected_users();
             self.presence_states.remove(jid);
             debug!("Unregistered connection");
         } else {
@@ -221,7 +224,9 @@ impl ConnectionRegistry {
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 debug!("Outbound channel closed, connection may have dropped");
                 // Remove the stale entry
-                self.connections.remove(jid);
+                if self.connections.remove(jid).is_some() {
+                    prometheus::decrement_connected_users();
+                }
                 SendResult::ChannelClosed
             }
         }
@@ -378,6 +383,7 @@ impl ConnectionRegistry {
 
         for jid in stale {
             if self.connections.remove(&jid).is_some() {
+                prometheus::decrement_connected_users();
                 debug!(jid = %jid, "Removed stale connection");
                 removed += 1;
             }

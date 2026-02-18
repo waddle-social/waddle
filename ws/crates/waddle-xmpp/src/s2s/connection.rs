@@ -424,6 +424,7 @@ impl S2sConnectionActor {
                     debug!("Received S2S message before connection established - ignoring");
                     return Ok(());
                 }
+                crate::prometheus::record_message_processed();
                 self.handle_inbound_message(element.clone()).await?;
             }
             ParsedStanza::Presence(element) => {
