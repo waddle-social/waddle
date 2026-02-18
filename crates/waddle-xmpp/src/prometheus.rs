@@ -3,10 +3,10 @@
 //! This module tracks a small set of process-level metrics required for
 //! operational health dashboards and exposes them in Prometheus text format.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-static CONNECTED_USERS: AtomicI64 = AtomicI64::new(0);
-static ROOM_COUNT: AtomicI64 = AtomicI64::new(0);
+static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
+static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
 static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static CURRENT_SECOND: AtomicU64 = AtomicU64::new(0);
 static CURRENT_SECOND_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -39,16 +39,9 @@ pub fn increment_connected_users() {
 }
 
 pub fn decrement_connected_users() {
-    loop {
-        let current = CONNECTED_USERS.load(Ordering::Acquire);
-        let next = if current > 0 { current - 1 } else { 0 };
-        if CONNECTED_USERS
-            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            break;
-        }
-    }
+    let _ = CONNECTED_USERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_sub(1))
+    });
 }
 
 pub fn increment_room_count() {
@@ -56,16 +49,9 @@ pub fn increment_room_count() {
 }
 
 pub fn decrement_room_count() {
-    loop {
-        let current = ROOM_COUNT.load(Ordering::Acquire);
-        let next = if current > 0 { current - 1 } else { 0 };
-        if ROOM_COUNT
-            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            break;
-        }
-    }
+    let _ = ROOM_COUNT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_sub(1))
+    });
 }
 
 pub fn record_message_processed() {
@@ -104,4 +90,91 @@ pub fn render_metrics() -> String {
         messages_total = messages_total,
         messages_per_second = messages_per_second
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn reset_metrics_for_test() {
+        CONNECTED_USERS.store(0, Ordering::Release);
+        ROOM_COUNT.store(0, Ordering::Release);
+        MESSAGES_TOTAL.store(0, Ordering::Release);
+        CURRENT_SECOND.store(0, Ordering::Release);
+        CURRENT_SECOND_MESSAGES.store(0, Ordering::Release);
+        LAST_SECOND_MESSAGES.store(0, Ordering::Release);
+    }
+
+    #[test]
+    fn test_decrement_saturates_at_zero() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        decrement_connected_users();
+        decrement_room_count();
+
+        assert_eq!(CONNECTED_USERS.load(Ordering::Acquire), 0);
+        assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_increment_and_decrement_round_trip() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        increment_connected_users();
+        increment_connected_users();
+        decrement_connected_users();
+
+        increment_room_count();
+        decrement_room_count();
+
+        assert_eq!(CONNECTED_USERS.load(Ordering::Acquire), 1);
+        assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_rotate_second_bucket_moves_current_to_last() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        CURRENT_SECOND.store(100, Ordering::Release);
+        CURRENT_SECOND_MESSAGES.store(7, Ordering::Release);
+
+        rotate_second_bucket(101);
+
+        assert_eq!(CURRENT_SECOND.load(Ordering::Acquire), 101);
+        assert_eq!(CURRENT_SECOND_MESSAGES.load(Ordering::Acquire), 0);
+        assert_eq!(LAST_SECOND_MESSAGES.load(Ordering::Acquire), 7);
+    }
+
+    #[test]
+    fn test_render_metrics_contains_expected_families() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        increment_connected_users();
+        increment_room_count();
+        record_message_processed();
+
+        let rendered = render_metrics();
+
+        assert!(rendered.contains("# HELP waddle_connected_users"));
+        assert!(rendered.contains("# TYPE waddle_connected_users gauge"));
+        assert!(rendered.contains("# HELP waddle_room_count"));
+        assert!(rendered.contains("# TYPE waddle_room_count gauge"));
+        assert!(rendered.contains("# HELP waddle_messages_total"));
+        assert!(rendered.contains("# TYPE waddle_messages_total counter"));
+        assert!(rendered.contains("# HELP waddle_messages_per_second"));
+        assert!(rendered.contains("# TYPE waddle_messages_per_second gauge"));
+        assert!(rendered.contains("waddle_connected_users 1"));
+        assert!(rendered.contains("waddle_room_count 1"));
+        assert!(rendered.contains("waddle_messages_total 1"));
+    }
 }

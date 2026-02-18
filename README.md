@@ -52,6 +52,14 @@ cargo run --bin waddle
 cargo test
 ```
 
+### Runtime Configuration
+
+- `RUST_LOG`: Standard `tracing` filter expression (takes precedence over `WADDLE_LOG_LEVEL`).
+- `WADDLE_LOG_LEVEL`: Optional shorthand log level or full filter for server logging.
+  - Shorthand examples: `debug`, `info`, `warn`, `error`
+  - Full filter examples: `info,waddle_server=debug,waddle_xmpp=debug`
+- Default logging filter (when neither env var is set): `info,waddle_server=debug,waddle_xmpp=debug`
+
 ## Architecture
 
 Waddle uses a unique architecture combining:

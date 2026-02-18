@@ -771,7 +771,7 @@ mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, MigrationRunner, PoolConfig};
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -814,6 +814,25 @@ mod tests {
 
         assert_eq!(json["status"], "healthy");
         assert_eq!(json["service"], "waddle-server");
+    }
+
+    #[tokio::test]
+    async fn test_healthz_alias_endpoint() {
+        let state = create_test_state().await;
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -868,6 +887,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_readyz_alias_endpoint() {
+        let state = create_test_state().await;
+        let server_config = ServerConfig::test_homeserver();
+        let app = create_router(state, server_config, true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_metrics_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
@@ -884,6 +922,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let metrics = String::from_utf8(body.to_vec()).unwrap();

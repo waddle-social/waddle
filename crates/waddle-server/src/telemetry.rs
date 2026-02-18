@@ -37,7 +37,8 @@ fn build_resource() -> Resource {
 }
 
 fn default_filter() -> EnvFilter {
-    EnvFilter::new("info,waddle_server=info,waddle_xmpp=info")
+    // Keep historical defaults to avoid changing verbosity unexpectedly.
+    EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug")
 }
 
 fn build_log_filter() -> EnvFilter {
