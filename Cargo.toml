@@ -80,6 +80,7 @@ tracing-opentelemetry = "0.29"
 
 # Security/Crypto
 rustls = "0.23"
+rustls-acme = { version = "0.15.1", default-features = false, features = ["ring", "tokio", "tower", "webpki-roots", "tls12"] }
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
