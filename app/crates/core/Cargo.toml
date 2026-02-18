@@ -1,0 +1,38 @@
+[package]
+name = "waddle-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Event bus, config, shared types, i18n, and errors for Waddle"
+
+[features]
+default = ["native"]
+native = ["dep:tokio", "dep:directories"]
+web = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+
+[dependencies]
+tokio = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+fluent = { workspace = true }
+fluent-langneg = { workspace = true }
+unic-langid = { workspace = true }
+sys-locale = { workspace = true }
+glob = { workspace = true }
+globset = { workspace = true }
+directories = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+assert_matches = { workspace = true }
+tracing-test = { workspace = true }
+tempfile = { workspace = true }

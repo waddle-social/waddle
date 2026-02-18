@@ -1,0 +1,24 @@
+[package]
+name = "waddle-xmpp-xep-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Waddle Social - Custom XEP for GitHub link expansion and embeds"
+
+[dependencies]
+minidom = { workspace = true }
+xmpp-parsers = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+lru = { workspace = true }
+regex = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+minidom = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

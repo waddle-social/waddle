@@ -1,0 +1,22 @@
+# Scaleway S3 credentials for the state backend are fetched automatically
+# by scripts/tofu.sh from 1Password (waddle-infra vault, "Scaleway S3" item).
+
+# Proxmox connection
+proxmox_endpoint     = "https://10.10.0.1:8006"
+proxmox_api_token    = "tofu@pve!tofu-token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node_name    = "pve"
+proxmox_ssh_username = "root"
+
+# Scaleway Elastic Metal
+public_ip      = "x.x.x.x"
+public_gateway = "x.x.x.1"
+
+# SSH key for all VMs
+ssh_public_key = "ssh-ed25519 AAAA... user@host"
+
+# Operator IP for temporary SSH during bootstrap
+operator_ip = "y.y.y.y"
+
+# Teleport GitHub SSO (store in env vars or 1Password, not here)
+# teleport_github_client_id     = ""
+# teleport_github_client_secret = ""

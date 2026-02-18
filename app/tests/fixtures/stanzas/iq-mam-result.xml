@@ -1,0 +1,9 @@
+<iq from='localhost' to='alice@localhost/waddle' type='result' id='mam_1'>
+  <fin xmlns='urn:xmpp:mam:2' complete='true'>
+    <set xmlns='http://jabber.org/protocol/rsm'>
+      <first index='0'>archive-1</first>
+      <last>archive-1</last>
+      <count>1</count>
+    </set>
+  </fin>
+</iq>

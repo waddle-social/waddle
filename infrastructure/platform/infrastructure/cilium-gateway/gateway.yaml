@@ -1,0 +1,31 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: waddle-gateway
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.apps.waddle.social"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: apps-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: "*.apps.waddle.social"
+      allowedRoutes:
+        namespaces:
+          from: All
+  addresses:
+    - type: IPAddress
+      value: "10.10.0.30"

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddle-server.fullname" . }}
+  labels:
+    {{- include "waddle-server.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "waddle-server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.ports.http }}
+      targetPort: http
+      protocol: TCP
+    {{- if .Values.xmpp.enabled }}
+    - name: xmpp-c2s
+      port: {{ .Values.service.ports.xmppC2S }}
+      targetPort: xmpp-c2s
+      protocol: TCP
+    {{- if .Values.xmpp.s2sEnabled }}
+    - name: xmpp-s2s
+      port: {{ .Values.service.ports.xmppS2S }}
+      targetPort: xmpp-s2s
+      protocol: TCP
+    {{- end }}
+    {{- end }}

@@ -1,0 +1,187 @@
+//! S2S (Server-to-Server) listener for XMPP federation.
+//!
+//! Handles incoming connections from remote XMPP servers on port 5269.
+//! Implements RFC 6120 and TLS 1.3 for secure inter-server communication.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
+use tracing::{info, info_span, warn, Instrument};
+
+use crate::routing::StanzaRouter;
+use crate::s2s::connection::S2sConnectionActor;
+use crate::s2s::S2sMetrics;
+use crate::XmppError;
+
+/// S2S listener configuration.
+#[derive(Debug, Clone)]
+pub struct S2sListenerConfig {
+    /// Address to bind for S2S connections (default: 0.0.0.0:5269)
+    pub addr: SocketAddr,
+    /// Server domain (e.g., "waddle.social")
+    pub domain: String,
+    /// Secret key for dialback key generation (XEP-0220)
+    pub dialback_secret: Vec<u8>,
+}
+
+impl Default for S2sListenerConfig {
+    fn default() -> Self {
+        // Generate a random dialback secret for development/testing
+        // In production, this should be configured with a persistent secret
+        let mut dialback_secret = vec![0u8; 32];
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut dialback_secret);
+
+        Self {
+            addr: "0.0.0.0:5269".parse().unwrap(),
+            domain: "localhost".to_string(),
+            dialback_secret,
+        }
+    }
+}
+
+/// S2S listener accepting connections from remote XMPP servers.
+pub struct S2sListener {
+    config: S2sListenerConfig,
+    tls_acceptor: TlsAcceptor,
+    metrics: Arc<S2sMetrics>,
+    /// Stanza router for routing incoming stanzas to local users.
+    stanza_router: Option<Arc<StanzaRouter>>,
+    /// Pre-bound listener — passed in by the caller.
+    listener: TcpListener,
+    /// Shutdown token — when cancelled, the accept loop stops.
+    shutdown_token: tokio_util::sync::CancellationToken,
+}
+
+impl S2sListener {
+    /// Create a new S2S listener.
+    ///
+    /// Requires a pre-bound listener and a shutdown token.
+    pub fn new(
+        config: S2sListenerConfig,
+        tls_acceptor: TlsAcceptor,
+        listener: TcpListener,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            config,
+            tls_acceptor,
+            metrics: Arc::new(S2sMetrics::new()),
+            stanza_router: None,
+            listener,
+            shutdown_token,
+        }
+    }
+
+    /// Set the stanza router for routing incoming stanzas to local users.
+    pub fn with_stanza_router(mut self, router: Arc<StanzaRouter>) -> Self {
+        self.stanza_router = Some(router);
+        self
+    }
+
+    /// Start listening for incoming S2S connections.
+    ///
+    /// This method runs indefinitely, accepting connections and spawning
+    /// connection actors to handle each one.
+    pub async fn run(self) -> Result<(), XmppError> {
+        let listener = self.listener;
+        let addr = listener.local_addr().ok();
+        info!(addr = ?addr, "XMPP S2S server listening");
+
+        let shutdown_token = self.shutdown_token;
+
+        // Initialize metrics
+        self.metrics.record_listener_start();
+
+        loop {
+            let (stream, peer_addr) = tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to accept S2S connection");
+                            continue;
+                        }
+                    }
+                }
+                _ = shutdown_token.cancelled() => {
+                    info!("S2S accept loop stopped (shutdown token cancelled)");
+                    break;
+                }
+            };
+
+            let tls_acceptor = self.tls_acceptor.clone();
+            let domain = self.config.domain.clone();
+            let dialback_secret = self.config.dialback_secret.clone();
+            let metrics = Arc::clone(&self.metrics);
+            let stanza_router = self.stanza_router.clone();
+
+            // Record incoming connection
+            metrics.record_connection_attempt();
+
+            tokio::spawn(
+                async move {
+                    if let Err(e) = S2sConnectionActor::handle_connection(
+                        stream,
+                        peer_addr,
+                        tls_acceptor,
+                        domain,
+                        metrics,
+                        &dialback_secret,
+                        stanza_router,
+                    )
+                    .await
+                    {
+                        warn!(error = %e, peer = %peer_addr, "S2S connection error");
+                    }
+                }
+                .instrument(info_span!(
+                    "xmpp.s2s.connection.lifecycle",
+                    peer_ip = %peer_addr,
+                    transport = "tcp+tls",
+                    remote_domain = tracing::field::Empty,
+                )),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Get the listener's metrics.
+    pub fn metrics(&self) -> &Arc<S2sMetrics> {
+        &self.metrics
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = S2sListenerConfig::default();
+        assert_eq!(config.addr.port(), 5269);
+        assert_eq!(config.domain, "localhost");
+    }
+
+    #[test]
+    fn test_custom_config() {
+        let config = S2sListenerConfig {
+            addr: "127.0.0.1:15269".parse().unwrap(),
+            domain: "example.com".to_string(),
+            dialback_secret: vec![1, 2, 3, 4],
+        };
+        assert_eq!(config.addr.port(), 15269);
+        assert_eq!(config.domain, "example.com");
+        assert_eq!(config.dialback_secret, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_default_config_has_dialback_secret() {
+        let config = S2sListenerConfig::default();
+        // Default config should have a 32-byte random dialback secret
+        assert_eq!(config.dialback_secret.len(), 32);
+    }
+}

@@ -1,0 +1,123 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/waddle-ecdysis",
+    "crates/waddle-server",
+    "crates/waddle-cli",
+    "crates/waddle-xmpp",
+    "crates/waddle-xmpp-xep-github",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+authors = ["Waddle Contributors"]
+repository = "https://github.com/waddle-social/waddle"
+
+[workspace.dependencies]
+# Core Runtime & Async
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = "0.7"
+tower = "0.5"
+futures = "0.3"
+
+# Web Framework (Server)
+axum = { version = "0.7", features = ["ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+
+# CLI TUI (Client)
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+
+# Database
+libsql = "0.9"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+
+# Actor Framework
+kameo = "0.15"
+
+# XMPP Server
+tokio-xmpp = "4.0"
+jid = { version = "0.11", features = ["serde"] }
+xmpp-parsers = "0.21"
+minidom = "0.16"
+rxml = "0.12"
+dashmap = "6.0"
+
+# XMPP Client
+xmpp = "0.5"
+# Pin native-tls to avoid 0.2.17 compile failure with OpenSSL protocol variants
+native-tls = "=0.2.14"
+
+# Object Storage
+object_store = { version = "0.11", features = ["aws"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error Handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# HTTP Client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# CLI Arguments & Config
+clap = { version = "4.5", features = ["derive"] }
+config = "0.14"
+dirs = "5.0"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "metrics"] }
+tracing-opentelemetry = "0.29"
+
+# Security/Crypto
+rustls = "0.23"
+rustls-acme = { version = "0.15.1", default-features = false, features = ["ring", "tokio", "tower", "webpki-roots", "tls12"] }
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
+elliptic-curve = { version = "0.13", features = ["jwk"] }
+argon2 = "0.5"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.5"
+base64 = "0.22"
+rand = "0.9"
+hex = "0.4"
+hickory-resolver = "0.25"
+lru = "0.12"
+regex = "1.10"
+
+# Markdown/Syntax (CLI)
+pulldown-cmark = "0.12"
+syntect = "5.2"
+
+# Testing
+testcontainers = "0.23"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[patch.crates-io]
+# native-tls 0.2.17 is currently incompatible with the CI rust toolchain (1.93.x).
+native-tls = { git = "https://github.com/sfackler/rust-native-tls.git", tag = "v0.2.16" }

@@ -1,0 +1,74 @@
+[package]
+name = "waddle-xmpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Waddle Social - Native XMPP server library"
+
+[dependencies]
+# Core Runtime & Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = "0.1"
+
+# Actor Framework
+kameo = { workspace = true }
+
+# XMPP
+tokio-xmpp = { workspace = true }
+jid = { workspace = true }
+xmpp-parsers = { workspace = true }
+minidom = { workspace = true }
+rxml = { workspace = true }
+
+# Concurrent Data Structures
+dashmap = { workspace = true }
+
+# TLS
+rustls = { workspace = true, features = ["ring"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
+rustls-pemfile = "2.2"
+
+# Serialization
+serde = { workspace = true }
+
+# Error Handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+
+# DNS Resolution
+hickory-resolver = { workspace = true }
+
+# SCRAM-SHA-256 Authentication and XEP-0115 Entity Capabilities
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+
+# GitHub link enrichment
+waddle-xmpp-xep-github = { path = "../waddle-xmpp-xep-github" }
+
+# Database
+libsql = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tokio = { workspace = true }
+rcgen = "0.13"
+tempfile = "3.14"
+tracing-subscriber = { workspace = true }
+testcontainers = { workspace = true }
+serde_json = { workspace = true }

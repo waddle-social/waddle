@@ -1,0 +1,105 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/waddle-social/app"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration
+toml = "0.8"
+semver = "1"
+
+# Date/time and identifiers
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+
+# Logging / diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# XMPP
+tokio-xmpp = "4"
+xmpp-parsers = "0.22"
+sasl = "0.5"
+
+# WebSocket (web transport)
+tokio-tungstenite = "0.26"
+
+# TLS
+tokio-rustls = "0.26"
+rustls = "0.23"
+
+# SQLite (native)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# WASM plugin runtime
+wasmtime = "29"
+
+# OCI registry client
+oci-distribution = "0.11"
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Desktop application shell
+tauri = { version = "2", features = [] }
+tauri-build = "2"
+
+# Notifications
+notify-rust = "4"
+
+# i18n
+fluent = "0.16"
+fluent-langneg = "0.14"
+unic-langid = "0.9"
+sys-locale = "0.3"
+
+# Glob pattern matching (event subscriptions)
+glob = "0.3"
+globset = "0.4"
+
+# Platform paths
+directories = "6"
+
+# WASM bindings (web)
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+
+# Workspace crates
+waddle-core = { path = "crates/core", default-features = false }
+waddle-storage = { path = "crates/storage", default-features = false }
+waddle-xmpp = { path = "crates/xmpp", default-features = false }
+waddle-roster = { path = "crates/roster", default-features = false }
+waddle-messaging = { path = "crates/messaging", default-features = false }
+waddle-presence = { path = "crates/presence", default-features = false }
+waddle-mam = { path = "crates/mam", default-features = false }
+waddle-plugins = { path = "crates/plugins", default-features = false }
+waddle-notifications = { path = "crates/notifications", default-features = false }
+waddle-test-support = { path = "crates/test-support", default-features = false }
+
+# Dev dependencies
+tokio-test = "0.4"
+mockall = "0.13"
+assert_matches = "1"
+tempfile = "3"
+tracing-test = "0.2"
+cucumber = "0.22"
+testcontainers = "0.27"
+wiremock = "0.6"

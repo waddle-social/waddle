@@ -1,0 +1,45 @@
+[package]
+name = "waddle-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM plugin runtime, OCI registry, and KV storage for Waddle"
+
+[features]
+default = ["native"]
+native = [
+    "waddle-core/native",
+    "waddle-storage/native",
+    "dep:tokio",
+    "dep:wasmtime",
+    "dep:oci-distribution",
+    "dep:ureq",
+]
+web = ["waddle-core/web", "waddle-storage/web"]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+waddle-storage = { workspace = true, default-features = false }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+glob = { workspace = true }
+semver = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+sha2 = "0.10"
+tar = "0.4"
+wasmtime = { workspace = true, optional = true }
+oci-distribution = { workspace = true, optional = true }
+ureq = { version = "3", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+tracing-test = { workspace = true }

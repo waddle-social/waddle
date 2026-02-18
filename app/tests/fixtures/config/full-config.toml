@@ -1,0 +1,27 @@
+[account]
+jid = "alice@localhost"
+password = "alice_pass"
+server = "localhost"
+port = 5222
+
+[ui]
+notifications = true
+theme = "nord"
+locale = "en-US"
+
+[theme]
+name = "nord"
+custom_path = "/tmp/themes/nord.toml"
+
+[plugins]
+enabled = true
+directory = "/tmp/waddle/plugins"
+
+[logging]
+level = "debug"
+
+[event_bus]
+channel_capacity = 2048
+
+[storage]
+path = "/tmp/waddle/waddle.db"

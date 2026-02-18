@@ -1,0 +1,26 @@
+[
+  {
+    "id": "muc-hist-1",
+    "from": "waddle@conference.localhost/alice",
+    "to": "bob@localhost/waddle",
+    "type": "groupchat",
+    "body": "Welcome to the room!",
+    "timestamp": "2025-01-15T09:00:00Z"
+  },
+  {
+    "id": "muc-hist-2",
+    "from": "waddle@conference.localhost/bob",
+    "to": "bob@localhost/waddle",
+    "type": "groupchat",
+    "body": "Thanks! Glad to be here.",
+    "timestamp": "2025-01-15T09:01:00Z"
+  },
+  {
+    "id": "muc-hist-3",
+    "from": "waddle@conference.localhost/charlie",
+    "to": "bob@localhost/waddle",
+    "type": "groupchat",
+    "body": "Hey everyone!",
+    "timestamp": "2025-01-15T09:02:00Z"
+  }
+]

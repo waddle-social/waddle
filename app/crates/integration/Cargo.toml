@@ -1,0 +1,32 @@
+[package]
+name = "waddle-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Integration tests for cross-crate Waddle flows"
+publish = false
+
+[features]
+default = ["native"]
+native = [
+    "waddle-core/native",
+    "waddle-storage/native",
+    "waddle-roster/native",
+    "waddle-messaging/native",
+    "waddle-presence/native",
+    "waddle-mam/native",
+]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+waddle-storage = { workspace = true, default-features = false }
+waddle-roster = { workspace = true, default-features = false }
+waddle-messaging = { workspace = true, default-features = false }
+waddle-presence = { workspace = true, default-features = false }
+waddle-mam = { workspace = true, default-features = false }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,31 @@
+apiVersion: authzed.com/v1alpha1
+kind: SpiceDBCluster
+metadata:
+  name: spicedb
+  namespace: spicedb
+spec:
+  config:
+    datastoreEngine: postgres
+    datastorePostgresUri: postgres://spicedb:$(SPICEDB_PG_PASSWORD)@spicedb-pg-rw.spicedb.svc.cluster.local:5432/spicedb?sslmode=require
+    replicas: 2
+    presharedKey:
+      secretRef:
+        name: spicedb-preshared-key
+        key: SPICEDB_GRPC_PRESHARED_KEY
+    grpcTLS:
+      secretName: apps-wildcard-tls
+  secretName: spicedb-config
+  patches:
+    - kind: Deployment
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: spicedb
+                  env:
+                    - name: SPICEDB_PG_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: cnpg-superuser
+                          key: password

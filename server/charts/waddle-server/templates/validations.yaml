@@ -1,0 +1,9 @@
+{{- $drainTimeout := int .Values.config.drainTimeoutSeconds -}}
+{{- $terminationGrace := int .Values.terminationGracePeriodSeconds -}}
+{{- if lt $terminationGrace $drainTimeout -}}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= config.drainTimeoutSeconds (%d)" $terminationGrace $drainTimeout) -}}
+{{- end -}}
+
+{{- if and .Values.persistence.enabled (gt (int .Values.replicaCount) 1) (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
+{{- fail "replicaCount > 1 with persistence.accessModes containing ReadWriteOnce is usually unschedulable. Use ReadWriteMany/ReadOnlyMany, disable persistence, or set persistence.allowUnsafeRwoScale=true if your storage backend supports it." -}}
+{{- end -}}
