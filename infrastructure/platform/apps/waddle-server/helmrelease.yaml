@@ -17,8 +17,6 @@ spec:
     createNamespace: true
   values:
     fullnameOverride: waddle-server
-    imagePullSecrets:
-      - name: ghcr-pull
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

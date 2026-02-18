@@ -3,6 +3,5 @@ kind: Kustomization
 namespace: waddle
 resources:
   - namespace.yaml
-  - external-secret.yaml
   - helmrelease.yaml
   - httproute.yaml
