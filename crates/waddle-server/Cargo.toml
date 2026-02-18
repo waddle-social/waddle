@@ -37,6 +37,7 @@ dashmap = { workspace = true }
 
 # XMPP Client (for testing/integration)
 xmpp = { workspace = true }
+native-tls = { workspace = true }
 xmpp-parsers = { workspace = true }
 
 # Object Storage
