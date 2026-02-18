@@ -1,0 +1,27 @@
+# OpenTofu
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!terraform.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Talos generated configs (contain secrets)
+talos/generated/
+
+# 1Password credentials
+1password-credentials.json
+
+# SSH keys
+*.pem
+id_*
+deploy-key*
+
+# OS
+.DS_Store

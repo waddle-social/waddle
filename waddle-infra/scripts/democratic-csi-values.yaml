@@ -1,0 +1,59 @@
+node:
+  hostPID: true
+  driver:
+    iscsiDirHostPath: /etc/iscsi
+    iscsiDirHostPathType: ""
+
+csiDriver:
+  name: "org.democratic-csi.iscsi"
+
+storageClasses:
+  - name: zfs-iscsi
+    defaultClass: true
+    reclaimPolicy: Delete
+    volumeBindingMode: Immediate
+    allowVolumeExpansion: true
+    parameters:
+      fsType: ext4
+
+driver:
+  config:
+    driver: zfs-generic-iscsi
+    sshConnection:
+      host: 10.10.0.1
+      port: 22
+      username: root
+      privateKey: |
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+        QyNTUxOQAAACBW71ipdmMUY6yIs0C53ufaGSjAZtqnW6+I2jyISHhl7gAAAJh+5qbJfuam
+        yQAAAAtzc2gtZWQyNTUxOQAAACBW71ipdmMUY6yIs0C53ufaGSjAZtqnW6+I2jyISHhl7g
+        AAAEDQWnMM1IBnlVDSjbYOUS8CqkL94YQgeH/cdl9j+oQCkFbvWKl2YxRjrIizQLne59oZ
+        KMBm2qdbr4jaPIhIeGXuAAAADmRlbW9jcmF0aWMtY3NpAQIDBAUGBw==
+        -----END OPENSSH PRIVATE KEY-----
+    zfs:
+      datasetParentName: zpve/k8s-csi
+      detachedSnapshotsDatasetParentName: zpve/k8s-csi-snaps
+      zvolCompression: ""
+      zvolDedup: ""
+      zvolEnableReservation: false
+      zvolBlocksize: ""
+    iscsi:
+      shareStrategy: targetCli
+      shareStrategyTargetCli:
+        basename: "iqn.2003-01.org.linux-iscsi.proxmox"
+        tpg:
+          attributes:
+            authentication: 0
+            generate_node_acls: 1
+            cache_dynamic_acls: 1
+            demo_mode_write_protect: 0
+          auth: {}
+          block:
+            attributes:
+              emulate_tpu: 0
+      targetPortal: "10.10.0.1:3260"
+      targetPortals: []
+      interface: ""
+      namePrefix: "csi-"
+      nameSuffix: ""

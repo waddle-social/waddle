@@ -1,0 +1,47 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: spicedb-pg
+  namespace: spicedb
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+
+  storage:
+    size: 20Gi
+    storageClass: zfs-iscsi
+
+  bootstrap:
+    initdb:
+      database: spicedb
+      owner: spicedb
+      secret:
+        name: cnpg-superuser
+
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://waddle-pg-backups/spicedb/
+      endpointURL: https://s3.fr-par.scw.cloud
+      s3Credentials:
+        accessKeyId:
+          name: scaleway-s3-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: scaleway-s3-creds
+          key: SECRET_ACCESS_KEY
+      wal:
+        compression: gzip
+        maxParallel: 2
+      data:
+        compression: gzip
+    retentionPolicy: "30d"
+
+  monitoring:
+    enablePodMonitor: false
+
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi
