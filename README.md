@@ -69,6 +69,14 @@ docker run --rm \
 GitHub Actions publishes container images to GHCR on every push to `main` and on semver tags (`vX.Y.Z`).
 Release tags publish semver image tags (for example `v0.2.1` -> `0.2.1`, `0.2`, `0`).
 
+### Kubernetes (Helm)
+
+An in-repo Helm chart is available at `charts/waddle-server`.
+
+```bash
+helm upgrade --install waddle ./charts/waddle-server --namespace waddle --create-namespace
+```
+
 ## Architecture
 
 Waddle uses a unique architecture combining:
