@@ -52,6 +52,19 @@ cargo run --bin waddle
 cargo test
 ```
 
+### Container Image
+
+```bash
+# Build a local runtime image
+docker build --target runtime -t waddle-server:local .
+
+# Run the server container
+docker run --rm -p 3000:3000 -p 5222:5222 -p 5269:5269 waddle-server:local
+```
+
+GitHub Actions publishes container images to GHCR on every push to `main` and on semver tags (`vX.Y.Z`).
+Release tags publish semver image tags (for example `v0.2.1` -> `0.2.1`, `0.2`, `0`).
+
 ## Architecture
 
 Waddle uses a unique architecture combining:
