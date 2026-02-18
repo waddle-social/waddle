@@ -8,12 +8,17 @@ use axum::{
     routing::get,
     Router,
 };
+use futures::StreamExt;
 use routes::auth::AuthState;
 use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
 use routes::uploads::UploadState;
 use routes::waddles::WaddleState;
 use routes::websocket::WebSocketState;
+use rustls::ServerConfig as RustlsServerConfig;
+use rustls_acme::caches::DirCache;
+use rustls_acme::tower::TowerHttp01ChallengeService;
+use rustls_acme::{AcmeConfig, UseChallenge};
 use serde::Serialize;
 use serde_json::json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
@@ -30,6 +35,24 @@ mod routes;
 pub mod xmpp_state;
 
 pub use xmpp_state::XmppAppState;
+
+#[derive(Debug, Clone)]
+pub struct XmppAcmeConfig {
+    /// Whether ACME-managed certificates are enabled
+    pub enabled: bool,
+    /// Contact email for ACME account registration
+    pub email: Option<String>,
+    /// Cache directory for ACME account and certificate material
+    pub cache_dir: PathBuf,
+    /// Use Let's Encrypt production directory instead of staging
+    pub production: bool,
+}
+
+#[derive(Clone)]
+struct AcmeRuntime {
+    tls_server_config: Arc<RustlsServerConfig>,
+    http01_challenge_service: TowerHttp01ChallengeService,
+}
 
 /// Server application state
 pub struct AppState {
@@ -74,6 +97,8 @@ pub struct XmppConfig {
     /// When enabled, users can register new accounts before authentication.
     /// Security note: Enable with caution on public servers.
     pub registration_enabled: bool,
+    /// ACME configuration for managed TLS certificates.
+    pub acme: XmppAcmeConfig,
 }
 
 impl Default for XmppConfig {
@@ -89,6 +114,12 @@ impl Default for XmppConfig {
             mam_db_path: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
+            acme: XmppAcmeConfig {
+                enabled: false,
+                email: None,
+                cache_dir: PathBuf::from("certs/acme-cache"),
+                production: false,
+            },
         }
     }
 }
@@ -124,6 +155,20 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
 
+        let acme_enabled = std::env::var("WADDLE_XMPP_ACME_ENABLED")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+        let acme_email = std::env::var("WADDLE_XMPP_ACME_EMAIL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let acme_cache_dir = std::env::var("WADDLE_XMPP_ACME_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("certs/acme-cache"));
+        let acme_production = std::env::var("WADDLE_XMPP_ACME_PRODUCTION")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
         let s2s_enabled = std::env::var("WADDLE_XMPP_S2S_ENABLED")
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
@@ -144,11 +189,20 @@ impl XmppConfig {
             mam_db_path,
             native_auth_enabled,
             registration_enabled,
+            acme: XmppAcmeConfig {
+                enabled: acme_enabled,
+                email: acme_email,
+                cache_dir: acme_cache_dir,
+                production: acme_production,
+            },
         }
     }
 
     /// Convert to waddle_xmpp::XmppServerConfig.
-    pub fn to_xmpp_server_config(&self) -> XmppServerConfig {
+    pub fn to_xmpp_server_config(
+        &self,
+        tls_server_config: Option<Arc<RustlsServerConfig>>,
+    ) -> XmppServerConfig {
         XmppServerConfig {
             c2s_addr: self.c2s_addr,
             s2s_addr: if self.s2s_enabled {
@@ -159,12 +213,81 @@ impl XmppConfig {
             s2s_enabled: self.s2s_enabled,
             tls_cert_path: self.tls_cert_path.clone(),
             tls_key_path: self.tls_key_path.clone(),
+            tls_server_config,
             domain: self.domain.clone(),
             mam_db_path: self.mam_db_path.clone(),
             native_auth_enabled: self.native_auth_enabled,
             registration_enabled: self.registration_enabled,
         }
     }
+}
+
+fn start_acme_runtime(
+    xmpp_config: &XmppConfig,
+    stop_token: tokio_util::sync::CancellationToken,
+) -> Option<AcmeRuntime> {
+    if !xmpp_config.enabled || !xmpp_config.acme.enabled {
+        return None;
+    }
+
+    if xmpp_config.domain == "localhost" {
+        warn!(
+            "ACME is enabled but XMPP domain is localhost; public DNS domain is required for Let's Encrypt"
+        );
+    }
+
+    let mut acme_config = AcmeConfig::new([xmpp_config.domain.as_str()])
+        .cache(DirCache::new(xmpp_config.acme.cache_dir.clone()))
+        .directory_lets_encrypt(xmpp_config.acme.production)
+        .challenge_type(UseChallenge::Http01);
+
+    if let Some(email) = xmpp_config.acme.email.as_deref() {
+        let contact = if email.starts_with("mailto:") {
+            email.to_string()
+        } else {
+            format!("mailto:{email}")
+        };
+        acme_config = acme_config.contact_push(contact);
+    } else {
+        warn!("ACME is enabled without WADDLE_XMPP_ACME_EMAIL; proceeding without contact email");
+    }
+
+    let mut state = acme_config.state();
+    let tls_server_config = state.default_rustls_config();
+    let http01_challenge_service = state.http01_challenge_tower_service();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop_token.cancelled() => {
+                    info!("ACME task stopped (shutdown token cancelled)");
+                    break;
+                }
+                event = state.next() => {
+                    match event {
+                        Some(Ok(ok)) => info!(event = ?ok, "ACME event"),
+                        Some(Err(err)) => warn!(error = %err, "ACME event failed"),
+                        None => {
+                            warn!("ACME stream ended unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    info!(
+        domain = %xmpp_config.domain,
+        production = xmpp_config.acme.production,
+        cache_dir = %xmpp_config.acme.cache_dir.display(),
+        "ACME certificate management enabled (HTTP-01)"
+    );
+
+    Some(AcmeRuntime {
+        tls_server_config,
+        http01_challenge_service,
+    })
 }
 
 /// Start both HTTP and XMPP servers with Ecdysis graceful restart support.
@@ -269,16 +392,21 @@ pub async fn start_with_config(
     // Create HTTP state (shares db_pool via Arc)
     let state = Arc::new(AppState::new(Arc::clone(&db_pool), server_config.clone()));
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
+    let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
     let http_state = state.clone();
     let http_server_config = server_config.clone();
     let http_stop = stop_token.clone();
+    let acme_http01_challenge_service = acme_runtime
+        .as_ref()
+        .map(|runtime| runtime.http01_challenge_service.clone());
     let http_handle = tokio::spawn(async move {
         start_http_server(
             http_state,
             http_server_config,
             xmpp_native_auth_enabled,
+            acme_http01_challenge_service,
             http_listener,
             http_stop,
         )
@@ -287,7 +415,10 @@ pub async fn start_with_config(
 
     // Start XMPP server
     let xmpp_handle = if let Some(xmpp_app_state) = xmpp_app_state {
-        let xmpp_server_config = xmpp_config.to_xmpp_server_config();
+        let xmpp_tls_server_config = acme_runtime
+            .as_ref()
+            .map(|runtime| runtime.tls_server_config.clone());
+        let xmpp_server_config = xmpp_config.to_xmpp_server_config(xmpp_tls_server_config);
         let xmpp_stop = stop_token.clone();
         let c2s = c2s_listener.expect("XMPP enabled but no C2S listener");
 
@@ -363,10 +494,16 @@ async fn start_http_server(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
+    acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let app = create_router(state, server_config, xmpp_native_auth_enabled);
+    let app = create_router(
+        state,
+        server_config,
+        xmpp_native_auth_enabled,
+        acme_http01_challenge_service,
+    );
 
     let addr = listener.local_addr()?;
     info!("Starting Axum HTTP server on {}", addr);
@@ -446,6 +583,7 @@ fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
+    acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
     // Create auth state with configuration from environment or defaults
     // The base URL is used to construct client_id and redirect_uri for OAuth
@@ -520,6 +658,13 @@ fn create_router(
         .with_state(state)
         .route("/api/v1/server-info", get(server_info_handler))
         .with_state(server_info_state);
+
+    if let Some(challenge_service) = acme_http01_challenge_service {
+        router = router.route_service(
+            "/.well-known/acme-challenge/:challenge_token",
+            challenge_service,
+        );
+    }
 
     // Conditionally merge ATProto routes based on server mode
     if server_config.mode.atproto_enabled() {
@@ -794,7 +939,7 @@ mod tests {
     async fn test_health_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true);
+        let app = create_router(state, server_config, true, None);
 
         let response = app
             .oneshot(
@@ -820,7 +965,7 @@ mod tests {
     async fn test_healthz_alias_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true);
+        let app = create_router(state, server_config, true, None);
 
         let response = app
             .oneshot(
@@ -839,7 +984,7 @@ mod tests {
     async fn test_detailed_health_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true);
+        let app = create_router(state, server_config, true, None);
 
         let response = app
             .oneshot(
@@ -866,7 +1011,7 @@ mod tests {
     async fn test_ready_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true);
+        let app = create_router(state, server_config, true, None);
 
         let response = app
             .oneshot(
@@ -890,7 +1035,7 @@ mod tests {
     async fn test_readyz_alias_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true);
+        let app = create_router(state, server_config, true, None);
 
         let response = app
             .oneshot(
@@ -909,7 +1054,7 @@ mod tests {
     async fn test_metrics_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true);
+        let app = create_router(state, server_config, true, None);
 
         let response = app
             .oneshot(

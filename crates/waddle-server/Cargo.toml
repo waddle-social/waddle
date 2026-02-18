@@ -68,6 +68,7 @@ tracing-opentelemetry = { workspace = true }
 
 # Security/Crypto
 rustls = { workspace = true, features = ["ring"] }
+rustls-acme = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 p256 = { workspace = true }

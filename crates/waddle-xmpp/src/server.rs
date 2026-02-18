@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rustls::ServerConfig as RustlsServerConfig;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, warn, Instrument};
@@ -36,6 +37,8 @@ pub struct XmppServerConfig {
     pub tls_cert_path: String,
     /// TLS private key path (PEM format)
     pub tls_key_path: String,
+    /// Pre-built rustls server config (when set, cert/key paths are ignored)
+    pub tls_server_config: Option<Arc<RustlsServerConfig>>,
     /// Server domain (e.g., "waddle.social")
     pub domain: String,
     /// MAM database path (None for in-memory, Some(path) for file-based)
@@ -57,6 +60,7 @@ impl Default for XmppServerConfig {
             s2s_enabled: false, // S2S disabled by default
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
+            tls_server_config: None,
             domain: "localhost".to_string(),
             mam_db_path: None, // In-memory by default
             native_auth_enabled: true,
@@ -191,10 +195,14 @@ impl<S: AppState> XmppServer<S> {
 
     /// Load TLS configuration from certificate and key files.
     fn load_tls_config(config: &XmppServerConfig) -> Result<TlsAcceptor, XmppError> {
+        if let Some(server_config) = &config.tls_server_config {
+            return Ok(TlsAcceptor::from(server_config.clone()));
+        }
+
         use rustls_pemfile::{certs, pkcs8_private_keys};
         use std::fs::File;
         use std::io::BufReader;
-        use tokio_rustls::rustls::{pki_types::PrivateKeyDer, ServerConfig};
+        use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 
         let cert_file = File::open(&config.tls_cert_path).map_err(|e| {
             XmppError::config(format!(
@@ -222,7 +230,7 @@ impl<S: AppState> XmppServer<S> {
             .next()
             .ok_or_else(|| XmppError::config("No private key found"))?;
 
-        let server_config = ServerConfig::builder()
+        let server_config = RustlsServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, PrivateKeyDer::Pkcs8(key))
             .map_err(|e| XmppError::config(format!("TLS config error: {}", e)))?;
