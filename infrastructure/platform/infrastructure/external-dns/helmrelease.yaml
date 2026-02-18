@@ -24,6 +24,7 @@ spec:
             key: api-token
     domainFilters:
       - apps.waddle.social
+      - waddle.social
     policy: sync
     sources:
       - gateway-httproute

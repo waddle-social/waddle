@@ -10,7 +10,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/external-secrets-operator
+  path: ./infrastructure/platform/infrastructure/external-secrets-operator
   prune: true
   wait: true
 ---
@@ -26,7 +26,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/onepassword-connect
+  path: ./infrastructure/platform/infrastructure/onepassword-connect
   prune: true
   wait: true
   dependsOn:
@@ -44,7 +44,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/cert-manager
+  path: ./infrastructure/platform/infrastructure/cert-manager
   prune: true
   wait: true
   dependsOn:
@@ -62,7 +62,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/external-dns
+  path: ./infrastructure/platform/infrastructure/external-dns
   prune: true
   wait: true
   dependsOn:
@@ -80,7 +80,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/cloudnative-pg
+  path: ./infrastructure/platform/infrastructure/cloudnative-pg
   prune: true
   wait: true
 ---
@@ -96,7 +96,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/spicedb-operator
+  path: ./infrastructure/platform/infrastructure/spicedb-operator
   prune: true
   wait: true
 ---
@@ -131,7 +131,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/cert-manager-issuer
+  path: ./infrastructure/platform/infrastructure/cert-manager-issuer
   prune: true
   wait: true
   dependsOn:
@@ -149,7 +149,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/infrastructure/cilium-gateway
+  path: ./infrastructure/platform/infrastructure/cilium-gateway
   prune: true
   wait: true
   dependsOn:

@@ -3,6 +3,8 @@ kind: GRPCRoute
 metadata:
   name: spicedb
   namespace: spicedb
+  annotations:
+    external-dns.alpha.kubernetes.io/target: 51.159.109.202
 spec:
   parentRefs:
     - name: waddle-gateway

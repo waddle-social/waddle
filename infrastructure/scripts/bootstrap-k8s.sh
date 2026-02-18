@@ -166,9 +166,9 @@ spec:
     networkPolicy: true
   sync:
     kind: GitRepository
-    url: "https://github.com/waddle-social/waddle-infra.git"
+    url: "https://github.com/waddle-social/waddle.git"
     ref: "refs/heads/main"
-    path: "platform/clusters/scaleway"
+    path: "infrastructure/platform/clusters/scaleway"
     pullSecret: "flux-system"
 EOF
 

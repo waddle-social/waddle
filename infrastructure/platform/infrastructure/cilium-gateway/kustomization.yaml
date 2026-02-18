@@ -4,3 +4,4 @@ resources:
   - gateway-class.yaml
   - gateway.yaml
   - wildcard-certificate.yaml
+  - chat-certificate.yaml

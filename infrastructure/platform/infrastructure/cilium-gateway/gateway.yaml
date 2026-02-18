@@ -5,6 +5,7 @@ metadata:
   namespace: default
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-production
+    external-dns.alpha.kubernetes.io/target: 51.159.109.202
 spec:
   gatewayClassName: cilium
   listeners:
@@ -23,6 +24,24 @@ spec:
       protocol: HTTP
       port: 80
       hostname: "*.apps.waddle.social"
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-chat
+      protocol: HTTPS
+      port: 443
+      hostname: "chat.waddle.social"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: chat-waddle-social-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http-chat
+      protocol: HTTP
+      port: 80
+      hostname: "chat.waddle.social"
       allowedRoutes:
         namespaces:
           from: All

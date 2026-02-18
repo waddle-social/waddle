@@ -10,7 +10,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
-  path: ./platform/apps
+  path: ./infrastructure/platform/apps
   prune: true
   dependsOn:
     - name: infra-cloudnative-pg

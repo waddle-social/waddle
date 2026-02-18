@@ -1,34 +1,36 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: demo
+  name: waddle-server
+  namespace: waddle
   annotations:
     external-dns.alpha.kubernetes.io/target: 51.159.109.202
 spec:
   parentRefs:
     - name: waddle-gateway
       namespace: default
-      sectionName: https
+      sectionName: https-chat
   hostnames:
-    - demo.apps.waddle.social
+    - chat.waddle.social
   rules:
     - backendRefs:
-        - name: demo
-          port: 80
+        - name: waddle-server
+          port: 3000
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: demo-redirect
+  name: waddle-server-redirect
+  namespace: waddle
   annotations:
     external-dns.alpha.kubernetes.io/target: 51.159.109.202
 spec:
   parentRefs:
     - name: waddle-gateway
       namespace: default
-      sectionName: http
+      sectionName: http-chat
   hostnames:
-    - demo.apps.waddle.social
+    - chat.waddle.social
   rules:
     - filters:
         - type: RequestRedirect
