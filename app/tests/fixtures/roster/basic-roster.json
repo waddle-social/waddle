@@ -1,0 +1,20 @@
+[
+  {
+    "jid": "bob@localhost",
+    "name": "Bob",
+    "subscription": "both",
+    "groups": []
+  },
+  {
+    "jid": "charlie@localhost",
+    "name": "Charlie",
+    "subscription": "from",
+    "groups": []
+  },
+  {
+    "jid": "diana@localhost",
+    "name": "Diana",
+    "subscription": "none",
+    "groups": []
+  }
+]

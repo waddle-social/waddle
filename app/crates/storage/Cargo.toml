@@ -1,0 +1,27 @@
+[package]
+name = "waddle-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite abstraction with platform-specific backends for Waddle"
+
+[features]
+default = ["native"]
+native = ["waddle-core/native", "dep:tokio", "dep:rusqlite"]
+web = ["waddle-core/web", "dep:wasm-bindgen", "dep:web-sys"]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["FileSystemHandle", "FileSystemDirectoryHandle", "FileSystemFileHandle", "IdbFactory", "IdbDatabase", "IdbObjectStore", "IdbTransaction", "IdbRequest", "IdbOpenDbRequest"] }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
+tracing-test = { workspace = true }

@@ -1,0 +1,3 @@
+[account]
+jid = "alice@localhost"
+password = "alice_pass"

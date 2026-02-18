@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Discord/Slack-inspired dark palette */
+  --waddle-bg: #1e1f22;
+  --waddle-fg: #dbdee1;
+  --waddle-accent: #5865f2;
+  --waddle-surface: #2b2d31;
+  --waddle-surface-raised: #313338;
+  --waddle-border: #3f4147;
+  --waddle-success: #23a559;
+  --waddle-warning: #f0b232;
+  --waddle-error: #da373c;
+  --waddle-muted: #80848e;
+  --waddle-sidebar: #2b2d31;
+  --waddle-header: #313338;
+  --waddle-chat-bg: #313338;
+  --waddle-hover: rgba(79, 84, 92, 0.32);
+  --waddle-active: rgba(79, 84, 92, 0.48);
+  font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--waddle-bg);
+  color: var(--waddle-fg);
+}
+
+#app {
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Scrollbar styling (Discord-like) */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--waddle-bg);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--waddle-border);
+}
+
+/* Thin scrollbar for Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--waddle-bg) transparent;
+}

@@ -1,0 +1,42 @@
+[package]
+name = "waddle-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal user interface application for Waddle"
+
+[features]
+default = ["native"]
+native = [
+    "waddle-core/native",
+    "waddle-storage/native",
+    "waddle-xmpp/native",
+    "waddle-roster/native",
+    "waddle-messaging/native",
+    "waddle-presence/native",
+    "waddle-mam/native",
+    "waddle-plugins/native",
+    "waddle-notifications/native",
+    "dep:tokio",
+    "dep:ratatui",
+    "dep:crossterm",
+]
+
+[dependencies]
+waddle-core = { workspace = true, default-features = false }
+waddle-storage = { workspace = true, default-features = false }
+waddle-xmpp = { workspace = true, default-features = false }
+waddle-roster = { workspace = true, default-features = false }
+waddle-messaging = { workspace = true, default-features = false }
+waddle-presence = { workspace = true, default-features = false }
+waddle-mam = { workspace = true, default-features = false }
+waddle-plugins = { workspace = true, default-features = false }
+waddle-notifications = { workspace = true, default-features = false }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }

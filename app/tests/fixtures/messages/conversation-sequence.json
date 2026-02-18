@@ -1,0 +1,26 @@
+[
+  {
+    "id": "msg-1",
+    "from": "alice@localhost/waddle",
+    "to": "bob@localhost",
+    "type": "chat",
+    "body": "Hey Bob, are you around?",
+    "timestamp": "2025-01-15T10:00:00Z"
+  },
+  {
+    "id": "msg-2",
+    "from": "bob@localhost/mobile",
+    "to": "alice@localhost/waddle",
+    "type": "chat",
+    "body": "Yes, what's up?",
+    "timestamp": "2025-01-15T10:01:00Z"
+  },
+  {
+    "id": "msg-3",
+    "from": "alice@localhost/waddle",
+    "to": "bob@localhost",
+    "type": "chat",
+    "body": "Just testing the chat. Looks like it works!",
+    "timestamp": "2025-01-15T10:02:00Z"
+  }
+]
