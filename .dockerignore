@@ -2,7 +2,6 @@
 .github
 target
 test-logs
-artifact_dir=test-logs
 docs
 docs/plans
 .claude

@@ -8,6 +8,7 @@ on:
       - "crates/**"
       - "Containerfile"
       - ".dockerignore"
+      - "certs/**"
       - ".github/workflows/container-image.yml"
   push:
     branches: [main]
