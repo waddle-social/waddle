@@ -1,0 +1,72 @@
+name: Rust Server CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - ".github/workflows/rust-ci.yaml"
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/rust-ci.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Lint, Test, Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            server/target/
+          key: ${{ runner.os }}-cargo-server-${{ hashFiles('server/**/Cargo.toml', 'server/rust-toolchain.toml', 'server/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-server-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D clippy::correctness
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked --package waddle-server
+
+      - name: Upload server artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: waddle-server-linux-amd64
+          path: server/target/release/waddle-server
+          if-no-files-found: error
