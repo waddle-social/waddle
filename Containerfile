@@ -24,9 +24,6 @@ WORKDIR /app
 COPY --from=builder /workspace/target/release/waddle-server /usr/local/bin/waddle-server
 COPY certs ./certs
 
-ENV WADDLE_DB_PATH=/var/lib/waddle/waddle.db \
-    RUST_LOG=info
-
 EXPOSE 3000 5222 5269
 
 VOLUME ["/var/lib/waddle"]
