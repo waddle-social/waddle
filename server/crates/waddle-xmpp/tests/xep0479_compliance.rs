@@ -1244,6 +1244,15 @@ fn parse_container_timeout_secs(profile: ComplianceProfile) -> Result<Option<u64
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock<'a>() -> MutexGuard<'a, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn test_profile_parse() {
@@ -1295,6 +1304,7 @@ mod unit_tests {
 
     #[test]
     fn test_parse_container_timeout_secs() {
+        let _env_lock = env_lock();
         let env_name = "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS";
         let previous = env::var(env_name).ok();
 
@@ -1333,6 +1343,7 @@ mod unit_tests {
 
     #[test]
     fn test_env_bool_parsing() {
+        let _env_lock = env_lock();
         let env_name = "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD";
         let previous = env::var(env_name).ok();
 
@@ -1357,6 +1368,7 @@ mod unit_tests {
 
     #[test]
     fn test_resolve_waddle_server_binary_rejects_invalid_override_path() {
+        let _env_lock = env_lock();
         let server_bin_env = "WADDLE_SERVER_BIN";
         let skip_build_env = "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD";
         let previous_server_bin = env::var(server_bin_env).ok();
@@ -1388,6 +1400,7 @@ mod unit_tests {
 
     #[test]
     fn test_resolve_waddle_server_binary_honors_override_path_when_present() {
+        let _env_lock = env_lock();
         let server_bin_env = "WADDLE_SERVER_BIN";
         let skip_build_env = "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD";
         let previous_server_bin = env::var(server_bin_env).ok();
