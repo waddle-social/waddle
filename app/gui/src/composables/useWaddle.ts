@@ -181,6 +181,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
   };
   const listeners = new Map<string, Set<EventCallback<any>>>();
   let rosterByJid = new Map<string, RosterItem>();
+  let rosterLoaded = false;
   let historyByJid = new Map<string, ChatMessage[]>();
   /** Tracks the nick used to join each MUC room (keyed by bare room JID). */
   let roomNickByJid = new Map<string, string>();
@@ -266,6 +267,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       xml('query', { xmlns: 'jabber:iq:roster' }),
     );
     const items = parseRosterItems(result);
+    rosterLoaded = true;
     console.debug(`[waddle:roster] received ${items.length} items:`, items.map(i => `${i.jid}(${i.subscription})`));
     for (const item of items) rosterByJid.set(item.jid, item);
     emit('xmpp.roster.received', 'rosterReceived', {
@@ -330,6 +332,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
           const query = stanza.getChild?.('query', 'jabber:iq:roster');
           if (query) {
             const items = parseRosterItems(stanza);
+            rosterLoaded = true;
             for (const item of items) {
               if (item.subscription === 'remove') {
                 rosterByJid.delete(item.jid);
@@ -449,6 +452,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
 
       // Reset session state
       rosterByJid = new Map();
+      rosterLoaded = false;
       historyByJid = new Map();
       roomNickByJid = new Map();
 
@@ -518,6 +522,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       }
       connectionSnapshot = { status: 'offline', jid: null, attempt: null };
       rosterByJid = new Map();
+      rosterLoaded = false;
       historyByJid = new Map();
       roomNickByJid = new Map();
 
@@ -586,7 +591,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
     getRoster: async () => {
       requireConnection('getRoster');
       let items: RosterItem[];
-      if (rosterByJid.size > 0) {
+      if (rosterLoaded) {
         items = Array.from(rosterByJid.values());
       } else {
         items = await fetchRoster();

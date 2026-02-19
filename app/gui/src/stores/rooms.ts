@@ -3,6 +3,32 @@ import { defineStore } from 'pinia';
 import { useWaddle, type RoomInfo, type UnlistenFn } from '../composables/useWaddle';
 import { useAuthStore } from './auth';
 
+const JOINED_ROOMS_STORAGE_KEY = 'waddle:joined-rooms';
+
+type JoinedRoomsByAccount = Record<string, string[]>;
+
+function accountKey(jid: string): string {
+  return (jid.split('/')[0] || jid).trim().toLowerCase();
+}
+
+function loadJoinedRoomsByAccount(): JoinedRoomsByAccount {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(JOINED_ROOMS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as JoinedRoomsByAccount;
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function saveJoinedRoomsByAccount(data: JoinedRoomsByAccount): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(JOINED_ROOMS_STORAGE_KEY, JSON.stringify(data));
+}
+
 export const useRoomsStore = defineStore('rooms', () => {
   const { discoverMucService, listRooms, joinRoom, leaveRoom, createRoom, deleteRoom, listen } =
     useWaddle();
@@ -15,6 +41,45 @@ export const useRoomsStore = defineStore('rooms', () => {
 
   const unlistenFns: UnlistenFn[] = [];
   let listening = false;
+  let rejoining = false;
+
+  function persistJoinedRooms(): void {
+    const auth = useAuthStore();
+    const key = accountKey(auth.jid);
+    if (!key) return;
+    const byAccount = loadJoinedRoomsByAccount();
+    byAccount[key] = Array.from(joinedRooms.value);
+    saveJoinedRoomsByAccount(byAccount);
+  }
+
+  function restoreJoinedRooms(): void {
+    const auth = useAuthStore();
+    const key = accountKey(auth.jid);
+    if (!key) {
+      joinedRooms.value = new Set();
+      return;
+    }
+    const byAccount = loadJoinedRoomsByAccount();
+    const restored = byAccount[key] ?? [];
+    joinedRooms.value = new Set(restored);
+  }
+
+  async function rejoinKnownRooms(): Promise<void> {
+    if (rejoining || joinedRooms.value.size === 0) return;
+    rejoining = true;
+    const auth = useAuthStore();
+    const nick = auth.nickname;
+    const roomsToJoin = Array.from(joinedRooms.value);
+    try {
+      await Promise.allSettled(
+        roomsToJoin.map(async (roomJid) => {
+          await joinRoom(roomJid, nick);
+        }),
+      );
+    } finally {
+      rejoining = false;
+    }
+  }
 
   async function discoverService(): Promise<string | null> {
     if (mucService.value) return mucService.value;
@@ -52,6 +117,7 @@ export const useRoomsStore = defineStore('rooms', () => {
     try {
       await joinRoom(roomJid, nick);
       joinedRooms.value = new Set([...joinedRooms.value, roomJid]);
+      persistJoinedRooms();
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
       throw err;
@@ -65,6 +131,7 @@ export const useRoomsStore = defineStore('rooms', () => {
       const next = new Set(joinedRooms.value);
       next.delete(roomJid);
       joinedRooms.value = next;
+      persistJoinedRooms();
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
       throw err;
@@ -90,6 +157,7 @@ export const useRoomsStore = defineStore('rooms', () => {
       const roomJid = `${localpart}@${service}`;
       await createRoom(roomJid, nick);
       joinedRooms.value = new Set([...joinedRooms.value, roomJid]);
+      persistJoinedRooms();
 
       // Refresh the room list
       await fetchRooms();
@@ -106,6 +174,7 @@ export const useRoomsStore = defineStore('rooms', () => {
       const next = new Set(joinedRooms.value);
       next.delete(roomJid);
       joinedRooms.value = next;
+      persistJoinedRooms();
 
       // Refresh the room list
       await fetchRooms();
@@ -119,6 +188,10 @@ export const useRoomsStore = defineStore('rooms', () => {
     if (listening) return;
     listening = true;
 
+    restoreJoinedRooms();
+
+    // If we're already connected, immediately rejoin so the server replays room history.
+    void rejoinKnownRooms();
     void fetchRooms();
 
     const events = [
@@ -131,6 +204,9 @@ export const useRoomsStore = defineStore('rooms', () => {
 
     for (const channel of events) {
       void listen(channel, () => {
+        if (channel === 'system.connection.established') {
+          void rejoinKnownRooms();
+        }
         void fetchRooms();
       })
         .then((unlisten) => {

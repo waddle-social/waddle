@@ -20,8 +20,7 @@ frontend ft_ssl
 
     use_backend bk_teleport if { req_ssl_sni -i teleport.${domain} }
     use_backend bk_teleport if { req_ssl_sni -i proxmox.${domain} }
-    use_backend bk_k8s_ingress if { req_ssl_sni -m end .apps.${domain} }
-    use_backend bk_k8s_ingress if { req_ssl_sni -i chat.${domain} }
+    use_backend bk_k8s_ingress if { req_ssl_sni -m end .${domain} }
     default_backend bk_drop
 
 backend bk_teleport

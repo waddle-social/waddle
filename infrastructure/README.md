@@ -364,7 +364,7 @@ What it creates:
 |---|---|
 | `teleport.waddle.social` | Teleport VM (10.10.0.2:3080) |
 | `proxmox.waddle.social` | Teleport VM (10.10.0.2:3080) |
-| `*.apps.waddle.social` | Cilium Gateway VIP (10.10.0.30:443) |
+| `*.waddle.social` (except `teleport` and `proxmox`) | Cilium Gateway VIP (10.10.0.30:443) |
 | Default | Drop (no servers) |
 
 Port 80 is forwarded to Cilium Gateway VIP (10.10.0.30:80) for HTTP-to-HTTPS redirect.
