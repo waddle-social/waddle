@@ -85,8 +85,20 @@ tasks: {
 		]
 	}
 	deployProduction: {
-		command: "bun"
-		args: ["run", "wrangler", "deploy", "--config", "wrangler.jsonc", "--env", "production"]
+		command: "bash"
+		args: [
+			"-lc",
+			"""
+			set -euo pipefail
+			export HOME="${PWD}/.wrangler-home"
+			export XDG_CACHE_HOME="${PWD}/.wrangler/cache"
+			export XDG_CONFIG_HOME="${PWD}/.wrangler/config"
+			export XDG_DATA_HOME="${PWD}/.wrangler/data"
+			export WRANGLER_SEND_METRICS="false"
+			mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+			bun run wrangler deploy --config wrangler.jsonc --env production
+			""",
+		]
 		dependsOn: [_t.build]
 		inputs: [
 			"wrangler.jsonc",
@@ -94,6 +106,7 @@ tasks: {
 		]
 		outputs: [
 			".wrangler/**",
+			".wrangler-home/**",
 		]
 	}
 	deployPreview: {
@@ -136,6 +149,12 @@ tasks: {
 			fi
 
 			worker_name="waddle-gui-pr-${pr_number}"
+			export HOME="${PWD}/.wrangler-home"
+			export XDG_CACHE_HOME="${PWD}/.wrangler/cache"
+			export XDG_CONFIG_HOME="${PWD}/.wrangler/config"
+			export XDG_DATA_HOME="${PWD}/.wrangler/data"
+			export WRANGLER_SEND_METRICS="false"
+			mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 
 			if [ "$event_action" = "closed" ]; then
 			  set +e
@@ -162,16 +181,27 @@ tasks: {
 		dependsOn: [_t.build]
 		outputs: [
 			".wrangler/**",
+			".wrangler-home/**",
 		]
 	}
 	deletePreview: {
-		command: "sh"
+		command: "bash"
 		args: [
-			"-c",
-			"bun run wrangler delete --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required} --force",
+			"-lc",
+			"""
+			set -euo pipefail
+			export HOME="${PWD}/.wrangler-home"
+			export XDG_CACHE_HOME="${PWD}/.wrangler/cache"
+			export XDG_CONFIG_HOME="${PWD}/.wrangler/config"
+			export XDG_DATA_HOME="${PWD}/.wrangler/data"
+			export WRANGLER_SEND_METRICS="false"
+			mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+			bun run wrangler delete --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required} --force
+			""",
 		]
 		outputs: [
 			".wrangler/**",
+			".wrangler-home/**",
 		]
 	}
 }
