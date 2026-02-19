@@ -744,7 +744,11 @@ async fn handle_iq(
 
             // Disco info on server
             let identities = vec![Identity::server(Some("Waddle"))];
-            let features = vec![Feature::ping(), Feature::disco_info(), Feature::disco_items()];
+            let features = vec![
+                Feature::ping(),
+                Feature::disco_info(),
+                Feature::disco_items(),
+            ];
             let response = build_disco_info_response(request_iq, &identities, &features, None);
             return vec![iq_to_xml(response)];
         }
