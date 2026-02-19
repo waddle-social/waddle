@@ -101,6 +101,9 @@ tasks: {
 			set -euo pipefail
 
 			event_action="$(jq -r '.action // ""' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)"
+			if [ -z "$event_action" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
+			  event_action="$(grep -Eo '"action"[[:space:]]*:[[:space:]]*"[^"]+"' "${GITHUB_EVENT_PATH}" | head -n1 | cut -d'"' -f4 || true)"
+			fi
 			pr_number="${PR_NUMBER:-}"
 			if [ -z "$pr_number" ]; then
 			  pr_number="$(jq -r '.pull_request.number // .number // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)"
@@ -111,6 +114,15 @@ tasks: {
 			      pr_number="$(echo "$GITHUB_REF" | cut -d/ -f3)"
 			      ;;
 			  esac
+			fi
+			if [ -z "$pr_number" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_SHA:-}" ]; then
+			  pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].number' 2>/dev/null || true)"
+			fi
+			if [ -z "$pr_number" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
+			  pr_number="$(grep -Eo '"number"[[:space:]]*:[[:space:]]*[0-9]+' "${GITHUB_EVENT_PATH}" | head -n1 | grep -Eo '[0-9]+' || true)"
+			fi
+			if [ -z "$pr_number" ]; then
+			  pr_number="$(git for-each-ref --format='%(refname)' refs/remotes/pull | awk -F/ '$1=="refs" && $2=="remotes" && $3=="pull" && $4 ~ /^[0-9]+$/ && $5=="merge" { print $4; exit }' || true)"
 			fi
 			if [ "$pr_number" = "null" ]; then
 			  pr_number=""
