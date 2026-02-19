@@ -318,6 +318,68 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 }
 
+function embedKey(embed: NonNullable<ChatMessage['embeds']>[number]): string {
+  const namespace = embed.namespace ?? '';
+  const data = embed.data ?? {};
+  const url = typeof data.url === 'string' ? data.url : '';
+  const type = typeof data.type === 'string' ? data.type : '';
+  const owner = typeof data.owner === 'string' ? data.owner : '';
+  const name = typeof data.name === 'string' ? data.name : '';
+  const repo = typeof data.repo === 'string' ? data.repo : '';
+  const number = typeof data.number === 'string' || typeof data.number === 'number'
+    ? String(data.number)
+    : '';
+  return `${namespace}|${url}|${type}|${owner}|${name}|${repo}|${number}`;
+}
+
+function mergeMessage(existing: ChatMessage, incoming: ChatMessage): ChatMessage {
+  const mergedEmbeds = new Map<string, NonNullable<ChatMessage['embeds']>[number]>();
+  for (const embed of existing.embeds ?? []) mergedEmbeds.set(embedKey(embed), embed);
+  for (const embed of incoming.embeds ?? []) {
+    const key = embedKey(embed);
+    const current = mergedEmbeds.get(key);
+    if (!current) {
+      mergedEmbeds.set(key, embed);
+      continue;
+    }
+    mergedEmbeds.set(key, {
+      namespace: current.namespace,
+      data: {
+        ...current.data,
+        ...embed.data,
+      },
+    });
+  }
+
+  return {
+    ...existing,
+    from: incoming.from || existing.from,
+    to: incoming.to || existing.to,
+    body: incoming.body || existing.body,
+    messageType: incoming.messageType ?? existing.messageType,
+    threadId: incoming.threadId ?? existing.threadId ?? null,
+    replyTo: incoming.replyTo ?? existing.replyTo ?? null,
+    stanzaId: incoming.stanzaId ?? existing.stanzaId ?? null,
+    originId: incoming.originId ?? existing.originId ?? null,
+    embeds: Array.from(mergedEmbeds.values()),
+  };
+}
+
+function upsertMessage(message: ChatMessage): boolean {
+  const existingIdx = messages.value.findIndex((existing) => existing.id === message.id);
+  if (existingIdx < 0) {
+    messages.value = sortMessages([...messages.value, message]);
+    return true;
+  }
+
+  const existing = messages.value[existingIdx];
+  if (!existing) return false;
+  const next = [...messages.value];
+  next[existingIdx] = mergeMessage(existing, message);
+  messages.value = sortMessages(next);
+  return true;
+}
+
 function maybeRefreshForEvent(event: unknown): void {
   const message = extractMessageFromEventPayload<ChatMessage>(event);
   if (!message) return;
@@ -326,15 +388,15 @@ function maybeRefreshForEvent(event: unknown): void {
   const toBare = bareJid(message.to);
 
   if (fromBare === jid.value || toBare === jid.value) {
-    const alreadyPresent = messages.value.some((existing) => existing.id === message.id);
-    if (!alreadyPresent) {
-      messages.value = sortMessages([...messages.value, message]);
+    const changed = upsertMessage(message);
+    if (changed) {
       scrollToBottom();
     }
   }
 }
 
-let stopMessageListener: UnlistenFn | null = null;
+let stopReceivedMessageListener: UnlistenFn | null = null;
+let stopSentMessageListener: UnlistenFn | null = null;
 let stopConnectionListener: UnlistenFn | null = null;
 let historyReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -347,8 +409,14 @@ function scheduleMucReload(): void {
 onMounted(async () => {
   await runtimeStore.bootstrap();
 
-  // Set up the message listener FIRST so we don't miss messages
-  stopMessageListener = await listen<unknown>('xmpp.message.received', ({ payload }) => {
+  // Set up message listeners FIRST so we don't miss messages
+  stopReceivedMessageListener = await listen<unknown>(
+    'xmpp.message.received',
+    ({ payload }) => {
+      maybeRefreshForEvent(payload);
+    },
+  );
+  stopSentMessageListener = await listen<unknown>('xmpp.message.sent', ({ payload }) => {
     maybeRefreshForEvent(payload);
   });
 
@@ -366,8 +434,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  stopMessageListener?.();
-  stopMessageListener = null;
+  stopReceivedMessageListener?.();
+  stopReceivedMessageListener = null;
+  stopSentMessageListener?.();
+  stopSentMessageListener = null;
   stopConnectionListener?.();
   stopConnectionListener = null;
   if (historyReloadTimer) {

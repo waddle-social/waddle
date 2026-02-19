@@ -9,7 +9,7 @@ use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use waddle_core::event::{
-    ChatMessage, ChatState, Event, EventPayload, MessageType, MucOccupant, MucRole, MessageEmbed,
+    ChatMessage, ChatState, Event, EventPayload, MessageType, MucOccupant, MucRole,
 };
 use waddle_storage::{Database, FromRow, Row, SqlValue, StorageError};
 use waddle_xmpp::Stanza;
@@ -122,13 +122,13 @@ impl StoredMessage {
             .timestamp
             .parse::<DateTime<Utc>>()
             .unwrap_or_else(|_| Utc::now());
-            
+
         let embeds = if let Some(json) = self.embeds {
             serde_json::from_str(&json).unwrap_or_default()
         } else {
             Vec::new()
         };
-        
+
         ChatMessage {
             id: self.id,
             from: self.from_jid,
@@ -376,7 +376,7 @@ impl<D: Database> MessageManager<D> {
         let mt = message_type_to_str(&message.message_type).to_string();
         let thread = message.thread.clone();
         let read = 0_i64;
-        
+
         let embeds = if message.embeds.is_empty() {
             None
         } else {
@@ -385,8 +385,33 @@ impl<D: Database> MessageManager<D> {
 
         self.db
             .execute(
-                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read, embeds) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read, embeds) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 from_jid = CASE \
+                    WHEN TRIM(COALESCE(excluded.from_jid, '')) = '' THEN messages.from_jid \
+                    WHEN TRIM(COALESCE(messages.from_jid, '')) = '' THEN excluded.from_jid \
+                    WHEN LENGTH(excluded.from_jid) > LENGTH(messages.from_jid) THEN excluded.from_jid \
+                    ELSE messages.from_jid \
+                 END, \
+                 to_jid = CASE \
+                    WHEN TRIM(COALESCE(excluded.to_jid, '')) = '' THEN messages.to_jid \
+                    WHEN TRIM(COALESCE(messages.to_jid, '')) = '' THEN excluded.to_jid \
+                    WHEN LENGTH(excluded.to_jid) > LENGTH(messages.to_jid) THEN excluded.to_jid \
+                    ELSE messages.to_jid \
+                 END, \
+                 thread = CASE \
+                    WHEN TRIM(COALESCE(excluded.thread, '')) = '' THEN messages.thread \
+                    WHEN TRIM(COALESCE(messages.thread, '')) = '' THEN excluded.thread \
+                    WHEN LENGTH(COALESCE(excluded.thread, '')) > LENGTH(COALESCE(messages.thread, '')) THEN excluded.thread \
+                    ELSE messages.thread \
+                 END, \
+                 embeds = CASE \
+                    WHEN excluded.embeds IS NULL OR TRIM(excluded.embeds) = '' OR excluded.embeds = '[]' THEN messages.embeds \
+                    WHEN messages.embeds IS NULL OR TRIM(messages.embeds) = '' OR messages.embeds = '[]' THEN excluded.embeds \
+                    WHEN LENGTH(excluded.embeds) > LENGTH(COALESCE(messages.embeds, '')) THEN excluded.embeds \
+                    ELSE messages.embeds \
+                 END",
                 &[&id, &from, &to, &body, &ts, &mt, &thread, &read, &embeds],
             )
             .await?;
@@ -1063,7 +1088,7 @@ impl<D: Database> MucManager<D> {
         let mt = message_type_to_str(&message.message_type).to_string();
         let thread = message.thread.clone();
         let read = 0_i64;
-        
+
         let embeds = if message.embeds.is_empty() {
             None
         } else {
@@ -1072,8 +1097,33 @@ impl<D: Database> MucManager<D> {
 
         self.db
             .execute(
-                "INSERT OR IGNORE INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read, embeds) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO messages (id, from_jid, to_jid, body, timestamp, message_type, thread, read, embeds) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 from_jid = CASE \
+                    WHEN TRIM(COALESCE(excluded.from_jid, '')) = '' THEN messages.from_jid \
+                    WHEN TRIM(COALESCE(messages.from_jid, '')) = '' THEN excluded.from_jid \
+                    WHEN LENGTH(excluded.from_jid) > LENGTH(messages.from_jid) THEN excluded.from_jid \
+                    ELSE messages.from_jid \
+                 END, \
+                 to_jid = CASE \
+                    WHEN TRIM(COALESCE(excluded.to_jid, '')) = '' THEN messages.to_jid \
+                    WHEN TRIM(COALESCE(messages.to_jid, '')) = '' THEN excluded.to_jid \
+                    WHEN LENGTH(excluded.to_jid) > LENGTH(messages.to_jid) THEN excluded.to_jid \
+                    ELSE messages.to_jid \
+                 END, \
+                 thread = CASE \
+                    WHEN TRIM(COALESCE(excluded.thread, '')) = '' THEN messages.thread \
+                    WHEN TRIM(COALESCE(messages.thread, '')) = '' THEN excluded.thread \
+                    WHEN LENGTH(COALESCE(excluded.thread, '')) > LENGTH(COALESCE(messages.thread, '')) THEN excluded.thread \
+                    ELSE messages.thread \
+                 END, \
+                 embeds = CASE \
+                    WHEN excluded.embeds IS NULL OR TRIM(excluded.embeds) = '' OR excluded.embeds = '[]' THEN messages.embeds \
+                    WHEN messages.embeds IS NULL OR TRIM(messages.embeds) = '' OR messages.embeds = '[]' THEN excluded.embeds \
+                    WHEN LENGTH(excluded.embeds) > LENGTH(COALESCE(messages.embeds, '')) THEN excluded.embeds \
+                    ELSE messages.embeds \
+                 END",
                 &[&id, &from, &to, &body, &ts, &mt, &thread, &read, &embeds],
             )
             .await?;
@@ -1226,7 +1276,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use waddle_core::event::{BroadcastEventBus, EventBus};
+    use waddle_core::event::{BroadcastEventBus, EventBus, MessageEmbed};
 
     async fn setup() -> (
         Arc<MessageManager<impl Database>>,
@@ -1399,6 +1449,64 @@ mod tests {
             .unwrap();
 
         assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_message_with_richer_embeds_updates_row() {
+        let (manager, _, _dir) = setup().await;
+        let msg_id = "msg-embed-upgrade";
+
+        let initial = make_chat_message(msg_id, "alice@example.com", "me@example.com", "See link");
+        manager.persist_message(&initial).await.unwrap();
+
+        let mut enriched = initial.clone();
+        enriched.embeds.push(MessageEmbed {
+            namespace: "urn:waddle:github:0".to_string(),
+            data: serde_json::json!({
+                "type": "repo",
+                "owner": "rust-lang",
+                "name": "rust",
+                "url": "https://github.com/rust-lang/rust"
+            }),
+        });
+        manager.persist_message(&enriched).await.unwrap();
+
+        let messages = manager
+            .get_messages("alice@example.com", 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, msg_id);
+        assert_eq!(messages[0].embeds.len(), 1);
+        assert_eq!(messages[0].embeds[0].namespace, "urn:waddle:github:0");
+        assert_eq!(messages[0].embeds[0].data["owner"], "rust-lang");
+    }
+
+    #[tokio::test]
+    async fn duplicate_message_with_blank_sender_fields_gets_upgraded() {
+        let (manager, _, _dir) = setup().await;
+        let msg_id = "msg-from-upgrade";
+
+        let initial = make_chat_message(msg_id, "", "bob@example.com", "Hello Bob");
+        manager.persist_message(&initial).await.unwrap();
+
+        let mut upgraded = initial.clone();
+        upgraded.from = "alice@example.com/web".to_string();
+        upgraded.to = "bob@example.com/phone".to_string();
+        upgraded.thread = Some("thread-123".to_string());
+        manager.persist_message(&upgraded).await.unwrap();
+
+        let messages = manager
+            .get_messages("bob@example.com/phone", 50, None)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, msg_id);
+        assert_eq!(messages[0].from, "alice@example.com/web");
+        assert_eq!(messages[0].to, "bob@example.com/phone");
+        assert_eq!(messages[0].thread.as_deref(), Some("thread-123"));
     }
 
     #[tokio::test]
