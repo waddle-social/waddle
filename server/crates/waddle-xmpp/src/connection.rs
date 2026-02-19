@@ -5225,13 +5225,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             effective_item
         };
 
+        // RFC 6121: Send roster push to all connected resources
+        // This notifies all user's clients about the roster change.
+        //
+        // Ordering matters: roster push MUST be sent before the IQ result
+        // to the initiating resource.
+        self.send_roster_push(&push_item).await;
+
         // Send empty result to acknowledge the roster set
         let response = build_roster_result_empty(&iq);
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
-
-        // RFC 6121: Send roster push to all connected resources
-        // This notifies all user's clients about the roster change
-        self.send_roster_push(&push_item).await;
 
         info!(
             contact = %push_item.jid,
