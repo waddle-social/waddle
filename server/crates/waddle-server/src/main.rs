@@ -38,7 +38,8 @@ async fn main() -> Result<()> {
     }
 
     // Load configuration
-    let server_config = ServerConfig::from_env();
+    let server_config = ServerConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("Failed to load server configuration: {}", e))?;
     server_config.log_config();
 
     // Initialize database

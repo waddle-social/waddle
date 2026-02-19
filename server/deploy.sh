@@ -303,9 +303,9 @@ read_existing() {
         value="$(grep "^${key}=" "${ENV_FILE}" | head -1 | cut -d= -f2-)"
         # Strip optional surrounding quotes from existing values.
         if [[ "${value}" =~ ^\".*\"$ ]]; then
-            value="${value:1:${#value}-2}"
+            value="${value:1:$(( ${#value} - 2 ))}"
         elif [[ "${value}" =~ ^\'.*\'$ ]]; then
-            value="${value:1:${#value}-2}"
+            value="${value:1:$(( ${#value} - 2 ))}"
         fi
         echo "${value}"
     else
