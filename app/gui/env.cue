@@ -176,10 +176,6 @@ tasks: {
 			""",
 		]
 		dependsOn: [_t.build]
-		inputs: [
-			"wrangler.jsonc",
-			"dist/**",
-		]
 	}
 	deletePreview: {
 		command: "sh"
