@@ -112,12 +112,6 @@ tasks: {
 			      ;;
 			  esac
 			fi
-			if [ -z "$pr_number" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_SHA:-}" ]; then
-			  pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].number' 2>/dev/null || true)"
-			fi
-			if [ -z "$pr_number" ]; then
-			  pr_number="$(git for-each-ref --format='%(refname)' refs/remotes/pull | awk -F/ '$1=="refs" && $2=="remotes" && $3=="pull" && $4 ~ /^[0-9]+$/ && $5=="merge" { print $4; exit }' || true)"
-			fi
 			if [ "$pr_number" = "null" ]; then
 			  pr_number=""
 			fi
@@ -138,13 +132,26 @@ tasks: {
 			  if [ -z "${GITHUB_REPOSITORY:-}" ]; then
 			    return 0
 			  fi
-			  local existing_id
-			  existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" --paginate | jq -r --arg marker "$marker" '.[] | select(.user.type=="Bot" and (.body | contains($marker))) | .id' | head -n1 || true)"
-			  if [ -n "$existing_id" ]; then
-			    gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$body" >/dev/null || true
-			  else
-			    gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -f body="$body" >/dev/null || true
+			  if [ -z "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
+			    echo "Skipping PR comment: no GitHub token available."
+			    return 0
 			  fi
+			  if ! command -v gh >/dev/null 2>&1; then
+			    echo "Skipping PR comment: gh CLI unavailable."
+			    return 0
+			  fi
+
+			  set +e
+			  local existing_id=""
+			  existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" --paginate 2>/dev/null | jq -r --arg marker "$marker" '.[] | select(.user.type=="Bot" and (.body | contains($marker))) | .id' 2>/dev/null | head -n1)"
+			  if [ -n "$existing_id" ]; then
+			    gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$body" >/dev/null 2>&1
+			  else
+			    gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -f body="$body" >/dev/null 2>&1
+			  fi
+			  set -e
+
+			  return 0
 			}
 
 			if [ "$event_action" = "closed" ]; then
@@ -160,13 +167,13 @@ tasks: {
 			  exit 0
 			fi
 
-			log_file="$(mktemp)"
 			set +e
-			bun x wrangler deploy --config wrangler.jsonc --name "$worker_name" 2>&1 | tee "$log_file"
-			deploy_status=${PIPESTATUS[0]}
+			deploy_output="$(bun x wrangler deploy --config wrangler.jsonc --name "$worker_name" 2>&1)"
+			deploy_status=$?
 			set -e
+			printf '%s\n' "$deploy_output"
 
-			preview_url="$(grep -Eo 'https://[^ ]+[.]workers[.]dev' "$log_file" | head -n1 || true)"
+			preview_url="$(printf '%s\n' "$deploy_output" | grep -Eo 'https://[^ ]+[.]workers[.]dev' | head -n1 || true)"
 			if [ "$deploy_status" -eq 0 ]; then
 			  body="$marker
 			GUI preview deployed
@@ -184,6 +191,7 @@ tasks: {
 			Outcome: failure
 			Logs: ${run_url}"
 			upsert_comment "$body"
+			echo "Preview deployment failed with exit status: $deploy_status"
 			exit "$deploy_status"
 			""",
 		]
