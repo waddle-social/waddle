@@ -9,6 +9,7 @@ import { useAuthStore } from '../stores/auth';
 import { useRoomsStore } from '../stores/rooms';
 import { useVCardStore } from '../stores/vcard';
 import AvatarImage from './AvatarImage.vue';
+import { decodeRouteParam } from '../utils/routeParams';
 
 const router = useRouter();
 const route = useRoute();
@@ -48,11 +49,7 @@ function getAvatarColor(jid: string): string {
 
 function isActiveChat(jid: string): boolean {
   if (route.name !== 'chat') return false;
-  try {
-    return decodeURIComponent(String(route.params.jid ?? '')) === jid;
-  } catch {
-    return false;
-  }
+  return decodeRouteParam(String(route.params.jid ?? '')) === jid;
 }
 
 function openChat(jid: string): void {

@@ -1,4 +1,5 @@
 import { ref, readonly } from 'vue';
+import { isTauriRuntime } from '../utils/runtime';
 
 /* ------------------------------------------------------------------ */
 /*  Public types                                                       */
@@ -123,10 +124,6 @@ export interface WaddleTransport {
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
 
 function toFrontendEventChannel(channel: string): string {
   return channel.replace(/\./g, ':');
@@ -991,7 +988,7 @@ const ready = ref(false);
 const connected = ref(false);
 
 async function initTransport(): Promise<WaddleTransport> {
-  if (isTauri()) {
+  if (isTauriRuntime()) {
     return createTauriTransport();
   }
   try {

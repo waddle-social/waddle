@@ -7,6 +7,7 @@ import { useConversations } from './composables/useConversations';
 import { useRuntimeStore } from './stores/runtime';
 import { useAuthStore } from './stores/auth';
 import SidebarNav from './components/SidebarNav.vue';
+import { decodeRouteParam } from './utils/routeParams';
 
 useTheme();
 
@@ -16,14 +17,6 @@ const authStore = useAuthStore();
 const { setActiveConversation, startListening, stopListening } = useConversations();
 
 const isLoginRoute = computed(() => route.name === 'login');
-
-function decodeRouteJid(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
 
 // Only bootstrap runtime & conversations when authenticated
 watch(
@@ -48,7 +41,7 @@ watch(
       setActiveConversation(null);
       return;
     }
-    setActiveConversation(decodeRouteJid(String(routeJid ?? '')));
+    setActiveConversation(decodeRouteParam(String(routeJid ?? '')));
   },
   { immediate: true },
 );
