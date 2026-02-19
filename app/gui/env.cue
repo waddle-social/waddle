@@ -170,6 +170,24 @@ tasks: {
 			printf '%s\n' "$deploy_output"
 
 			if [ "$deploy_status" -eq 0 ]; then
+			  preview_url="$(printf '%s\n' "$deploy_output" | grep -Eo 'https://[^ ]+[.]workers[.]dev' | head -n1 || true)"
+			  if [ -n "$preview_url" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+			    marker='<!-- waddle-gui-preview -->'
+			    body="$marker
+			GUI preview deployed
+
+			URL: $preview_url
+			Worker: $worker_name"
+
+			    set +e
+			    existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" --paginate --jq '.[] | select(.user.type==\"Bot\" and (.body | contains(\"<!-- waddle-gui-preview -->\"))) | .id' 2>/dev/null | head -n1 || true)"
+			    if [ -n "$existing_id" ]; then
+			      gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$body" >/dev/null 2>&1
+			    else
+			      gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -f body="$body" >/dev/null 2>&1
+			    fi
+			    set -e
+			  fi
 			  echo "deployPreview script completed successfully"
 			  exit 0
 			fi
