@@ -209,10 +209,6 @@ function getAvatarColor(name: string): string {
   return colors[Math.abs(hash) % colors.length] ?? colors[0] ?? '#5865f2';
 }
 
-function getInitials(name: string): string {
-  return name.slice(0, 2).toUpperCase();
-}
-
 function defaultOutboundStatus(): MessageDeliveryStatus {
   return connectionStatus.value === 'connected' ? 'sent' : 'queued';
 }

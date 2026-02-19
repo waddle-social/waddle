@@ -1,0 +1,25 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "waddle-gui",
+  "compatibility_date": "2025-09-10",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "workers_dev": true,
+  "env": {
+    "production": {
+      "workers_dev": false,
+      "routes": [
+        {
+          "pattern": "app.waddle.chat",
+          "custom_domain": true
+        }
+      ]
+    }
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
