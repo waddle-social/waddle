@@ -151,7 +151,7 @@ tasks: {
 			  body="$marker
 			GUI preview cleaned up
 
-			Worker: `$worker_name`
+			Worker: $worker_name
 			Status: deleted on PR close."
 			  upsert_comment "$body"
 			  exit 0
@@ -169,7 +169,7 @@ tasks: {
 			GUI preview deployed
 
 			URL: ${preview_url:-"(deployment URL not reported by command output)"}
-			Worker: `$worker_name`"
+			Worker: $worker_name"
 			  upsert_comment "$body"
 			  exit 0
 			fi
@@ -177,8 +177,8 @@ tasks: {
 			body="$marker
 			GUI preview deploy failed
 
-			Worker: `$worker_name`
-			Outcome: `failure`
+			Worker: $worker_name
+			Outcome: failure
 			Logs: ${run_url}"
 			upsert_comment "$body"
 			exit "$deploy_status"
