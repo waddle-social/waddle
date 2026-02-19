@@ -444,7 +444,10 @@ mod tests {
         claims.raw_claims = json!({});
 
         let username = IdentityService::derive_base_username(&provider, &claims);
-        assert!(username.starts_with("provider_"));
-        assert_eq!(username.len(), "provider_".len() + 8);
+        let prefix = "ext_provider_";
+        assert!(username.starts_with(prefix));
+        let suffix = &username[prefix.len()..];
+        assert_eq!(suffix.len(), 12);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
