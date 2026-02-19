@@ -33,6 +33,7 @@ pub mod did;
 pub mod dpop;
 pub mod jid;
 pub mod native;
+pub mod profile;
 pub mod session;
 
 use thiserror::Error;

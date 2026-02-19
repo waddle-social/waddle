@@ -75,8 +75,8 @@ use crate::xep::xep0049::{
     parse_private_storage_get, parse_private_storage_set,
 };
 use crate::xep::xep0054::{
-    build_empty_vcard_response, build_vcard_response, build_vcard_success, is_vcard_get,
-    is_vcard_set, parse_vcard_from_iq,
+    build_empty_vcard_response, build_vcard_success, is_vcard_get,
+    is_vcard_set,
 };
 use crate::xep::xep0077::RegistrationError;
 use crate::xep::xep0191::{
@@ -287,9 +287,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         if let Ok(Some(vcard_xml)) = self.app_state.get_vcard(&full_jid.to_bare()).await {
             if let Ok(elem) = vcard_xml.parse::<minidom::Element>() {
                 if let Ok(vcard) = crate::xep::xep0054::parse_vcard_element(&elem) {
-                    if let Some(ref photo) = vcard.photo {
+                    if let Some(crate::xep::xep0054::VCardPhoto::Binary { ref data, .. }) =
+                        vcard.photo
+                    {
                         self.avatar_hash =
-                            crate::xep::xep0153::compute_photo_hash_from_base64(&photo.data);
+                            crate::xep::xep0153::compute_photo_hash_from_base64(data);
                         debug!(
                             jid = %full_jid,
                             avatar_hash = ?self.avatar_hash,
@@ -4403,7 +4405,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                                                             // Update vCard with the photo
                                                             let vcard = crate::xep::xep0054::VCard {
                                                                 photo: Some(
-                                                                    crate::xep::xep0054::VCardPhoto {
+                                                                    crate::xep::xep0054::VCardPhoto::Binary {
                                                                         mime_type,
                                                                         data: photo_b64.clone(),
                                                                     },
@@ -5388,13 +5390,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         let response = match vcard_xml {
             Some(xml) => {
-                // Parse the stored XML to build the response
+                // Return stored XML directly to preserve all fields (EXTVAL, DESC, etc.)
                 match xml.parse::<minidom::Element>() {
-                    Ok(elem) => {
-                        let vcard =
-                            crate::xep::xep0054::parse_vcard_element(&elem).unwrap_or_default();
-                        build_vcard_response(&iq, &vcard)
-                    }
+                    Ok(vcard_elem) => xmpp_parsers::iq::Iq {
+                        from: iq.to.clone(),
+                        to: iq.from.clone(),
+                        id: iq.id.clone(),
+                        payload: xmpp_parsers::iq::IqType::Result(Some(vcard_elem)),
+                    },
                     Err(_) => {
                         // If stored XML is invalid, return empty vCard
                         warn!(target = %target_jid, "Stored vCard XML invalid, returning empty");
@@ -5447,12 +5450,25 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         debug!(jid = %sender_jid, "Processing vCard set request");
 
-        // Parse the vCard from the IQ
-        let vcard = parse_vcard_from_iq(&iq)
+        // Extract the raw vCard element from the IQ for storage (preserves all fields)
+        let vcard_elem = match &iq.payload {
+            xmpp_parsers::iq::IqType::Set(elem)
+                if elem.name() == "vCard" && elem.ns() == crate::xep::xep0054::NS_VCARD =>
+            {
+                elem.clone()
+            }
+            _ => {
+                return Err(XmppError::bad_request(Some(
+                    "Missing vCard element".to_string(),
+                )));
+            }
+        };
+
+        // Parse for validation and to extract photo for avatar hash computation
+        let vcard = crate::xep::xep0054::parse_vcard_element(&vcard_elem)
             .map_err(|e| XmppError::bad_request(Some(format!("Invalid vCard: {}", e))))?;
 
-        // Build the vCard XML for storage
-        let vcard_elem = crate::xep::xep0054::build_vcard_element(&vcard);
+        // Store the raw XML directly (preserves EXTVAL, DESC, and any other fields)
         let vcard_xml = String::from(&vcard_elem);
 
         // Store the vCard
@@ -5460,18 +5476,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .set_vcard(&sender_jid.to_bare(), &vcard_xml)
             .await?;
 
-        // XEP-0153: Compute avatar hash from vCard PHOTO if present
-        if let Some(ref photo) = vcard.photo {
-            let hash = crate::xep::xep0153::compute_photo_hash_from_base64(&photo.data);
-            self.avatar_hash = hash;
+        // XEP-0153: Compute avatar hash from vCard PHOTO if present (only for BINVAL)
+        match &vcard.photo {
+            Some(crate::xep::xep0054::VCardPhoto::Binary { data, mime_type }) => {
+                let hash = crate::xep::xep0153::compute_photo_hash_from_base64(data);
+                self.avatar_hash = hash;
 
-            // XEP-0398: Convert vCard PHOTO to PEP avatar (if not already converting)
-            if !self.converting_avatar {
-                self.converting_avatar = true;
-                let converter = crate::xep::xep0398::DefaultAvatarConversion;
-                if let Some((avatar_info, avatar_data_b64)) =
-                    converter.on_vcard_photo_updated(&photo.data, &photo.mime_type)
-                {
+                // XEP-0398: Convert vCard PHOTO to PEP avatar (if not already converting)
+                if !self.converting_avatar {
+                    self.converting_avatar = true;
+                    let converter = crate::xep::xep0398::DefaultAvatarConversion;
+                    if let Some((avatar_info, avatar_data_b64)) =
+                        converter.on_vcard_photo_updated(data, mime_type)
+                    {
                     // Publish avatar data to PEP
                     let data_elem = crate::xep::xep0084::build_avatar_data(&avatar_data_b64);
                     let data_item = PubSubItem::new(Some(avatar_info.id.clone()), Some(data_elem));
@@ -5501,11 +5518,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         )
                         .await;
                 }
-                self.converting_avatar = false;
+                    self.converting_avatar = false;
+                }
             }
-        } else {
-            // No photo in vCard, clear the hash
-            self.avatar_hash = None;
+            Some(crate::xep::xep0054::VCardPhoto::External { .. }) => {
+                // EXTVAL photos are URL references — no binary data to hash
+                // Clear any previous binary avatar hash
+                self.avatar_hash = None;
+            }
+            None => {
+                // No photo in vCard, clear the hash
+                self.avatar_hash = None;
+            }
         }
 
         // Send success response

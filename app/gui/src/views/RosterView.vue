@@ -3,8 +3,11 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { type RosterItem, type UnlistenFn, useWaddle } from '../composables/useWaddle';
+import { useVCardStore } from '../stores/vcard';
+import AvatarImage from '../components/AvatarImage.vue';
 
-const { addContact, getRoster, listen } = useWaddle();
+const { addContact, getRoster, getVCard, setVCard, listen } = useWaddle();
+const vcardStore = useVCardStore();
 const router = useRouter();
 
 const entries = ref<RosterItem[]>([]);
@@ -29,25 +32,14 @@ const orderedGroupNames = computed(() =>
 );
 
 function contactName(entry: RosterItem): string {
-  return entry.name?.trim() || entry.jid;
+  return vcardStore.getDisplayName(entry.jid, entry.name);
 }
 
-function getInitials(name: string): string {
-  const parts = name.split(/[@.\s]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    const first = parts[0]?.[0] ?? '';
-    const second = parts[1]?.[0] ?? '';
-    return `${first}${second}`.toUpperCase();
-  }
-  return name.slice(0, 2).toUpperCase();
+function contactAvatar(entry: RosterItem): string | null {
+  return vcardStore.getAvatarUrl(entry.jid);
 }
 
-function getAvatarColor(jid: string): string {
-  const colors = ['#5865f2', '#57f287', '#fee75c', '#eb459e', '#ed4245', '#3ba55c', '#faa61a', '#e67e22'];
-  let hash = 0;
-  for (const ch of jid) hash = ch.charCodeAt(0) + ((hash << 5) - hash);
-  return colors[Math.abs(hash) % colors.length] ?? colors[0] ?? '#5865f2';
-}
+
 
 function groupEntries(groupName: string): RosterItem[] {
   return grouped.value[groupName] ?? [];
@@ -98,7 +90,22 @@ const rosterEvents = [
 const unlistenFns: UnlistenFn[] = [];
 
 onMounted(async () => {
+  // Initialize vCard store if not already done
+  if (!vcardStore.initialized) {
+    const selfJid = entries.value[0]?.jid ?? ''; // will be set properly after roster load
+    vcardStore.init(getVCard, setVCard, selfJid);
+  }
+
   await refreshRoster();
+
+  // Batch fetch vCards for all roster contacts (FR-2.2, non-blocking)
+  const contactJids = entries.value.map(e => e.jid);
+  if (contactJids.length > 0) {
+    vcardStore.fetchBatch(contactJids).catch(err =>
+      console.warn('[roster] vCard batch fetch failed:', err)
+    );
+  }
+
   for (const channel of rosterEvents) {
     try {
       const unlisten = await listen(channel, () => { void refreshRoster(); });
@@ -172,12 +179,12 @@ onUnmounted(() => {
               @click="openChat(entry.jid)"
             >
               <!-- Avatar -->
-              <div
-                class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white"
-                :style="{ backgroundColor: getAvatarColor(entry.jid) }"
-              >
-                {{ getInitials(contactName(entry)) }}
-              </div>
+              <AvatarImage
+                :jid="entry.jid"
+                :name="contactName(entry)"
+                :photo-url="contactAvatar(entry)"
+                :size="32"
+              />
               <!-- Info -->
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-medium text-foreground">{{ contactName(entry) }}</p>

@@ -7,12 +7,15 @@ import { useConversations } from '../composables/useConversations';
 import { useRuntimeStore } from '../stores/runtime';
 import { useAuthStore } from '../stores/auth';
 import { useRoomsStore } from '../stores/rooms';
+import { useVCardStore } from '../stores/vcard';
+import AvatarImage from './AvatarImage.vue';
 
 const router = useRouter();
 const route = useRoute();
 const runtimeStore = useRuntimeStore();
 const authStore = useAuthStore();
 const roomsStore = useRoomsStore();
+const vcardStore = useVCardStore();
 const { connectionStatus } = storeToRefs(runtimeStore);
 
 const { conversations } = useConversations();
@@ -134,6 +137,16 @@ onUnmounted(() => {
         Rooms
       </RouterLink>
       <RouterLink
+        to="/profile"
+        class="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted transition-colors hover:bg-hover hover:text-foreground"
+        active-class="!bg-active !text-foreground"
+      >
+        <svg class="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+        </svg>
+        Profile
+      </RouterLink>
+      <RouterLink
         to="/settings"
         class="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-muted transition-colors hover:bg-hover hover:text-foreground"
         active-class="!bg-active !text-foreground"
@@ -178,12 +191,12 @@ onUnmounted(() => {
             @click="openChat(convo.jid)"
           >
             <!-- Avatar -->
-            <div
-              class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white"
-              :style="{ backgroundColor: getAvatarColor(convo.jid) }"
-            >
-              {{ getInitials(convo.title) }}
-            </div>
+            <AvatarImage
+              :jid="convo.jid"
+              :name="vcardStore.getDisplayName(convo.jid) || convo.title"
+              :photo-url="vcardStore.getAvatarUrl(convo.jid)"
+              :size="32"
+            />
             <!-- Name + preview -->
             <div class="min-w-0 flex-1">
               <div class="flex items-center justify-between gap-1">
@@ -191,7 +204,7 @@ onUnmounted(() => {
                   class="truncate text-sm font-medium"
                   :class="isActiveChat(convo.jid) ? 'text-foreground' : 'text-muted'"
                 >
-                  {{ convo.title }}
+                  {{ vcardStore.getDisplayName(convo.jid) || convo.title }}
                 </span>
                 <span v-if="convo.updatedAt" class="flex-shrink-0 text-[10px] text-muted">
                   {{ formatTime(convo.updatedAt) }}

@@ -55,15 +55,25 @@ pub struct VCard {
     pub org: Option<String>,
     /// Title/role (TITLE element)
     pub title: Option<String>,
+    /// Description (DESC element)
+    pub desc: Option<String>,
 }
 
-/// Photo data for vCard.
+/// Photo data for vCard — either inline base64 (BINVAL) or external URL (EXTVAL).
 #[derive(Debug, Clone)]
-pub struct VCardPhoto {
-    /// MIME type (e.g., "image/png", "image/jpeg")
-    pub mime_type: String,
-    /// Base64-encoded photo data
-    pub data: String,
+pub enum VCardPhoto {
+    /// Inline base64-encoded photo (TYPE + BINVAL).
+    Binary {
+        /// MIME type (e.g., "image/png", "image/jpeg")
+        mime_type: String,
+        /// Base64-encoded photo data
+        data: String,
+    },
+    /// External photo URL (EXTVAL).
+    External {
+        /// URL pointing to the photo
+        url: String,
+    },
 }
 
 /// Errors that can occur during vCard processing.
@@ -162,19 +172,38 @@ pub fn parse_vcard_element(elem: &Element) -> Result<VCard, VCardError> {
         }
     }
 
-    // Parse PHOTO
+    // Parse PHOTO — supports both BINVAL (inline base64) and EXTVAL (URL)
     if let Some(photo_elem) = elem.get_child("PHOTO", NS_VCARD) {
-        let mime_type = photo_elem
-            .get_child("TYPE", NS_VCARD)
-            .map(|e| e.text())
-            .filter(|s| !s.is_empty());
-        let data = photo_elem
-            .get_child("BINVAL", NS_VCARD)
+        // Try EXTVAL first (URL reference)
+        let extval = photo_elem
+            .get_child("EXTVAL", NS_VCARD)
             .map(|e| e.text())
             .filter(|s| !s.is_empty());
 
-        if let (Some(mime_type), Some(data)) = (mime_type, data) {
-            vcard.photo = Some(VCardPhoto { mime_type, data });
+        if let Some(url) = extval {
+            vcard.photo = Some(VCardPhoto::External { url });
+        } else {
+            // Fall back to TYPE + BINVAL (inline base64)
+            let mime_type = photo_elem
+                .get_child("TYPE", NS_VCARD)
+                .map(|e| e.text())
+                .filter(|s| !s.is_empty());
+            let data = photo_elem
+                .get_child("BINVAL", NS_VCARD)
+                .map(|e| e.text())
+                .filter(|s| !s.is_empty());
+
+            if let (Some(mime_type), Some(data)) = (mime_type, data) {
+                vcard.photo = Some(VCardPhoto::Binary { mime_type, data });
+            }
+        }
+    }
+
+    // Parse DESC (Description)
+    if let Some(desc_elem) = elem.get_child("DESC", NS_VCARD) {
+        let text = desc_elem.text();
+        if !text.is_empty() {
+            vcard.desc = Some(text);
         }
     }
 
@@ -278,18 +307,27 @@ pub fn build_vcard_element(vcard: &VCard) -> Element {
 
     // Add PHOTO
     if let Some(ref photo) = vcard.photo {
-        let photo_elem = Element::builder("PHOTO", NS_VCARD)
-            .append(
-                Element::builder("TYPE", NS_VCARD)
-                    .append(photo.mime_type.as_str())
-                    .build(),
-            )
-            .append(
-                Element::builder("BINVAL", NS_VCARD)
-                    .append(photo.data.as_str())
-                    .build(),
-            )
-            .build();
+        let photo_elem = match photo {
+            VCardPhoto::Binary { mime_type, data } => Element::builder("PHOTO", NS_VCARD)
+                .append(
+                    Element::builder("TYPE", NS_VCARD)
+                        .append(mime_type.as_str())
+                        .build(),
+                )
+                .append(
+                    Element::builder("BINVAL", NS_VCARD)
+                        .append(data.as_str())
+                        .build(),
+                )
+                .build(),
+            VCardPhoto::External { url } => Element::builder("PHOTO", NS_VCARD)
+                .append(
+                    Element::builder("EXTVAL", NS_VCARD)
+                        .append(url.as_str())
+                        .build(),
+                )
+                .build(),
+        };
         builder = builder.append(photo_elem);
     }
 
@@ -312,6 +350,15 @@ pub fn build_vcard_element(vcard: &VCard) -> Element {
         builder = builder.append(
             Element::builder("NOTE", NS_VCARD)
                 .append(note.as_str())
+                .build(),
+        );
+    }
+
+    // Add DESC (Description)
+    if let Some(ref desc) = vcard.desc {
+        builder = builder.append(
+            Element::builder("DESC", NS_VCARD)
+                .append(desc.as_str())
                 .build(),
         );
     }
@@ -561,9 +608,13 @@ mod tests {
         let vcard = parse_vcard_element(&vcard_elem).unwrap();
 
         assert!(vcard.photo.is_some());
-        let photo = vcard.photo.unwrap();
-        assert_eq!(photo.mime_type, "image/png");
-        assert_eq!(photo.data, "iVBORw0KGgo=");
+        match vcard.photo.unwrap() {
+            VCardPhoto::Binary { mime_type, data } => {
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(data, "iVBORw0KGgo=");
+            }
+            _ => panic!("Expected Binary photo"),
+        }
     }
 
     #[test]
@@ -590,6 +641,7 @@ mod tests {
             birthday: Some("1990-01-15".to_string()),
             org: Some("Example Corp".to_string()),
             title: Some("Engineer".to_string()),
+            desc: None,
         };
 
         let elem = build_vcard_element(&vcard);
@@ -707,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_vcard() {
+    fn test_roundtrip_vcard_binval() {
         let original = VCard {
             full_name: Some("Round Trip".to_string()),
             nickname: Some("rt".to_string()),
@@ -717,7 +769,8 @@ mod tests {
             birthday: Some("2000-12-31".to_string()),
             org: Some("Test Org".to_string()),
             title: Some("Tester".to_string()),
-            photo: Some(VCardPhoto {
+            desc: Some("A description".to_string()),
+            photo: Some(VCardPhoto::Binary {
                 mime_type: "image/jpeg".to_string(),
                 data: "dGVzdA==".to_string(),
             }),
@@ -734,9 +787,81 @@ mod tests {
         assert_eq!(original.birthday, parsed.birthday);
         assert_eq!(original.org, parsed.org);
         assert_eq!(original.title, parsed.title);
+        assert_eq!(original.desc, parsed.desc);
         assert!(parsed.photo.is_some());
-        let photo = parsed.photo.unwrap();
-        assert_eq!(photo.mime_type, "image/jpeg");
-        assert_eq!(photo.data, "dGVzdA==");
+        match parsed.photo.unwrap() {
+            VCardPhoto::Binary { mime_type, data } => {
+                assert_eq!(mime_type, "image/jpeg");
+                assert_eq!(data, "dGVzdA==");
+            }
+            _ => panic!("Expected Binary photo"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_vcard_extval() {
+        let original = VCard {
+            full_name: Some("External Photo".to_string()),
+            desc: Some("Has an external avatar".to_string()),
+            photo: Some(VCardPhoto::External {
+                url: "https://cdn.bsky.app/img/avatar/plain/did:plc:abc123/cid@jpeg".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let elem = build_vcard_element(&original);
+        let parsed = parse_vcard_element(&elem).unwrap();
+
+        assert_eq!(parsed.full_name, Some("External Photo".to_string()));
+        assert_eq!(parsed.desc, Some("Has an external avatar".to_string()));
+        match parsed.photo.unwrap() {
+            VCardPhoto::External { url } => {
+                assert_eq!(
+                    url,
+                    "https://cdn.bsky.app/img/avatar/plain/did:plc:abc123/cid@jpeg"
+                );
+            }
+            _ => panic!("Expected External photo"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vcard_with_desc() {
+        let vcard_elem = Element::builder("vCard", NS_VCARD)
+            .append(Element::builder("FN", NS_VCARD).append("Test User").build())
+            .append(
+                Element::builder("DESC", NS_VCARD)
+                    .append("A bio from Bluesky")
+                    .build(),
+            )
+            .build();
+
+        let vcard = parse_vcard_element(&vcard_elem).unwrap();
+        assert_eq!(vcard.full_name, Some("Test User".to_string()));
+        assert_eq!(vcard.desc, Some("A bio from Bluesky".to_string()));
+    }
+
+    #[test]
+    fn test_parse_vcard_with_extval_photo() {
+        let vcard_elem = Element::builder("vCard", NS_VCARD)
+            .append(
+                Element::builder("PHOTO", NS_VCARD)
+                    .append(
+                        Element::builder("EXTVAL", NS_VCARD)
+                            .append("https://example.com/avatar.jpg")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let vcard = parse_vcard_element(&vcard_elem).unwrap();
+        assert!(vcard.photo.is_some());
+        match vcard.photo.unwrap() {
+            VCardPhoto::External { url } => {
+                assert_eq!(url, "https://example.com/avatar.jpg");
+            }
+            _ => panic!("Expected External photo"),
+        }
     }
 }

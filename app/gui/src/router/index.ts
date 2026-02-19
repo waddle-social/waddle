@@ -6,6 +6,7 @@ import LoginView from '../views/LoginView.vue';
 import PluginView from '../views/PluginView.vue';
 import RoomsView from '../views/RoomsView.vue';
 import RosterView from '../views/RosterView.vue';
+import ProfileView from '../views/ProfileView.vue';
 import SettingsView from '../views/SettingsView.vue';
 
 const routes: RouteRecordRaw[] = [
@@ -35,6 +36,11 @@ const routes: RouteRecordRaw[] = [
     path: '/rooms',
     name: 'rooms',
     component: RoomsView,
+  },
+  {
+    path: '/profile',
+    name: 'profile',
+    component: ProfileView,
   },
   {
     path: '/settings',
