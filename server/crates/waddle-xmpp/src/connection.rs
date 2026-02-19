@@ -3895,22 +3895,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         ))));
                     }
 
-                    // Non-self bare-JID queries without a node are not supported
-                    if query.node.is_none() {
+                    // Non-self bare-JID disco#info is currently unsupported in this
+                    // implementation (both with and without a node), even when
+                    // presence subscription exists.
+                    if query.node.is_some() {
                         return Err(XmppError::service_unavailable(Some(format!(
-                            "disco#info on bare JID {} without node is not supported for other users",
+                            "disco#info on bare JID {} with node is not supported for other users",
                             target_bare
                         ))));
                     }
 
-                    // For queries with a node from other users, check if the
-                    // target is online and we actually have entity capabilities
-                    // cached for that node.  We don't implement caps caching,
-                    // so node queries to other users always return item-not-found.
-                    return Err(XmppError::item_not_found(Some(format!(
-                        "No cached capabilities for {} node '{}'",
-                        target_bare,
-                        query.node.as_deref().unwrap_or("")
+                    return Err(XmppError::service_unavailable(Some(format!(
+                        "disco#info on bare JID {} without node is not supported for other users",
+                        target_bare
                     ))));
                 }
 
