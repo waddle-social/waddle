@@ -73,8 +73,9 @@ mod tests {
         let embed = MessageEmbed {
             namespace: "urn:waddle:github:0".to_string(),
             data: json!({
+                "type": "repo",
                 "owner": "rust-lang",
-                "repo": "rust",
+                "name": "rust",
                 "url": "https://github.com/rust-lang/rust",
                 "description": "Rust Programming Language"
             }),
@@ -121,6 +122,6 @@ mod tests {
 
         let data = &stored_embed.data;
         assert_eq!(data["owner"], "rust-lang");
-        assert_eq!(data["repo"], "rust");
+        assert_eq!(data["name"], "rust");
     }
 }
