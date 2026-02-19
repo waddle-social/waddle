@@ -271,7 +271,7 @@ async fn handle_xmpp_frame(
 
     // Handle IQ stanzas
     if frame.starts_with("<iq") {
-        return handle_iq(frame, domain, &muc_domain);
+        return handle_iq(frame, domain, &muc_domain, state).await;
     }
 
     // Handle message stanzas
@@ -472,7 +472,7 @@ async fn handle_presence(
 /// Handle MUC room join
 async fn handle_muc_join(
     state: &WebSocketState,
-    domain: &str,
+    _domain: &str,
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
@@ -642,7 +642,12 @@ async fn handle_muc_leave(
 }
 
 /// Handle IQ stanzas
-fn handle_iq(frame: &str, domain: &str, muc_domain: &str) -> Vec<String> {
+async fn handle_iq(
+    frame: &str,
+    domain: &str,
+    muc_domain: &str,
+    state: &WebSocketState,
+) -> Vec<String> {
     let id = extract_attr(frame, "id").unwrap_or_default();
     let to = extract_attr(frame, "to");
 
@@ -674,6 +679,22 @@ fn handle_iq(frame: &str, domain: &str, muc_domain: &str) -> Vec<String> {
                 id, muc_domain
             )];
         }
+        // Disco info on a specific room
+        if let Some(target) = to.as_deref() {
+            let room_target = target.split('/').next().unwrap_or(target);
+            if let Ok(room_jid) = room_target.parse::<BareJid>() {
+                if state.muc_registry.is_muc_jid(&room_jid) {
+                    let room_name = room_jid
+                        .node()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "Room".to_string());
+                    return vec![format!(
+                        r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#info"><identity category="conference" type="text" name="{}"/><feature var="http://jabber.org/protocol/muc"/></query></iq>"#,
+                        id, room_jid, room_name
+                    )];
+                }
+            }
+        }
         // Disco info on server
         return vec![format!(
             r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#info"><identity category="server" type="im" name="Waddle"/><feature var="urn:xmpp:ping"/><feature var="http://jabber.org/protocol/disco#info"/><feature var="http://jabber.org/protocol/disco#items"/></query></iq>"#,
@@ -685,15 +706,81 @@ fn handle_iq(frame: &str, domain: &str, muc_domain: &str) -> Vec<String> {
     if frame.contains("http://jabber.org/protocol/disco#items") {
         if to.as_deref() == Some(muc_domain) {
             debug!("Disco items query on MUC service");
+            let mut rooms = state.muc_registry.list_rooms();
+            rooms.sort_by_key(|room| room.to_string());
+            let items_xml = if rooms.is_empty() {
+                format!(r#"<item jid="lobby@{}" name="Lobby"/>"#, muc_domain)
+            } else {
+                rooms
+                    .into_iter()
+                    .map(|room_jid| {
+                        let name = room_jid
+                            .node()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| room_jid.to_string());
+                        format!(r#"<item jid="{}" name="{}"/>"#, room_jid, name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            };
             return vec![format!(
-                r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="lobby@{}" name="Lobby"/></query></iq>"#,
-                id, muc_domain, muc_domain
+                r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#items">{}</query></iq>"#,
+                id, muc_domain, items_xml
             )];
         }
         debug!("Disco items query on server");
         return vec![format!(
             r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="{}" name="Chatrooms"/></query></iq>"#,
             id, domain, muc_domain
+        )];
+    }
+
+    // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
+    // This is needed for clients that create a room by:
+    // 1) joining via presence
+    // 2) submitting an empty owner form (`jabber:x:data` type='submit')
+    if frame.contains("http://jabber.org/protocol/muc#owner") {
+        let Some(target) = to.as_deref() else {
+            return vec![format!(
+                r#"<iq id="{}" type="error"><error type="modify"><bad-request xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
+                id
+            )];
+        };
+
+        let room_target = target.split('/').next().unwrap_or(target);
+        let Ok(room_jid) = room_target.parse::<BareJid>() else {
+            return vec![format!(
+                r#"<iq id="{}" type="error"><error type="modify"><jid-malformed xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
+                id
+            )];
+        };
+
+        if !state.muc_registry.is_muc_jid(&room_jid) {
+            return vec![format!(
+                r#"<iq id="{}" type="error"><error type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
+                id
+            )];
+        }
+
+        if frame.contains("<destroy") {
+            if state.muc_registry.destroy_room(&room_jid).is_some() {
+                debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
+                return vec![format!(
+                    r#"<iq id="{}" from="{}" type="result"/>"#,
+                    id, room_jid
+                )];
+            }
+
+            return vec![format!(
+                r#"<iq id="{}" type="error"><error type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
+                id
+            )];
+        }
+
+        // Treat all other owner IQ sets as successful config submit for instant rooms.
+        return vec![format!(
+            r#"<iq id="{}" from="{}" type="result"/>"#,
+            id, room_jid
         )];
     }
 
