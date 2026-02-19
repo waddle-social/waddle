@@ -49,6 +49,13 @@ const loading = ref(false);
 const sending = ref(false);
 const error = ref<string | null>(null);
 const messagesContainer = ref<HTMLElement | null>(null);
+const messagesByCanonicalId = computed<Map<string, ChatMessage>>(() => {
+  const map = new Map<string, ChatMessage>();
+  for (const message of messages.value) {
+    map.set(canonicalMessageId(message), message);
+  }
+  return map;
+});
 
 interface EventPayloadEnvelope {
   type?: string;
@@ -119,7 +126,7 @@ function clearReply(): void {
 function resolveReplyTarget(message: ChatMessage): ChatMessage | null {
   const replyId = message.replyTo?.id?.trim();
   if (!replyId) return null;
-  return messages.value.find((candidate) => canonicalMessageId(candidate) === replyId) ?? null;
+  return messagesByCanonicalId.value.get(replyId) ?? null;
 }
 
 function replyTargetName(message: ChatMessage): string {

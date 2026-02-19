@@ -167,10 +167,10 @@ impl LibSqlMamStorage {
             "ALTER TABLE mam_messages ADD COLUMN origin_id TEXT",
         )
         .await?;
-        Self::ensure_column(
+        let message_type_added = Self::ensure_column(
             conn,
             "message_type",
-            "ALTER TABLE mam_messages ADD COLUMN message_type TEXT",
+            "ALTER TABLE mam_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'chat'",
         )
         .await?;
 
@@ -184,12 +184,9 @@ impl LibSqlMamStorage {
         )
         .await?;
 
-        // Backfill nullable message_type for rows created before this column existed.
-        conn.execute(
-            "UPDATE mam_messages SET message_type = 'chat' WHERE message_type IS NULL",
-            (),
-        )
-        .await?;
+        if message_type_added {
+            debug!("Added mam_messages.message_type with NOT NULL DEFAULT 'chat'");
+        }
 
         Ok(())
     }
@@ -198,7 +195,7 @@ impl LibSqlMamStorage {
         conn: &Connection,
         column_name: &str,
         alter_statement: &str,
-    ) -> Result<(), MamStorageError> {
+    ) -> Result<bool, MamStorageError> {
         let mut rows = conn.query("PRAGMA table_info(mam_messages)", ()).await?;
         let mut exists = false;
 
@@ -212,9 +209,10 @@ impl LibSqlMamStorage {
 
         if !exists {
             conn.execute(alter_statement, ()).await?;
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 
