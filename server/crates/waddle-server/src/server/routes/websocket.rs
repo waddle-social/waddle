@@ -1229,12 +1229,12 @@ mod tests {
         let muc_domain = "muc.example.com";
         let muc_registry = MucRoomRegistry::new(muc_domain.to_string());
 
-        let server_query = r#"<iq id="srv1" type="get" to="example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let server_query = r#"<iq xmlns="jabber:client" id="srv1" type="get" to="example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
         let server_responses = handle_iq(server_query, server_domain, muc_domain, &muc_registry);
         let server_response = server_responses.first().expect("server disco response");
         assert!(server_response.contains("urn:xmpp:reply:0"));
 
-        let muc_query = r#"<iq id="muc1" type="get" to="muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let muc_query = r#"<iq xmlns="jabber:client" id="muc1" type="get" to="muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
         let muc_responses = handle_iq(muc_query, server_domain, muc_domain, &muc_registry);
         let muc_response = muc_responses.first().expect("muc disco response");
         assert!(muc_response.contains("urn:xmpp:reply:0"));
