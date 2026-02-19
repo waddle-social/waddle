@@ -914,6 +914,22 @@ fn resolve_waddle_server_binary() -> Result<PathBuf> {
     let debug_path = root.join("target").join("debug").join(bin_name);
     let release_path = root.join("target").join("release").join(bin_name);
 
+    if env_bool("WADDLE_COMPLIANCE_SKIP_SERVER_BUILD", false) {
+        if debug_path.exists() {
+            return Ok(debug_path);
+        }
+        if release_path.exists() {
+            return Ok(release_path);
+        }
+
+        bail!(
+            "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD=true but no binary found at {} or {}. \
+Run `cargo build --package waddle-server` or set WADDLE_SERVER_BIN.",
+            debug_path.display(),
+            release_path.display()
+        );
+    }
+
     // Always rebuild to ensure the harness picks up latest local source changes.
     let status = Command::new("cargo")
         .arg("build")
@@ -1312,6 +1328,93 @@ mod unit_tests {
         match previous {
             Some(value) => env::set_var(env_name, value),
             None => env::remove_var(env_name),
+        }
+    }
+
+    #[test]
+    fn test_env_bool_parsing() {
+        let env_name = "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD";
+        let previous = env::var(env_name).ok();
+
+        env::remove_var(env_name);
+        assert!(!env_bool(env_name, false));
+        assert!(env_bool(env_name, true));
+
+        env::set_var(env_name, "true");
+        assert!(env_bool(env_name, false));
+
+        env::set_var(env_name, "1");
+        assert!(env_bool(env_name, false));
+
+        env::set_var(env_name, "false");
+        assert!(!env_bool(env_name, true));
+
+        match previous {
+            Some(value) => env::set_var(env_name, value),
+            None => env::remove_var(env_name),
+        }
+    }
+
+    #[test]
+    fn test_resolve_waddle_server_binary_rejects_invalid_override_path() {
+        let server_bin_env = "WADDLE_SERVER_BIN";
+        let skip_build_env = "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD";
+        let previous_server_bin = env::var(server_bin_env).ok();
+        let previous_skip_build = env::var(skip_build_env).ok();
+
+        env::set_var(
+            server_bin_env,
+            "/tmp/waddle-server-does-not-exist-for-compliance-test",
+        );
+        env::remove_var(skip_build_env);
+
+        let error = resolve_waddle_server_binary().expect_err("invalid server bin should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("WADDLE_SERVER_BIN path does not exist"),
+            "expected clear invalid-path error, got: {error}"
+        );
+
+        match previous_server_bin {
+            Some(value) => env::set_var(server_bin_env, value),
+            None => env::remove_var(server_bin_env),
+        }
+        match previous_skip_build {
+            Some(value) => env::set_var(skip_build_env, value),
+            None => env::remove_var(skip_build_env),
+        }
+    }
+
+    #[test]
+    fn test_resolve_waddle_server_binary_honors_override_path_when_present() {
+        let server_bin_env = "WADDLE_SERVER_BIN";
+        let skip_build_env = "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD";
+        let previous_server_bin = env::var(server_bin_env).ok();
+        let previous_skip_build = env::var(skip_build_env).ok();
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "waddle-server-override-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::write(&temp_path, b"#!/bin/sh\n").expect("write temp server bin");
+        env::set_var(server_bin_env, temp_path.to_string_lossy().to_string());
+        env::set_var(skip_build_env, "true");
+
+        let resolved =
+            resolve_waddle_server_binary().expect("existing override server bin should resolve");
+        assert_eq!(resolved, temp_path);
+
+        let _ = fs::remove_file(&temp_path);
+
+        match previous_server_bin {
+            Some(value) => env::set_var(server_bin_env, value),
+            None => env::remove_var(server_bin_env),
+        }
+        match previous_skip_build {
+            Some(value) => env::set_var(skip_build_env, value),
+            None => env::remove_var(skip_build_env),
         }
     }
 

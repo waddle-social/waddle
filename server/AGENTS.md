@@ -5,8 +5,13 @@
   - `just quick`
   - `just full`
   - `just quick-caas`
+  - `just compliance-fast-local`
+  - `just compliance-full-local`
 - Run compliance via CLI entrypoint: `cargo run --bin waddle -- compliance ...`.
 - Quick CAAS-based checks are available via: `cargo run --bin compliance-quick -- --jid <jid> --password <password>`.
+- For local iteration with a prebuilt server binary, use:
+  - `cargo run --bin waddle -- compliance --skip-server-build`
+  - `cargo run --bin waddle -- compliance --server-bin <path-to-waddle-server>`
 - CLI compliance runs default to unbounded execution timeout (`WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0`) unless overridden in environment.
 - Prefer this smoke command shape:
   - `cargo run --bin waddle -- compliance --profile best_effort_full --enabled-specs RFC6120,RFC6121,XEP-0030 --artifact-dir ./test-logs/<run-name>`
