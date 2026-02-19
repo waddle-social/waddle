@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           log_file="$(mktemp)"
-          cuenv exec --path app/gui --env production \
+          cuenv exec --path . --env production \
             bun x wrangler deploy --config wrangler.jsonc --name "waddle-gui-pr-${PR_NUMBER}" \
             2>&1 | tee "$log_file"
           preview_url="$(grep -Eo 'https://[A-Za-z0-9.-]+\\.workers\\.dev' "$log_file" | head -n1 || true)"
@@ -200,7 +200,7 @@ jobs:
         continue-on-error: true
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: cuenv exec --path app/gui --env production bun x wrangler delete --config wrangler.jsonc --name "waddle-gui-pr-${PR_NUMBER}" --force
+        run: cuenv exec --path . --env production bun x wrangler delete --config wrangler.jsonc --name "waddle-gui-pr-${PR_NUMBER}" --force
 
       - name: Update preview comment
         uses: actions/github-script@v7
@@ -276,4 +276,4 @@ jobs:
           "$HOME/.local/bin/cuenv" --version
 
       - name: Deploy production via cuenv pipeline
-        run: cuenv exec --path app/gui --env production bun x wrangler deploy --config wrangler.jsonc --env production
+        run: cuenv exec --path . --env production bun x wrangler deploy --config wrangler.jsonc --env production
