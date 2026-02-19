@@ -32,6 +32,11 @@ TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
   - Never construct XML with `format!`, string concatenation, or `println!`.
   - Always build XMPP/XML payloads using Rust structs/builders (`xmpp_parsers`, `minidom::Element`, etc.) and serialize them.
 
+- XEP custom test-suite hard rule:
+  - Every implemented XEP (including advertised compatibility/profile support) MUST have a dedicated Rust custom test suite.
+  - Any PR that adds or expands XEP behavior MUST add or update that XEP’s dedicated Rust tests in the same PR.
+  - If a feature is advertised but lacks testable behavior, either implement behavior with tests or remove the advertisement.
+
 <!-- MANUAL ADDITIONS START -->
 - Breaking changes by default: do not add backwards compatibility layers, migration shims, or legacy aliases unless explicitly requested.
 - Assume no production servers/users/data for this project; prioritize clean design over compatibility.

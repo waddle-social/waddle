@@ -969,3 +969,238 @@ pub fn extract_bound_jid(response: &str) -> Option<String> {
     let jid = &response[start + 5..end];
     Some(jid.to_string())
 }
+
+/// Initialize shared test environment (tracing + crypto provider).
+pub fn init_test_env() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        install_crypto_provider();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .with_test_writer()
+            .try_init();
+    });
+}
+
+/// Establish a full authenticated and bound XMPP session.
+pub async fn establish_bound_session(
+    client: &mut RawXmppClient,
+    server: &TestServer,
+    username: &str,
+    resource: &str,
+) -> std::io::Result<String> {
+    // Initial stream.
+    client
+        .send(&format!(
+            "<?xml version='1.0'?>\
+            <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+            to='{}' version='1.0'>",
+            server.domain
+        ))
+        .await?;
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await?;
+    client.clear();
+
+    // STARTTLS.
+    client
+        .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+        .await?;
+    client.read_until("<proceed", DEFAULT_TIMEOUT).await?;
+    client.clear();
+
+    // Upgrade to TLS.
+    let connector = server.tls_connector();
+    client.upgrade_tls(connector, &server.domain).await?;
+
+    // Post-TLS stream for SASL features.
+    client
+        .send(&format!(
+            "<?xml version='1.0'?>\
+            <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+            to='{}' version='1.0'>",
+            server.domain
+        ))
+        .await?;
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await?;
+    client.clear();
+
+    // SASL PLAIN auth.
+    let auth_data = encode_sasl_plain(&format!("{}@{}", username, server.domain), "token123");
+    client
+        .send(&format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
+            auth_data
+        ))
+        .await?;
+    client.read_until("<success", DEFAULT_TIMEOUT).await?;
+    client.clear();
+
+    // Post-auth stream for bind features.
+    client
+        .send(&format!(
+            "<?xml version='1.0'?>\
+            <stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' \
+            to='{}' version='1.0'>",
+            server.domain
+        ))
+        .await?;
+    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await?;
+    client.clear();
+
+    // Resource bind.
+    client
+        .send(&format!(
+            "<iq type='set' id='bind-1' xmlns='jabber:client'>\
+                <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
+                    <resource>{}</resource>\
+                </bind>\
+            </iq>",
+            resource
+        ))
+        .await?;
+    let bind_response = client.read_until("</iq>", DEFAULT_TIMEOUT).await?;
+    client.clear();
+
+    extract_bound_jid(&bind_response).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Bind response missing <jid>",
+        )
+    })
+}
+
+/// Convert a full JID string to bare JID.
+pub fn to_bare_jid(full_jid: &str) -> Option<String> {
+    full_jid.split('/').next().map(|s| s.to_string())
+}
+
+async fn read_iq_response(client: &mut RawXmppClient) -> std::io::Result<String> {
+    let start = std::time::Instant::now();
+    loop {
+        let buffered = client.buffer.as_str();
+        if buffered.contains("</iq>")
+            || (buffered.contains("<iq") && buffered.contains("/>") && !buffered.contains("</iq>"))
+        {
+            let response = client.buffer.clone();
+            client.clear();
+            return Ok(response);
+        }
+
+        if start.elapsed() > DEFAULT_TIMEOUT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Timeout waiting for IQ response",
+            ));
+        }
+
+        let remaining = DEFAULT_TIMEOUT.saturating_sub(start.elapsed());
+        client.read(remaining).await?;
+    }
+}
+
+/// Send a disco#info query and read a single IQ response.
+pub async fn disco_info_query(
+    client: &mut RawXmppClient,
+    to: &str,
+    id: &str,
+) -> std::io::Result<String> {
+    client
+        .send(&format!(
+            "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
+                <query xmlns='http://jabber.org/protocol/disco#info'/>\
+            </iq>",
+            id, to
+        ))
+        .await?;
+    read_iq_response(client).await
+}
+
+/// Send a disco#items query and read a single IQ response.
+pub async fn disco_items_query(
+    client: &mut RawXmppClient,
+    to: &str,
+    id: &str,
+) -> std::io::Result<String> {
+    client
+        .send(&format!(
+            "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
+                <query xmlns='http://jabber.org/protocol/disco#items'/>\
+            </iq>",
+            id, to
+        ))
+        .await?;
+    read_iq_response(client).await
+}
+
+/// Send an XEP-0215 external services query.
+pub async fn extdisco_services_query(
+    client: &mut RawXmppClient,
+    to: &str,
+    id: &str,
+) -> std::io::Result<String> {
+    client
+        .send(&format!(
+            "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
+                <services xmlns='urn:xmpp:extdisco:2'/>\
+            </iq>",
+            id, to
+        ))
+        .await?;
+    read_iq_response(client).await
+}
+
+/// Send an invalid XEP-0215 extdisco IQ set request (negative path).
+pub async fn extdisco_services_set_query(
+    client: &mut RawXmppClient,
+    to: &str,
+    id: &str,
+) -> std::io::Result<String> {
+    client
+        .send(&format!(
+            "<iq type='set' id='{}' to='{}' xmlns='jabber:client'>\
+                <services xmlns='urn:xmpp:extdisco:2'/>\
+            </iq>",
+            id, to
+        ))
+        .await?;
+    read_iq_response(client).await
+}
+
+/// Join a MUC room and wait for self-presence (status code 110).
+pub async fn join_muc_room(
+    client: &mut RawXmppClient,
+    room_jid: &str,
+    nick: &str,
+) -> std::io::Result<String> {
+    client
+        .send(&format!(
+            "<presence to='{}/{}' xmlns='jabber:client'>\
+                <x xmlns='http://jabber.org/protocol/muc'>\
+                    <history maxstanzas='0'/>\
+                </x>\
+            </presence>",
+            room_jid, nick
+        ))
+        .await?;
+    let response = client.read_until("110", DEFAULT_TIMEOUT).await?;
+    client.clear();
+    Ok(response)
+}
+
+/// Send an XEP-0199 ping query and read a single IQ response.
+pub async fn ping_query(
+    client: &mut RawXmppClient,
+    to: &str,
+    id: &str,
+) -> std::io::Result<String> {
+    client
+        .send(&format!(
+            "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
+                <ping xmlns='urn:xmpp:ping'/>\
+            </iq>",
+            id, to
+        ))
+        .await?;
+    read_iq_response(client).await
+}
