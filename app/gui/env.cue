@@ -151,6 +151,7 @@ tasks: {
 			printf '%s\n' "$deploy_output"
 
 			if [ "$deploy_status" -eq 0 ]; then
+			  echo "deployPreview script completed successfully"
 			  exit 0
 			fi
 
