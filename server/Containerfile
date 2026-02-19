@@ -3,15 +3,10 @@
 # ── Cross-compilation builder ───────────────────────────────────────
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
-
-# Install cross-compilation toolchains (including arm64 OpenSSL headers)
-RUN dpkg --add-architecture arm64 \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev ca-certificates \
+# Install cross-compilation toolchains + OpenSSL build deps (for vendored build)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config ca-certificates perl make \
     gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
-    libssl-dev:arm64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Rust targets
@@ -28,41 +23,32 @@ COPY Cargo.toml ./
 COPY crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
-# ── Cook dependencies (cached layer) ───────────────────────────────
-FROM builder AS deps
-
-# Set cross-compilation env based on target platform
-ARG TARGETPLATFORM
-RUN <<EOF
-  case "$TARGETPLATFORM" in
-    linux/arm64)
-      echo "CARGO_TARGET=aarch64-unknown-linux-gnu" >> /etc/environment
-      echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> /etc/environment
-      echo "PKG_CONFIG_ALLOW_CROSS=1" >> /etc/environment
-      echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> /etc/environment
-      echo "PKG_CONFIG_SYSROOT_DIR=/" >> /etc/environment
-      echo "OPENSSL_DIR=/usr" >> /etc/environment
-      echo "OPENSSL_INCLUDE_DIR=/usr/include" >> /etc/environment
-      echo "OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> /etc/environment
-      ;;
-    *)
-      echo "CARGO_TARGET=x86_64-unknown-linux-gnu" >> /etc/environment
-      ;;
-  esac
-EOF
+# ── Cook + build for amd64 ──────────────────────────────────────────
+FROM builder AS build-amd64
 
 COPY --from=planner /workspace/recipe.json recipe.json
-
-RUN . /etc/environment && \
-    cargo chef cook --release --target "$CARGO_TARGET" --recipe-path recipe.json --package waddle-server
+RUN cargo chef cook --release --target x86_64-unknown-linux-gnu --recipe-path recipe.json --package waddle-server
 
 COPY Cargo.toml ./
 COPY crates ./crates
+RUN cargo build --release --target x86_64-unknown-linux-gnu --package waddle-server --bin waddle-server \
+    && mkdir -p /out && cp target/x86_64-unknown-linux-gnu/release/waddle-server /out/waddle-server
 
-RUN . /etc/environment && \
-    cargo build --release --target "$CARGO_TARGET" --package waddle-server --bin waddle-server && \
-    mkdir -p /out && \
-    cp "target/$CARGO_TARGET/release/waddle-server" /out/waddle-server
+# ── Cook + build for arm64 ──────────────────────────────────────────
+FROM builder AS build-arm64
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+
+COPY --from=planner /workspace/recipe.json recipe.json
+RUN cargo chef cook --release --target aarch64-unknown-linux-gnu --recipe-path recipe.json --package waddle-server
+
+COPY Cargo.toml ./
+COPY crates ./crates
+RUN cargo build --release --target aarch64-unknown-linux-gnu --package waddle-server --bin waddle-server \
+    && mkdir -p /out && cp target/aarch64-unknown-linux-gnu/release/waddle-server /out/waddle-server
+
+# ── Select correct binary ──────────────────────────────────────────
+FROM build-${TARGETARCH} AS build
 
 # ── Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -74,7 +60,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=deps /out/waddle-server /usr/local/bin/waddle-server
+COPY --from=build /out/waddle-server /usr/local/bin/waddle-server
 COPY certs ./certs
 
 EXPOSE 3000 5222 5269

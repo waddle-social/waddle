@@ -51,6 +51,8 @@ dashmap = "6.0"
 xmpp = "0.5"
 # Pin native-tls to avoid 0.2.17 compile failure with OpenSSL protocol variants
 native-tls = "=0.2.14"
+# Vendored OpenSSL for cross-compilation support (arm64)
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Object Storage
 object_store = { version = "0.11", features = ["aws"] }
