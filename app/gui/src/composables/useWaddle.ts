@@ -711,11 +711,12 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
           }
         }
 
-        // Fallback: try the conventional subdomain
-        return `conference.${domain}`;
+        // Fallback: try the server's conventional MUC subdomain.
+        // Waddle server advertises/uses `muc.<domain>`.
+        return `muc.${domain}`;
       } catch {
         // disco#items failed entirely — fall back to convention
-        return domain ? `conference.${domain}` : null;
+        return domain ? `muc.${domain}` : null;
       }
     },
 

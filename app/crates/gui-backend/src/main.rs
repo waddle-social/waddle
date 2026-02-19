@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::{BaseDirs, ProjectDirs};
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,13 @@ struct ConnectionStateResponse {
     attempt: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomInfoResponse {
+    jid: String,
+    name: String,
+}
+
 impl ConnectionStateResponse {
     fn from_connection_state(state: ConnectionState, own_jid: &str) -> Self {
         match state {
@@ -182,7 +189,7 @@ enum PluginAction {
 }
 
 struct AppState {
-    own_jid: String,
+    own_jid: Arc<Mutex<String>>,
     ui_config: UiConfigResponse,
     event_bus: Arc<dyn EventBus>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
@@ -208,6 +215,54 @@ async fn send_message(
 }
 
 #[tauri::command]
+async fn connect(
+    jid: String,
+    password: String,
+    endpoint: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let bare_jid = jid.split('/').next().unwrap_or(&jid).trim().to_string();
+    let domain = domain_from_jid(&bare_jid).ok_or_else(|| {
+        "Invalid JID. Expected format user@domain (resource optional).".to_string()
+    })?;
+
+    let (server, port) = match parse_endpoint_server_override(&endpoint) {
+        Some((host, parsed_port)) => (Some(host), parsed_port),
+        None => (Some(domain), None),
+    };
+
+    let new_config = ConnectionConfig {
+        jid: bare_jid.clone(),
+        password,
+        server,
+        port,
+        timeout_seconds: CONNECTION_TIMEOUT_SECONDS,
+        max_reconnect_attempts: CONNECTION_MAX_RECONNECT_ATTEMPTS,
+    };
+
+    let mut connection = state.connection_manager.lock().await;
+    let _ = connection.disconnect().await;
+    *connection = ConnectionManager::with_event_bus(new_config, state.event_bus.clone());
+    connection
+        .connect()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut own_jid = state.own_jid.lock().await;
+    *own_jid = bare_jid;
+    Ok(())
+}
+
+#[tauri::command]
+async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    let mut connection = state.connection_manager.lock().await;
+    connection
+        .disconnect()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn get_roster(state: State<'_, AppState>) -> Result<Vec<RosterItem>, String> {
     let mut items = state
         .roster_manager
@@ -216,7 +271,8 @@ async fn get_roster(state: State<'_, AppState>) -> Result<Vec<RosterItem>, Strin
         .map_err(|error| error.to_string())?;
 
     // Inject a synthetic entry for the connected user so they always see themselves
-    let bare_jid = state.own_jid.split('/').next().unwrap_or(&state.own_jid);
+    let own_jid = state.own_jid.lock().await.clone();
+    let bare_jid = own_jid.split('/').next().unwrap_or(&own_jid);
     let self_already_present = items.iter().any(|item| item.jid == bare_jid);
     if !self_already_present && !bare_jid.is_empty() {
         let localpart = bare_jid.split('@').next().unwrap_or(bare_jid);
@@ -257,10 +313,11 @@ async fn add_contact(jid: String, state: State<'_, AppState>) -> Result<(), Stri
 async fn get_connection_state(
     state: State<'_, AppState>,
 ) -> Result<ConnectionStateResponse, String> {
+    let own_jid = state.own_jid.lock().await.clone();
     let connection = state.connection_manager.lock().await;
     Ok(ConnectionStateResponse::from_connection_state(
         connection.state(),
-        &state.own_jid,
+        &own_jid,
     ))
 }
 
@@ -302,6 +359,306 @@ async fn leave_room(room_jid: String, state: State<'_, AppState>) -> Result<(), 
         .leave_room(&room_jid)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn discover_muc_service(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let own_jid = state.own_jid.lock().await.clone();
+    let Some(domain) = domain_from_jid(&own_jid) else {
+        return Ok(None);
+    };
+
+    match discover_muc_service_via_disco(state.inner(), &domain).await {
+        Ok(service) => Ok(Some(service)),
+        Err(_) => Ok(Some(format!("muc.{domain}"))),
+    }
+}
+
+#[tauri::command]
+async fn list_rooms(
+    service_jid: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<RoomInfoResponse>, String> {
+    let service = if service_jid.trim().is_empty() {
+        let own_jid = state.own_jid.lock().await.clone();
+        let domain = domain_from_jid(&own_jid).ok_or_else(|| {
+            "Cannot discover MUC service without a valid connected JID".to_string()
+        })?;
+        discover_muc_service_via_disco(state.inner(), &domain)
+            .await
+            .unwrap_or_else(|_| format!("muc.{domain}"))
+    } else {
+        service_jid.trim().to_string()
+    };
+
+    let iq_id = next_iq_id();
+    let iq = format!(
+        "<iq type='get' id='{iq_id}' to='{service}'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+    );
+
+    let response =
+        send_iq_and_wait_for_result(state.inner(), &iq_id, iq, Duration::from_secs(8)).await?;
+
+    let mut rooms = extract_disco_items(&response)
+        .into_iter()
+        .filter(|(jid, _)| !jid.is_empty())
+        .map(|(jid, name)| RoomInfoResponse {
+            name: name.unwrap_or_else(|| jid.clone()),
+            jid,
+        })
+        .collect::<Vec<_>>();
+
+    rooms.sort_by(|left, right| left.jid.cmp(&right.jid));
+    Ok(rooms)
+}
+
+#[tauri::command]
+async fn create_room(
+    room_jid: String,
+    nick: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut joined_subscription = state
+        .event_bus
+        .subscribe("xmpp.muc.joined")
+        .map_err(|error| error.to_string())?;
+
+    state
+        .muc_manager
+        .join_room(&room_jid, &nick)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    wait_for_muc_join(&mut joined_subscription, &room_jid, Duration::from_secs(8)).await?;
+
+    // Accept instant-room defaults with an owner config submit (XEP-0045).
+    let iq_id = next_iq_id();
+    let iq = format!(
+        "<iq type='set' id='{iq_id}' to='{room_jid}'><query xmlns='http://jabber.org/protocol/muc#owner'><x xmlns='jabber:x:data' type='submit'/></query></iq>"
+    );
+
+    send_iq_and_wait_for_result(state.inner(), &iq_id, iq, Duration::from_secs(8))
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
+async fn delete_room(room_jid: String, state: State<'_, AppState>) -> Result<(), String> {
+    let iq_id = next_iq_id();
+    let iq = format!(
+        "<iq type='set' id='{iq_id}' to='{room_jid}'><query xmlns='http://jabber.org/protocol/muc#owner'><destroy/></query></iq>"
+    );
+
+    send_iq_and_wait_for_result(state.inner(), &iq_id, iq, Duration::from_secs(8)).await?;
+
+    // Best effort local cleanup.
+    state
+        .muc_manager
+        .leave_room(&room_jid)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn next_iq_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("gui-iq-{nanos}")
+}
+
+fn domain_from_jid(jid: &str) -> Option<String> {
+    let bare = jid.split('/').next().unwrap_or(jid).trim();
+    bare.split('@')
+        .nth(1)
+        .map(str::trim)
+        .filter(|domain| !domain.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_endpoint_server_override(endpoint: &str) -> Option<(String, Option<u16>)> {
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if authority.is_empty() {
+        return None;
+    }
+
+    if let Some((host_part, port_part)) = authority.rsplit_once(':')
+        && !host_part.is_empty()
+        && !port_part.is_empty()
+        && port_part.chars().all(|ch| ch.is_ascii_digit())
+        && let Ok(port) = port_part.parse::<u16>()
+    {
+        return Some((host_part.trim_matches(['[', ']']).to_string(), Some(port)));
+    }
+
+    Some((authority.trim_matches(['[', ']']).to_string(), None))
+}
+
+fn extract_attr(xml: &str, attr: &str) -> Option<String> {
+    let pattern_double = format!("{attr}=\"");
+    if let Some(start) = xml.find(&pattern_double) {
+        let rest = &xml[start + pattern_double.len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+
+    let pattern_single = format!("{attr}='");
+    if let Some(start) = xml.find(&pattern_single) {
+        let rest = &xml[start + pattern_single.len()..];
+        if let Some(end) = rest.find('\'') {
+            return Some(rest[..end].to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_disco_items(xml: &str) -> Vec<(String, Option<String>)> {
+    let mut items = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(start_rel) = xml[cursor..].find("<item") {
+        let start = cursor + start_rel;
+        let rest = &xml[start..];
+        let Some(end_rel) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[..=end_rel];
+        if let Some(jid) = extract_attr(tag, "jid") {
+            let name = extract_attr(tag, "name");
+            items.push((jid, name));
+        }
+        cursor = start + end_rel + 1;
+    }
+
+    items
+}
+
+fn is_iq_result(xml: &str) -> bool {
+    xml.starts_with("<iq") && (xml.contains("type='result'") || xml.contains("type=\"result\""))
+}
+
+fn is_iq_error(xml: &str) -> bool {
+    xml.starts_with("<iq") && (xml.contains("type='error'") || xml.contains("type=\"error\""))
+}
+
+fn is_conference_text_identity(xml: &str) -> bool {
+    let conference =
+        xml.contains("category='conference'") || xml.contains("category=\"conference\"");
+    let text = xml.contains("type='text'") || xml.contains("type=\"text\"");
+    conference && text
+}
+
+async fn send_iq_and_wait_for_result(
+    state: &AppState,
+    iq_id: &str,
+    iq_stanza: String,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut subscription = state
+        .event_bus
+        .subscribe("xmpp.raw.stanza.received")
+        .map_err(|error| error.to_string())?;
+
+    {
+        let mut connection = state.connection_manager.lock().await;
+        connection
+            .send_stanza(iq_stanza.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("Timed out waiting for IQ result (id={iq_id})"));
+        }
+
+        let event = match tokio::time::timeout(remaining, subscription.recv()).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_) => return Err(format!("Timed out waiting for IQ result (id={iq_id})")),
+        };
+
+        let EventPayload::RawStanzaReceived { stanza } = event.payload else {
+            continue;
+        };
+
+        if extract_attr(&stanza, "id").as_deref() != Some(iq_id) {
+            continue;
+        }
+
+        if is_iq_result(&stanza) {
+            return Ok(stanza);
+        }
+
+        if is_iq_error(&stanza) {
+            return Err(format!("Server returned IQ error: {stanza}"));
+        }
+    }
+}
+
+async fn discover_muc_service_via_disco(state: &AppState, domain: &str) -> Result<String, String> {
+    let iq_id = next_iq_id();
+    let disco_items = format!(
+        "<iq type='get' id='{iq_id}' to='{domain}'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+    );
+
+    let response =
+        send_iq_and_wait_for_result(state, &iq_id, disco_items, Duration::from_secs(8)).await?;
+
+    for (jid, _) in extract_disco_items(&response) {
+        let info_id = next_iq_id();
+        let disco_info = format!(
+            "<iq type='get' id='{info_id}' to='{jid}'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>"
+        );
+
+        if let Ok(info_response) =
+            send_iq_and_wait_for_result(state, &info_id, disco_info, Duration::from_secs(5)).await
+            && is_conference_text_identity(&info_response)
+        {
+            return Ok(jid);
+        }
+    }
+
+    Ok(format!("muc.{domain}"))
+}
+
+async fn wait_for_muc_join(
+    subscription: &mut waddle_core::event::EventSubscription,
+    room_jid: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("Timed out waiting to join room '{room_jid}'"));
+        }
+
+        let event = match tokio::time::timeout(remaining, subscription.recv()).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_) => return Err(format!("Timed out waiting to join room '{room_jid}'")),
+        };
+
+        if let EventPayload::MucJoined { room, .. } = event.payload
+            && room == room_jid
+        {
+            return Ok(());
+        }
+    }
 }
 
 #[tauri::command]
@@ -378,6 +735,8 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            connect,
+            disconnect,
             send_message,
             get_roster,
             add_contact,
@@ -385,6 +744,10 @@ fn main() {
             set_presence,
             join_room,
             leave_room,
+            discover_muc_service,
+            list_rooms,
+            create_room,
+            delete_room,
             get_history,
             manage_plugins,
             get_config
@@ -516,7 +879,7 @@ async fn initialize_backend(app_handle: AppHandle) -> Result<AppState, GuiBacken
     spawn_initial_connection(connection.clone(), event_bus.clone());
 
     Ok(AppState {
-        own_jid: config.account.jid.clone(),
+        own_jid: Arc::new(Mutex::new(config.account.jid.clone())),
         ui_config,
         event_bus,
         connection_manager: connection,
@@ -645,6 +1008,16 @@ fn spawn_inbound_pump(
                     continue;
                 }
             };
+
+            let raw_stanza = String::from_utf8_lossy(&frame).into_owned();
+            if let Err(error) = publish_event(
+                &event_bus,
+                "xmpp.raw.stanza.received",
+                EventSource::Xmpp,
+                EventPayload::RawStanzaReceived { stanza: raw_stanza },
+            ) {
+                warn!(%error, "failed to publish raw stanza event");
+            }
 
             let stream_management_handled = {
                 let mut manager = connection.lock().await;
