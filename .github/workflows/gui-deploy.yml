@@ -82,8 +82,11 @@ jobs:
 
       - name: Install cuenv
         run: |
-          cargo install --locked cuenv --version 0.26.12
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/cuenv" "https://github.com/cuenv/cuenv/releases/download/0.26.12/cuenv-linux-x64"
+          chmod +x "$HOME/.local/bin/cuenv"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cuenv" --version
 
       - name: Deploy preview worker via cuenv pipeline
         id: deploy
@@ -186,8 +189,11 @@ jobs:
 
       - name: Install cuenv
         run: |
-          cargo install --locked cuenv --version 0.26.12
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/cuenv" "https://github.com/cuenv/cuenv/releases/download/0.26.12/cuenv-linux-x64"
+          chmod +x "$HOME/.local/bin/cuenv"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cuenv" --version
 
       - name: Delete preview worker via cuenv
         id: cleanup
@@ -263,8 +269,11 @@ jobs:
 
       - name: Install cuenv
         run: |
-          cargo install --locked cuenv --version 0.26.12
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/cuenv" "https://github.com/cuenv/cuenv/releases/download/0.26.12/cuenv-linux-x64"
+          chmod +x "$HOME/.local/bin/cuenv"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cuenv" --version
 
       - name: Deploy production via cuenv pipeline
         run: cuenv exec --path app/gui --env production bun x wrangler deploy --config wrangler.jsonc --env production
