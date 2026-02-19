@@ -170,8 +170,11 @@ tasks: {
 			printf '%s\n' "$deploy_output"
 
 			if [ "$deploy_status" -eq 0 ]; then
+			  if [ -n "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
+			    export GH_TOKEN="$GITHUB_TOKEN"
+			  fi
 			  preview_url="$(printf '%s\n' "$deploy_output" | grep -Eo 'https://[^ ]+[.]workers[.]dev' | head -n1 || true)"
-			  if [ -n "$preview_url" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+			  if [ -n "$preview_url" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
 			    marker='<!-- waddle-gui-preview -->'
 			    body="$marker
 			GUI preview deployed
