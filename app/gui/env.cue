@@ -45,6 +45,7 @@ tasks: {
 			"-lc",
 			"""
 			set -euo pipefail
+			trap 'rc=$?; echo "deployPreview error at line ${LINENO} (exit ${rc})"; exit "${rc}"' ERR
 			forbidden_lockfiles="$(find . -type f | grep -E '/(package-lock[.]json|yarn[.]lock|pnpm-lock[.]yaml)$' | grep -Ev '^./(node_modules|dist)/' || true)"
 			if [ -n "$forbidden_lockfiles" ]; then
 			  echo "Forbidden lockfiles found in app/gui:"
