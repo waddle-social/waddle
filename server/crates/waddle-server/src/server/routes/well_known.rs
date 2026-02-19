@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use super::auth::AuthState;
 
+const XMPP_ALT_CONNECTIONS_WEBSOCKET_REL: &str = "urn:xmpp:alt-connections:websocket";
+
 /// Create the well-known router
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
@@ -35,8 +37,9 @@ async fn host_meta_xml_handler(State(state): State<Arc<AuthState>>) -> Response 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
-  <Link rel="urn:xmpp:alt-connections:websocket" href="{}" />
+  <Link rel="{}" href="{}" />
 </XRD>"#,
+        XMPP_ALT_CONNECTIONS_WEBSOCKET_REL,
         websocket_url
     );
 
@@ -62,7 +65,7 @@ async fn host_meta_json_handler(State(state): State<Arc<AuthState>>) -> Response
     let json = serde_json::json!({
         "links": [
             {
-                "rel": "urn:xmpp:alt-connections:websocket",
+                "rel": XMPP_ALT_CONNECTIONS_WEBSOCKET_REL,
                 "href": websocket_url
             }
         ]
@@ -102,5 +105,38 @@ fn extract_websocket_scheme(base_url: &str) -> &'static str {
     {
         Some("https") => "wss",
         _ => "ws",
+    }
+}
+
+#[cfg(test)]
+mod xep0156_host_meta_tests {
+    use super::{
+        extract_authority, extract_websocket_scheme, XMPP_ALT_CONNECTIONS_WEBSOCKET_REL,
+    };
+
+    #[test]
+    fn xep0156_positive_https_maps_to_wss_with_authority() {
+        let authority = extract_authority("https://chat.example:8443");
+        let scheme = extract_websocket_scheme("https://chat.example:8443");
+
+        assert_eq!(authority, "chat.example:8443");
+        assert_eq!(scheme, "wss");
+    }
+
+    #[test]
+    fn xep0156_negative_invalid_base_url_falls_back_to_localhost_ws() {
+        let authority = extract_authority("not a url");
+        let scheme = extract_websocket_scheme("not a url");
+
+        assert_eq!(authority, "localhost");
+        assert_eq!(scheme, "ws");
+    }
+
+    #[test]
+    fn xep0156_consistency_uses_single_rel_identifier_constant() {
+        assert_eq!(
+            XMPP_ALT_CONNECTIONS_WEBSOCKET_REL,
+            "urn:xmpp:alt-connections:websocket"
+        );
     }
 }
