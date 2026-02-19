@@ -21,13 +21,14 @@ ci: pipelines: [
 		when: {
 			branch:        ["main"]
 			defaultBranch: true
+			manual:        true
 		}
 		tasks: ["install", "build", "deploy-production"]
 	},
 	{
 		name: "pull-request"
 		when: pullRequest: true
-		tasks: ["install", "build"]
+		tasks: ["install", "build", "deploy-preview"]
 	},
 ]
 
@@ -42,17 +43,23 @@ tasks: {
 		dependsOn: ["install"]
 	}
 	"deploy-production": {
-		command: "bunx"
-		args: ["wrangler", "deploy", "--config", "wrangler.jsonc", "--env", "production"]
+		command: "bun"
+		args: ["x", "wrangler", "deploy", "--config", "wrangler.jsonc", "--env", "production"]
 		dependsOn: ["build"]
 	}
 	"deploy-preview": {
-		command: "bunx"
-		args: ["wrangler", "deploy", "--config", "wrangler.jsonc", "--name", "waddle-gui-pr-${PR_NUMBER}"]
+		command: "sh"
+		args: [
+			"-c",
+			"bun x wrangler deploy --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required}",
+		]
 		dependsOn: ["build"]
 	}
 	"delete-preview": {
-		command: "bunx"
-		args: ["wrangler", "delete", "--config", "wrangler.jsonc", "--name", "waddle-gui-pr-${PR_NUMBER}", "--force"]
+		command: "sh"
+		args: [
+			"-c",
+			"bun x wrangler delete --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required} --force",
+		]
 	}
 }
