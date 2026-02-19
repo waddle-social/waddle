@@ -88,8 +88,8 @@ async fn xep0215_feature_advertisement_matches_handler_availability() {
 
     let feature_advertised = disco.contains("var='urn:xmpp:extdisco:2'")
         || disco.contains("var=\"urn:xmpp:extdisco:2\"");
-    let handler_responded = extdisco.contains("<services") && extdisco.contains("type='result'")
-        || extdisco.contains("type=\"result\"");
+    let handler_responded = extdisco.contains("<services")
+        && (extdisco.contains("type='result'") || extdisco.contains("type=\"result\""));
 
     assert!(
         feature_advertised && handler_responded,
