@@ -1219,10 +1219,7 @@ mod tests {
         runner.run(db_pool.global()).await.expect("migrations");
 
         let server_config = ServerConfig::test_homeserver();
-        let app_state = Arc::new(AppState::new(
-            Arc::new(db_pool),
-            server_config.clone(),
-        ));
+        let app_state = Arc::new(AppState::new(Arc::new(db_pool), server_config.clone()));
         let auth_state = Arc::new(AuthState::new(
             app_state,
             &server_config,

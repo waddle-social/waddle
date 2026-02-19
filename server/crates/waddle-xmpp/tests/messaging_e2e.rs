@@ -11,9 +11,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{
-    encode_sasl_plain, extract_bound_jid, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
-};
+use common::{encode_sasl_plain, extract_bound_jid, RawXmppClient, TestServer, DEFAULT_TIMEOUT};
 
 /// Initialize tracing and crypto provider for tests.
 fn init_test() {
