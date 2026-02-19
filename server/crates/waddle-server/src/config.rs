@@ -98,7 +98,7 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let mode_str = std::env::var("WADDLE_MODE").unwrap_or_else(|_| "homeserver".to_string());
         let mode = ServerMode::from_str(&mode_str);
 
@@ -106,15 +106,14 @@ impl ServerConfig {
             .unwrap_or_else(|_| "http://localhost:3000".to_string());
 
         let session_key = std::env::var("WADDLE_SESSION_KEY").ok();
-        let auth = AuthConfig::from_env()
-            .unwrap_or_else(|err| panic!("Failed to parse auth provider config: {}", err));
+        let auth = AuthConfig::from_env()?;
 
-        Self {
+        Ok(Self {
             mode,
             base_url,
             session_key,
             auth,
-        }
+        })
     }
 
     pub fn auth_enabled(&self) -> bool {

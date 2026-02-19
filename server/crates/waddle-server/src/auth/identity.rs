@@ -162,9 +162,16 @@ impl IdentityService {
             }
         }
 
-        let digest = Sha256::digest(claims.subject.as_bytes());
-        let short = hex::encode(&digest[..4]);
-        format!("provider_{}", short)
+        let provider_slug = username_to_localpart(&provider.id);
+        let provider_component = if provider_slug.is_empty() {
+            "provider".to_string()
+        } else {
+            provider_slug
+        };
+
+        let digest = Sha256::digest(format!("{}:{}", provider.id, claims.subject).as_bytes());
+        let short = hex::encode(&digest[..6]);
+        format!("ext_{}_{}", provider_component, short)
     }
 
     async fn create_user(
@@ -178,7 +185,7 @@ impl IdentityService {
             let username = if i == 0 {
                 base.clone()
             } else {
-                format!("{}{}", base, i + 1)
+                format!("{}{}", base, i)
             };
             let xmpp_localpart = username_to_localpart(&username);
             let user_id = Uuid::new_v4().to_string();
