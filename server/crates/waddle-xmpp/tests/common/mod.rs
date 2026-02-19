@@ -999,7 +999,9 @@ pub async fn establish_bound_session(
             server.domain
         ))
         .await?;
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await?;
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await?;
     client.clear();
 
     // STARTTLS.
@@ -1022,7 +1024,9 @@ pub async fn establish_bound_session(
             server.domain
         ))
         .await?;
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await?;
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await?;
     client.clear();
 
     // SASL PLAIN auth.
@@ -1045,7 +1049,9 @@ pub async fn establish_bound_session(
             server.domain
         ))
         .await?;
-    client.read_until("</stream:features>", DEFAULT_TIMEOUT).await?;
+    client
+        .read_until("</stream:features>", DEFAULT_TIMEOUT)
+        .await?;
     client.clear();
 
     // Resource bind.
@@ -1189,11 +1195,7 @@ pub async fn join_muc_room(
 }
 
 /// Send an XEP-0199 ping query and read a single IQ response.
-pub async fn ping_query(
-    client: &mut RawXmppClient,
-    to: &str,
-    id: &str,
-) -> std::io::Result<String> {
+pub async fn ping_query(client: &mut RawXmppClient, to: &str, id: &str) -> std::io::Result<String> {
     client
         .send(&format!(
             "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\

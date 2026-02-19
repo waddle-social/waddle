@@ -72,7 +72,8 @@ async fn xep0157_server_info_form_matches_feature_advertisement() {
 
     let has_feature = response.contains("var='urn:xmpp:serverinfo:0'")
         || response.contains("var=\"urn:xmpp:serverinfo:0\"");
-    let has_form_type = response.contains("FORM_TYPE") && response.contains("urn:xmpp:serverinfo:0");
+    let has_form_type =
+        response.contains("FORM_TYPE") && response.contains("urn:xmpp:serverinfo:0");
 
     assert!(
         has_feature && has_form_type,

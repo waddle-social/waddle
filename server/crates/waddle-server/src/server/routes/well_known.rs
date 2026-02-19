@@ -39,8 +39,7 @@ async fn host_meta_xml_handler(State(state): State<Arc<AuthState>>) -> Response 
 <XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
   <Link rel="{}" href="{}" />
 </XRD>"#,
-        XMPP_ALT_CONNECTIONS_WEBSOCKET_REL,
-        websocket_url
+        XMPP_ALT_CONNECTIONS_WEBSOCKET_REL, websocket_url
     );
 
     (
@@ -110,9 +109,7 @@ fn extract_websocket_scheme(base_url: &str) -> &'static str {
 
 #[cfg(test)]
 mod xep0156_host_meta_tests {
-    use super::{
-        extract_authority, extract_websocket_scheme, XMPP_ALT_CONNECTIONS_WEBSOCKET_REL,
-    };
+    use super::{extract_authority, extract_websocket_scheme, XMPP_ALT_CONNECTIONS_WEBSOCKET_REL};
 
     #[test]
     fn xep0156_positive_https_maps_to_wss_with_authority() {
