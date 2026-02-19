@@ -175,7 +175,7 @@ tasks: {
 
 			Worker: $worker_name
 			Status: deleted on PR close."
-			  upsert_comment "$body"
+			  upsert_comment "$body" || true
 			  exit 0
 			fi
 
@@ -184,6 +184,7 @@ tasks: {
 			deploy_status=$?
 			set -e
 			printf '%s\n' "$deploy_output"
+			echo "Wrangler deploy exit status: $deploy_status"
 
 			preview_url="$(printf '%s\n' "$deploy_output" | grep -Eo 'https://[^ ]+[.]workers[.]dev' | head -n1 || true)"
 			if [ "$deploy_status" -eq 0 ]; then
@@ -192,7 +193,7 @@ tasks: {
 
 			URL: ${preview_url:-"(deployment URL not reported by command output)"}
 			Worker: $worker_name"
-			  upsert_comment "$body"
+			  upsert_comment "$body" || true
 			  exit 0
 			fi
 
@@ -202,7 +203,7 @@ tasks: {
 			Worker: $worker_name
 			Outcome: failure
 			Logs: ${run_url}"
-			upsert_comment "$body"
+			upsert_comment "$body" || true
 			echo "Preview deployment failed with exit status: $deploy_status"
 			exit "$deploy_status"
 			""",
