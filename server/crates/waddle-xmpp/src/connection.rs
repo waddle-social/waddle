@@ -1990,8 +1990,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Echo enriched GitHub direct messages back to sender so clients can
         // merge upgraded embed metadata for already-sent messages.
         if message_has_github_embed(&msg_with_from) {
-            let mut echo = msg_with_from.clone();
-            echo.to = Some(sender_jid.clone().into());
+            let echo = msg_with_from.clone();
             if let Err(error) = self.stream.write_stanza(&Stanza::Message(echo)).await {
                 warn!(
                     error = %error,

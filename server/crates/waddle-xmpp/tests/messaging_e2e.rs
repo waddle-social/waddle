@@ -378,7 +378,7 @@ async fn test_chat_message_direct_github_payload_echoed_to_sender() {
     let mut alice = RawXmppClient::connect(server.addr).await.unwrap();
     let mut bob = RawXmppClient::connect(server.addr).await.unwrap();
 
-    let alice_jid = establish_session(&mut alice, &server, "alice", "github1").await;
+    let _alice_jid = establish_session(&mut alice, &server, "alice", "github1").await;
     let bob_jid = establish_session(&mut bob, &server, "bob", "github2").await;
 
     alice.clear();
@@ -416,8 +416,8 @@ async fn test_chat_message_direct_github_payload_echoed_to_sender() {
         alice_echo
     );
     assert!(
-        alice_echo.contains(&alice_jid),
-        "Alice echo should target sender JID, got: {}",
+        alice_echo.contains("dm-gh-1"),
+        "Alice echo should contain original message id, got: {}",
         alice_echo
     );
 

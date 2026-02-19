@@ -1040,8 +1040,7 @@ async fn handle_message(
             }
 
             if has_github_embed {
-                let mut echo = prototype.clone();
-                echo.to = Some(jid::Jid::from(sender_jid.clone()));
+                let echo = prototype.clone();
                 return vec![stanza_to_xml(&Stanza::Message(echo))];
             }
         } else {
@@ -1219,13 +1218,14 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.expect("migrations");
 
+        let server_config = ServerConfig::test_homeserver();
         let app_state = Arc::new(AppState::new(
             Arc::new(db_pool),
-            ServerConfig::test_homeserver(),
+            server_config.clone(),
         ));
         let auth_state = Arc::new(AuthState::new(
             app_state,
-            "https://waddle.social",
+            &server_config,
             Some(b"test-encryption-key-32-bytes!!!"),
         ));
 
@@ -1311,9 +1311,9 @@ mod tests {
         assert_eq!(responses.len(), 1, "sender should get an echo response");
         let sender_echo = &responses[0];
         assert!(
-            sender_echo.contains("to=\"alice@example.com/web\"")
-                || sender_echo.contains("to='alice@example.com/web'"),
-            "sender echo should target sender JID: {sender_echo}"
+            sender_echo.contains("to=\"bob@example.com/mobile\"")
+                || sender_echo.contains("to='bob@example.com/mobile'"),
+            "sender echo should preserve original recipient JID: {sender_echo}"
         );
         assert!(
             sender_echo.contains("urn:waddle:github:0"),

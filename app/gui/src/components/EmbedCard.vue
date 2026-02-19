@@ -18,14 +18,42 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function parseGithubRepoFromUrl(url: string): { owner: string; name: string } | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== 'github.com') return null;
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+    return {
+      owner: parts[0] ?? '',
+      name: parts[1] ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function repoOwner(embed: Embed): string {
+  const owner = str(embed.data.owner).trim();
+  if (owner) return owner;
+  return parseGithubRepoFromUrl(str(embed.data.url))?.owner ?? '';
+}
+
+function repoName(embed: Embed): string {
+  const name = str(embed.data.name).trim();
+  if (name) return name;
+  return parseGithubRepoFromUrl(str(embed.data.url))?.name ?? '';
+}
+
 function isGitHubRepo(embed: Embed): boolean {
   const type = str(embed.data.type).toLowerCase();
-  const owner = str(embed.data.owner);
-  const name = str(embed.data.name);
-  const url = str(embed.data.url);
+  const owner = repoOwner(embed);
+  const name = repoName(embed);
+  const url = str(embed.data.url).trim();
   return (
     embed.namespace === NS_WADDLE_GITHUB &&
-    (type === 'repo' || (!!owner && !!name && !!url))
+    ((type === 'repo' && (!!url || (!!owner && !!name))) || (!!owner && !!name && !!url))
   );
 }
 
@@ -76,12 +104,12 @@ function githubIssueKind(embed: Embed): string {
         <path fill-rule="evenodd" d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 110-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5v-9z" />
       </svg>
       <a
-        :href="str(props.embed.data.url) || `https://github.com/${str(props.embed.data.owner)}/${str(props.embed.data.name)}`"
+        :href="str(props.embed.data.url) || `https://github.com/${repoOwner(props.embed)}/${repoName(props.embed)}`"
         target="_blank"
         rel="noopener"
         class="text-sm font-semibold text-accent hover:underline"
       >
-        {{ str(props.embed.data.owner) }}/{{ str(props.embed.data.name) }}
+        {{ repoOwner(props.embed) }}/{{ repoName(props.embed) }}
       </a>
     </div>
     <p v-if="str(props.embed.data.description)" class="mt-1 text-xs leading-snug text-muted line-clamp-2">
