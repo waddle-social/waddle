@@ -92,6 +92,9 @@ tasks: {
 			"wrangler.jsonc",
 			"dist/**",
 		]
+		outputs: [
+			".wrangler/**",
+		]
 	}
 	deployPreview: {
 		command: "bash"
@@ -156,12 +159,18 @@ tasks: {
 			""",
 		]
 		dependsOn: [_t.build]
+		outputs: [
+			".wrangler/**",
+		]
 	}
 	deletePreview: {
 		command: "sh"
 		args: [
 			"-c",
 			"bun run wrangler delete --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required} --force",
+		]
+		outputs: [
+			".wrangler/**",
 		]
 	}
 }
