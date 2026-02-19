@@ -840,7 +840,18 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
         if (photoEl) {
           const extval = photoEl.getChild?.('EXTVAL');
           if (extval) {
-            photoUrl = typeof extval.text === 'function' ? extval.text() : String(extval.text ?? '');
+            const extvalText = typeof extval.text === 'function' ? extval.text() : String(extval.text ?? '');
+            const extvalUrl = extvalText.trim();
+            if (extvalUrl) {
+              try {
+                const parsedUrl = new URL(extvalUrl);
+                if (parsedUrl.protocol === 'https:') {
+                  photoUrl = extvalUrl;
+                }
+              } catch {
+                // Ignore invalid EXTVAL URLs
+              }
+            }
           } else {
             const binval = photoEl.getChild?.('BINVAL');
             const typeEl = photoEl.getChild?.('TYPE');

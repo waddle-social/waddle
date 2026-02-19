@@ -4,10 +4,12 @@ import { useRouter } from 'vue-router';
 
 import { type RosterItem, type UnlistenFn, useWaddle } from '../composables/useWaddle';
 import { useVCardStore } from '../stores/vcard';
+import { useAuthStore } from '../stores/auth';
 import AvatarImage from '../components/AvatarImage.vue';
 
 const { addContact, getRoster, getVCard, setVCard, listen } = useWaddle();
 const vcardStore = useVCardStore();
+const authStore = useAuthStore();
 const router = useRouter();
 
 const entries = ref<RosterItem[]>([]);
@@ -90,13 +92,12 @@ const rosterEvents = [
 const unlistenFns: UnlistenFn[] = [];
 
 onMounted(async () => {
-  // Initialize vCard store if not already done
-  if (!vcardStore.initialized) {
-    const selfJid = entries.value[0]?.jid ?? ''; // will be set properly after roster load
-    vcardStore.init(getVCard, setVCard, selfJid);
-  }
-
   await refreshRoster();
+
+  // Initialize vCard store if not already done (after roster load so authStore.jid is available)
+  if (!vcardStore.initialized) {
+    vcardStore.init(getVCard, setVCard, authStore.jid);
+  }
 
   // Batch fetch vCards for all roster contacts (FR-2.2, non-blocking)
   const contactJids = entries.value.map(e => e.jid);
