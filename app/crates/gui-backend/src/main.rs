@@ -202,6 +202,7 @@ struct AppState {
     roster_manager: Arc<RosterManager<NativeDatabase>>,
     message_manager: Arc<MessageManager<NativeDatabase>>,
     muc_manager: Arc<MucManager<NativeDatabase>>,
+    mam_manager: Arc<MamManager<NativeDatabase>>,
     presence_manager: Arc<PresenceManager>,
     plugin_registry: Arc<PluginRegistry>,
     plugin_runtime: Arc<Mutex<PluginRuntime<NativeDatabase>>>,
@@ -718,6 +719,51 @@ async fn wait_for_muc_join(
     }
 }
 
+async fn load_local_history(
+    state: &AppState,
+    jid: &str,
+    limit: u32,
+    before: Option<&str>,
+) -> Result<Vec<ChatMessage>, String> {
+    let messages = state
+        .message_manager
+        .get_messages(jid, limit, before)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !messages.is_empty() {
+        return Ok(messages);
+    }
+
+    state
+        .muc_manager
+        .get_room_messages(jid, limit, before)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn with_remote_history_fallback<LocalFn, LocalFut, RemoteFn, RemoteFut>(
+    mut load_local: LocalFn,
+    mut fetch_remote: RemoteFn,
+) -> Result<Vec<ChatMessage>, String>
+where
+    LocalFn: FnMut() -> LocalFut,
+    LocalFut: Future<Output = Result<Vec<ChatMessage>, String>>,
+    RemoteFn: FnMut() -> RemoteFut,
+    RemoteFut: Future<Output = Result<(), String>>,
+{
+    let local_messages = load_local().await?;
+    if !local_messages.is_empty() {
+        return Ok(local_messages);
+    }
+
+    if let Err(error) = fetch_remote().await {
+        warn!(error = %error, "remote history fetch failed, falling back to local history");
+    }
+
+    load_local().await
+}
+
 #[tauri::command]
 async fn get_history(
     jid: String,
@@ -744,21 +790,20 @@ async fn get_history(
 
     let normalized_limit = limit.max(1);
 
-    let messages = state
-        .message_manager
-        .get_messages(&jid, normalized_limit, before.as_deref())
-        .await
-        .map_err(|error| error.to_string())?;
-
-    if !messages.is_empty() {
-        return Ok(messages);
-    }
-
-    state
-        .muc_manager
-        .get_room_messages(&jid, normalized_limit, before.as_deref())
-        .await
-        .map_err(|error| error.to_string())
+    with_remote_history_fallback(
+        || load_local_history(state.inner(), &jid, normalized_limit, before.as_deref()),
+        || async {
+            state
+                .mam_manager
+                .fetch_history(&jid, Some(""), normalized_limit)
+                .await
+                .map(|messages| {
+                    debug!(jid = %jid, count = messages.len(), "MAM fallback history fetch completed");
+                })
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -943,6 +988,7 @@ async fn initialize_backend(app_handle: AppHandle) -> Result<AppState, GuiBacken
         roster_manager,
         message_manager,
         muc_manager,
+        mam_manager,
         presence_manager,
         plugin_registry,
         plugin_runtime,
@@ -1646,6 +1692,24 @@ fn emit_component_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use waddle_core::event::MessageType;
+
+    fn make_test_message(id: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_string(),
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            body: "hello".to_string(),
+            timestamp: "2024-01-01T00:00:00Z"
+                .parse()
+                .expect("static test timestamp should parse"),
+            message_type: MessageType::Chat,
+            thread: None,
+            embeds: vec![],
+        }
+    }
 
     #[test]
     fn parses_presence_show_values() {
@@ -1683,5 +1747,99 @@ mod tests {
     fn defaults_storage_path_to_waddle_db() {
         let path = default_storage_path();
         assert!(path.ends_with("waddle.db"));
+    }
+
+    #[tokio::test]
+    async fn history_fallback_skips_remote_when_local_present() {
+        let remote_called = Arc::new(AtomicBool::new(false));
+        let messages = vec![make_test_message("local-1")];
+
+        let result = with_remote_history_fallback(
+            || {
+                let messages = messages.clone();
+                async move { Ok(messages) }
+            },
+            || {
+                let remote_called = remote_called.clone();
+                async move {
+                    remote_called.store(true, Ordering::Relaxed);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("history fallback should succeed");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "local-1");
+        assert!(!remote_called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn history_fallback_refetches_local_after_remote_fetch() {
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let remote_calls = Arc::new(AtomicUsize::new(0));
+
+        let result = with_remote_history_fallback(
+            || {
+                let local_calls = local_calls.clone();
+                async move {
+                    let call_idx = local_calls.fetch_add(1, Ordering::Relaxed);
+                    if call_idx == 0 {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![make_test_message("from-remote-1")])
+                    }
+                }
+            },
+            || {
+                let remote_calls = remote_calls.clone();
+                async move {
+                    remote_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("history fallback should succeed");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "from-remote-1");
+        assert_eq!(local_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(remote_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn history_fallback_returns_local_when_remote_fetch_fails() {
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let remote_calls = Arc::new(AtomicUsize::new(0));
+
+        let result = with_remote_history_fallback(
+            || {
+                let local_calls = local_calls.clone();
+                async move {
+                    let call_idx = local_calls.fetch_add(1, Ordering::Relaxed);
+                    if call_idx == 0 {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![make_test_message("local-after-failure")])
+                    }
+                }
+            },
+            || {
+                let remote_calls = remote_calls.clone();
+                async move {
+                    remote_calls.fetch_add(1, Ordering::Relaxed);
+                    Err("MAM unavailable".to_string())
+                }
+            },
+        )
+        .await
+        .expect("history fallback should return local history after remote failure");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "local-after-failure");
+        assert_eq!(local_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(remote_calls.load(Ordering::Relaxed), 1);
     }
 }

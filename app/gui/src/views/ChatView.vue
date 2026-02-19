@@ -355,7 +355,14 @@ function maybeRefreshForEvent(event: BackendEventEnvelope): void {
 }
 
 let stopMessageListener: UnlistenFn | null = null;
+let stopConnectionListener: UnlistenFn | null = null;
 let historyReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleMucReload(): void {
+  if (!isRoom.value) return;
+  if (historyReloadTimer) clearTimeout(historyReloadTimer);
+  historyReloadTimer = setTimeout(() => { void loadHistory(); }, 1500);
+}
 
 onMounted(async () => {
   await runtimeStore.bootstrap();
@@ -365,19 +372,24 @@ onMounted(async () => {
     maybeRefreshForEvent(payload);
   });
 
+  stopConnectionListener = await listen('system.connection.established', () => {
+    void loadHistory();
+    scheduleMucReload();
+  });
+
   // Now load history (catches anything already in the transport's buffer)
   await loadHistory();
 
   // For MUC rooms, schedule a re-load after a short delay to catch
   // history messages that may still be arriving from the server.
-  if (isRoom.value) {
-    historyReloadTimer = setTimeout(() => { void loadHistory(); }, 1500);
-  }
+  scheduleMucReload();
 });
 
 onUnmounted(() => {
   stopMessageListener?.();
   stopMessageListener = null;
+  stopConnectionListener?.();
+  stopConnectionListener = null;
   if (historyReloadTimer) {
     clearTimeout(historyReloadTimer);
     historyReloadTimer = null;
@@ -393,9 +405,7 @@ watch(jid, () => {
   }
   void loadHistory();
   // Re-schedule reload for MUC rooms
-  if (isRoom.value) {
-    historyReloadTimer = setTimeout(() => { void loadHistory(); }, 1500);
-  }
+  scheduleMucReload();
 });
 </script>
 

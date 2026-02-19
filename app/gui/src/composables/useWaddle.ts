@@ -318,6 +318,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
     client: (config: Record<string, string>) => any;
     xml: (...args: any[]) => any;
   };
+  const MAM_QUERY_TIMEOUT_MS = 10_000;
 
   /* ---- mutable session state (reset on each connect) ---- */
   let xmpp: any = null;
@@ -331,6 +332,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
   let rosterByJid = new Map<string, RosterItem>();
   let rosterLoaded = false;
   let historyByJid = new Map<string, ChatMessage[]>();
+  let historyHydrationByJid = new Map<string, Promise<void>>();
   /** Tracks the nick used to join each MUC room (keyed by bare room JID). */
   let roomNickByJid = new Map<string, string>();
   /* pendingIq / pendingRoster maps removed — we use xmpp.iqCaller.request()
@@ -366,6 +368,202 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
     }
     historyByJid.set(key, [...current, message]);
     console.debug(`[waddle:history] stored key=${key} total=${current.length + 1} from=${message.from}`);
+  };
+
+  const withTimeout = async <T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string,
+  ): Promise<T> => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race<T>([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  };
+
+  const normalizeTimestamp = (stamp?: string): string => {
+    if (stamp && !Number.isNaN(Date.parse(stamp))) {
+      return new Date(stamp).toISOString();
+    }
+    return new Date().toISOString();
+  };
+
+  const buildChatMessage = (
+    messageStanza: any,
+    options: { id?: string; timestamp?: string } = {},
+  ): ChatMessage | null => {
+    const body = messageStanza.getChildText?.('body');
+    if (typeof body !== 'string' || body.trim().length === 0) return null;
+
+    const rawFrom = String(messageStanza.attrs?.from ?? selfJid);
+    const rawTo = String(messageStanza.attrs?.to ?? selfJid);
+    const msgType = String(messageStanza.attrs?.type ?? 'chat');
+    const isGroupchat = msgType === 'groupchat';
+    const threadRaw = messageStanza.getChildText?.('thread');
+    const threadId =
+      typeof threadRaw === 'string' && threadRaw.trim().length > 0
+        ? threadRaw.trim()
+        : null;
+
+    const replyElem = messageStanza.getChild?.('reply', 'urn:xmpp:reply:0');
+    const replyIdAttr = String(replyElem?.attrs?.id ?? '').trim();
+    const replyToAttr = String(replyElem?.attrs?.to ?? '').trim();
+    const replyTo = replyIdAttr.length > 0
+      ? {
+          id: replyIdAttr,
+          to: replyToAttr.length > 0 ? replyToAttr : null,
+        }
+      : replyToAttr.length > 0
+        ? {
+            id: replyToAttr,
+            to: null,
+          }
+        : null;
+
+    const stanzaIdElem = messageStanza.getChild?.('stanza-id', 'urn:xmpp:sid:0');
+    const stanzaIdValue = String(stanzaIdElem?.attrs?.id ?? '').trim();
+    const stanzaBy = String(stanzaIdElem?.attrs?.by ?? '').trim();
+    const stanzaId =
+      stanzaIdValue.length > 0 && stanzaBy.length > 0
+        ? { id: stanzaIdValue, by: stanzaBy }
+        : null;
+
+    const originIdRaw = String(
+      messageStanza.getChild?.('origin-id', 'urn:xmpp:sid:0')?.attrs?.id ?? '',
+    ).trim();
+    const originId = originIdRaw.length > 0 ? originIdRaw : null;
+
+    // For MUC: preserve full JID (room@conf/nick) so the UI can extract the nick.
+    // For 1:1: use bare JID as before.
+    const from = isGroupchat ? rawFrom : bareJid(rawFrom);
+    const to = isGroupchat ? bareJid(rawTo) : bareJid(rawTo);
+
+    // Parse XEP-0203 <delay> for historical messages.
+    const delay = messageStanza.getChild?.('delay', 'urn:xmpp:delay');
+    const timestamp = normalizeTimestamp(options.timestamp ?? delay?.attrs?.stamp);
+    const stanzaMessageId = String(messageStanza.attrs?.id ?? '').trim();
+    const id = (options.id ?? stanzaMessageId) || randomId('msg');
+
+    return {
+      id,
+      from,
+      to,
+      body,
+      timestamp,
+      messageType: msgType,
+      threadId,
+      replyTo,
+      stanzaId,
+      originId,
+    };
+  };
+
+  const parseMamResultMessage = (stanza: any): ChatMessage | null => {
+    const result = stanza.getChild?.('result', 'urn:xmpp:mam:2');
+    if (!result) return null;
+
+    const forwarded = result.getChild?.('forwarded', 'urn:xmpp:forward:0');
+    if (!forwarded) return null;
+
+    const forwardedMessage =
+      forwarded.getChild?.('message', 'jabber:client')
+      ?? forwarded.getChild?.('message');
+    if (!forwardedMessage) return null;
+
+    const archivedId = String(result.attrs?.id ?? '').trim();
+    const delay =
+      forwarded.getChild?.('delay', 'urn:xmpp:delay')
+      ?? forwardedMessage.getChild?.('delay', 'urn:xmpp:delay');
+    const message = buildChatMessage(forwardedMessage, {
+      id: archivedId || undefined,
+      timestamp: delay?.attrs?.stamp,
+    });
+
+    if (!message) return null;
+    console.debug(
+      `[waddle:mam] archived message id=${message.id} from=${message.from} to=${message.to}`,
+    );
+    return message;
+  };
+
+  const fetchLatestMamPage = async (conversationJid: string, limit: number): Promise<void> => {
+    requireConnection('getHistory');
+    const normalizedLimit = Math.max(1, Math.min(limit, 100));
+    const queryId = randomId('mam');
+
+    const mamQuery = xml(
+      'query',
+      { xmlns: 'urn:xmpp:mam:2', queryid: queryId },
+      xml(
+        'x',
+        { xmlns: 'jabber:x:data', type: 'submit' },
+        xml(
+          'field',
+          { var: 'FORM_TYPE', type: 'hidden' },
+          xml('value', {}, 'urn:xmpp:mam:2'),
+        ),
+        xml(
+          'field',
+          { var: 'with' },
+          xml('value', {}, conversationJid),
+        ),
+      ),
+      xml(
+        'set',
+        { xmlns: 'http://jabber.org/protocol/rsm' },
+        xml('max', {}, String(normalizedLimit)),
+        xml('before', {}, ''),
+      ),
+    );
+
+    await withTimeout(
+      sendIq({ type: 'set' }, mamQuery),
+      MAM_QUERY_TIMEOUT_MS,
+      `MAM query timed out after ${Math.round(MAM_QUERY_TIMEOUT_MS / 1000)}s`,
+    );
+  };
+
+  const hydrateHistoryFromMam = async (conversationJid: string, limit: number): Promise<void> => {
+    const inFlight = historyHydrationByJid.get(conversationJid);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
+
+    const fetchTask = (async () => {
+      try {
+        console.debug(`[waddle:history] cache miss for jid=${conversationJid}; querying MAM`);
+        const cachedBefore = historyByJid.get(conversationJid)?.length ?? 0;
+        await fetchLatestMamPage(conversationJid, limit);
+        const cachedAfter = historyByJid.get(conversationJid)?.length ?? 0;
+        const hydratedCount = Math.max(0, cachedAfter - cachedBefore);
+        console.debug(
+          `[waddle:history] MAM query completed for jid=${conversationJid} hydrated=${hydratedCount}`,
+        );
+      } catch (error) {
+        // Best-effort fallback: preserve current local/live cache if MAM fails.
+        console.debug(
+          `[waddle:history] MAM query failed for jid=${conversationJid}; using local cache`,
+          error,
+        );
+      }
+    })();
+
+    historyHydrationByJid.set(conversationJid, fetchTask);
+    try {
+      await fetchTask;
+    } finally {
+      if (historyHydrationByJid.get(conversationJid) === fetchTask) {
+        historyHydrationByJid.delete(conversationJid);
+      }
+    }
   };
 
   const parseRosterItems = (stanza: any): RosterItem[] => {
@@ -531,6 +729,12 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       /* ---- Messages ---- */
       if (!stanza.is?.('message')) return;
 
+      const mamMessage = parseMamResultMessage(stanza);
+      if (mamMessage) {
+        upsertHistory(mamMessage);
+        return;
+      }
+
       const receipt = stanza.getChild?.('received', 'urn:xmpp:receipts');
       const receiptId = String(receipt?.attrs?.id ?? '').trim();
       if (receiptId) {
@@ -541,73 +745,15 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
         return;
       }
 
-      const body = stanza.getChildText?.('body');
-      if (typeof body !== 'string' || body.trim().length === 0) return;
-
-      const threadRaw = stanza.getChildText?.('thread');
-      const threadId =
-        typeof threadRaw === 'string' && threadRaw.trim().length > 0
-          ? threadRaw.trim()
-          : null;
-
-      const replyElem = stanza.getChild?.('reply', 'urn:xmpp:reply:0');
-      const replyIdAttr = String(replyElem?.attrs?.id ?? '').trim();
-      const replyToAttr = String(replyElem?.attrs?.to ?? '').trim();
-      const replyTo = replyIdAttr.length > 0
-        ? {
-            id: replyIdAttr,
-            to: replyToAttr.length > 0 ? replyToAttr : null,
-          }
-        : replyToAttr.length > 0
-          ? {
-              id: replyToAttr,
-              to: null,
-            }
-          : null;
-
-      const stanzaIdElem = stanza.getChild?.('stanza-id', 'urn:xmpp:sid:0');
-      const stanzaIdValue = String(stanzaIdElem?.attrs?.id ?? '').trim();
-      const stanzaBy = String(stanzaIdElem?.attrs?.by ?? '').trim();
-      const stanzaId =
-        stanzaIdValue.length > 0 && stanzaBy.length > 0
-          ? { id: stanzaIdValue, by: stanzaBy }
-          : null;
-
-      const originIdRaw = String(
-        stanza.getChild?.('origin-id', 'urn:xmpp:sid:0')?.attrs?.id ?? '',
-      ).trim();
-      const originId = originIdRaw.length > 0 ? originIdRaw : null;
-
-      const rawFrom = String(stanza.attrs?.from ?? selfJid);
-      const rawTo = String(stanza.attrs?.to ?? selfJid);
-      const msgType = String(stanza.attrs?.type ?? 'chat');
+      const message = buildChatMessage(stanza);
+      if (!message) return;
+      const msgType = message.messageType ?? 'chat';
       const isGroupchat = msgType === 'groupchat';
-
-      // For MUC: preserve full JID (room@conf/nick) so the UI can extract the nick.
-      // For 1:1: use bare JID as before.
-      const from = isGroupchat ? rawFrom : bareJid(rawFrom);
-      const to = isGroupchat ? bareJid(rawTo) : bareJid(rawTo);
-
-      // Parse XEP-0203 <delay> for historical MUC messages
-      const delay = stanza.getChild?.('delay', 'urn:xmpp:delay');
-      const stamp = delay?.attrs?.stamp;
-      const timestamp =
-        stamp && !Number.isNaN(Date.parse(stamp))
-          ? new Date(stamp).toISOString()
-          : new Date().toISOString();
-
-      const message: ChatMessage = {
-        id: String(stanza.attrs?.id ?? randomId('msg')),
-        from,
-        to,
-        body,
-        timestamp,
-        messageType: msgType,
-        threadId,
-        replyTo,
-        stanzaId,
-        originId,
-      };
+      const rawFrom = String(stanza.attrs?.from ?? selfJid);
+      const from = message.from;
+      const to = message.to;
+      const body = message.body;
+      const timestamp = message.timestamp;
 
       console.debug(`[waddle:msg] type=${msgType} from=${from} to=${to} body="${body.slice(0, 50)}" ts=${timestamp}`);
       upsertHistory(message);
@@ -639,6 +785,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       rosterByJid = new Map();
       rosterLoaded = false;
       historyByJid = new Map();
+      historyHydrationByJid = new Map();
       roomNickByJid = new Map();
 
       const bare = bareJid(jid);
@@ -709,6 +856,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       rosterByJid = new Map();
       rosterLoaded = false;
       historyByJid = new Map();
+      historyHydrationByJid = new Map();
       roomNickByJid = new Map();
 
       emit('system.connection.lost', 'connectionLost', {
@@ -789,15 +937,27 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
 
     getHistory: async (jid, limit, before) => {
       const normalizedJid = bareJid(jid);
-      const all = historyByJid.get(normalizedJid) ?? [];
-      console.debug(`[waddle:getHistory] jid=${normalizedJid} found=${all.length} keys=[${Array.from(historyByJid.keys()).join(', ')}]`);
-      const filtered = before
+      const normalizedLimit = Math.max(1, limit);
+
+      let all = historyByJid.get(normalizedJid) ?? [];
+      let filtered = before
         ? all.filter((m) => Date.parse(m.timestamp) < Date.parse(before))
         : all;
+
+      console.debug(
+        `[waddle:getHistory] jid=${normalizedJid} found=${filtered.length} keys=[${Array.from(historyByJid.keys()).join(', ')}]`,
+      );
+
+      if (!before && filtered.length < normalizedLimit) {
+        await hydrateHistoryFromMam(normalizedJid, normalizedLimit);
+        all = historyByJid.get(normalizedJid) ?? [];
+        filtered = all;
+      }
+
       const sorted = [...filtered].sort(
         (a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp),
       );
-      return sorted.slice(0, Math.max(1, limit));
+      return sorted.slice(0, normalizedLimit);
     },
 
     /* ---------- roster ---------- */

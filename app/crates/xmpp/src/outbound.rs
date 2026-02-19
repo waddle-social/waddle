@@ -13,7 +13,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jid;
 use xmpp_parsers::mam;
 use xmpp_parsers::message::{Lang, Message, MessageType as XmppMessageType};
-use xmpp_parsers::muc::Muc;
+use xmpp_parsers::minidom::Element;
 use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
 use xmpp_parsers::roster;
 use xmpp_parsers::rsm;
@@ -429,8 +429,17 @@ fn build_muc_join_stanza(room: &str, nick: &str) -> Result<Stanza, OutboundRoute
     let mut presence = Presence::new(PresenceType::None);
     presence.to = Some(room_jid);
 
-    let muc = Muc::new();
-    let muc_element: xmpp_parsers::minidom::Element = muc.into();
+    let history_element = Element::builder("history", "http://jabber.org/protocol/muc")
+        .attr(
+            "maxstanzas"
+                .try_into()
+                .expect("static history attribute should be valid NCName"),
+            "50",
+        )
+        .build();
+    let muc_element = Element::builder("x", "http://jabber.org/protocol/muc")
+        .append(history_element)
+        .build();
     presence.payloads.push(muc_element);
 
     Ok(Stanza::Presence(Box::new(presence)))
@@ -532,6 +541,7 @@ pub enum OutboundRouterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xmpp_parsers::muc::Muc;
 
     #[test]
     fn builds_chat_message_stanza() {
@@ -708,6 +718,13 @@ mod tests {
             .iter()
             .any(|el| Muc::try_from(el.clone()).is_ok());
         assert!(has_muc, "MUC join presence should contain <x/> element");
+
+        let history_maxstanzas = p
+            .payloads
+            .iter()
+            .find_map(|payload| payload.get_child("history", "http://jabber.org/protocol/muc"))
+            .and_then(|history| history.attr("maxstanzas"));
+        assert_eq!(history_maxstanzas, Some("50"));
     }
 
     #[test]
