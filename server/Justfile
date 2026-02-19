@@ -53,6 +53,7 @@ quick-caas artifact_dir="test-logs/quick-caas" jid="admin@localhost" password="p
     WADDLE_XMPP_TLS_KEY=certs/server.key \
     WADDLE_XMPP_S2S_ENABLED=false \
     WADDLE_NATIVE_AUTH_ENABLED=true \
+    WADDLE_AUTH_PROVIDERS_JSON='[]' \
     WADDLE_XMPP_ISR_IN_SASL_SUCCESS=false \
     WADDLE_REGISTRATION_ENABLED=true \
     target/debug/waddle-server >"$server_log" 2>&1 &

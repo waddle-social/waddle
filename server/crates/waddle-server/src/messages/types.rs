@@ -127,8 +127,8 @@ pub struct Message {
     /// Channel this message belongs to
     pub channel_id: String,
 
-    /// Author's ATProto DID
-    pub author_did: String,
+    /// Author user ID
+    pub author_user_id: String,
 
     /// Message text content (max 4000 characters)
     pub content: Option<String>,
@@ -204,8 +204,8 @@ pub struct MessageCreate {
     /// Channel to post the message in
     pub channel_id: String,
 
-    /// Author's ATProto DID
-    pub author_did: String,
+    /// Author user ID
+    pub author_user_id: String,
 
     /// Message text content
     pub content: String,
@@ -225,10 +225,10 @@ pub struct MessageCreate {
 
 impl MessageCreate {
     /// Create a new MessageCreate with required fields
-    pub fn new(channel_id: String, author_did: String, content: String) -> Self {
+    pub fn new(channel_id: String, author_user_id: String, content: String) -> Self {
         Self {
             channel_id,
-            author_did,
+            author_user_id,
             content,
             reply_to_id: None,
             thread_id: None,
@@ -374,7 +374,7 @@ mod tests {
     fn test_message_create_validation() {
         let create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             "Hello".to_string(),
         );
         assert!(create.validate().is_ok());
@@ -383,7 +383,7 @@ mod tests {
         let long_content = "x".repeat(MAX_CONTENT_LENGTH + 1);
         let create_long = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             long_content,
         );
         assert!(matches!(
@@ -396,7 +396,7 @@ mod tests {
     fn test_message_create_builder() {
         let create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             "Hello".to_string(),
         )
         .with_reply_to("msg-456".to_string())
@@ -431,7 +431,7 @@ mod tests {
         let message = Message {
             id: "msg-123".to_string(),
             channel_id: "channel-456".to_string(),
-            author_did: "did:plc:alice".to_string(),
+            author_user_id: "user-alice".to_string(),
             content: Some("Hello".to_string()),
             reply_to_id: Some("msg-parent".to_string()),
             thread_id: Some("thread-root".to_string()),

@@ -1,19 +1,46 @@
 ---
-import LoginForm from '../components/LoginForm.vue';
-import '../tailwind.css';
-
-const redirectTo = Astro.url.searchParams.get('redirect') ?? undefined;
+const title = "Auth Disabled";
 ---
 
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width" />
-    <meta name="generator" content={Astro.generator} />
-    <title>Colony - AT Protocol Authentication</title>
-  </head>
-  <body>
-    <LoginForm client:load redirectTo={redirectTo} />
-  </body>
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<style>
+			:root {
+				font-family: "IBM Plex Sans", system-ui, sans-serif;
+				background: #0b1220;
+				color: #dbe5f5;
+			}
+			body {
+				margin: 0;
+				display: grid;
+				place-items: center;
+				min-height: 100vh;
+			}
+			main {
+				max-width: 760px;
+				padding: 24px;
+				border: 1px solid #2a3957;
+				border-radius: 12px;
+				background: linear-gradient(180deg, #101a2c, #0d1525);
+			}
+			code {
+				background: #0a111f;
+				padding: 2px 6px;
+				border-radius: 6px;
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<h1>Auth Disabled</h1>
+			<p>
+				Website auth has been disabled for this release. Use server auth endpoints:
+				<code>/v2/auth/providers</code>, <code>/v2/auth/start</code>, and related
+				<code>/v2/auth/*</code> routes.
+			</p>
+		</main>
+	</body>
 </html>

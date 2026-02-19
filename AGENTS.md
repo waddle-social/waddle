@@ -31,3 +31,9 @@ TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
 - XML generation hard rule:
   - Never construct XML with `format!`, string concatenation, or `println!`.
   - Always build XMPP/XML payloads using Rust structs/builders (`xmpp_parsers`, `minidom::Element`, etc.) and serialize them.
+
+<!-- MANUAL ADDITIONS START -->
+- Breaking changes by default: do not add backwards compatibility layers, migration shims, or legacy aliases unless explicitly requested.
+- Assume no production servers/users/data for this project; prioritize clean design over compatibility.
+- Keep the codebase clean: remove dead compatibility code immediately instead of preserving legacy paths.
+<!-- MANUAL ADDITIONS END -->

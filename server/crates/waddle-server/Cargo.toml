@@ -88,6 +88,7 @@ lru = { workspace = true }
 percent-encoding = "2.3"
 urlencoding = "2.1"
 html-escape = "0.2"
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

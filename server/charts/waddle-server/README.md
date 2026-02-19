@@ -71,7 +71,11 @@ helm upgrade --install waddle ./charts/waddle-server \
 The chart supports an app secret containing:
 
 - `WADDLE_SESSION_KEY` (required by server features relying on encrypted session data)
+- `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/v2/auth/*` broker flows)
 - `GITHUB_TOKEN` (optional, for GitHub link enrichment)
+
+Provider JSON may also be set in `config.authProvidersJson`, but `secret.authProvidersJson`
+is recommended because provider definitions usually include client secrets.
 
 Default behavior:
 
@@ -97,6 +101,14 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set secret.existingSecret=waddle-app-secrets
 ```
 
+Example provider config (OIDC):
+
+```bash
+helm upgrade --install waddle ./charts/waddle-server \
+  --namespace waddle \
+  --set-json secret.authProvidersJson='[{"id":"google","display_name":"Google","kind":"oidc","issuer":"https://accounts.google.com","client_id":"...","client_secret":"...","scopes":["openid","profile","email"]}]'
+```
+
 ## Env overrides
 
 This chart supports two extra env mechanisms:
@@ -106,8 +118,6 @@ This chart supports two extra env mechanisms:
 - `containerExtraEnv`:
   - list rendered directly into `Deployment.spec.template.spec.containers[0].env`
   - supports `value` and `valueFrom`
-
-`extraEnv` still works as a deprecated alias for `containerExtraEnv`.
 
 ## Graceful drain
 

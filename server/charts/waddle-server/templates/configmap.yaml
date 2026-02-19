@@ -20,6 +20,9 @@ data:
   {{- if .Values.config.corsOrigins }}
   WADDLE_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
   {{- end }}
+  {{- if .Values.config.authProvidersJson }}
+  WADDLE_AUTH_PROVIDERS_JSON: {{ .Values.config.authProvidersJson | quote }}
+  {{- end }}
   {{- if .Values.telemetry.otlpEndpoint }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.telemetry.otlpEndpoint | quote }}
   {{- end }}

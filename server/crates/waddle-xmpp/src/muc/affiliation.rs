@@ -19,7 +19,7 @@
 //! use waddle_xmpp::muc::affiliation::{AffiliationResolver, PermissionMapper};
 //!
 //! // Check affiliation for a user joining a room
-//! let affiliation = resolver.resolve_affiliation(&user_did, &channel_id).await?;
+//! let affiliation = resolver.resolve_affiliation(&user_id, &channel_id).await?;
 //! ```
 
 use std::collections::{HashMap, HashSet};
@@ -408,7 +408,7 @@ pub trait AffiliationResolver: Send + Sync {
     /// Resolve the affiliation for a user in a channel.
     ///
     /// # Arguments
-    /// * `user_did` - The user's decentralized identifier (e.g., did:plc:...)
+    /// * `user_id` - The user identifier used for permission subjects.
     /// * `waddle_id` - The Waddle community ID
     /// * `channel_id` - The channel ID within the Waddle
     ///
@@ -416,7 +416,7 @@ pub trait AffiliationResolver: Send + Sync {
     /// The MUC affiliation for the user, or an error if resolution fails.
     fn resolve_affiliation(
         &self,
-        user_did: &str,
+        user_id: &str,
         waddle_id: &str,
         channel_id: &str,
     ) -> impl Future<Output = Result<Affiliation, XmppError>> + Send;
@@ -436,7 +436,7 @@ pub trait AffiliationResolver: Send + Sync {
     /// For members-only rooms, only users with Member+ affiliation can join.
     fn can_join(
         &self,
-        user_did: &str,
+        user_id: &str,
         waddle_id: &str,
         channel_id: &str,
         members_only: bool,
@@ -579,16 +579,16 @@ impl<S> AffiliationResolver for AppStateAffiliationResolver<S>
 where
     S: crate::AppState,
 {
-    #[instrument(skip(self), fields(user = %user_did, channel = %channel_id))]
+    #[instrument(skip(self), fields(user = %user_id, channel = %channel_id))]
     fn resolve_affiliation(
         &self,
-        user_did: &str,
+        user_id: &str,
         waddle_id: &str,
         channel_id: &str,
     ) -> impl Future<Output = Result<Affiliation, XmppError>> + Send {
         let app_state = Arc::clone(&self.app_state);
         let mapper = self.mapper.clone();
-        let user_did = user_did.to_string();
+        let user_id = user_id.to_string();
         let waddle_id = waddle_id.to_string();
         let channel_id = channel_id.to_string();
 
@@ -608,7 +608,7 @@ where
             // First check waddle-level permissions (inherit to all channels)
             for (relation, expected_affiliation) in &relations_to_check {
                 let resource = format!("waddle:{}", waddle_id);
-                let subject = format!("user:{}", user_did);
+                let subject = format!("user:{}", user_id);
 
                 match app_state
                     .check_permission(&resource, relation, &subject)
@@ -633,7 +633,7 @@ where
             // Then check channel-level permissions (more specific)
             for (relation, _) in &relations_to_check {
                 let resource = format!("channel:{}", channel_id);
-                let subject = format!("user:{}", user_did);
+                let subject = format!("user:{}", user_id);
 
                 match app_state
                     .check_permission(&resource, relation, &subject)
@@ -692,11 +692,11 @@ where
                 match app_state.list_subjects(&resource, relation).await {
                     Ok(subjects) => {
                         for subject_str in subjects {
-                            // Parse the subject (expected format: "user:did:plc:...")
-                            if let Some(did) = subject_str.strip_prefix("user:") {
-                                // Convert DID to JID
+                            // Parse the subject (expected format: "user:<user_id>")
+                            if let Some(user_id) = subject_str.strip_prefix("user:") {
+                                // Convert user identifier to a synthetic JID.
                                 if let Ok(jid) =
-                                    format!("{}@{}", did.replace(':', "_"), domain).parse()
+                                    format!("{}@{}", user_id.replace(':', "_"), domain).parse()
                                 {
                                     let aff = mapper.map_relation(relation);
                                     if aff == affiliation {
@@ -718,8 +718,8 @@ where
                 match app_state.list_subjects(&resource, relation).await {
                     Ok(subjects) => {
                         for subject_str in subjects {
-                            if let Some(did) = subject_str.strip_prefix("user:") {
-                                if let Ok(jid) = format!("{}@{}", did.replace(':', "_"), domain)
+                            if let Some(user_id) = subject_str.strip_prefix("user:") {
+                                if let Ok(jid) = format!("{}@{}", user_id.replace(':', "_"), domain)
                                     .parse::<BareJid>()
                                 {
                                     // Only add if not already present (channel-level takes precedence)
@@ -744,16 +744,16 @@ where
         }
     }
 
-    #[instrument(skip(self), fields(user = %user_did, channel = %channel_id, members_only = %members_only))]
+    #[instrument(skip(self), fields(user = %user_id, channel = %channel_id, members_only = %members_only))]
     fn can_join(
         &self,
-        user_did: &str,
+        user_id: &str,
         waddle_id: &str,
         channel_id: &str,
         members_only: bool,
     ) -> impl Future<Output = Result<bool, XmppError>> + Send {
         let app_state = Arc::clone(&self.app_state);
-        let user_did = user_did.to_string();
+        let user_id = user_id.to_string();
         let waddle_id = waddle_id.to_string();
         let channel_id = channel_id.to_string();
 
@@ -766,7 +766,7 @@ where
             // For members-only rooms, check if user has any membership
             // Check waddle membership first (inherits to channels)
             let resource = format!("waddle:{}", waddle_id);
-            let subject = format!("user:{}", user_did);
+            let subject = format!("user:{}", user_id);
 
             // Check if user has view permission (minimum required)
             if app_state

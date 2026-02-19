@@ -12,7 +12,7 @@
 //!
 //! ```ignore
 //! // Alice is owner of penguin-club waddle
-//! waddle:penguin-club#owner@user:did:plc:alice
+//! waddle:penguin-club#owner@user:user-alice
 //!
 //! // Channel general belongs to penguin-club
 //! channel:general#parent@waddle:penguin-club
@@ -161,14 +161,14 @@ mod tests {
         let tuple = Tuple::new(
             Object::new(ObjectType::Waddle, "test-waddle"),
             Relation::new("owner"),
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
         );
 
         // Write the tuple
         service.write_tuple(tuple.clone()).await.unwrap();
 
         // Check permission - owner should have delete permission
-        let subject = Subject::user("did:plc:alice");
+        let subject = Subject::user("user-alice");
         let object = Object::new(ObjectType::Waddle, "test-waddle");
 
         let response = service.check(&subject, "delete", &object).await.unwrap();

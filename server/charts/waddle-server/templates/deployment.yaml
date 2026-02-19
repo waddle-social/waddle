@@ -1,4 +1,3 @@
-{{- $containerExtraEnv := coalesce .Values.containerExtraEnv .Values.extraEnv -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,7 +73,7 @@ spec:
             - name: WADDLE_XMPP_TLS_KEY
               value: {{ printf "%s/%s" .Values.xmpp.tls.mountPath .Values.xmpp.tls.keyKey | quote }}
             {{- end }}
-            {{- with $containerExtraEnv }}
+            {{- with .Values.containerExtraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           livenessProbe:

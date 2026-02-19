@@ -1,190 +1,306 @@
-//! ATProto OAuth Authentication Routes
+//! Provider-based authentication routes.
 //!
-//! Provides HTTP endpoints for the ATProto OAuth authentication flow:
-//! - POST /v1/auth/atproto/authorize - Start OAuth flow for a handle
-//! - GET /v1/auth/atproto/callback - Handle OAuth redirect callback
+//! v2 API:
+//! - GET /v2/auth/providers
+//! - GET /v2/auth/start
+//! - GET /v2/auth/callback/:provider
+//! - GET /v2/auth/session
+//! - POST /v2/auth/logout
 
+use crate::auth::identity::IdentityService;
+use crate::auth::oauth2;
+use crate::auth::oidc;
 use crate::auth::{
-    did_to_jid, session::PendingAuthorization, AtprotoOAuth, AuthError, Session, SessionManager,
+    AuthError, AuthProviderConfig, AuthProviderKind, ProviderRegistry, Session, SessionManager,
 };
+use crate::config::ServerConfig;
 use crate::server::AppState;
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
     response::{IntoResponse, Json, Redirect},
     routing::{get, post},
     Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, instrument, warn};
+use uuid::Uuid;
 
-/// In-memory store for pending OAuth authorizations
-/// In production, consider using Redis or database storage
-pub type PendingAuthStore = Arc<DashMap<String, PendingAuthorization>>;
-
-/// Pending XMPP OAuth client state stored during the ATProto OAuth roundtrip.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // client_code_challenge stored for future PKCE wiring
-pub struct XmppPendingState {
-    /// The XMPP client's redirect URI
-    pub client_redirect_uri: String,
-    /// The XMPP client's state parameter (CSRF)
-    pub client_state: Option<String>,
-    /// The XMPP client's PKCE code challenge
-    pub client_code_challenge: Option<String>,
-    /// When this entry was created (for TTL enforcement)
-    pub created_at: std::time::Instant,
-}
-
-impl XmppPendingState {
-    /// Check if this pending state has expired (5 minute timeout,
-    /// matching `PendingAuthorization::is_expired()`).
-    pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > std::time::Duration::from_secs(300)
-    }
-}
-
-/// In-memory store for pending XMPP OAuth states (ATProto state key -> XmppPendingState)
-pub type XmppPendingStateStore = Arc<DashMap<String, XmppPendingState>>;
-
-/// Extended application state for auth routes
+/// Shared auth state.
 pub struct AuthState {
-    /// Core app state (kept for future use accessing database directly)
-    #[allow(dead_code)]
     pub app_state: Arc<AppState>,
-    /// ATProto OAuth client
-    pub oauth_client: AtprotoOAuth,
-    /// Session manager
     pub session_manager: SessionManager,
-    /// Pending authorizations (state -> PendingAuthorization)
-    pub pending_auths: PendingAuthStore,
-    /// Pending XMPP OAuth client states (ATProto state -> XmppPendingState)
-    pub xmpp_pending_states: XmppPendingStateStore,
-    /// Server base URL for OAuth client metadata
+    pub identity_service: IdentityService,
+    pub providers: ProviderRegistry,
     pub base_url: String,
+    pub http_client: reqwest::Client,
+    pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
+    pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
+    pub xmpp_auth_codes: Arc<DashMap<String, XmppAuthCode>>,
 }
 
 impl AuthState {
-    /// Create new auth state
-    pub fn new(app_state: Arc<AppState>, base_url: &str, encryption_key: Option<&[u8]>) -> Self {
-        // client_id is the URL to our OAuth client metadata endpoint
-        let client_id = format!(
-            "{}/oauth/client-metadata.json",
-            base_url.trim_end_matches('/')
-        );
-        let redirect_uri = format!(
-            "{}/v1/auth/atproto/callback",
-            base_url.trim_end_matches('/')
-        );
-
-        let oauth_client = AtprotoOAuth::new(&client_id, &redirect_uri);
-        // Create session manager with OAuth client for automatic token refresh
-        let session_manager = SessionManager::with_oauth_client(
-            Arc::new(app_state.db_pool.global().clone()),
-            encryption_key,
-            oauth_client.clone(),
-        );
+    pub fn new(
+        app_state: Arc<AppState>,
+        server_config: &ServerConfig,
+        encryption_key: Option<&[u8]>,
+    ) -> Self {
+        let db = Arc::new(app_state.db_pool.global().clone());
+        let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
+        let identity_service = IdentityService::new(Arc::clone(&db));
+        let providers = ProviderRegistry::new(server_config.auth.providers.clone())
+            .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
         Self {
             app_state,
-            oauth_client,
             session_manager,
-            pending_auths: Arc::new(DashMap::new()),
-            xmpp_pending_states: Arc::new(DashMap::new()),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            identity_service,
+            providers,
+            base_url: server_config.base_url.trim_end_matches('/').to_string(),
+            http_client: reqwest::Client::new(),
+            pending_auth: Arc::new(DashMap::new()),
+            device_auth: Arc::new(DashMap::new()),
+            xmpp_auth_codes: Arc::new(DashMap::new()),
         }
+    }
+
+    fn callback_url(&self, provider: &str) -> String {
+        format!("{}/v2/auth/callback/{}", self.base_url, provider)
+    }
+
+    fn create_pkce_verifier() -> String {
+        let bytes: [u8; 32] = rand::rng().random();
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn pkce_challenge(verifier: &str) -> String {
+        let digest = Sha256::digest(verifier.as_bytes());
+        URL_SAFE_NO_PAD.encode(digest)
+    }
+
+    fn random_state() -> String {
+        let bytes: [u8; 24] = rand::rng().random();
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    pub async fn start_authorization(
+        &self,
+        provider: &AuthProviderConfig,
+        flow: PendingFlow,
+    ) -> Result<String, AuthError> {
+        let state = Self::random_state();
+        let nonce = Self::random_state();
+        let code_verifier = Self::create_pkce_verifier();
+        let code_challenge = Self::pkce_challenge(&code_verifier);
+        let redirect_uri = self.callback_url(&provider.id);
+
+        let authorization_endpoint = match provider.kind {
+            AuthProviderKind::Oidc => {
+                let discovery = oidc::discover(
+                    &self.http_client,
+                    provider.issuer.as_deref().ok_or_else(|| {
+                        AuthError::InvalidRequest("oidc provider missing issuer".to_string())
+                    })?,
+                )
+                .await?;
+                provider
+                    .authorization_endpoint
+                    .clone()
+                    .unwrap_or(discovery.authorization_endpoint)
+            }
+            AuthProviderKind::OAuth2 => {
+                provider.authorization_endpoint.clone().ok_or_else(|| {
+                    AuthError::InvalidRequest(
+                        "oauth2 provider missing authorization_endpoint".to_string(),
+                    )
+                })?
+            }
+        };
+
+        let mut url = url::Url::parse(&authorization_endpoint).map_err(|e| {
+            AuthError::InvalidRequest(format!("invalid authorization endpoint: {}", e))
+        })?;
+
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("response_type", "code");
+            qp.append_pair("client_id", &provider.client_id);
+            qp.append_pair("redirect_uri", &redirect_uri);
+            qp.append_pair("scope", &provider.scopes_string());
+            qp.append_pair("state", &state);
+            qp.append_pair("code_challenge", &code_challenge);
+            qp.append_pair("code_challenge_method", "S256");
+            qp.append_pair("nonce", &nonce);
+        }
+
+        self.pending_auth.insert(
+            state.clone(),
+            PendingAuthorization {
+                state,
+                provider_id: provider.id.clone(),
+                nonce,
+                code_verifier,
+                redirect_uri,
+                flow,
+                created_at: Utc::now(),
+            },
+        );
+
+        Ok(url.to_string())
+    }
+
+    fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+        let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+        for pair in cookie_header.split(';') {
+            let trimmed = pair.trim();
+            if let Some(v) = trimmed.strip_prefix("waddle_session=") {
+                return Some(v.to_string());
+            }
+        }
+        None
     }
 }
 
-/// Create the auth router
+#[derive(Debug, Clone)]
+pub struct PendingAuthorization {
+    pub state: String,
+    pub provider_id: String,
+    pub nonce: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+    pub flow: PendingFlow,
+    pub created_at: DateTime<Utc>,
+}
+
+impl PendingAuthorization {
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.created_at + Duration::minutes(10)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PendingFlow {
+    Browser {
+        next: Option<String>,
+    },
+    Device {
+        device_code: String,
+    },
+    Xmpp {
+        client_redirect_uri: String,
+        client_state: Option<String>,
+        client_code_challenge: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub provider_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: DeviceAuthStatus,
+    pub session_id: Option<String>,
+}
+
+impl DeviceAuthorization {
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.expires_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceAuthStatus {
+    Pending,
+    InProgress,
+    Approved,
+}
+
+#[derive(Debug, Clone)]
+pub struct XmppAuthCode {
+    pub code: String,
+    pub session_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl XmppAuthCode {
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.created_at + Duration::minutes(10)
+    }
+}
+
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
-        .route("/oauth/client-metadata.json", get(client_metadata_handler))
-        .route("/v1/auth/atproto/authorize", post(authorize_handler))
-        .route("/v1/auth/atproto/callback", get(callback_handler))
-        .route("/v1/auth/session", get(session_info_handler))
-        .route("/v1/auth/logout", post(logout_handler))
-        .route("/v1/auth/refresh", post(refresh_handler))
-        .route("/v1/auth/xmpp-token", get(xmpp_token_handler))
+        .route("/v2/auth/providers", get(list_providers_handler))
+        .route("/v2/auth/start", get(start_handler))
+        .route("/v2/auth/callback/:provider", get(callback_handler))
+        .route("/v2/auth/session", get(session_handler))
+        .route("/v2/auth/logout", post(logout_handler))
         .with_state(auth_state)
 }
 
-/// Request body for authorize endpoint
 #[derive(Debug, Deserialize)]
-pub struct AuthorizeRequest {
-    /// Bluesky/ATProto handle (e.g., "user.bsky.social")
-    pub handle: String,
+pub struct StartQuery {
+    pub provider: String,
+    #[serde(default = "default_flow")]
+    pub flow: String,
+    #[serde(default)]
+    pub next: Option<String>,
+
+    // XMPP fields
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    #[serde(default)]
+    pub client_state: Option<String>,
+    #[serde(default)]
+    pub code_challenge: Option<String>,
+
+    // Device field
+    #[serde(default)]
+    pub device_code: Option<String>,
 }
 
-/// Response for authorize endpoint
-#[derive(Debug, Serialize)]
-pub struct AuthorizeResponse {
-    /// URL to redirect user to for authorization
-    pub authorization_url: String,
-    /// State parameter (for debugging/verification)
-    pub state: String,
+fn default_flow() -> String {
+    "browser".to_string()
 }
 
-/// Query parameters for callback endpoint
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
-    /// Authorization code from OAuth server
-    pub code: String,
-    /// State parameter (must match original request)
-    pub state: String,
-    /// Issuer (optional, for verification) - prefixed with underscore as we don't use it yet
-    #[serde(rename = "iss")]
-    pub _iss: Option<String>,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
 }
 
-/// Response for callback endpoint (on success)
-#[derive(Debug, Serialize)]
-pub struct CallbackResponse {
-    /// Session ID for the authenticated user
-    pub session_id: String,
-    /// User's DID
-    pub did: String,
-    /// User's handle
-    pub handle: String,
+#[derive(Debug, Deserialize)]
+pub struct SessionQuery {
+    pub session_id: Option<String>,
 }
 
-/// Session info response
+#[derive(Debug, Deserialize)]
+pub struct LogoutRequest {
+    pub session_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
-pub struct SessionInfoResponse {
-    /// Session ID
+pub struct SessionResponse {
     pub session_id: String,
-    /// User's DID
-    pub did: String,
-    /// User's handle
-    pub handle: String,
-    /// Whether the session is expired
+    pub user_id: String,
+    pub username: String,
+    pub xmpp_localpart: String,
     pub is_expired: bool,
-    /// When the session expires (if set)
     pub expires_at: Option<String>,
 }
 
-/// XMPP token response for client connection
-#[derive(Debug, Serialize)]
-pub struct XmppTokenResponse {
-    /// Full JID for XMPP connection (localpart@domain)
-    pub jid: String,
-    /// Session token for SASL PLAIN authentication
-    pub token: String,
-    /// XMPP server hostname
-    pub xmpp_host: String,
-    /// XMPP server port (typically 5222)
-    pub xmpp_port: u16,
-    /// WebSocket URL for web clients (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub websocket_url: Option<String>,
-    /// When the token expires
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-}
-
-/// Error response
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -200,259 +316,341 @@ impl ErrorResponse {
     }
 }
 
-/// Convert AuthError to HTTP response
 fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
-    let (status, error_code) = match &err {
-        AuthError::InvalidHandle(_) => (StatusCode::BAD_REQUEST, "invalid_handle"),
-        AuthError::DidResolutionFailed(_) => (StatusCode::BAD_GATEWAY, "did_resolution_failed"),
-        AuthError::DidDocumentFetchFailed(_) => (StatusCode::BAD_GATEWAY, "did_document_failed"),
-        AuthError::OAuthDiscoveryFailed(_) => (StatusCode::BAD_GATEWAY, "oauth_discovery_failed"),
-        AuthError::OAuthAuthorizationFailed(_) => (StatusCode::BAD_REQUEST, "oauth_failed"),
-        AuthError::TokenExchangeFailed(_) => (StatusCode::BAD_GATEWAY, "token_exchange_failed"),
-        AuthError::SessionNotFound(_) => (StatusCode::NOT_FOUND, "session_not_found"),
-        AuthError::SessionExpired => (StatusCode::UNAUTHORIZED, "session_expired"),
-        AuthError::InvalidState => (StatusCode::BAD_REQUEST, "invalid_state"),
-        AuthError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
-        AuthError::HttpError(_) => (StatusCode::BAD_GATEWAY, "http_error"),
-        AuthError::DnsError(_) => (StatusCode::BAD_GATEWAY, "dns_error"),
-        AuthError::InvalidDid(_) => (StatusCode::BAD_REQUEST, "invalid_did"),
-        // Native user authentication errors (XEP-0077)
-        AuthError::UserAlreadyExists(_) => (StatusCode::CONFLICT, "user_already_exists"),
-        AuthError::UserNotFound(_) => (StatusCode::NOT_FOUND, "user_not_found"),
-        AuthError::InvalidUsername(_) => (StatusCode::BAD_REQUEST, "invalid_username"),
-        AuthError::InvalidPassword(_) => (StatusCode::BAD_REQUEST, "invalid_password"),
-        AuthError::CryptoError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "crypto_error"),
-        AuthError::RegistrationDisabled => (StatusCode::FORBIDDEN, "registration_disabled"),
+    let status = match err {
+        AuthError::InvalidProvider(_) | AuthError::InvalidRequest(_) | AuthError::InvalidState => {
+            StatusCode::BAD_REQUEST
+        }
+        AuthError::SessionNotFound(_) => StatusCode::NOT_FOUND,
+        AuthError::SessionExpired => StatusCode::UNAUTHORIZED,
+        AuthError::AuthorizationFailed(_)
+        | AuthError::TokenExchangeFailed(_)
+        | AuthError::UserInfoFailed(_)
+        | AuthError::HttpError(_)
+        | AuthError::JwtError(_) => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
 
-    (
-        status,
-        Json(ErrorResponse::new(error_code, &err.to_string())),
-    )
-}
-
-/// OAuth client metadata document for ATProto OAuth
-#[derive(Debug, Serialize)]
-struct OAuthClientMetadata {
-    client_id: String,
-    client_name: String,
-    client_uri: String,
-    redirect_uris: Vec<String>,
-    grant_types: Vec<String>,
-    response_types: Vec<String>,
-    scope: String,
-    token_endpoint_auth_method: String,
-    application_type: String,
-    dpop_bound_access_tokens: bool,
-}
-
-/// GET /oauth/client-metadata.json
-///
-/// Serve the OAuth client metadata document.
-/// This endpoint is required by ATProto OAuth - the authorization server
-/// fetches this document to verify the client.
-#[instrument(skip(state))]
-pub async fn client_metadata_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
-    let client_id = format!("{}/oauth/client-metadata.json", state.base_url);
-    let auth_redirect_uri = format!("{}/v1/auth/atproto/callback", state.base_url);
-    let device_redirect_uri = format!("{}/v1/auth/device/callback", state.base_url);
-    let web_auth_redirect_uri = format!("{}/auth/callback", state.base_url);
-
-    let metadata = OAuthClientMetadata {
-        client_id,
-        client_name: "Waddle".to_string(),
-        client_uri: state.base_url.clone(),
-        redirect_uris: vec![
-            auth_redirect_uri,
-            device_redirect_uri,
-            web_auth_redirect_uri,
-        ],
-        grant_types: vec![
-            "authorization_code".to_string(),
-            "refresh_token".to_string(),
-        ],
-        response_types: vec!["code".to_string()],
-        scope: "atproto transition:generic".to_string(),
-        token_endpoint_auth_method: "none".to_string(),
-        application_type: "native".to_string(),
-        dpop_bound_access_tokens: true,
+    let code = match &err {
+        AuthError::InvalidProvider(_) => "invalid_provider",
+        AuthError::InvalidRequest(_) => "invalid_request",
+        AuthError::InvalidState => "invalid_state",
+        AuthError::SessionNotFound(_) => "session_not_found",
+        AuthError::SessionExpired => "session_expired",
+        AuthError::AuthorizationFailed(_) => "authorization_failed",
+        AuthError::TokenExchangeFailed(_) => "token_exchange_failed",
+        AuthError::UserInfoFailed(_) => "userinfo_failed",
+        AuthError::JwtError(_) => "jwt_error",
+        _ => "auth_error",
     };
 
-    (StatusCode::OK, Json(metadata))
+    (status, Json(ErrorResponse::new(code, &err.to_string())))
 }
 
-/// POST /v1/auth/atproto/authorize
-///
-/// Start the OAuth authorization flow for a Bluesky handle.
-/// Returns the authorization URL that the client should redirect to.
 #[instrument(skip(state))]
-pub async fn authorize_handler(
+pub async fn list_providers_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
+    (StatusCode::OK, Json(state.providers.list()))
+}
+
+#[instrument(skip(state))]
+pub async fn start_handler(
     State(state): State<Arc<AuthState>>,
-    Json(request): Json<AuthorizeRequest>,
+    Query(query): Query<StartQuery>,
 ) -> impl IntoResponse {
-    info!("Starting authorization for handle: {}", request.handle);
-
-    match state
-        .oauth_client
-        .start_authorization(&request.handle)
-        .await
-    {
-        Ok(auth_request) => {
-            // Store pending authorization
-            let pending = PendingAuthorization::from_authorization_request(&auth_request);
-            state
-                .pending_auths
-                .insert(auth_request.state.clone(), pending);
-
-            info!("Authorization URL generated for handle: {}", request.handle);
-
-            (
-                StatusCode::OK,
-                Json(AuthorizeResponse {
-                    authorization_url: auth_request.authorization_url,
-                    state: auth_request.state,
-                }),
-            )
-                .into_response()
+    let provider = match state.providers.get(&query.provider) {
+        Some(p) => p,
+        None => {
+            return auth_error_to_response(AuthError::InvalidProvider(query.provider))
+                .into_response();
         }
-        Err(err) => {
-            error!("Authorization failed for {}: {}", request.handle, err);
-            let (status, json) = auth_error_to_response(err);
-            (status, json).into_response()
+    };
+
+    let flow = match query.flow.as_str() {
+        "browser" => PendingFlow::Browser { next: query.next },
+        "device" => {
+            let Some(device_code) = query.device_code else {
+                return auth_error_to_response(AuthError::InvalidRequest(
+                    "device flow requires device_code".to_string(),
+                ))
+                .into_response();
+            };
+            PendingFlow::Device { device_code }
         }
+        "xmpp" => {
+            let Some(client_redirect_uri) = query.redirect_uri else {
+                return auth_error_to_response(AuthError::InvalidRequest(
+                    "xmpp flow requires redirect_uri".to_string(),
+                ))
+                .into_response();
+            };
+            PendingFlow::Xmpp {
+                client_redirect_uri,
+                client_state: query.client_state,
+                client_code_challenge: query.code_challenge,
+            }
+        }
+        _ => {
+            return auth_error_to_response(AuthError::InvalidRequest(
+                "flow must be browser|device|xmpp".to_string(),
+            ))
+            .into_response();
+        }
+    };
+
+    match state.start_authorization(provider, flow).await {
+        Ok(url) => Redirect::temporary(&url).into_response(),
+        Err(err) => auth_error_to_response(err).into_response(),
     }
 }
 
-/// GET /v1/auth/atproto/callback
-///
-/// Handle the OAuth callback after user authentication.
-/// Exchanges the authorization code for tokens and creates a session.
 #[instrument(skip(state))]
 pub async fn callback_handler(
     State(state): State<Arc<AuthState>>,
+    Path(provider_id): Path<String>,
     Query(query): Query<CallbackQuery>,
 ) -> impl IntoResponse {
-    info!("OAuth callback received with state: {}", query.state);
+    if let Some(err) = query.error {
+        let msg = query
+            .error_description
+            .unwrap_or_else(|| "provider returned an error".to_string());
+        return auth_error_to_response(AuthError::AuthorizationFailed(format!("{}: {}", err, msg)))
+            .into_response();
+    }
 
-    // Look up pending authorization
-    let pending = match state.pending_auths.remove(&query.state) {
-        Some((_, pending)) => {
-            if pending.is_expired() {
-                warn!("Pending authorization expired for state: {}", query.state);
-                return auth_error_to_response(AuthError::InvalidState).into_response();
-            }
-            pending
-        }
+    let (Some(code), Some(state_key)) = (query.code, query.state) else {
+        return auth_error_to_response(AuthError::InvalidRequest("missing code/state".to_string()))
+            .into_response();
+    };
+
+    let provider = match state.providers.get(&provider_id) {
+        Some(p) => p,
         None => {
-            warn!("No pending authorization found for state: {}", query.state);
-            return auth_error_to_response(AuthError::InvalidState).into_response();
+            return auth_error_to_response(AuthError::InvalidProvider(provider_id)).into_response()
         }
     };
 
-    // Exchange code for tokens (with DPoP)
-    match state
-        .oauth_client
-        .exchange_code(
-            &pending.token_endpoint,
-            &query.code,
-            &pending.code_verifier,
-            &pending.dpop_keypair,
-            &pending.redirect_uri,
-        )
-        .await
-    {
-        Ok(tokens) => {
-            info!("Token exchange successful for DID: {}", pending.did);
+    let pending = match state.pending_auth.remove(&state_key) {
+        Some((_, pending)) => pending,
+        None => return auth_error_to_response(AuthError::InvalidState).into_response(),
+    };
 
-            // Create session
-            let session = Session::from_token_response(
-                &pending.did,
-                &pending.handle,
-                &tokens,
-                &pending.token_endpoint,
-                &pending.pds_url,
-            );
+    if pending.is_expired() {
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    }
 
-            // Store session
-            match state.session_manager.create_session(&session).await {
-                Ok(()) => {
-                    info!("Session created: {} for {}", session.id, pending.handle);
+    if pending.provider_id != provider.id {
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    }
+    if pending.state != state_key {
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    }
 
-                    // Auto-populate vCard from Bluesky profile (FR-1, non-blocking)
-                    super::device::auto_populate_vcard(&state, &pending.did, &pending.handle).await;
+    let identity_claims = match provider.kind {
+        AuthProviderKind::Oidc => {
+            let issuer = provider.issuer.as_deref().ok_or_else(|| {
+                AuthError::InvalidRequest("oidc provider missing issuer".to_string())
+            });
+            let issuer = match issuer {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
 
-                    // Check if this OAuth flow was initiated by an XMPP client.
-                    // Peek (don't remove) — xmpp_callback_handler owns removal.
-                    if state.xmpp_pending_states.contains_key(&query.state) {
-                        debug!(
-                            atproto_state = %query.state,
-                            "XMPP-initiated OAuth flow detected, redirecting to xmpp callback"
-                        );
-                        let redirect_url = format!(
-                            "/v1/auth/xmpp/callback?session_id={}&atproto_state={}",
-                            urlencoding::encode(&session.id),
-                            urlencoding::encode(&query.state),
-                        );
-                        return Redirect::temporary(&redirect_url).into_response();
-                    }
+            let discovery = match oidc::discover(&state.http_client, issuer).await {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
 
-                    debug!("Non-XMPP OAuth flow, returning JSON response");
-                    (
-                        StatusCode::OK,
-                        Json(CallbackResponse {
-                            session_id: session.id,
-                            did: pending.did,
-                            handle: pending.handle,
-                        }),
-                    )
-                        .into_response()
-                }
-                Err(err) => {
-                    error!("Failed to create session: {}", err);
-                    auth_error_to_response(err).into_response()
-                }
+            let token = match oidc::exchange_authorization_code(
+                &state.http_client,
+                provider,
+                &discovery,
+                &code,
+                &pending.redirect_uri,
+                &pending.code_verifier,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            match oidc::claims_from_token_response(
+                &state.http_client,
+                provider,
+                &discovery,
+                &token,
+                Some(&pending.nonce),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
             }
         }
-        Err(err) => {
-            error!("Token exchange failed for DID {}: {}", pending.did, err);
-            auth_error_to_response(err).into_response()
+        AuthProviderKind::OAuth2 => {
+            let token_endpoint = match provider.token_endpoint.as_deref() {
+                Some(v) => v,
+                None => {
+                    return auth_error_to_response(AuthError::InvalidRequest(
+                        "oauth2 provider missing token_endpoint".to_string(),
+                    ))
+                    .into_response();
+                }
+            };
+
+            let userinfo_endpoint = match provider.userinfo_endpoint.as_deref() {
+                Some(v) => v,
+                None => {
+                    return auth_error_to_response(AuthError::InvalidRequest(
+                        "oauth2 provider missing userinfo_endpoint".to_string(),
+                    ))
+                    .into_response();
+                }
+            };
+
+            let token = match oauth2::exchange_code(
+                &state.http_client,
+                provider,
+                token_endpoint,
+                &code,
+                &pending.redirect_uri,
+                &pending.code_verifier,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
+
+            match oidc::claims_from_oauth2_fallback(
+                &state.http_client,
+                provider,
+                provider.issuer.clone(),
+                &token.access_token,
+                userinfo_endpoint,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            }
+        }
+    };
+
+    let linked = match state
+        .identity_service
+        .resolve_or_create_user(provider, &identity_claims)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => return auth_error_to_response(err).into_response(),
+    };
+
+    let session = Session::new(
+        &linked.user.id,
+        &linked.user.username,
+        &linked.user.xmpp_localpart,
+    );
+
+    if let Err(err) = state.session_manager.create_session(&session).await {
+        return auth_error_to_response(err).into_response();
+    }
+
+    match pending.flow {
+        PendingFlow::Browser { next } => {
+            let redirect_to = next.unwrap_or_else(|| "/".to_string());
+            let mut response = Redirect::temporary(&redirect_to).into_response();
+            let cookie = format!(
+                "waddle_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+                session.id,
+                60 * 60 * 24 * 30
+            );
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, cookie.parse().expect("valid cookie"));
+            response
+        }
+        PendingFlow::Device { device_code } => {
+            if let Some(mut entry) = state.device_auth.get_mut(&device_code) {
+                entry.status = DeviceAuthStatus::Approved;
+                entry.session_id = Some(session.id.clone());
+            }
+
+            (
+                StatusCode::OK,
+                axum::response::Html("<html><body><h1>Device authorized</h1><p>You can close this window.</p></body></html>".to_string()),
+            )
+                .into_response()
+        }
+        PendingFlow::Xmpp {
+            client_redirect_uri,
+            client_state,
+            client_code_challenge,
+        } => {
+            let auth_code = Uuid::new_v4().to_string();
+            state.xmpp_auth_codes.insert(
+                auth_code.clone(),
+                XmppAuthCode {
+                    code: auth_code.clone(),
+                    session_id: session.id,
+                    redirect_uri: client_redirect_uri.clone(),
+                    code_challenge: client_code_challenge,
+                    created_at: Utc::now(),
+                },
+            );
+
+            let mut redirect = match url::Url::parse(&client_redirect_uri) {
+                Ok(v) => v,
+                Err(err) => {
+                    error!(error = %err, "Invalid XMPP redirect URI");
+                    return auth_error_to_response(AuthError::InvalidRequest(
+                        "invalid xmpp redirect_uri".to_string(),
+                    ))
+                    .into_response();
+                }
+            };
+
+            {
+                let mut qp = redirect.query_pairs_mut();
+                qp.append_pair("code", &auth_code);
+                if let Some(state_value) = client_state {
+                    qp.append_pair("state", &state_value);
+                }
+            }
+
+            Redirect::temporary(redirect.as_str()).into_response()
         }
     }
 }
 
-/// GET /v1/auth/session
-///
-/// Get information about the current session.
-/// Requires session_id as a query parameter or header.
-#[instrument(skip(state))]
-pub async fn session_info_handler(
+#[instrument(skip(state, headers))]
+pub async fn session_handler(
     State(state): State<Arc<AuthState>>,
-    Query(params): Query<SessionQuery>,
+    Query(query): Query<SessionQuery>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let session_id = match params.session_id {
-        Some(id) => id,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "missing_session_id",
-                    "session_id query parameter is required",
-                )),
-            )
-                .into_response();
-        }
+    let session_id = query
+        .session_id
+        .or_else(|| AuthState::extract_session_cookie(&headers));
+
+    let Some(session_id) = session_id else {
+        return auth_error_to_response(AuthError::SessionNotFound(
+            "missing session identifier".to_string(),
+        ))
+        .into_response();
     };
 
     match state.session_manager.get_session(&session_id).await {
         Ok(Some(session)) => {
             let is_expired = session.is_expired();
-            let expires_at = session.expires_at.map(|dt| dt.to_rfc3339());
+            let expires_at = session.expires_at.map(|v| v.to_rfc3339());
             (
                 StatusCode::OK,
-                Json(SessionInfoResponse {
+                Json(SessionResponse {
                     session_id: session.id,
-                    did: session.did,
-                    handle: session.handle,
+                    user_id: session.user_id,
+                    username: session.username,
+                    xmpp_localpart: session.xmpp_localpart,
                     is_expired,
                     expires_at,
                 }),
@@ -464,551 +662,27 @@ pub async fn session_info_handler(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SessionQuery {
-    pub session_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LogoutRequest {
-    pub session_id: String,
-}
-
-/// Request body for refresh endpoint
-#[derive(Debug, Deserialize)]
-pub struct RefreshRequest {
-    pub session_id: String,
-}
-
-/// Response for refresh endpoint
-#[derive(Debug, Serialize)]
-pub struct RefreshResponse {
-    /// Session ID
-    pub session_id: String,
-    /// User's DID
-    pub did: String,
-    /// User's handle
-    pub handle: String,
-    /// New expiration time
-    pub expires_at: Option<String>,
-}
-
-/// POST /v1/auth/logout
-///
-/// End the current session.
-#[instrument(skip(state))]
+#[instrument(skip(state, headers))]
 pub async fn logout_handler(
     State(state): State<Arc<AuthState>>,
-    Json(request): Json<LogoutRequest>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<LogoutRequest>>,
 ) -> impl IntoResponse {
-    info!("Logout request for session: {}", request.session_id);
+    let requested = body.and_then(|Json(payload)| payload.session_id);
+    let session_id = requested.or_else(|| AuthState::extract_session_cookie(&headers));
 
-    match state
-        .session_manager
-        .delete_session(&request.session_id)
-        .await
-    {
-        Ok(()) => {
-            info!("Session deleted: {}", request.session_id);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(err) => {
-            error!("Failed to delete session: {}", err);
-            auth_error_to_response(err).into_response()
+    if let Some(session_id) = session_id {
+        if let Err(err) = state.session_manager.delete_session(&session_id).await {
+            warn!(error = %err, "Failed to delete session on logout");
         }
     }
-}
 
-/// POST /v1/auth/refresh
-///
-/// Refresh the access token for a session.
-/// Requires a valid refresh token to be present in the session.
-#[instrument(skip(state))]
-pub async fn refresh_handler(
-    State(state): State<Arc<AuthState>>,
-    Json(request): Json<RefreshRequest>,
-) -> impl IntoResponse {
-    info!("Token refresh request for session: {}", request.session_id);
-
-    // Get the session
-    let session = match state.session_manager.get_session(&request.session_id).await {
-        Ok(Some(session)) => session,
-        Ok(None) => {
-            warn!("Session not found for refresh: {}", request.session_id);
-            return auth_error_to_response(AuthError::SessionNotFound(request.session_id))
-                .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get session for refresh: {}", err);
-            return auth_error_to_response(err).into_response();
-        }
-    };
-
-    // Check if we have a refresh token
-    let refresh_token = match &session.refresh_token {
-        Some(token) => token,
-        None => {
-            warn!(
-                "No refresh token available for session: {}",
-                request.session_id
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "no_refresh_token",
-                    "Session does not have a refresh token",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    // Check if we have a token endpoint
-    if session.token_endpoint.is_empty() {
-        warn!("No token endpoint for session: {}", request.session_id);
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "no_token_endpoint",
-                "Session does not have a token endpoint configured",
-            )),
-        )
-            .into_response();
-    }
-
-    // Perform the token refresh
-    match state
-        .oauth_client
-        .refresh_token(&session.token_endpoint, refresh_token)
-        .await
-    {
-        Ok(tokens) => {
-            info!(
-                "Token refresh successful for session: {}",
-                request.session_id
-            );
-
-            // Update the session in the database
-            if let Err(err) = state
-                .session_manager
-                .update_session_tokens(&request.session_id, &tokens)
-                .await
-            {
-                error!("Failed to update session tokens: {}", err);
-                return auth_error_to_response(err).into_response();
-            }
-
-            // Calculate new expiration time
-            let expires_at = tokens.expires_in.map(|secs| {
-                (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
-            });
-
-            (
-                StatusCode::OK,
-                Json(RefreshResponse {
-                    session_id: session.id,
-                    did: session.did,
-                    handle: session.handle,
-                    expires_at,
-                }),
-            )
-                .into_response()
-        }
-        Err(err) => {
-            error!(
-                "Token refresh failed for session {}: {}",
-                request.session_id, err
-            );
-            auth_error_to_response(err).into_response()
-        }
-    }
-}
-
-/// Query parameters for XMPP token endpoint
-#[derive(Debug, Deserialize)]
-pub struct XmppTokenQuery {
-    /// Session ID from ATProto authentication
-    pub session_id: String,
-}
-
-/// GET /v1/auth/xmpp-token
-///
-/// Get XMPP connection credentials for an authenticated session.
-///
-/// Takes an ATProto session and returns XMPP connection info:
-/// - JID derived from the user's DID
-/// - Token for SASL PLAIN authentication
-/// - XMPP server host and port
-#[instrument(skip(state))]
-pub async fn xmpp_token_handler(
-    State(state): State<Arc<AuthState>>,
-    Query(params): Query<XmppTokenQuery>,
-) -> impl IntoResponse {
-    info!("XMPP token request for session: {}", params.session_id);
-
-    // Validate the session
-    let session = match state
-        .session_manager
-        .validate_session(&params.session_id)
-        .await
-    {
-        Ok(session) => session,
-        Err(err) => {
-            warn!("Failed to validate session for XMPP token: {}", err);
-            return auth_error_to_response(err).into_response();
-        }
-    };
-
-    // Convert DID to JID
-    // Use WADDLE_XMPP_DOMAIN env var, or extract domain from base_url
-    let xmpp_domain = std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| {
-        // Extract domain from base_url (e.g., "https://rawkode.tools" -> "rawkode.tools")
-        url::Url::parse(&state.base_url)
-            .ok()
-            .and_then(|u| u.host_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "localhost".to_string())
-    });
-    let xmpp_port = std::env::var("WADDLE_XMPP_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(5222u16);
-
-    let jid = match did_to_jid(&session.did, &xmpp_domain) {
-        Ok(jid) => jid,
-        Err(err) => {
-            error!("Failed to convert DID to JID: {}", err);
-            return auth_error_to_response(err).into_response();
-        }
-    };
-
-    // Use the session ID as the XMPP token
-    // In a full implementation, this would be a separate XMPP-specific token
-    // that's validated by the XMPP server against the session store
-    let token = session.id.clone();
-
-    let expires_at = session.expires_at.map(|dt| dt.to_rfc3339());
-
-    info!("XMPP token generated for JID: {}", jid);
-
-    (
-        StatusCode::OK,
-        Json(XmppTokenResponse {
-            jid,
-            token,
-            xmpp_host: xmpp_domain.clone(),
-            xmpp_port,
-            websocket_url: Some(format!("wss://{}/xmpp-websocket", xmpp_domain)),
-            expires_at,
-        }),
-    )
-        .into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
-    use axum::body::Body;
-    use axum::http::Request;
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
-
-    async fn create_test_auth_state() -> Arc<AuthState> {
-        let config = DatabaseConfig::default();
-        let pool_config = PoolConfig::default();
-        let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
-
-        // Run migrations
-        let runner = MigrationRunner::global();
-        runner.run(db_pool.global()).await.unwrap();
-
-        let app_state = Arc::new(AppState::new(
-            Arc::new(db_pool),
-            crate::config::ServerConfig::test_homeserver(),
-        ));
-        Arc::new(AuthState::new(
-            app_state,
-            "https://waddle.social",
-            Some(b"test-encryption-key-32-bytes!!!"),
-        ))
-    }
-
-    #[tokio::test]
-    async fn test_authorize_invalid_handle() {
-        let auth_state = create_test_auth_state().await;
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/auth/atproto/authorize")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"handle": "invalid"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "invalid_handle");
-    }
-
-    #[tokio::test]
-    async fn test_callback_invalid_state() {
-        let auth_state = create_test_auth_state().await;
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/auth/atproto/callback?code=test&state=invalid")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "invalid_state");
-    }
-
-    #[tokio::test]
-    async fn test_session_info_missing_id() {
-        let auth_state = create_test_auth_state().await;
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/auth/session")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn test_session_info_not_found() {
-        let auth_state = create_test_auth_state().await;
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/auth/session?session_id=nonexistent")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_xmpp_token_missing_session() {
-        let auth_state = create_test_auth_state().await;
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/auth/xmpp-token?session_id=nonexistent")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Should return 404 for non-existent session
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn test_xmpp_token_response_format() {
-        use crate::auth::Session;
-        use chrono::{Duration, Utc};
-
-        let auth_state = create_test_auth_state().await;
-
-        // Create a test session directly
-        let session = Session {
-            id: "test-session-id".to_string(),
-            did: "did:plc:abc123xyz789def".to_string(),
-            handle: "test.bsky.social".to_string(),
-            access_token: "test-token".to_string(),
-            refresh_token: None,
-            token_endpoint: "https://bsky.social/oauth/token".to_string(),
-            pds_url: "https://bsky.social".to_string(),
-            expires_at: Some(Utc::now() + Duration::hours(1)),
-            created_at: Utc::now(),
-            last_used_at: Utc::now(),
-        };
-
-        // Store the session
-        auth_state
-            .session_manager
-            .create_session(&session)
-            .await
-            .unwrap();
-
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/v1/auth/xmpp-token?session_id=test-session-id")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        // Verify response structure
-        assert_eq!(json["jid"], "abc123xyz789def@waddle.social");
-        assert_eq!(json["token"], "test-session-id");
-        assert_eq!(json["xmpp_host"], "waddle.social");
-        assert_eq!(json["xmpp_port"], 5222);
-        assert!(json["websocket_url"].is_string());
-    }
-
-    #[tokio::test]
-    async fn test_refresh_session_not_found() {
-        let auth_state = create_test_auth_state().await;
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/auth/refresh")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"session_id": "nonexistent"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "session_not_found");
-    }
-
-    #[tokio::test]
-    async fn test_refresh_no_refresh_token() {
-        use crate::auth::Session;
-        use chrono::{Duration, Utc};
-
-        let auth_state = create_test_auth_state().await;
-
-        // Create a test session without a refresh token
-        let session = Session {
-            id: "test-refresh-no-token".to_string(),
-            did: "did:plc:abc123xyz789def".to_string(),
-            handle: "test.bsky.social".to_string(),
-            access_token: "test-token".to_string(),
-            refresh_token: None, // No refresh token
-            token_endpoint: "https://bsky.social/oauth/token".to_string(),
-            pds_url: "https://bsky.social".to_string(),
-            expires_at: Some(Utc::now() + Duration::hours(1)),
-            created_at: Utc::now(),
-            last_used_at: Utc::now(),
-        };
-
-        auth_state
-            .session_manager
-            .create_session(&session)
-            .await
-            .unwrap();
-
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/auth/refresh")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"session_id": "test-refresh-no-token"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "no_refresh_token");
-    }
-
-    #[tokio::test]
-    async fn test_refresh_no_token_endpoint() {
-        use crate::auth::Session;
-        use chrono::{Duration, Utc};
-
-        let auth_state = create_test_auth_state().await;
-
-        // Create a test session without a token endpoint
-        let session = Session {
-            id: "test-refresh-no-endpoint".to_string(),
-            did: "did:plc:abc123xyz789def".to_string(),
-            handle: "test.bsky.social".to_string(),
-            access_token: "test-token".to_string(),
-            refresh_token: Some("test-refresh-token".to_string()),
-            token_endpoint: "".to_string(), // Empty token endpoint
-            pds_url: "https://bsky.social".to_string(),
-            expires_at: Some(Utc::now() + Duration::hours(1)),
-            created_at: Utc::now(),
-            last_used_at: Utc::now(),
-        };
-
-        auth_state
-            .session_manager
-            .create_session(&session)
-            .await
-            .unwrap();
-
-        let app = router(auth_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/auth/refresh")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"session_id": "test-refresh-no-endpoint"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "no_token_endpoint");
-    }
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        "waddle_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+            .parse()
+            .expect("valid cookie"),
+    );
+    resp
 }

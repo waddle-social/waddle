@@ -174,7 +174,7 @@ impl FromStr for Relation {
 /// A subject in the permission system
 ///
 /// Can be:
-/// - A direct user: `user:did:plc:alice`
+/// - A direct user: `user:user-alice`
 /// - A userset: `waddle:penguin-club#member` (all members of penguin-club)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Subject {
@@ -187,10 +187,10 @@ pub struct Subject {
 impl Subject {
     /// Create a new direct user subject
     #[allow(dead_code)]
-    pub fn user(did: impl Into<String>) -> Self {
+    pub fn user(user_id: impl Into<String>) -> Self {
         Self {
             subject_type: SubjectType::User,
-            id: did.into(),
+            id: user_id.into(),
             relation: None,
         }
     }
@@ -738,9 +738,9 @@ mod tests {
 
     #[test]
     fn test_subject_parse_direct() {
-        let subj = Subject::parse("user:did:plc:alice").unwrap();
+        let subj = Subject::parse("user:user-alice").unwrap();
         assert_eq!(subj.subject_type, SubjectType::User);
-        assert_eq!(subj.id, "did:plc:alice");
+        assert_eq!(subj.id, "user-alice");
         assert_eq!(subj.relation, None);
     }
 
@@ -754,8 +754,8 @@ mod tests {
 
     #[test]
     fn test_subject_display() {
-        let subj = Subject::user("did:plc:alice");
-        assert_eq!(subj.to_string(), "user:did:plc:alice");
+        let subj = Subject::user("user-alice");
+        assert_eq!(subj.to_string(), "user:user-alice");
 
         let subj = Subject::userset(SubjectType::Waddle, "penguin-club", "member");
         assert_eq!(subj.to_string(), "waddle:penguin-club#member");
@@ -763,12 +763,12 @@ mod tests {
 
     #[test]
     fn test_tuple_parse() {
-        let tuple = Tuple::parse("waddle:penguin-club#owner@user:did:plc:alice").unwrap();
+        let tuple = Tuple::parse("waddle:penguin-club#owner@user:user-alice").unwrap();
         assert_eq!(tuple.object.object_type, ObjectType::Waddle);
         assert_eq!(tuple.object.id, "penguin-club");
         assert_eq!(tuple.relation.name, "owner");
         assert_eq!(tuple.subject.subject_type, SubjectType::User);
-        assert_eq!(tuple.subject.id, "did:plc:alice");
+        assert_eq!(tuple.subject.id, "user-alice");
     }
 
     #[test]
@@ -776,11 +776,11 @@ mod tests {
         let tuple = Tuple::new(
             Object::new(ObjectType::Waddle, "penguin-club"),
             Relation::new("owner"),
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
         );
         assert_eq!(
             tuple.to_string(),
-            "waddle:penguin-club#owner@user:did:plc:alice"
+            "waddle:penguin-club#owner@user:user-alice"
         );
     }
 
@@ -796,7 +796,7 @@ mod tests {
         let store = TupleStore::new(Arc::clone(&db));
 
         let object = Object::new(ObjectType::Waddle, "test-waddle");
-        let subject = Subject::user("did:plc:alice");
+        let subject = Subject::user("user-alice");
 
         // Initially should not exist
         assert!(!store.exists(&object, "owner", &subject).await.unwrap());
@@ -823,7 +823,7 @@ mod tests {
         let store = TupleStore::new(Arc::clone(&db));
 
         let object = Object::new(ObjectType::Waddle, "test-waddle");
-        let subject = Subject::user("did:plc:alice");
+        let subject = Subject::user("user-alice");
 
         // Write the tuple
         let tuple = Tuple::new(object.clone(), Relation::new("owner"), subject.clone());
@@ -857,7 +857,7 @@ mod tests {
             .write(Tuple::new(
                 object.clone(),
                 Relation::new("member"),
-                Subject::user("did:plc:alice"),
+                Subject::user("user-alice"),
             ))
             .await
             .unwrap();
@@ -865,7 +865,7 @@ mod tests {
             .write(Tuple::new(
                 object.clone(),
                 Relation::new("member"),
-                Subject::user("did:plc:bob"),
+                Subject::user("user-bob"),
             ))
             .await
             .unwrap();
@@ -875,7 +875,7 @@ mod tests {
         assert_eq!(subjects.len(), 2);
 
         let ids: Vec<_> = subjects.iter().map(|s| s.id.as_str()).collect();
-        assert!(ids.contains(&"did:plc:alice"));
-        assert!(ids.contains(&"did:plc:bob"));
+        assert!(ids.contains(&"user-alice"));
+        assert!(ids.contains(&"user-bob"));
     }
 }

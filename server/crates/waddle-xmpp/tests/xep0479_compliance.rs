@@ -737,7 +737,7 @@ async fn ensure_admin_account(config: &ComplianceConfig, artifacts: &ArtifactPat
         .await
         .context("Reading initial stream features")?;
     if !features.contains("starttls") {
-        bail!("Server did not advertise STARTTLS before registration");
+        bail!("Server user_id not advertise STARTTLS before registration");
     }
     client.clear();
 
@@ -750,7 +750,7 @@ async fn ensure_admin_account(config: &ComplianceConfig, artifacts: &ArtifactPat
         .await
         .context("Waiting for STARTTLS proceed")?;
     if !proceed.contains("<proceed") {
-        bail!("Server did not return STARTTLS proceed");
+        bail!("Server user_id not return STARTTLS proceed");
     }
     client.clear();
 

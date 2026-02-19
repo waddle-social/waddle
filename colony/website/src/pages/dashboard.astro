@@ -1,45 +1,45 @@
 ---
-import Dashboard from '../components/Dashboard.vue';
-import '../tailwind.css';
-import { createAuth } from '../lib/auth/better-auth';
-
-// Create auth instance and verify session via Better Auth (handles cookie name/signature)
-const auth = await createAuth(Astro.locals.runtime.env.DB, Astro.locals.runtime.env, Astro.request);
-
-let session;
-try {
-  session = await auth.api.getSession({
-    headers: Astro.request.headers,
-  });
-} catch (error) {
-  console.error('Dashboard: Failed to get session:', error);
-  return Astro.redirect('/');
-}
-
-if (!session) {
-  return Astro.redirect('/');
-}
-
-// Enhance user data with AT Protocol specific info
-const userDid = Astro.cookies.get('atproto_user_did')?.value;
-const handle = Astro.cookies.get('atproto_handle')?.value;
-
-const user = {
-  ...session.user,
-  did: userDid ? decodeURIComponent(userDid) : session.user.id,
-  handle: handle ? decodeURIComponent(handle) : session.user.email?.split('@')[0],
-};
+const title = "Dashboard Disabled";
 ---
 
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width" />
-    <meta name="generator" content={Astro.generator} />
-    <title>Colony Dashboard - {user.name || user.handle}</title>
-  </head>
-  <body>
-    <Dashboard client:load user={user} />
-  </body>
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<style>
+			:root {
+				font-family: "IBM Plex Sans", system-ui, sans-serif;
+				background: #0b1220;
+				color: #dbe5f5;
+			}
+			body {
+				margin: 0;
+				display: grid;
+				place-items: center;
+				min-height: 100vh;
+			}
+			main {
+				max-width: 760px;
+				padding: 24px;
+				border: 1px solid #2a3957;
+				border-radius: 12px;
+				background: linear-gradient(180deg, #101a2c, #0d1525);
+			}
+			code {
+				background: #0a111f;
+				padding: 2px 6px;
+				border-radius: 6px;
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<h1>Dashboard Disabled</h1>
+			<p>
+				Website auth and dashboard flows are disabled for this release. Use server
+				auth endpoints under <code>/v2/auth/*</code>.
+			</p>
+		</main>
+	</body>
 </html>

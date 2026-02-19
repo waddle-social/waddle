@@ -72,8 +72,8 @@ impl AppState for MockAppState {
         async move {
             if accept {
                 Ok(Session {
-                    did: format!(
-                        "did:plc:test{}",
+                    user_id: format!(
+                        "user-test-{}",
                         jid.node().map(|n| n.to_string()).unwrap_or_default()
                     ),
                     jid: jid.to_bare().into(),
@@ -107,7 +107,7 @@ impl AppState for MockAppState {
                 // Mock: derive a JID from the token
                 let mock_jid = format!("user_{}@{}", &token[..token.len().min(8)], domain);
                 Ok(Session {
-                    did: format!("did:plc:mock{}", &token[..token.len().min(8)]),
+                    user_id: format!("user-mock-{}", &token[..token.len().min(8)]),
                     jid: mock_jid
                         .parse()
                         .unwrap_or_else(|_| "fallback@test.local".parse().unwrap()),
@@ -385,7 +385,7 @@ impl AppState for MockAppState {
 
     fn list_user_waddles(
         &self,
-        _did: &str,
+        _user_id: &str,
     ) -> impl Future<Output = Result<Vec<waddle_xmpp::WaddleInfo>, XmppError>> + Send {
         // Mock returns no waddles — auto-join is a no-op in tests by default
         async { Ok(Vec::new()) }

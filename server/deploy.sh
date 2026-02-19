@@ -299,7 +299,15 @@ info "Step 10: Creating systemd service..."
 read_existing() {
     local key="$1" default="$2"
     if [[ -f "${ENV_FILE}" ]] && grep -q "^${key}=" "${ENV_FILE}"; then
-        grep "^${key}=" "${ENV_FILE}" | head -1 | cut -d= -f2-
+        local value
+        value="$(grep "^${key}=" "${ENV_FILE}" | head -1 | cut -d= -f2-)"
+        # Strip optional surrounding quotes from existing values.
+        if [[ "${value}" =~ ^\".*\"$ ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "${value}" =~ ^\'.*\'$ ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+        echo "${value}"
     else
         echo "${default}"
     fi
@@ -310,6 +318,7 @@ ENV_RUST_LOG=$(read_existing RUST_LOG "info")
 ENV_REGISTRATION=$(read_existing WADDLE_REGISTRATION_ENABLED "false")
 ENV_NATIVE_AUTH=$(read_existing WADDLE_NATIVE_AUTH_ENABLED "true")
 ENV_S2S=$(read_existing WADDLE_XMPP_S2S_ENABLED "false")
+ENV_AUTH_PROVIDERS_JSON=$(read_existing WADDLE_AUTH_PROVIDERS_JSON "[]")
 
 if [[ -f "${ENV_FILE}" ]]; then
     info "Updating env file (preserving session key and operator-tuned settings)"
@@ -345,6 +354,11 @@ WADDLE_REGISTRATION_ENABLED=${ENV_REGISTRATION}
 
 # Security [preserved]
 WADDLE_SESSION_KEY=${ENV_SESSION_KEY}
+
+# Auth broker providers [preserved]
+# JSON array/object consumed by WADDLE_AUTH_PROVIDERS_JSON.
+# Keep this compact and single-line for EnvironmentFile compatibility.
+WADDLE_AUTH_PROVIDERS_JSON='${ENV_AUTH_PROVIDERS_JSON}'
 
 # Graceful restart (Ecdysis)
 WADDLE_DRAIN_TIMEOUT_SECS=30

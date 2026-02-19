@@ -1,8 +1,12 @@
 import type { APIRoute } from "astro";
-import { createAuth } from "../../../lib/auth/better-auth";
 
-export const ALL: APIRoute = async (context) => {
-	const { request, locals } = context;
-	const auth = await createAuth(locals.runtime.env.DB, locals.runtime.env, request);
-	return auth.handler(request);
+const message = {
+	error: "gone",
+	message: "Auth disabled in colony website. Use server /v2/auth endpoints.",
 };
+
+export const ALL: APIRoute = async () =>
+	new Response(JSON.stringify(message), {
+		status: 410,
+		headers: { "Content-Type": "application/json" },
+	});

@@ -12,6 +12,7 @@
 
 use super::Database;
 use super::DatabaseError;
+use std::collections::HashMap;
 use tracing::{debug, info, instrument};
 
 /// Represents a single database migration
@@ -39,305 +40,208 @@ impl Migration {
     }
 }
 
-/// Global database migrations (users, sessions, waddle registry)
+/// Global database migrations (auth broker, users, permissions, and XMPP data)
 pub mod global {
     use super::Migration;
 
-    /// Initial global schema - users, sessions, and waddle registry
-    pub const V0001_INITIAL_SCHEMA: &str = r#"
--- Users table (linked to ATProto DID)
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    did TEXT NOT NULL UNIQUE,              -- ATProto DID (decentralized identifier)
-    handle TEXT,                            -- ATProto handle (e.g., user.bsky.social)
-    display_name TEXT,                      -- Display name
-    avatar_url TEXT,                        -- Avatar URL
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    /// Hard-cut schema reset for native OIDC/OAuth auth broker.
+    pub const V0001_AUTH_BROKER_SCHEMA: &str = r#"
+PRAGMA foreign_keys = OFF;
+
+DROP TABLE IF EXISTS auth_identities;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS waddle_members;
+DROP TABLE IF EXISTS waddles;
+DROP TABLE IF EXISTS permission_tuples;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS native_users;
+DROP TABLE IF EXISTS vcard_storage;
+DROP TABLE IF EXISTS upload_slots;
+DROP TABLE IF EXISTS roster_items;
+DROP TABLE IF EXISTS roster_versions;
+DROP TABLE IF EXISTS blocking_list;
+DROP TABLE IF EXISTS private_xml_storage;
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    xmpp_localpart TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    avatar_url TEXT,
+    primary_email TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
--- Index for quick DID lookups
-CREATE INDEX IF NOT EXISTS idx_users_did ON users(did);
-CREATE INDEX IF NOT EXISTS idx_users_handle ON users(handle);
-
--- Sessions table for authentication
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,                    -- Session ID (UUID)
-    user_id INTEGER NOT NULL,               -- Reference to users table
-    access_token TEXT,                      -- ATProto access token (encrypted)
-    refresh_token TEXT,                     -- ATProto refresh token (encrypted)
-    expires_at TEXT,                        -- Session expiration
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_used_at TEXT NOT NULL DEFAULT (datetime('now')),
+CREATE TABLE auth_identities (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    issuer TEXT,
+    subject TEXT NOT NULL,
+    email TEXT,
+    email_verified INTEGER,
+    raw_claims_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT NOT NULL,
+    UNIQUE(provider_id, subject),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX idx_auth_identities_user_id ON auth_identities(user_id);
 
--- Waddles (communities) registry
-CREATE TABLE IF NOT EXISTS waddles (
-    id TEXT PRIMARY KEY,                    -- Waddle ID (UUID)
-    name TEXT NOT NULL,                     -- Waddle name
-    description TEXT,                       -- Waddle description
-    owner_id INTEGER NOT NULL,              -- Owner user ID
-    icon_url TEXT,                          -- Waddle icon URL
-    is_public INTEGER NOT NULL DEFAULT 1,  -- Whether the waddle is publicly discoverable
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
+
+CREATE TABLE waddles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    owner_id TEXT NOT NULL,
+    icon_url TEXT,
+    is_public INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_waddles_owner_id ON waddles(owner_id);
-CREATE INDEX IF NOT EXISTS idx_waddles_is_public ON waddles(is_public);
+CREATE INDEX idx_waddles_owner_id ON waddles(owner_id);
+CREATE INDEX idx_waddles_is_public ON waddles(is_public);
 
--- Waddle memberships
-CREATE TABLE IF NOT EXISTS waddle_members (
+CREATE TABLE waddle_members (
     waddle_id TEXT NOT NULL,
-    user_id INTEGER NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',   -- 'owner', 'admin', 'moderator', 'member'
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
     joined_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (waddle_id, user_id),
     FOREIGN KEY (waddle_id) REFERENCES waddles(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_waddle_members_user_id ON waddle_members(user_id);
-"#;
+CREATE INDEX idx_waddle_members_user_id ON waddle_members(user_id);
 
-    /// Migration to add token_endpoint and pds_url columns to sessions table
-    pub const V0002_ADD_TOKEN_ENDPOINT: &str = r#"
--- Add token_endpoint and pds_url columns for token refresh support
-ALTER TABLE sessions ADD COLUMN token_endpoint TEXT;
-ALTER TABLE sessions ADD COLUMN pds_url TEXT;
-"#;
-
-    /// Migration to add permission_tuples table for Zanzibar-style permissions
-    pub const V0003_PERMISSION_TUPLES: &str = r#"
--- Permission tuples table for Zanzibar-inspired ReBAC
--- Stores relationships in format: object#relation@subject
-CREATE TABLE IF NOT EXISTS permission_tuples (
+CREATE TABLE permission_tuples (
     id TEXT PRIMARY KEY,
-    object_type TEXT NOT NULL,      -- waddle, channel, message, dm, role
+    object_type TEXT NOT NULL,
     object_id TEXT NOT NULL,
-    relation TEXT NOT NULL,         -- owner, admin, member, viewer, etc.
-    subject_type TEXT NOT NULL,     -- user, waddle, role
+    relation TEXT NOT NULL,
+    subject_type TEXT NOT NULL,
     subject_id TEXT NOT NULL,
-    subject_relation TEXT,          -- for set-based subjects (e.g., waddle:abc#member)
+    subject_relation TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-
     UNIQUE(object_type, object_id, relation, subject_type, subject_id, subject_relation)
 );
 
--- Index for looking up all relations on an object (e.g., "who has access to channel:general?")
-CREATE INDEX IF NOT EXISTS idx_tuples_object ON permission_tuples(object_type, object_id);
+CREATE INDEX idx_tuples_object ON permission_tuples(object_type, object_id);
+CREATE INDEX idx_tuples_subject ON permission_tuples(subject_type, subject_id);
+CREATE INDEX idx_tuples_relation ON permission_tuples(object_type, relation);
+CREATE INDEX idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
 
--- Index for looking up all objects a subject has access to (e.g., "what can user:alice access?")
-CREATE INDEX IF NOT EXISTS idx_tuples_subject ON permission_tuples(subject_type, subject_id);
-
--- Index for looking up specific relation types (e.g., "all owners of waddles")
-CREATE INDEX IF NOT EXISTS idx_tuples_relation ON permission_tuples(object_type, relation);
-
--- Composite index for permission checks (most common query pattern)
-CREATE INDEX IF NOT EXISTS idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
-"#;
-
-    /// Migration to add native_users table for XEP-0077 In-Band Registration
-    pub const V0004_NATIVE_USERS: &str = r#"
--- Native XMPP users table for XEP-0077 In-Band Registration
--- These users authenticate via SCRAM-SHA-256 (native JID) rather than ATProto OAuth
-CREATE TABLE IF NOT EXISTS native_users (
+CREATE TABLE native_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL,                 -- Local part of JID (e.g., "alice" in alice@domain.com)
-    domain TEXT NOT NULL,                   -- Domain part of JID (e.g., "domain.com")
-    password_hash TEXT NOT NULL,            -- Argon2id hash of the password
-    salt TEXT NOT NULL,                     -- SCRAM salt (base64 encoded, used for PBKDF2)
-    iterations INTEGER NOT NULL DEFAULT 4096, -- PBKDF2 iteration count
-    stored_key BLOB NOT NULL,               -- SCRAM StoredKey = H(ClientKey)
-    server_key BLOB NOT NULL,               -- SCRAM ServerKey = HMAC(SaltedPassword, "Server Key")
-    email TEXT,                             -- Optional email for recovery
+    username TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    iterations INTEGER NOT NULL DEFAULT 4096,
+    stored_key BLOB NOT NULL,
+    server_key BLOB NOT NULL,
+    email TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(username, domain)
 );
 
--- Index for username lookup during authentication
-CREATE INDEX IF NOT EXISTS idx_native_users_username_domain ON native_users(username, domain);
+CREATE INDEX idx_native_users_username_domain ON native_users(username, domain);
+CREATE INDEX idx_native_users_email ON native_users(email) WHERE email IS NOT NULL;
 
--- Index for email (for recovery features)
-CREATE INDEX IF NOT EXISTS idx_native_users_email ON native_users(email) WHERE email IS NOT NULL;
-"#;
-
-    /// Migration to add vcard_storage table for XEP-0054 vcard-temp
-    pub const V0005_VCARD_STORAGE: &str = r#"
--- vCard storage table for XEP-0054 vcard-temp
--- Stores user profile information as XML
-CREATE TABLE IF NOT EXISTS vcard_storage (
-    jid TEXT PRIMARY KEY,                   -- Bare JID (e.g., "user@domain.com")
-    vcard_xml TEXT NOT NULL,                -- Full vCard XML content
+CREATE TABLE vcard_storage (
+    jid TEXT PRIMARY KEY,
+    vcard_xml TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"#;
 
-    /// Migration to add upload_slots table for XEP-0363 HTTP File Upload
-    pub const V0006_UPLOAD_SLOTS: &str = r#"
--- Upload slots table for XEP-0363 HTTP File Upload
--- Tracks pending and completed file uploads
-CREATE TABLE IF NOT EXISTS upload_slots (
-    id TEXT PRIMARY KEY,                    -- Slot ID (UUID)
-    requester_jid TEXT NOT NULL,            -- JID of user who requested the slot
-    filename TEXT NOT NULL,                 -- Sanitized filename
-    size_bytes INTEGER NOT NULL,            -- File size in bytes
-    content_type TEXT NOT NULL,             -- MIME type (defaults to application/octet-stream)
-    status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'uploaded', 'expired'
-    storage_key TEXT,                       -- Storage key/path once uploaded
+CREATE TABLE upload_slots (
+    id TEXT PRIMARY KEY,
+    requester_jid TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    storage_key TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL,               -- When the upload slot expires
-    uploaded_at TEXT                        -- When the file was actually uploaded
+    expires_at TEXT NOT NULL,
+    uploaded_at TEXT
 );
 
--- Index for looking up slots by requester (for quota tracking)
-CREATE INDEX IF NOT EXISTS idx_upload_slots_requester ON upload_slots(requester_jid);
+CREATE INDEX idx_upload_slots_requester ON upload_slots(requester_jid);
+CREATE INDEX idx_upload_slots_expires ON upload_slots(expires_at) WHERE status = 'pending';
+CREATE INDEX idx_upload_slots_status ON upload_slots(status);
 
--- Index for finding expired slots (for cleanup)
-CREATE INDEX IF NOT EXISTS idx_upload_slots_expires ON upload_slots(expires_at) WHERE status = 'pending';
-
--- Index for finding slots by status
-CREATE INDEX IF NOT EXISTS idx_upload_slots_status ON upload_slots(status);
-"#;
-
-    /// Migration to add roster_items table for RFC 6121 roster management
-    pub const V0007_ROSTER_ITEMS: &str = r#"
--- Roster items table for RFC 6121 roster management
--- Stores contacts/buddies for each user's roster
-CREATE TABLE IF NOT EXISTS roster_items (
+CREATE TABLE roster_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_jid TEXT NOT NULL,                 -- Bare JID of the roster owner (e.g., "alice@domain.com")
-    contact_jid TEXT NOT NULL,              -- Bare JID of the contact (e.g., "bob@domain.com")
-    name TEXT,                              -- Optional display name for the contact
-    subscription TEXT NOT NULL DEFAULT 'none', -- 'none', 'to', 'from', 'both', 'remove'
-    ask TEXT,                               -- 'subscribe' if pending outbound subscription request
-    groups TEXT,                            -- JSON array of group names (e.g., '["Friends", "Work"]')
+    user_jid TEXT NOT NULL,
+    contact_jid TEXT NOT NULL,
+    name TEXT,
+    subscription TEXT NOT NULL DEFAULT 'none',
+    ask TEXT,
+    groups TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(user_jid, contact_jid)
 );
 
--- Index for fast roster retrieval by user
-CREATE INDEX IF NOT EXISTS idx_roster_items_user ON roster_items(user_jid);
+CREATE INDEX idx_roster_items_user ON roster_items(user_jid);
+CREATE INDEX idx_roster_items_contact ON roster_items(contact_jid);
+CREATE INDEX idx_roster_items_subscription ON roster_items(user_jid, subscription);
 
--- Index for reverse lookups (who has this user in their roster)
-CREATE INDEX IF NOT EXISTS idx_roster_items_contact ON roster_items(contact_jid);
-
--- Index for subscription state queries (e.g., find all contacts with subscription=from)
-CREATE INDEX IF NOT EXISTS idx_roster_items_subscription ON roster_items(user_jid, subscription);
-
--- Roster versions table for XEP-0237 roster versioning
-CREATE TABLE IF NOT EXISTS roster_versions (
-    user_jid TEXT PRIMARY KEY,              -- Bare JID of the roster owner
-    version TEXT NOT NULL,                  -- Current roster version string
+CREATE TABLE roster_versions (
+    user_jid TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"#;
 
-    /// Migration to add blocking_list table for XEP-0191 Blocking Command
-    pub const V0008_BLOCKING_LIST: &str = r#"
--- Blocking list table for XEP-0191 Blocking Command
--- Stores blocked JIDs for each user
-CREATE TABLE IF NOT EXISTS blocking_list (
+CREATE TABLE blocking_list (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_jid TEXT NOT NULL,                 -- Bare JID of the user doing the blocking
-    blocked_jid TEXT NOT NULL,              -- Bare JID of the blocked user
+    user_jid TEXT NOT NULL,
+    blocked_jid TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(user_jid, blocked_jid)
 );
 
--- Index for fast blocklist retrieval by user
-CREATE INDEX IF NOT EXISTS idx_blocking_list_user ON blocking_list(user_jid);
+CREATE INDEX idx_blocking_list_user ON blocking_list(user_jid);
+CREATE INDEX idx_blocking_list_blocked ON blocking_list(blocked_jid);
 
--- Index for checking if a JID is blocked by anyone (for presence filtering)
-CREATE INDEX IF NOT EXISTS idx_blocking_list_blocked ON blocking_list(blocked_jid);
-"#;
-
-    /// Migration to add private_xml_storage table for XEP-0049 Private XML Storage
-    pub const V0009_PRIVATE_XML_STORAGE: &str = r#"
--- Private XML storage table for XEP-0049
--- Stores arbitrary per-user XML data keyed by namespace
-CREATE TABLE IF NOT EXISTS private_xml_storage (
-    jid TEXT NOT NULL,                      -- Bare JID of the user
-    namespace TEXT NOT NULL,                -- XML namespace used as key
-    xml_content TEXT NOT NULL,              -- Stored XML content
+CREATE TABLE private_xml_storage (
+    jid TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    xml_content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (jid, namespace)
 );
-"#;
 
-    /// Migration to add source column to vcard_storage for profile auto-population tracking
-    pub const V0010_VCARD_SOURCE: &str = r#"
--- Add source column to track whether vCard was auto-populated from ATProto or manually set.
--- 'atproto_auto' = populated from Bluesky profile on login
--- 'manual' = set by user via XEP-0054 IQ set
-ALTER TABLE vcard_storage ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+PRAGMA foreign_keys = ON;
 "#;
 
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
-        vec![
-            Migration {
-                version: 1,
-                description: "Initial global schema".to_string(),
-                sql: V0001_INITIAL_SCHEMA,
-            },
-            Migration {
-                version: 2,
-                description: "Add token_endpoint and pds_url to sessions".to_string(),
-                sql: V0002_ADD_TOKEN_ENDPOINT,
-            },
-            Migration {
-                version: 3,
-                description: "Add permission_tuples table for Zanzibar-style ReBAC".to_string(),
-                sql: V0003_PERMISSION_TUPLES,
-            },
-            Migration {
-                version: 4,
-                description: "Add native_users table for XEP-0077 In-Band Registration".to_string(),
-                sql: V0004_NATIVE_USERS,
-            },
-            Migration {
-                version: 5,
-                description: "Add vcard_storage table for XEP-0054 vcard-temp".to_string(),
-                sql: V0005_VCARD_STORAGE,
-            },
-            Migration {
-                version: 6,
-                description: "Add upload_slots table for XEP-0363 HTTP File Upload".to_string(),
-                sql: V0006_UPLOAD_SLOTS,
-            },
-            Migration {
-                version: 7,
-                description: "Add roster_items table for RFC 6121 roster management".to_string(),
-                sql: V0007_ROSTER_ITEMS,
-            },
-            Migration {
-                version: 8,
-                description: "Add blocking_list table for XEP-0191 Blocking Command".to_string(),
-                sql: V0008_BLOCKING_LIST,
-            },
-            Migration {
-                version: 9,
-                description: "Add private_xml_storage table for XEP-0049 Private XML Storage"
-                    .to_string(),
-                sql: V0009_PRIVATE_XML_STORAGE,
-            },
-            Migration {
-                version: 10,
-                description: "Add source column to vcard_storage for profile auto-population"
-                    .to_string(),
-                sql: V0010_VCARD_SOURCE,
-            },
-        ]
+        vec![Migration {
+            version: 1,
+            description: "Hard-cut auth broker and UUID principal schema".to_string(),
+            sql: V0001_AUTH_BROKER_SCHEMA,
+        }]
     }
 }
 
@@ -345,109 +249,85 @@ ALTER TABLE vcard_storage ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
 pub mod waddle {
     use super::Migration;
 
-    /// Initial per-waddle schema - channels and messages
-    pub const V0001_INITIAL_SCHEMA: &str = r#"
--- Channels within a waddle
-CREATE TABLE IF NOT EXISTS channels (
-    id TEXT PRIMARY KEY,                    -- Channel ID (UUID)
-    name TEXT NOT NULL,                     -- Channel name (e.g., "general")
-    description TEXT,                       -- Channel description
-    channel_type TEXT NOT NULL DEFAULT 'text', -- 'text', 'voice', 'announcement'
-    position INTEGER NOT NULL DEFAULT 0,   -- Display order
-    is_default INTEGER NOT NULL DEFAULT 0, -- Is this the default channel?
+    /// Hard-cut per-waddle schema with UUID user principals.
+    pub const V0001_SCHEMA: &str = r#"
+PRAGMA foreign_keys = OFF;
+
+DROP TABLE IF EXISTS attachments;
+DROP TABLE IF EXISTS reactions;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS channels;
+
+CREATE TABLE channels (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    channel_type TEXT NOT NULL DEFAULT 'text',
+    position INTEGER NOT NULL DEFAULT 0,
+    is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_channels_position ON channels(position);
+CREATE INDEX idx_channels_position ON channels(position);
 
--- Messages in channels
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,                    -- Message ID (UUID)
-    channel_id TEXT NOT NULL,               -- Channel this message belongs to
-    author_did TEXT NOT NULL,               -- Author's ATProto DID
-    content TEXT NOT NULL,                  -- Message content (may be encrypted)
-    reply_to_id TEXT,                       -- ID of message being replied to
-    is_edited INTEGER NOT NULL DEFAULT 0,  -- Has this message been edited?
+CREATE TABLE messages (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    author_user_id TEXT NOT NULL,
+    content TEXT,
+    reply_to_id TEXT,
+    thread_id TEXT,
+    flags INTEGER NOT NULL DEFAULT 0,
+    edited_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
     FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id);
-CREATE INDEX IF NOT EXISTS idx_messages_author_did ON messages(author_did);
-CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
-CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id);
+CREATE INDEX idx_messages_channel_id ON messages(channel_id);
+CREATE INDEX idx_messages_author_user_id ON messages(author_user_id);
+CREATE INDEX idx_messages_created_at ON messages(created_at);
+CREATE INDEX idx_messages_reply_to_id ON messages(reply_to_id);
+CREATE INDEX idx_messages_thread ON messages(thread_id, created_at);
+CREATE INDEX idx_messages_channel_created ON messages(channel_id, created_at DESC);
+CREATE INDEX idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL;
 
--- Message reactions
-CREATE TABLE IF NOT EXISTS reactions (
+CREATE TABLE reactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id TEXT NOT NULL,
-    user_did TEXT NOT NULL,                 -- User's ATProto DID
-    emoji TEXT NOT NULL,                    -- Emoji reaction
+    user_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(message_id, user_did, emoji),
+    UNIQUE(message_id, user_id, emoji),
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_reactions_message_id ON reactions(message_id);
+CREATE INDEX idx_reactions_message_id ON reactions(message_id);
 
--- Attachments (references to object storage)
-CREATE TABLE IF NOT EXISTS attachments (
-    id TEXT PRIMARY KEY,                    -- Attachment ID (UUID)
-    message_id TEXT NOT NULL,               -- Message this attachment belongs to
-    filename TEXT NOT NULL,                 -- Original filename
-    content_type TEXT NOT NULL,             -- MIME type
-    size_bytes INTEGER NOT NULL,            -- File size
-    storage_key TEXT NOT NULL,              -- Key in object storage
+CREATE TABLE attachments (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    storage_key TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
-"#;
+CREATE INDEX idx_attachments_message_id ON attachments(message_id);
 
-    /// Migration to add message schema fields per message-schema.md spec
-    pub const V0002_MESSAGE_SCHEMA_UPDATES: &str = r#"
--- Add thread_id for threading support
-ALTER TABLE messages ADD COLUMN thread_id TEXT;
-
--- Add flags bitfield for message properties
-ALTER TABLE messages ADD COLUMN flags INTEGER DEFAULT 0;
-
--- Add edited_at timestamp (replacing is_edited boolean)
-ALTER TABLE messages ADD COLUMN edited_at TEXT;
-
--- Add expires_at for message TTL support
-ALTER TABLE messages ADD COLUMN expires_at TEXT;
-
--- Make content nullable (for system messages with only embeds)
--- Note: SQLite doesn't support ALTER COLUMN, content is already TEXT which allows NULL
-
--- Add index for thread queries
-CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, created_at);
-
--- Add index for channel + created_at (the most common query pattern)
-CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel_id, created_at DESC);
-
--- Add index for expires_at to support TTL cleanup
-CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL;
+PRAGMA foreign_keys = ON;
 "#;
 
     /// Get all per-waddle migrations in order
     pub fn all() -> Vec<Migration> {
-        vec![
-            Migration {
-                version: 1,
-                description: "Initial per-waddle schema".to_string(),
-                sql: V0001_INITIAL_SCHEMA,
-            },
-            Migration {
-                version: 2,
-                description: "Add message schema fields per spec".to_string(),
-                sql: V0002_MESSAGE_SCHEMA_UPDATES,
-            },
-        ]
+        vec![Migration {
+            version: 1,
+            description: "Hard-cut per-waddle schema with user_id principals".to_string(),
+            sql: V0001_SCHEMA,
+        }]
     }
 }
 
@@ -511,10 +391,13 @@ impl MigrationRunner {
             DatabaseError::MigrationFailed(format!("Failed to create migrations table: {}", e))
         })?;
 
-        // Get applied migrations
-        let mut applied: Vec<i64> = Vec::new();
+        // Get applied migrations (version + description).
+        let mut applied_rows: Vec<(i64, String)> = Vec::new();
         let mut rows = conn
-            .query("SELECT version FROM _migrations ORDER BY version", ())
+            .query(
+                "SELECT version, description FROM _migrations ORDER BY version",
+                (),
+            )
             .await
             .map_err(|e| {
                 DatabaseError::MigrationFailed(format!("Failed to query migrations: {}", e))
@@ -526,8 +409,58 @@ impl MigrationRunner {
             let version: i64 = row.get(0).map_err(|e| {
                 DatabaseError::MigrationFailed(format!("Failed to get version from row: {}", e))
             })?;
-            applied.push(version);
+            let description: String = row.get(1).map_err(|e| {
+                DatabaseError::MigrationFailed(format!("Failed to get description from row: {}", e))
+            })?;
+            applied_rows.push((version, description));
         }
+
+        // Hard-cut protection: if the migration history doesn't match this binary's
+        // migration set (unknown versions or differing descriptions), reset migration
+        // tracking and re-apply current migrations from scratch.
+        let expected: HashMap<i64, &str> = self
+            .migrations
+            .iter()
+            .map(|m| (m.version, m.description.as_str()))
+            .collect();
+        let has_incompatible_history = applied_rows.iter().any(|(version, description)| {
+            expected
+                .get(version)
+                .map(|expected_desc| *expected_desc != description.as_str())
+                .unwrap_or(true)
+        });
+
+        let applied: Vec<i64> = if has_incompatible_history {
+            info!("Incompatible migration history detected, resetting migration tracking");
+            conn.execute_batch("DROP TABLE IF EXISTS _migrations;")
+                .await
+                .map_err(|e| {
+                    DatabaseError::MigrationFailed(format!(
+                        "Failed to reset migration tracking table: {}",
+                        e
+                    ))
+                })?;
+            conn.execute(
+                r#"
+                CREATE TABLE IF NOT EXISTS _migrations (
+                    version INTEGER PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                "#,
+                (),
+            )
+            .await
+            .map_err(|e| {
+                DatabaseError::MigrationFailed(format!(
+                    "Failed to recreate migrations table: {}",
+                    e
+                ))
+            })?;
+            Vec::new()
+        } else {
+            applied_rows.iter().map(|(version, _)| *version).collect()
+        };
 
         debug!("Already applied migrations: {:?}", applied);
 
@@ -665,9 +598,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (10 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items + blocking list + private xml storage + vcard source)
+        // Check version (single hard-cut schema migration)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(10));
+        assert_eq!(version, Some(1));
     }
 
     #[tokio::test]
@@ -715,5 +648,44 @@ mod tests {
 
         // Should not have pending migrations
         assert!(!runner.has_pending(&db).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_incompatible_history_forces_hard_cut_reapply() {
+        let db = Database::in_memory("test-incompatible-history")
+            .await
+            .unwrap();
+        let conn = db.persistent_connection().unwrap();
+        let conn = conn.lock().await;
+
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO _migrations (version, description) VALUES (1, 'legacy initial schema')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let runner = MigrationRunner::global();
+        let applied = runner.run(&db).await.unwrap();
+        assert_eq!(applied, vec![1]);
+
+        let applied_again = runner.run(&db).await.unwrap();
+        assert!(applied_again.is_empty());
+
+        let version = runner.current_version(&db).await.unwrap();
+        assert_eq!(version, Some(1));
     }
 }

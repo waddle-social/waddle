@@ -100,6 +100,8 @@ config:
   mode: homeserver
   baseUrl: https://waddle.local
   corsOrigins: ""
+  # Optional non-sensitive provider JSON (usually keep this empty and use secret.authProvidersJson).
+  authProvidersJson: ""
   drainTimeoutSeconds: 30
   rustLog: info
   # Extra key/value env vars rendered into ConfigMap data (non-sensitive).
@@ -114,6 +116,11 @@ secret:
   create: true
   existingSecret: ""
   sessionKey: ""
+  # JSON object/array for WADDLE_AUTH_PROVIDERS_JSON.
+  # This usually contains provider client secrets and should stay in Secret data.
+  # Example:
+  # [{"id":"github","display_name":"GitHub","kind":"oauth2","client_id":"...","client_secret":"...","scopes":["read:user","user:email"],"authorization_endpoint":"https://github.com/login/oauth/authorize","token_endpoint":"https://github.com/login/oauth/access_token","userinfo_endpoint":"https://api.github.com/user","subject_claim":"id","username_claim":"login","email_claim":"email"}]
+  authProvidersJson: ""
   githubToken: ""
 
 probes:
@@ -133,8 +140,6 @@ probes:
 # Extra env vars rendered directly in Deployment container.env.
 # Supports both value and valueFrom entries.
 containerExtraEnv: []
-# Deprecated alias for containerExtraEnv (kept for backward compatibility).
-extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
 

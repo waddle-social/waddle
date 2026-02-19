@@ -100,6 +100,7 @@ hex = "0.4"
 hickory-resolver = "0.25"
 lru = "0.12"
 regex = "1.10"
+jsonwebtoken = "9.3"
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"

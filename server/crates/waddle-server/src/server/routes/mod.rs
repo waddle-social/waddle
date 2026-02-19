@@ -1,5 +1,5 @@
 // Route modules for Waddle Server API
-pub mod auth; // ATProto OAuth, session management
+pub mod auth; // Provider auth broker, session management
 pub mod auth_page; // Web-based auth page for XMPP credentials
 pub mod channels; // Channel CRUD and permissions
 pub mod device; // OAuth Device Flow for CLI

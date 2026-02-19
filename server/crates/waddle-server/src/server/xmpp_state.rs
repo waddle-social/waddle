@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
-use crate::auth::{did_to_jid, jid_to_did, NativeUserStore, RegisterRequest, SessionManager};
+use crate::auth::{
+    jid_to_localpart, localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager,
+};
 use crate::db::{Database, DatabasePool, MigrationRunner};
 use crate::permissions::{Object, PermissionService, Subject};
 use crate::server::routes::channels::list_channels_from_db as list_channels_for_waddle_from_db;
@@ -85,7 +87,7 @@ impl XmppAppState {
 
     /// Parse a subject string into a Subject.
     ///
-    /// Subject format: "user:{did}" or "waddle:{id}#member"
+    /// Subject format: "user:{user_id}" or "waddle:{id}#member"
     fn parse_subject(subject: &str) -> Result<Subject, XmppError> {
         Subject::parse(subject).map_err(|e| {
             XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
@@ -97,7 +99,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// Validate an XMPP session token and return the associated session.
     ///
     /// The token is expected to be a session ID from the HTTP authentication flow.
-    /// The JID's localpart is converted to a DID and verified against the session.
+    /// The JID's localpart is verified against the immutable session localpart.
     async fn validate_session(
         &self,
         jid: &jid::Jid,
@@ -105,9 +107,9 @@ impl waddle_xmpp::AppState for XmppAppState {
     ) -> Result<XmppSession, XmppError> {
         debug!(jid = %jid, "Validating XMPP session");
 
-        // Convert JID to DID for verification
-        let expected_did = jid_to_did(&jid.to_string()).map_err(|e| {
-            warn!(jid = %jid, error = %e, "Failed to convert JID to DID");
+        // Convert JID to localpart for verification
+        let expected_localpart = jid_to_localpart(&jid.to_string()).map_err(|e| {
+            warn!(jid = %jid, error = %e, "Failed to extract localpart from JID");
             XmppError::auth_failed(format!("Invalid JID format: {}", e))
         })?;
 
@@ -125,12 +127,12 @@ impl waddle_xmpp::AppState for XmppAppState {
                 }
             })?;
 
-        // Verify the DID matches
-        if session.did != expected_did {
+        // Verify the localpart matches the immutable session localpart.
+        if session.xmpp_localpart != expected_localpart {
             warn!(
-                expected_did = %expected_did,
-                session_did = %session.did,
-                "DID mismatch between JID and session"
+                expected_localpart = %expected_localpart,
+                session_localpart = %session.xmpp_localpart,
+                "Localpart mismatch between JID and session"
             );
             return Err(XmppError::auth_failed("JID does not match session"));
         }
@@ -144,7 +146,7 @@ impl waddle_xmpp::AppState for XmppAppState {
             .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
 
         Ok(XmppSession {
-            did: session.did,
+            user_id: session.user_id,
             jid: bare_jid,
             created_at: session.created_at,
             expires_at,
@@ -154,7 +156,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// Check if a subject has permission to perform an action on a resource.
     ///
     /// Resource format: "waddle:{id}" or "channel:{id}"
-    /// Subject format: "user:{did}"
+    /// Subject format: "user:{user_id}"
     async fn check_permission(
         &self,
         resource: &str,
@@ -198,7 +200,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// Validate an XMPP session token without a JID (for OAUTHBEARER).
     ///
     /// The token is expected to be a session ID. The JID is derived from the
-    /// session's DID after validation.
+    /// session's immutable localpart after validation.
     async fn validate_session_token(&self, token: &str) -> Result<XmppSession, XmppError> {
         debug!(token_prefix = %&token[..token.len().min(8)], "Validating XMPP session token (OAUTHBEARER)");
 
@@ -216,10 +218,10 @@ impl waddle_xmpp::AppState for XmppAppState {
                 }
             })?;
 
-        // Convert DID to JID
-        let jid_str = did_to_jid(&session.did, &self.domain).map_err(|e| {
-            warn!(did = %session.did, error = %e, "Failed to convert DID to JID");
-            XmppError::auth_failed(format!("Invalid DID format: {}", e))
+        // Convert immutable localpart to JID
+        let jid_str = localpart_to_jid(&session.xmpp_localpart, &self.domain).map_err(|e| {
+            warn!(localpart = %session.xmpp_localpart, error = %e, "Failed to convert localpart to JID");
+            XmppError::auth_failed(format!("Invalid localpart format: {}", e))
         })?;
 
         let bare_jid: jid::BareJid = jid_str.parse().map_err(|e| {
@@ -232,10 +234,10 @@ impl waddle_xmpp::AppState for XmppAppState {
             .expires_at
             .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
 
-        debug!(jid = %bare_jid, did = %session.did, "OAUTHBEARER session validated");
+        debug!(jid = %bare_jid, user_id = %session.user_id, "OAUTHBEARER session validated");
 
         Ok(XmppSession {
-            did: session.did,
+            user_id: session.user_id,
             jid: bare_jid,
             created_at: session.created_at,
             expires_at,
@@ -1011,9 +1013,9 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// List all waddles a user belongs to.
     async fn list_user_waddles(
         &self,
-        did: &str,
+        user_id: &str,
     ) -> Result<Vec<waddle_xmpp::WaddleInfo>, XmppError> {
-        debug!(did = %did, "Listing user waddles for auto-join");
+        debug!(user_id = %user_id, "Listing user waddles for auto-join");
 
         // Reuse shared query helper from waddles routes to avoid SQL duplication.
         const PAGE_SIZE: usize = 200;
@@ -1021,10 +1023,10 @@ impl waddle_xmpp::AppState for XmppAppState {
         let mut result = Vec::new();
 
         loop {
-            let page = list_user_waddles_from_db(self.db.as_ref(), did, PAGE_SIZE, offset)
+            let page = list_user_waddles_from_db(self.db.as_ref(), user_id, PAGE_SIZE, offset)
                 .await
                 .map_err(|e| {
-                    warn!(did = %did, error = %e, "Failed to list user waddles");
+                    warn!(user_id = %user_id, error = %e, "Failed to list user waddles");
                     XmppError::internal(format!("Failed to list user waddles: {}", e))
                 })?;
 
@@ -1040,7 +1042,7 @@ impl waddle_xmpp::AppState for XmppAppState {
             offset += PAGE_SIZE;
         }
 
-        debug!(did = %did, count = result.len(), "Found user waddles");
+        debug!(user_id = %user_id, count = result.len(), "Found user waddles");
         Ok(result)
     }
 
@@ -1184,8 +1186,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_subject() {
-        let subj = XmppAppState::parse_subject("user:did:plc:abc123").expect("Failed to parse");
-        assert_eq!(subj.id, "did:plc:abc123");
+        let subj = XmppAppState::parse_subject("user:user-abc123").expect("Failed to parse");
+        assert_eq!(subj.id, "user-abc123");
         assert!(subj.relation.is_none());
     }
 

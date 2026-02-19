@@ -449,9 +449,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                                             XmppError::auth_failed(format!("Invalid JID: {}", e))
                                         })?;
 
-                                    // For native users, the DID is the JID itself (no ATProto)
+                                    // For native users, use the bare JID as the user identifier.
                                     let session = Session {
-                                        did: jid.to_string(),
+                                        user_id: jid.to_string(),
                                         jid: jid.clone(),
                                         created_at: Utc::now(),
                                         expires_at: Utc::now() + chrono::Duration::hours(24),
@@ -657,7 +657,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                                         |e| XmppError::auth_failed(format!("Invalid JID: {}", e)),
                                     )?;
                                 let session = Session {
-                                    did: jid.to_string(),
+                                    user_id: jid.to_string(),
                                     jid: jid.clone(),
                                     created_at: Utc::now(),
                                     expires_at: Utc::now() + chrono::Duration::hours(24),
@@ -743,7 +743,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         Ok(Some(Session {
-            did: jid.to_string(),
+            user_id: jid.to_string(),
             jid: jid.clone(),
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(24),
@@ -832,7 +832,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             self.current_isr_token = None;
             self.stream.send_sasl_success().await?;
             debug!(
-                did = %session.did,
+                user_id = %session.user_id,
                 jid = %jid,
                 "Sent SASL success without ISR token (compat mode)"
             );
@@ -842,7 +842,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Create an ISR token for this session
         let isr_token = self
             .isr_token_store
-            .create_token(session.did.clone(), jid.clone());
+            .create_token(session.user_id.clone(), jid.clone());
 
         // Store the token ID for this connection
         self.current_isr_token = Some(isr_token.token.clone());
@@ -853,7 +853,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .await?;
 
         debug!(
-            did = %session.did,
+            user_id = %session.user_id,
             jid = %jid,
             token_expiry = %isr_token.expiry,
             "Created ISR token for session"
@@ -1064,7 +1064,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 if let Some(jid) = &self.jid {
                     // Create a new ISR token with SM state
                     let new_isr_token = self.isr_token_store.create_token_with_sm(
-                        session.did.clone(),
+                        session.user_id.clone(),
                         jid.to_bare(),
                         stream_id.clone(),
                         self.sm_state.inbound_count,
@@ -1139,7 +1139,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // First, try ISR token-based resumption (XEP-0397)
         if let Some(isr_token) = self.isr_token_store.validate_token(previd) {
             info!(
-                did = %isr_token.did,
+                user_id = %isr_token.user_id,
                 jid = %isr_token.jid,
                 sm_stream_id = ?isr_token.sm_stream_id,
                 "ISR token validated for instant resumption"
@@ -1150,7 +1150,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             // Restore session state from the ISR token
             self.session = Some(Session {
-                did: isr_token.did.clone(),
+                user_id: isr_token.user_id.clone(),
                 jid: isr_token.jid.clone(),
                 // Use session expiry from somewhere - for now use a long-lived session
                 // In production, this should be looked up from the session store
@@ -1174,7 +1174,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Create a new ISR token for the resumed session
             let new_isr_token = if let Some(ref sm_id) = isr_token.sm_stream_id {
                 self.isr_token_store.create_token_with_sm(
-                    isr_token.did.clone(),
+                    isr_token.user_id.clone(),
                     isr_token.jid.clone(),
                     sm_id.clone(),
                     isr_token.sm_inbound_count,
@@ -1182,7 +1182,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 )
             } else {
                 self.isr_token_store
-                    .create_token(isr_token.did.clone(), isr_token.jid.clone())
+                    .create_token(isr_token.user_id.clone(), isr_token.jid.clone())
             };
 
             self.current_isr_token = Some(new_isr_token.token.clone());
@@ -1217,8 +1217,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Restore session from detached state
                 self.jid = Some(session.jid.clone());
                 self.session = Some(Session {
-                    did: format!(
-                        "did:sm:{}",
+                    user_id: format!(
+                        "user_id:sm:{}",
                         session
                             .jid
                             .node()
@@ -2213,14 +2213,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        // Get the user's DID from the session for permission checking
-        let user_did = self
+        // Get the user identifier from the session for permission checking.
+        let user_id = self
             .session
             .as_ref()
-            .map(|s| s.did.clone())
+            .map(|s| s.user_id.clone())
             .unwrap_or_else(|| {
-                // Fallback: extract DID-like identifier from JID if no session
-                // This handles edge cases in testing scenarios
+                // Fallback to bare JID in edge-case test flows where no session is attached.
                 join_req.sender_jid.to_bare().to_string()
             });
 
@@ -2237,12 +2236,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             AppStateAffiliationResolver::new(Arc::clone(&self.app_state), self.domain.clone());
 
         let resolved_affiliation = match resolver
-            .resolve_affiliation(&user_did, &waddle_id, &channel_id)
+            .resolve_affiliation(&user_id, &waddle_id, &channel_id)
             .await
         {
             Ok(affiliation) => {
                 debug!(
-                    user = %user_did,
+                    user = %user_id,
                     affiliation = %affiliation,
                     "Resolved affiliation from Zanzibar permissions"
                 );
@@ -2251,7 +2250,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Err(e) => {
                 // Permission check failed - handle gracefully
                 warn!(
-                    user = %user_did,
+                    user = %user_id,
                     error = %e,
                     "Failed to resolve affiliation from Zanzibar, using default"
                 );
@@ -2563,24 +2562,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             None => return Ok(()), // No JID bound yet, skip
         };
 
-        let did = match self.session.as_ref() {
-            Some(session) => session.did.clone(),
+        let user_id = match self.session.as_ref() {
+            Some(session) => session.user_id.clone(),
             None => return Ok(()), // No session, skip
         };
 
-        info!(did = %did, "Auto-joining all channels");
+        info!(user_id = %user_id, "Auto-joining all channels");
 
         // Step 1: Get the user's waddles
-        let waddles = match self.app_state.list_user_waddles(&did).await {
+        let waddles = match self.app_state.list_user_waddles(&user_id).await {
             Ok(w) => w,
             Err(e) => {
-                warn!(did = %did, error = %e, "Failed to list user waddles for auto-join");
+                warn!(user_id = %user_id, error = %e, "Failed to list user waddles for auto-join");
                 return Ok(()); // Non-fatal
             }
         };
 
         if waddles.is_empty() {
-            debug!(did = %did, "User has no waddles, skipping auto-join");
+            debug!(user_id = %user_id, "User has no waddles, skipping auto-join");
             return Ok(());
         }
 
@@ -2612,12 +2611,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         if all_channels.is_empty() {
-            debug!(did = %did, "No channels to auto-join");
+            debug!(user_id = %user_id, "No channels to auto-join");
             return Ok(());
         }
 
         info!(
-            did = %did,
+            user_id = %user_id,
             channel_count = all_channels.len(),
             waddle_count = waddles.len(),
             "Auto-joining channels"
@@ -2716,7 +2715,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         info!(
-            did = %did,
+            user_id = %user_id,
             joined = joined_rooms.len(),
             total = all_channels.len(),
             "Auto-join complete"
@@ -4839,7 +4838,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Include SM state if Stream Management is enabled
             let sm_stream_id = self.sm_state.stream_id.clone().unwrap_or_default();
             self.isr_token_store.create_token_with_sm(
-                session.did.clone(),
+                session.user_id.clone(),
                 jid.clone(),
                 sm_stream_id,
                 self.sm_state.inbound_count,
@@ -4847,7 +4846,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             )
         } else {
             self.isr_token_store
-                .create_token(session.did.clone(), jid.clone())
+                .create_token(session.user_id.clone(), jid.clone())
         };
 
         // Store the new token ID

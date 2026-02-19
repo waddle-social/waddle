@@ -585,14 +585,13 @@ fn create_router(
     xmpp_native_auth_enabled: bool,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
-    // Create auth state with configuration from environment or defaults
-    // The base URL is used to construct client_id and redirect_uri for OAuth
+    // Create auth broker state
     let base_url = server_config.base_url.clone();
     let encryption_key = server_config.session_key.clone();
 
     let auth_state = Arc::new(AuthState::new(
         state.clone(),
-        &base_url,
+        &server_config,
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
 
@@ -666,36 +665,18 @@ fn create_router(
         );
     }
 
-    // Conditionally merge ATProto routes based on server mode
-    if server_config.mode.atproto_enabled() {
-        info!("Registering ATProto OAuth routes (HomeServer mode)");
+    // Always merge v2 auth surfaces. If no providers are configured these endpoints
+    // return explicit errors.
+    let auth_router = routes::auth::router(auth_state.clone());
+    let device_router = routes::device::router(auth_state.clone());
+    let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
+    let auth_page_router = routes::auth_page::router(auth_state.clone());
 
-        // Auth router uses its own state type, so we apply .with_state() before merging
-        // This converts Router<Arc<AuthState>> to Router<()>, which can then be merged
-        let auth_router = routes::auth::router(auth_state.clone());
-
-        // Device flow router for CLI authentication
-        let device_store = Arc::new(dashmap::DashMap::new());
-        let device_router = routes::device::router(auth_state.clone(), device_store);
-
-        // XMPP OAuth router (XEP-0493) for standard XMPP client authentication
-        let xmpp_oauth_router = routes::xmpp_oauth::router(auth_state.clone());
-
-        // Auth page router for web-based XMPP credential retrieval
-        let auth_page_router = routes::auth_page::router(auth_state.clone());
-
-        router = router
-            // Merge auth routes after the main router has its state applied
-            .merge(auth_router)
-            // Merge device flow routes for CLI authentication
-            .merge(device_router)
-            // Merge XMPP OAuth routes for standard XMPP client authentication (XEP-0493)
-            .merge(xmpp_oauth_router)
-            // Merge auth page routes for web-based XMPP credential retrieval
-            .merge(auth_page_router);
-    } else {
-        info!("ATProto OAuth routes disabled (Standalone mode)");
-    }
+    router = router
+        .merge(auth_router)
+        .merge(device_router)
+        .merge(xmpp_oauth_router)
+        .merge(auth_page_router);
 
     // Always merge common routes (WebSocket, permissions, waddles, channels, uploads)
     router
