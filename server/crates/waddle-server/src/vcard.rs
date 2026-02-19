@@ -295,5 +295,4 @@ mod tests {
         assert_eq!(retrieved1, Some(vcard1.to_string()));
         assert_eq!(retrieved2, Some(vcard2.to_string()));
     }
-
 }
