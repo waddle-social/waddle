@@ -115,6 +115,9 @@ tasks: {
 			if [ -z "$pr_number" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_SHA:-}" ]; then
 			  pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].number' 2>/dev/null || true)"
 			fi
+			if [ -z "$pr_number" ]; then
+			  pr_number="$(git for-each-ref --format='%(refname)' refs/remotes/pull | awk -F/ '$1=="refs" && $2=="remotes" && $3=="pull" && $4 ~ /^[0-9]+$/ && $5=="merge" { print $4; exit }' || true)"
+			fi
 			if [ "$pr_number" = "null" ]; then
 			  pr_number=""
 			fi
