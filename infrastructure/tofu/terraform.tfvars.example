@@ -1,9 +1,10 @@
 # Scaleway S3 credentials for the state backend are fetched automatically
 # by scripts/tofu.sh from 1Password (waddle-infra vault, "Scaleway S3" item).
+# Proxmox API token is also fetched automatically by scripts/tofu.sh from:
+# op://waddle-infra/Login/einvbbtkrcn232jry4d66ye2cq
 
 # Proxmox connection
 proxmox_endpoint     = "https://10.10.0.1:8006"
-proxmox_api_token    = "tofu@pve!tofu-token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 proxmox_node_name    = "pve"
 proxmox_ssh_username = "root"
 

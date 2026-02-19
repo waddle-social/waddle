@@ -179,7 +179,6 @@ Required variables (see `terraform.tfvars.example` for format):
 | Variable | Description |
 |---|---|
 | `proxmox_endpoint` | Proxmox API URL, e.g. `https://10.10.0.1:8006` |
-| `proxmox_api_token` | API token in `user@realm!token=secret` format |
 | `public_ip` | Scaleway server's public IP |
 | `public_gateway` | Public network gateway |
 | `ssh_public_key` | Your SSH public key |
@@ -190,7 +189,7 @@ Required variables (see `terraform.tfvars.example` for format):
 
 **3. Initialize OpenTofu:**
 
-The wrapper script `scripts/tofu.sh` fetches Scaleway S3 credentials from 1Password automatically. Use it for all tofu commands:
+The wrapper script `scripts/tofu.sh` fetches Scaleway S3 credentials and `proxmox_api_token` from 1Password automatically. Use it for all tofu commands:
 
 ```bash
 ./scripts/tofu.sh init
@@ -232,7 +231,7 @@ pveum user token add tofu@pve tofu-token --privsep 0
 
 > **Note:** The `Administrator` role is required (not `PVEAdmin`) because network and firewall operations need `Sys.Modify` privileges.
 
-Save the output token in the format `tofu@pve!tofu-token=<uuid>` -- this goes into your `terraform.tfvars` as `proxmox_api_token`.
+Save the output token in the format `tofu@pve!tofu-token=<uuid>`, and store it in 1Password item `op://waddle-infra/Login/einvbbtkrcn232jry4d66ye2cq`.
 
 **3. Create the ZFS dataset for CSI volumes:**
 
