@@ -89,6 +89,7 @@ use crate::xep::xep0363::{
     UploadError, UploadSlot,
 };
 use crate::xep::xep0398::AvatarConversion;
+use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
 use crate::{AppState, Session, XmppError};
 use waddle_xmpp_xep_github::MessageEnricher;
 
@@ -1579,6 +1580,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let archive_id = if muc_msg.has_body() {
             // Build the sender's MUC JID (room JID + nick resource)
             let muc_sender_jid = format!("{}/{}", room_jid, sender_nick);
+            let reply_ref = parse_reply_from_message(&muc_msg.message);
+            let thread_id = thread_id_from_message(&muc_msg.message);
+            let origin_id = extract_origin_id(&muc_msg.message);
 
             // Extract the body text for archival
             let body = muc_msg
@@ -1596,6 +1600,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 to: room_jid.to_string(),
                 body,
                 stanza_id: muc_msg.message.id.clone(),
+                thread_id,
+                reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
+                reply_to_jid: reply_ref.and_then(|reply| reply.to),
+                origin_id,
                 message_type: "groupchat".to_string(),
             };
 
@@ -1801,6 +1809,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Messages with a body are archived so clients can retrieve conversation history.
         let body_text = msg.bodies.get("").or_else(|| msg.bodies.values().next());
         if let Some(body) = body_text {
+            let reply_ref = parse_reply_from_message(&msg);
+            let thread_id = thread_id_from_message(&msg);
+            let origin_id = extract_origin_id(&msg);
             let archive_id = uuid::Uuid::new_v4().to_string();
             let now = Utc::now();
 
@@ -1812,7 +1823,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 to: recipient_bare.to_string(),
                 body: body.0.clone(),
                 stanza_id: msg.id.clone(),
-                message_type: "chat".to_string(),
+                thread_id: thread_id.clone(),
+                reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
+                reply_to_jid: reply_ref.as_ref().and_then(|reply| reply.to.clone()),
+                origin_id: origin_id.clone(),
+                message_type: message_type_to_string(&msg.type_),
             };
             if let Err(e) = self
                 .mam_storage
@@ -1834,7 +1849,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 to: recipient_bare.to_string(),
                 body: body.0.clone(),
                 stanza_id: msg.id.clone(),
-                message_type: "chat".to_string(),
+                thread_id,
+                reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
+                reply_to_jid: reply_ref.and_then(|reply| reply.to),
+                origin_id,
+                message_type: message_type_to_string(&msg.type_),
             };
             if let Err(e) = self
                 .mam_storage
@@ -2496,6 +2515,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         message
             .bodies
             .insert(String::new(), Body(archived.body.clone()));
+        if let Some(thread_id) = archived.thread_id.as_ref() {
+            message.thread = Some(xmpp_parsers::message::Thread(thread_id.clone()));
+        }
+        if let Some(reply_to_id) = archived.reply_to_id.as_ref() {
+            let mut reply_builder = Element::builder("reply", crate::xep::xep0461::NS_REPLY)
+                .attr("id", reply_to_id.as_str());
+            if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
+                reply_builder = reply_builder.attr("to", reply_to_jid);
+            }
+            message.payloads.push(reply_builder.build());
+        }
+        if let Some(origin_id) = archived.origin_id.as_deref() {
+            message.payloads.push(
+                Element::builder("origin-id", crate::mam::STANZA_ID_NS)
+                    .attr("id", origin_id)
+                    .build(),
+            );
+        }
 
         // Add delay element per XEP-0203
         let delay = Element::builder("delay", DELAY_NS)
@@ -6627,6 +6664,25 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
     }
+}
+
+fn extract_origin_id(msg: &xmpp_parsers::message::Message) -> Option<String> {
+    msg.payloads
+        .iter()
+        .find(|payload| payload.name() == "origin-id" && payload.ns() == crate::mam::STANZA_ID_NS)
+        .and_then(|payload| payload.attr("id"))
+        .map(ToOwned::to_owned)
+}
+
+fn message_type_to_string(msg_type: &MessageType) -> String {
+    match msg_type {
+        MessageType::Chat => "chat",
+        MessageType::Groupchat => "groupchat",
+        MessageType::Headline => "headline",
+        MessageType::Error => "error",
+        MessageType::Normal => "normal",
+    }
+    .to_string()
 }
 
 fn isr_token_in_sasl_success_enabled() -> bool {

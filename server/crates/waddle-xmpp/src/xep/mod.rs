@@ -26,6 +26,7 @@
 //!   file uploads, returning PUT and GET URLs for file transfer.
 //! - **XEP-0398**: User Avatar Conversion - Bridge between PEP and vCard avatars.
 //! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
+//! - **XEP-0461**: Message Replies - Reply references and thread metadata.
 
 pub mod xep0048;
 pub mod xep0049;
@@ -42,6 +43,7 @@ pub mod xep0352;
 pub mod xep0363;
 pub mod xep0398;
 pub mod xep0402;
+pub mod xep0461;
 
 pub use xep0054::{
     build_empty_vcard_response, build_vcard_element, build_vcard_error, build_vcard_response,
@@ -116,6 +118,11 @@ pub use xep0398::{
 };
 
 pub use xep0223::{is_private_storage_node, FEATURE_ACCESS_WHITELIST, FEATURE_PERSISTENT_ITEMS};
+
+pub use xep0461::{
+    build_reply_element, is_reply_element, parse_reply_from_message, set_reply_payload,
+    set_thread_id, thread_id_from_message, ReplyReference, NS_REPLY,
+};
 
 // Re-export commonly used items at the xep module level
 pub mod prelude {

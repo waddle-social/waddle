@@ -39,6 +39,14 @@ pub struct ArchivedMessage {
     pub body: String,
     /// Original stanza ID (if present)
     pub stanza_id: Option<String>,
+    /// RFC 6121 thread identifier for this message.
+    pub thread_id: Option<String>,
+    /// XEP-0461 reply target message ID.
+    pub reply_to_id: Option<String>,
+    /// XEP-0461 optional original sender JID.
+    pub reply_to_jid: Option<String>,
+    /// XEP-0359 origin-id supplied by client.
+    pub origin_id: Option<String>,
     /// Message type ("chat", "groupchat", "normal", etc.)
     /// Defaults to "chat" if not set.
     #[serde(default = "default_message_type")]
@@ -58,6 +66,10 @@ impl Default for ArchivedMessage {
             to: String::new(),
             body: String::new(),
             stanza_id: None,
+            thread_id: None,
+            reply_to_id: None,
+            reply_to_jid: None,
+            origin_id: None,
             message_type: default_message_type(),
         }
     }

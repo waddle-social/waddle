@@ -1,5 +1,5 @@
-import { ref, readonly, computed, watch } from 'vue';
-import { useConversations, type ConversationSummary } from './useConversations';
+import { ref, readonly, watch } from 'vue';
+import { useConversations } from './useConversations';
 import { useWaddle, type ChatMessage, type UnlistenFn } from './useWaddle';
 import { useRoomsStore } from '../stores/rooms';
 import { storeToRefs } from 'pinia';

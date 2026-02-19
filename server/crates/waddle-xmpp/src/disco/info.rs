@@ -102,6 +102,11 @@ impl Feature {
         Self::new("urn:xmpp:mam:2")
     }
 
+    /// XEP-0461 Message Replies feature.
+    pub fn replies() -> Self {
+        Self::new("urn:xmpp:reply:0")
+    }
+
     /// Stream Management feature
     pub fn stream_management() -> Self {
         Self::new("urn:xmpp:sm:3")
@@ -431,6 +436,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::caps(),
         Feature::roster_versioning(),
         Feature::mam(),
+        Feature::replies(),
         Feature::stream_management(),
         Feature::roster(),
         Feature::carbons(),
@@ -496,6 +502,7 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::replies(),
         Feature::vcard(),
         Feature::occupant_id(),
         Feature::muc_semianonymous(),
@@ -603,6 +610,7 @@ mod tests {
         assert!(features.contains(&Feature::disco_info()));
         assert!(features.contains(&Feature::disco_items()));
         assert!(features.contains(&Feature::mam()));
+        assert!(features.contains(&Feature::replies()));
         assert!(features.contains(&Feature::stream_management()));
     }
 
@@ -613,5 +621,6 @@ mod tests {
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
+        assert!(features.contains(&Feature::replies()));
     }
 }

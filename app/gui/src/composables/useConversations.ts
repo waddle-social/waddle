@@ -69,6 +69,7 @@ export const useConversationsStore = defineStore('conversations', () => {
 
     if (existingIdx >= 0) {
       const existing = current[existingIdx];
+      if (!existing) return;
       current[existingIdx] = {
         ...existing,
         title: summary.title || existing.title,

@@ -286,8 +286,8 @@ Enhanced messaging and collaboration features.
 | XHTML-IM formatting | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
 | Mentions (XEP-0372) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
 | Reactions (XEP-0444) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
-| Replies (XEP-0461) | ⬜ Not Started | P2 | [RFC-0004](rfcs/0004-message-format.md) |
-| Threads | ⬜ Not Started | P3 | [RFC-0002](rfcs/0002-channels.md), [RFC-0004](rfcs/0004-message-format.md) |
+| Replies (XEP-0461) | ✅ Complete | P2 | [RFC-0004](rfcs/0004-message-format.md) |
+| Threads (root-thread model) | 🔄 In Progress | P3 | [RFC-0002](rfcs/0002-channels.md), [RFC-0004](rfcs/0004-message-format.md) |
 | **File Uploads** |
 | S3 storage setup | ⬜ Not Started | P2 | [ADR-0011](adrs/0011-self-hosted-storage.md), [Spec: Uploads](specs/file-upload.md) |
 | HTTP File Upload (XEP-0363) | ✅ Complete | P2 | [Spec: Uploads](specs/file-upload.md), [Spec: XMPP](specs/xmpp-integration.md) |
