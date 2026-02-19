@@ -112,6 +112,12 @@ tasks: {
 			      ;;
 			  esac
 			fi
+			if [ -z "$pr_number" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_SHA:-}" ]; then
+			  pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].number' 2>/dev/null || true)"
+			fi
+			if [ "$pr_number" = "null" ]; then
+			  pr_number=""
+			fi
 			if [ -z "$pr_number" ]; then
 			  echo "PR number is required (set PR_NUMBER or run in pull_request context)."
 			  exit 2
