@@ -128,6 +128,7 @@ impl LibSqlMamStorage {
 
         // Create the message archive table
         conn.execute_batch(MAM_SCHEMA).await?;
+        Self::migrate_schema(&conn).await?;
 
         self.initialized
             .store(true, std::sync::atomic::Ordering::Release);
@@ -139,6 +140,81 @@ impl LibSqlMamStorage {
     /// Generate a time-sortable archive ID using UUID v7.
     fn generate_archive_id() -> String {
         Uuid::now_v7().to_string()
+    }
+
+    async fn migrate_schema(conn: &Connection) -> Result<(), MamStorageError> {
+        Self::ensure_column(
+            conn,
+            "thread_id",
+            "ALTER TABLE mam_messages ADD COLUMN thread_id TEXT",
+        )
+        .await?;
+        Self::ensure_column(
+            conn,
+            "reply_to_id",
+            "ALTER TABLE mam_messages ADD COLUMN reply_to_id TEXT",
+        )
+        .await?;
+        Self::ensure_column(
+            conn,
+            "reply_to_jid",
+            "ALTER TABLE mam_messages ADD COLUMN reply_to_jid TEXT",
+        )
+        .await?;
+        Self::ensure_column(
+            conn,
+            "origin_id",
+            "ALTER TABLE mam_messages ADD COLUMN origin_id TEXT",
+        )
+        .await?;
+        Self::ensure_column(
+            conn,
+            "message_type",
+            "ALTER TABLE mam_messages ADD COLUMN message_type TEXT",
+        )
+        .await?;
+
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_mam_room_thread
+                ON mam_messages(room_jid, thread_id, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
+                ON mam_messages(room_jid, reply_to_id, timestamp DESC);
+            "#,
+        )
+        .await?;
+
+        // Backfill nullable message_type for rows created before this column existed.
+        conn.execute(
+            "UPDATE mam_messages SET message_type = 'chat' WHERE message_type IS NULL",
+            (),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_column(
+        conn: &Connection,
+        column_name: &str,
+        alter_statement: &str,
+    ) -> Result<(), MamStorageError> {
+        let mut rows = conn.query("PRAGMA table_info(mam_messages)", ()).await?;
+        let mut exists = false;
+
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1)?;
+            if name == column_name {
+                exists = true;
+                break;
+            }
+        }
+
+        if !exists {
+            conn.execute(alter_statement, ()).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -160,6 +236,16 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     body TEXT NOT NULL,
     -- Original stanza-id from the client (if any)
     stanza_id TEXT,
+    -- RFC 6121 thread identifier
+    thread_id TEXT,
+    -- XEP-0461 reply target message ID
+    reply_to_id TEXT,
+    -- XEP-0461 optional original sender JID
+    reply_to_jid TEXT,
+    -- XEP-0359 origin-id from client
+    origin_id TEXT,
+    -- Message type ("chat", "groupchat", ...)
+    message_type TEXT NOT NULL DEFAULT 'chat',
     -- Created timestamp for internal tracking
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -175,6 +261,14 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_sender
 -- Index for pagination by ID (for before_id/after_id queries)
 CREATE INDEX IF NOT EXISTS idx_mam_room_id
     ON mam_messages(room_jid, id);
+
+-- Index for thread message retrieval
+CREATE INDEX IF NOT EXISTS idx_mam_room_thread
+    ON mam_messages(room_jid, thread_id, timestamp DESC);
+
+-- Index for reply message lookup
+CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
+    ON mam_messages(room_jid, reply_to_id, timestamp DESC);
 "#;
 
 #[async_trait]
@@ -198,11 +292,23 @@ impl MamStorage for LibSqlMamStorage {
 
         let timestamp = message.timestamp.to_rfc3339();
         let stanza_id = message.stanza_id.as_deref();
+        let thread_id = message.thread_id.as_deref();
+        let reply_to_id = message.reply_to_id.as_deref();
+        let reply_to_jid = message.reply_to_jid.as_deref();
+        let origin_id = message.origin_id.as_deref();
+        let message_type = if message.message_type.is_empty() {
+            "chat"
+        } else {
+            message.message_type.as_str()
+        };
 
         conn.execute(
             r#"
-            INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO mam_messages (
+                id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
+                thread_id, reply_to_id, reply_to_jid, origin_id, message_type
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             "#,
             (
                 archive_id.as_str(),
@@ -212,6 +318,11 @@ impl MamStorage for LibSqlMamStorage {
                 message.to.as_str(),
                 message.body.as_str(),
                 stanza_id,
+                thread_id,
+                reply_to_id,
+                reply_to_jid,
+                origin_id,
+                message_type,
             ),
         )
         .await?;
@@ -234,7 +345,9 @@ impl MamStorage for LibSqlMamStorage {
         // Build the query dynamically based on filters
         let mut sql = String::from(
             r#"
-            SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id
+            SELECT
+                id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
+                thread_id, reply_to_id, reply_to_jid, origin_id, message_type
             FROM mam_messages
             WHERE room_jid = ?1
             "#,
@@ -365,6 +478,11 @@ impl MamStorage for LibSqlMamStorage {
             let to: String = row.get(4)?;
             let body: String = row.get(5)?;
             let stanza_id: Option<String> = row.get(6).ok();
+            let thread_id: Option<String> = row.get(7).ok();
+            let reply_to_id: Option<String> = row.get(8).ok();
+            let reply_to_jid: Option<String> = row.get(9).ok();
+            let origin_id: Option<String> = row.get(10).ok();
+            let message_type: String = row.get(11).unwrap_or_else(|_| "chat".to_string());
 
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                 .map_err(|e| MamStorageError::Serialization(format!("Invalid timestamp: {}", e)))?
@@ -377,7 +495,11 @@ impl MamStorage for LibSqlMamStorage {
                 to,
                 body,
                 stanza_id,
-                message_type: crate::mam::default_message_type(),
+                thread_id,
+                reply_to_id,
+                reply_to_jid,
+                origin_id,
+                message_type,
             });
         }
 
@@ -425,7 +547,9 @@ impl MamStorage for LibSqlMamStorage {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id
+                SELECT
+                    id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
+                    thread_id, reply_to_id, reply_to_jid, origin_id, message_type
                 FROM mam_messages
                 WHERE id = ?1
                 "#,
@@ -440,6 +564,11 @@ impl MamStorage for LibSqlMamStorage {
             let to: String = row.get(4)?;
             let body: String = row.get(5)?;
             let stanza_id: Option<String> = row.get(6).ok();
+            let thread_id: Option<String> = row.get(7).ok();
+            let reply_to_id: Option<String> = row.get(8).ok();
+            let reply_to_jid: Option<String> = row.get(9).ok();
+            let origin_id: Option<String> = row.get(10).ok();
+            let message_type: String = row.get(11).unwrap_or_else(|_| "chat".to_string());
 
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                 .map_err(|e| MamStorageError::Serialization(format!("Invalid timestamp: {}", e)))?
@@ -452,7 +581,11 @@ impl MamStorage for LibSqlMamStorage {
                 to,
                 body,
                 stanza_id,
-                message_type: crate::mam::default_message_type(),
+                thread_id,
+                reply_to_id,
+                reply_to_jid,
+                origin_id,
+                message_type,
             }))
         } else {
             Ok(None)
@@ -545,6 +678,42 @@ mod tests {
         assert_eq!(retrieved.id, archive_id);
         assert_eq!(retrieved.body, "Hello, world!");
         assert_eq!(retrieved.stanza_id, Some("abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_store_and_retrieve_reply_thread_metadata() {
+        let storage = create_test_storage().await;
+
+        let msg = ArchivedMessage {
+            id: String::new(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/alice".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: "Reply body".to_string(),
+            stanza_id: Some("archive-stanza-1".to_string()),
+            thread_id: Some("thread-root-1".to_string()),
+            reply_to_id: Some("parent-message-1".to_string()),
+            reply_to_jid: Some("bob@example.com".to_string()),
+            origin_id: Some("origin-abc".to_string()),
+            message_type: "groupchat".to_string(),
+        };
+
+        let archive_id = storage
+            .store_message("room@conference.example.com", &msg)
+            .await
+            .unwrap();
+
+        let retrieved = storage
+            .get_message(&archive_id)
+            .await
+            .unwrap()
+            .expect("archived message");
+
+        assert_eq!(retrieved.thread_id.as_deref(), Some("thread-root-1"));
+        assert_eq!(retrieved.reply_to_id.as_deref(), Some("parent-message-1"));
+        assert_eq!(retrieved.reply_to_jid.as_deref(), Some("bob@example.com"));
+        assert_eq!(retrieved.origin_id.as_deref(), Some("origin-abc"));
+        assert_eq!(retrieved.message_type, "groupchat");
     }
 
     #[tokio::test]

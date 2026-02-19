@@ -11,7 +11,31 @@ export interface ChatMessage {
   body: string;
   timestamp: string;
   messageType?: string;
-  thread?: string | null;
+  threadId?: string | null;
+  replyTo?: {
+    id: string;
+    to?: string | null;
+  } | null;
+  stanzaId?: {
+    id: string;
+    by: string;
+  } | null;
+  originId?: string | null;
+  embeds?: MessageEmbed[];
+}
+
+export interface MessageEmbed {
+  namespace: string;
+  data: Record<string, unknown>;
+}
+
+export interface SendMessageOptions {
+  messageType?: 'chat' | 'groupchat';
+  threadId?: string | null;
+  replyTo?: {
+    id: string;
+    to?: string | null;
+  } | null;
 }
 
 export interface RosterItem {
@@ -85,7 +109,7 @@ export interface WaddleTransport {
   disconnect(): Promise<void>;
 
   /* messaging */
-  sendMessage(to: string, body: string, type?: string): Promise<ChatMessage>;
+  sendMessage(to: string, body: string, options?: SendMessageOptions): Promise<ChatMessage>;
   getHistory(jid: string, limit: number, before?: string): Promise<ChatMessage[]>;
 
   /* roster */
@@ -147,6 +171,101 @@ function notConnected(method: string): Error {
   return new Error(`Not connected — cannot call ${method}. Please log in first.`);
 }
 
+interface LegacyChatMessageShape {
+  id?: unknown;
+  from?: unknown;
+  to?: unknown;
+  body?: unknown;
+  timestamp?: unknown;
+  messageType?: unknown;
+  threadId?: unknown;
+  thread?: unknown;
+  replyTo?: unknown;
+  stanzaId?: unknown;
+  originId?: unknown;
+  embeds?: unknown;
+}
+
+function normalizeMessageType(input: unknown): string | undefined {
+  if (typeof input !== 'string') return undefined;
+  const normalized = input.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return normalized;
+}
+
+function normalizeReplyTo(input: unknown): ChatMessage['replyTo'] {
+  if (!input || typeof input !== 'object') return null;
+  const candidate = input as { id?: unknown; to?: unknown };
+  const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
+  if (!id) return null;
+  const toRaw = typeof candidate.to === 'string' ? candidate.to.trim() : '';
+  return {
+    id,
+    to: toRaw || null,
+  };
+}
+
+function normalizeStanzaId(input: unknown): ChatMessage['stanzaId'] {
+  if (!input || typeof input !== 'object') return null;
+  const candidate = input as { id?: unknown; by?: unknown };
+  const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
+  const by = typeof candidate.by === 'string' ? candidate.by.trim() : '';
+  if (!id || !by) return null;
+  return { id, by };
+}
+
+function normalizeEmbeds(input: unknown): MessageEmbed[] {
+  if (!Array.isArray(input)) return [];
+
+  return input
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const candidate = entry as { namespace?: unknown; data?: unknown };
+      if (typeof candidate.namespace !== 'string') return null;
+      if (!candidate.data || typeof candidate.data !== 'object') return null;
+      return {
+        namespace: candidate.namespace,
+        data: candidate.data as Record<string, unknown>,
+      } satisfies MessageEmbed;
+    })
+    .filter((entry): entry is MessageEmbed => entry !== null);
+}
+
+function normalizeChatMessage(input: unknown): ChatMessage {
+  const message = (input ?? {}) as LegacyChatMessageShape;
+  const threadIdRaw = typeof message.threadId === 'string'
+    ? message.threadId.trim()
+    : typeof message.thread === 'string'
+      ? message.thread.trim()
+      : '';
+  const originIdRaw = typeof message.originId === 'string' ? message.originId.trim() : '';
+
+  return {
+    id:
+      typeof message.id === 'string' && message.id.trim().length > 0
+        ? message.id
+        : randomId('msg'),
+    from: typeof message.from === 'string' ? message.from : '',
+    to: typeof message.to === 'string' ? message.to : '',
+    body: typeof message.body === 'string' ? message.body : '',
+    timestamp:
+      typeof message.timestamp === 'string' && message.timestamp.trim().length > 0
+        ? message.timestamp
+        : new Date().toISOString(),
+    messageType: normalizeMessageType(message.messageType),
+    threadId: threadIdRaw || null,
+    replyTo: normalizeReplyTo(message.replyTo),
+    stanzaId: normalizeStanzaId(message.stanzaId),
+    originId: originIdRaw || null,
+    embeds: normalizeEmbeds(message.embeds),
+  };
+}
+
+function normalizeChatMessages(input: unknown): ChatMessage[] {
+  if (!Array.isArray(input)) return [];
+  return input.map((entry) => normalizeChatMessage(entry));
+}
+
 /* ------------------------------------------------------------------ */
 /*  Tauri transport                                                    */
 /* ------------------------------------------------------------------ */
@@ -159,8 +278,14 @@ async function createTauriTransport(): Promise<WaddleTransport> {
     connect: (jid, password, endpoint) =>
       invoke<void>('connect', { jid, password, endpoint }),
     disconnect: () => invoke<void>('disconnect'),
-    sendMessage: (to, body, type) =>
-      invoke<ChatMessage>('send_message', { to, body, messageType: type ?? 'chat' }),
+    sendMessage: async (to, body, options) =>
+      normalizeChatMessage(await invoke<unknown>('send_message', {
+        to,
+        body,
+        messageType: options?.messageType ?? 'chat',
+        threadId: options?.threadId ?? null,
+        replyTo: options?.replyTo ?? null,
+      })),
     getRoster: () => invoke<RosterItem[]>('get_roster'),
     addContact: (jid) => invoke<void>('add_contact', { jid }),
     getConnectionState: () => invoke<ConnectionSnapshot>('get_connection_state'),
@@ -171,8 +296,8 @@ async function createTauriTransport(): Promise<WaddleTransport> {
     listRooms: (serviceJid) => invoke<RoomInfo[]>('list_rooms', { serviceJid }),
     createRoom: (roomJid, nick) => invoke<void>('create_room', { roomJid, nick }),
     deleteRoom: (roomJid) => invoke<void>('delete_room', { roomJid }),
-    getHistory: (jid, limit, before) =>
-      invoke<ChatMessage[]>('get_history', { jid, limit, before }),
+    getHistory: async (jid, limit, before) =>
+      normalizeChatMessages(await invoke<unknown>('get_history', { jid, limit, before })),
     managePlugins: (action) => invoke<PluginInfo>('manage_plugins', { action }),
     getConfig: () => invoke<UiConfig>('get_config'),
     getVCard: (jid) => invoke<VCardData | null>('get_vcard', { jid }),
@@ -419,6 +544,40 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       const body = stanza.getChildText?.('body');
       if (typeof body !== 'string' || body.trim().length === 0) return;
 
+      const threadRaw = stanza.getChildText?.('thread');
+      const threadId =
+        typeof threadRaw === 'string' && threadRaw.trim().length > 0
+          ? threadRaw.trim()
+          : null;
+
+      const replyElem = stanza.getChild?.('reply', 'urn:xmpp:reply:0');
+      const replyIdAttr = String(replyElem?.attrs?.id ?? '').trim();
+      const replyToAttr = String(replyElem?.attrs?.to ?? '').trim();
+      const replyTo = replyIdAttr.length > 0
+        ? {
+            id: replyIdAttr,
+            to: replyToAttr.length > 0 ? replyToAttr : null,
+          }
+        : replyToAttr.length > 0
+          ? {
+              id: replyToAttr,
+              to: null,
+            }
+          : null;
+
+      const stanzaIdElem = stanza.getChild?.('stanza-id', 'urn:xmpp:sid:0');
+      const stanzaIdValue = String(stanzaIdElem?.attrs?.id ?? '').trim();
+      const stanzaBy = String(stanzaIdElem?.attrs?.by ?? '').trim();
+      const stanzaId =
+        stanzaIdValue.length > 0 && stanzaBy.length > 0
+          ? { id: stanzaIdValue, by: stanzaBy }
+          : null;
+
+      const originIdRaw = String(
+        stanza.getChild?.('origin-id', 'urn:xmpp:sid:0')?.attrs?.id ?? '',
+      ).trim();
+      const originId = originIdRaw.length > 0 ? originIdRaw : null;
+
       const rawFrom = String(stanza.attrs?.from ?? selfJid);
       const rawTo = String(stanza.attrs?.to ?? selfJid);
       const msgType = String(stanza.attrs?.type ?? 'chat');
@@ -444,7 +603,10 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
         body,
         timestamp,
         messageType: msgType,
-        thread: null,
+        threadId,
+        replyTo,
+        stanzaId,
+        originId,
       };
 
       console.debug(`[waddle:msg] type=${msgType} from=${from} to=${to} body="${body.slice(0, 50)}" ts=${timestamp}`);
@@ -557,11 +719,20 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
     },
 
     /* ---------- messaging ---------- */
-    sendMessage: async (to, body, type) => {
+    sendMessage: async (to, body, options) => {
       requireConnection('sendMessage');
       const normalizedTo = bareJid(to);
-      const msgType = type ?? 'chat';
+      const msgType = options?.messageType ?? 'chat';
       const isGroupchat = msgType === 'groupchat';
+      const threadId = options?.threadId?.trim() || null;
+      const replyToId = options?.replyTo?.id?.trim() || '';
+      const replyToJid = options?.replyTo?.to?.trim() || '';
+      const replyTo = replyToId
+        ? {
+            id: replyToId,
+            to: replyToJid || null,
+          }
+        : null;
 
       // For MUC: use room/nick as `from` so UI can identify sender.
       const nick = isGroupchat ? roomNickByJid.get(normalizedTo) : undefined;
@@ -576,10 +747,29 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
         body,
         timestamp: new Date().toISOString(),
         messageType: msgType,
-        thread: null,
+        threadId,
+        replyTo,
+        stanzaId: null,
+        originId: null,
       };
+      const originId = message.id;
+      message.originId = originId;
 
       const children: any[] = [xml('body', {}, body)];
+      if (threadId) {
+        children.push(xml('thread', {}, threadId));
+      }
+      if (replyTo) {
+        const replyAttrs: Record<string, string> = {
+          xmlns: 'urn:xmpp:reply:0',
+          id: replyTo.id,
+        };
+        if (replyTo.to) replyAttrs.to = replyTo.to;
+        children.push(xml('reply', replyAttrs));
+      }
+      if (originId) {
+        children.push(xml('origin-id', { xmlns: 'urn:xmpp:sid:0', id: originId }));
+      }
       if (msgType === 'chat') {
         children.push(xml('request', { xmlns: 'urn:xmpp:receipts' }));
       }
@@ -985,7 +1175,6 @@ function createDisconnectedTransport(): WaddleTransport {
 /*  Transport singleton — supports reset for disconnect→reconnect      */
 /* ------------------------------------------------------------------ */
 
-let currentTransport: WaddleTransport | null = null;
 let transportInitPromise: Promise<WaddleTransport> | null = null;
 const ready = ref(false);
 const connected = ref(false);
@@ -1005,7 +1194,6 @@ async function initTransport(): Promise<WaddleTransport> {
 function getTransport(): Promise<WaddleTransport> {
   if (!transportInitPromise) {
     transportInitPromise = initTransport().then((t) => {
-      currentTransport = t;
       ready.value = true;
       return t;
     });
@@ -1015,7 +1203,6 @@ function getTransport(): Promise<WaddleTransport> {
 
 /** Reset the singleton so a fresh transport is created on next access. */
 function resetTransport(): void {
-  currentTransport = null;
   transportInitPromise = null;
   ready.value = false;
   connected.value = false;
@@ -1042,8 +1229,12 @@ export function useWaddle() {
     resetTransport();
   }
 
-  async function sendMessage(to: string, body: string, type?: string): Promise<ChatMessage> {
-    return (await transport).sendMessage(to, body, type);
+  async function sendMessage(
+    to: string,
+    body: string,
+    options?: SendMessageOptions,
+  ): Promise<ChatMessage> {
+    return (await transport).sendMessage(to, body, options);
   }
 
   async function getRoster(): Promise<RosterItem[]> {

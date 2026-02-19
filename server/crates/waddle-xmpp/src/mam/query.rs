@@ -11,6 +11,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::{ArchivedMessage, MamQuery, MamResult};
+use crate::xep::xep0461::NS_REPLY;
 use crate::XmppError;
 
 /// MAM XML namespace (XEP-0313 v2).
@@ -213,12 +214,41 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
     } else {
         &archived.message_type
     };
-    let inner_msg = Element::builder("message", "jabber:client")
+    let mut inner_builder = Element::builder("message", "jabber:client")
         .attr("from", &archived.from)
         .attr("to", &archived.to)
         .attr("type", msg_type)
-        .append(Element::builder("body", "jabber:client").append(archived.body.clone()))
-        .build();
+        .append(
+            Element::builder("body", "jabber:client")
+                .append(archived.body.clone())
+                .build(),
+        );
+
+    if let Some(thread_id) = archived.thread_id.as_deref() {
+        inner_builder = inner_builder.append(
+            Element::builder("thread", "jabber:client")
+                .append(thread_id)
+                .build(),
+        );
+    }
+
+    if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
+        let mut reply_builder = Element::builder("reply", NS_REPLY).attr("id", reply_to_id);
+        if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
+            reply_builder = reply_builder.attr("to", reply_to_jid);
+        }
+        inner_builder = inner_builder.append(reply_builder.build());
+    }
+
+    if let Some(origin_id) = archived.origin_id.as_deref() {
+        inner_builder = inner_builder.append(
+            Element::builder("origin-id", STANZA_ID_NS)
+                .attr("id", origin_id)
+                .build(),
+        );
+    }
+
+    let inner_msg = inner_builder.build();
 
     // Build the delay element
     let delay = Element::builder("delay", DELAY_NS)
@@ -365,13 +395,34 @@ mod tests {
             to: "room@conference.example.com".to_string(),
             body: "Hello, world!".to_string(),
             stanza_id: None,
+            thread_id: Some("thread-1".to_string()),
+            reply_to_id: Some("parent-1".to_string()),
+            reply_to_jid: Some("alice@example.com".to_string()),
+            origin_id: Some("origin-1".to_string()),
             ..Default::default()
         };
 
         let msg = build_result_message("query-1", "user@example.com", &archived);
-        assert!(msg
+        let result = msg
             .payloads
             .iter()
-            .any(|p| p.name() == "result" && p.ns() == MAM_NS));
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == "jabber:client")
+            .expect("inner message");
+
+        assert!(inner_msg.children().any(|c| c.name() == "thread"));
+        assert!(inner_msg
+            .children()
+            .any(|c| c.name() == "reply" && c.ns() == NS_REPLY));
+        assert!(inner_msg
+            .children()
+            .any(|c| c.name() == "origin-id" && c.ns() == STANZA_ID_NS));
     }
 }

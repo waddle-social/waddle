@@ -23,6 +23,8 @@ use waddle_xmpp::{
     registry::{ConnectionRegistry, OutboundStanza},
     Affiliation, Role,
 };
+use xmpp_parsers::message::MessageType as XmppMessageType;
+use xmpp_parsers::minidom::Element;
 
 use waddle_xmpp_xep_github::MessageEnricher;
 
@@ -196,7 +198,21 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
 /// — bodies, payloads (embeds), thread, etc. — is faithfully serialized
 /// without hand-rolled format strings.
 fn stanza_to_xml(stanza: &Stanza) -> String {
-    let element = stanza.to_element();
+    let mut element = stanza.to_element();
+    if let Stanza::Message(message) = stanza {
+        // xmpp_parsers currently drops RFC 6121 <thread/> during Message -> Element.
+        // Re-attach it so forwarded/broadcast messages preserve thread metadata.
+        if let Some(thread) = message.thread.as_ref() {
+            let has_thread = element.children().any(|child| child.name() == "thread");
+            if !has_thread {
+                element.append_child(
+                    Element::builder("thread", "jabber:client")
+                        .append(thread.0.clone())
+                        .build(),
+                );
+            }
+        }
+    }
     element_to_xml(element)
 }
 
@@ -873,34 +889,36 @@ async fn handle_message(
     state: &WebSocketState,
     session_jid: &Option<FullJid>,
 ) -> Vec<String> {
-    let msg_type = extract_attr(frame, "type");
-    let to = extract_attr(frame, "to");
-    let id = extract_attr(frame, "id");
-    let body = extract_element_text(frame, "body");
-
     let Some(ref sender_jid) = session_jid else {
         warn!("Message received without authenticated session");
         return vec![];
     };
 
+    let mut incoming = match parse_message_stanza(frame) {
+        Ok(msg) => msg,
+        Err(err) => {
+            warn!(error = %err, "Failed to parse message stanza");
+            return vec![];
+        }
+    };
+
+    // Always stamp the authenticated sender.
+    incoming.from = Some(jid::Jid::from(sender_jid.clone()));
+
     // Handle groupchat messages
-    if msg_type.as_deref() == Some("groupchat") {
-        let Some(ref to_jid_str) = to else {
+    if incoming.type_ == XmppMessageType::Groupchat {
+        let Some(to_jid) = incoming.to.as_ref() else {
             warn!("Groupchat message without 'to' attribute");
             return vec![];
         };
 
-        if !to_jid_str.contains(muc_domain) {
-            warn!(to = %to_jid_str, "Groupchat message to non-MUC JID");
+        // Parse room JID (strip resource if present)
+        let room_jid = to_jid.to_bare();
+
+        if room_jid.domain().as_str() != muc_domain {
+            warn!(to = %to_jid, "Groupchat message to non-MUC JID");
             return vec![];
         }
-
-        // Parse room JID (strip resource if present)
-        let room_jid_str = to_jid_str.split('/').next().unwrap_or(to_jid_str);
-        let Ok(room_jid) = room_jid_str.parse::<BareJid>() else {
-            warn!(room = %room_jid_str, "Invalid room JID in message");
-            return vec![];
-        };
 
         debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
 
@@ -930,21 +948,17 @@ async fn handle_message(
 
         // Build a prototype message, enrich once, then fan out to all occupants.
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
-        let msg_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let body_text = body.unwrap_or_default();
-
-        let mut prototype = xmpp_parsers::message::Message::new(None);
+        let mut prototype = incoming.clone();
+        if prototype.id.is_none() {
+            prototype.id = Some(uuid::Uuid::new_v4().to_string());
+        }
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
             prototype.from = Some(jid::Jid::from(from_jid));
         } else {
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
         }
-        prototype.id = Some(msg_id.clone());
-        prototype.type_ = xmpp_parsers::message::MessageType::Groupchat;
-        prototype.bodies.insert(
-            String::new(),
-            xmpp_parsers::message::Body(body_text.clone()),
-        );
+        prototype.type_ = XmppMessageType::Groupchat;
+        prototype.to = None;
 
         // Enrich: detect GitHub links and append embed XML elements (fail-open)
         let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
@@ -983,27 +997,21 @@ async fn handle_message(
     }
 
     // Handle direct messages (chat)
-    if msg_type.as_deref() == Some("chat") {
-        if let Some(ref to_jid_str) = to {
-            debug!(to = %to_jid_str, from = %sender_jid, "Direct chat message");
+    if incoming.type_ == XmppMessageType::Chat {
+        if let Some(to_jid) = incoming.to.as_ref() {
+            debug!(to = %to_jid, from = %sender_jid, "Direct chat message");
 
             // Build a prototype message and enrich it with embeds before routing.
             // Enrichment is fail-open: errors are logged but never block delivery.
-            let mut prototype = xmpp_parsers::message::Message::new(None);
+            let mut prototype = incoming.clone();
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
-            prototype.id = id.clone();
-            prototype.type_ = xmpp_parsers::message::MessageType::Chat;
-            if let Some(ref b) = body {
-                prototype
-                    .bodies
-                    .insert(String::new(), xmpp_parsers::message::Body(b.clone()));
-            }
+            prototype.type_ = XmppMessageType::Chat;
 
             // Enrich: detect GitHub links and append embed XML elements
             let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
 
             // Route the enriched message
-            if let Ok(to_full_jid) = to_jid_str.parse::<FullJid>() {
+            if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
                 let mut msg = prototype.clone();
                 msg.to = Some(jid::Jid::from(to_full_jid.clone()));
                 let stanza = Stanza::Message(msg);
@@ -1011,7 +1019,8 @@ async fn handle_message(
                     .connection_registry
                     .send_to(&to_full_jid, stanza)
                     .await;
-            } else if let Ok(to_bare_jid) = to_jid_str.parse::<BareJid>() {
+            } else {
+                let to_bare_jid = to_jid.to_bare();
                 let resources = state
                     .connection_registry
                     .get_resources_for_user(&to_bare_jid);
@@ -1025,11 +1034,13 @@ async fn handle_message(
                         .await;
                 }
             }
+        } else {
+            warn!("Direct chat message without 'to' attribute");
         }
         return vec![];
     }
 
-    debug!(msg_type = ?msg_type, "Message stanza received");
+    debug!(msg_type = ?incoming.type_, "Message stanza received");
     vec![]
 }
 
@@ -1111,6 +1122,45 @@ fn extract_element_text(xml: &str, element: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse a raw XMPP `<message/>` frame into an xmpp-parsers message stanza.
+fn parse_message_stanza(frame: &str) -> Result<xmpp_parsers::message::Message, String> {
+    let patched = add_default_namespace_if_missing(frame, "jabber:client");
+    let element: Element = patched
+        .parse()
+        .map_err(|err| format!("Failed to parse message XML: {}", err))?;
+    xmpp_parsers::message::Message::try_from(element)
+        .map_err(|err| format!("Invalid message stanza: {:?}", err))
+}
+
+fn add_default_namespace_if_missing(xml: &str, default_ns: &str) -> String {
+    let trimmed = xml.trim();
+    if !trimmed.starts_with("<message") {
+        return trimmed.to_string();
+    }
+
+    let open_end = match trimmed.find('>') {
+        Some(idx) => idx,
+        None => return trimmed.to_string(),
+    };
+    let open_tag = &trimmed[..open_end];
+
+    if open_tag.contains("xmlns=") {
+        return trimmed.to_string();
+    }
+
+    let tag_end = trimmed[1..]
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .map(|idx| idx + 1)
+        .unwrap_or(open_end);
+
+    format!(
+        "{} xmlns='{}'{}",
+        &trimmed[..tag_end],
+        default_ns,
+        &trimmed[tag_end..]
+    )
 }
 
 /// Derive waddle_id and channel_id from a room's bare JID node.
@@ -1237,5 +1287,56 @@ mod tests {
         let xml = stanza_to_xml(&Stanza::Message(msg));
         assert!(xml.contains("<body>No embeds</body>"));
         assert!(xml.ends_with("</message>"));
+    }
+
+    #[test]
+    fn parse_message_stanza_preserves_thread_and_reply() {
+        let xml = r#"<message to="room@muc.localhost" type="groupchat" id="msg-1">
+            <body>Hello</body>
+            <thread>thread-root</thread>
+            <reply xmlns="urn:xmpp:reply:0" id="parent-msg" to="alice@localhost"/>
+        </message>"#;
+
+        let parsed = parse_message_stanza(xml).expect("message parses");
+        assert_eq!(parsed.id.as_deref(), Some("msg-1"));
+        assert_eq!(
+            parsed.thread.as_ref().map(|t| t.0.as_str()),
+            Some("thread-root")
+        );
+        assert!(parsed
+            .payloads
+            .iter()
+            .any(|p| p.name() == "reply" && p.ns() == "urn:xmpp:reply:0"));
+    }
+
+    #[test]
+    fn stanza_to_xml_preserves_thread_and_reply() {
+        let xml = r#"<message to="room@muc.localhost" type="groupchat" id="msg-2">
+            <body>Follow-up</body>
+            <thread>thread-root</thread>
+            <reply xmlns="urn:xmpp:reply:0" id="msg-1" to="alice@localhost"/>
+        </message>"#;
+
+        let parsed = parse_message_stanza(xml).expect("message parses");
+        let rendered = stanza_to_xml(&Stanza::Message(parsed));
+        let reparsed = parse_message_stanza(&rendered).expect("serialized message parses");
+        assert_eq!(
+            reparsed.thread.as_ref().map(|thread| thread.0.as_str()),
+            Some("thread-root"),
+            "rendered stanza: {rendered}"
+        );
+        assert!(reparsed.payloads.iter().any(|payload| {
+            payload.name() == "reply"
+                && payload.ns() == "urn:xmpp:reply:0"
+                && payload.attr("id") == Some("msg-1")
+                && payload.attr("to") == Some("alice@localhost")
+        }));
+    }
+
+    #[test]
+    fn add_default_namespace_if_missing_for_message() {
+        let xml = "<message type='chat'><body>Hi</body></message>";
+        let patched = add_default_namespace_if_missing(xml, "jabber:client");
+        assert!(patched.contains("xmlns='jabber:client'"));
     }
 }

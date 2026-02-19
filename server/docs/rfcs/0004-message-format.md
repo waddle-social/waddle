@@ -132,15 +132,26 @@ To remove a reaction, send an empty `<reactions>` element.
 
 ### Replies & Threads
 
-Uses XEP-0461 (Message Replies):
+Uses XEP-0461 (Message Replies) with RFC 6121 `<thread/>`:
 
 ```xml
 <message to='general@muc.penguin-club.waddle.social' type='groupchat'>
   <body>Great point!</body>
-  <reply xmlns='urn:xmpp:reply:0' to='original-message-id'/>
-  <thread>thread-id</thread>
+  <reply xmlns='urn:xmpp:reply:0'
+         id='original-message-id'
+         to='alice@waddle.social'/>
+  <thread>root-thread-id</thread>
 </message>
 ```
+
+Threading semantics for this phase:
+
+- Root messages omit `<thread/>`.
+- First reply to a root message sets `<thread/>` to the root canonical ID.
+- Replies-to-replies keep the same root `<thread/>` and set `<reply id='...'>` to the direct parent.
+- For MUC, canonical reply targets should use `<stanza-id xmlns='urn:xmpp:sid:0' by='room@...'>` when available.
+
+Archived message metadata includes `thread_id`, `reply_to_id`, `reply_to_jid`, and `origin_id` so MAM replay preserves reply/thread context.
 
 ### Message Editing
 

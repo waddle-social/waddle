@@ -44,6 +44,7 @@ const displayAvatar = computed(() => {
 
 const messages = ref<ChatMessage[]>([]);
 const draft = ref('');
+const replyingTo = ref<ChatMessage | null>(null);
 const loading = ref(false);
 const sending = ref(false);
 const error = ref<string | null>(null);
@@ -84,8 +85,60 @@ function formatDate(value: string): string {
   return date.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 }
 
+function shortId(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 14) return trimmed;
+  return `${trimmed.slice(0, 8)}…${trimmed.slice(-4)}`;
+}
+
 function bareJid(value: string): string {
   return value.split('/')[0] || value;
+}
+
+function canonicalMessageId(message: ChatMessage): string {
+  if (message.messageType === 'groupchat' && message.stanzaId?.id) {
+    return message.stanzaId.id;
+  }
+  return message.id;
+}
+
+function threadRootIdFor(message: ChatMessage): string {
+  const thread = message.threadId?.trim();
+  if (thread) return thread;
+  return canonicalMessageId(message);
+}
+
+function beginReply(message: ChatMessage): void {
+  replyingTo.value = message;
+}
+
+function clearReply(): void {
+  replyingTo.value = null;
+}
+
+function resolveReplyTarget(message: ChatMessage): ChatMessage | null {
+  const replyId = message.replyTo?.id?.trim();
+  if (!replyId) return null;
+  return messages.value.find((candidate) => canonicalMessageId(candidate) === replyId) ?? null;
+}
+
+function replyTargetName(message: ChatMessage): string {
+  const target = resolveReplyTarget(message);
+  if (target) return senderName(target);
+  const fallback = message.replyTo?.to?.trim();
+  return fallback && fallback.length > 0 ? fallback : 'Original message unavailable';
+}
+
+function replyTargetBody(message: ChatMessage): string {
+  const target = resolveReplyTarget(message);
+  if (target) return target.body;
+  return 'Original message unavailable';
+}
+
+function threadLabel(message: ChatMessage): string | null {
+  const thread = message.threadId?.trim();
+  if (!thread) return null;
+  return shortId(thread);
 }
 
 function isOutbound(message: ChatMessage): boolean {
@@ -238,12 +291,23 @@ async function submitMessage(): Promise<void> {
   draft.value = '';
 
   try {
-    const msgType = isRoom.value ? 'groupchat' : 'chat';
-    const sent = await sendMessage(jid.value, body, msgType);
+    const msgType = (isRoom.value ? 'groupchat' : 'chat') as 'groupchat' | 'chat';
+    const replyTarget = replyingTo.value;
+    const sent = await sendMessage(jid.value, body, {
+      messageType: msgType,
+      threadId: replyTarget ? threadRootIdFor(replyTarget) : undefined,
+      replyTo: replyTarget
+        ? {
+            id: canonicalMessageId(replyTarget),
+            to: isRoom.value ? null : bareJid(replyTarget.from),
+          }
+        : undefined,
+    });
     if (!isRoom.value) {
       runtimeStore.setMessageDelivery(sent.id, defaultOutboundStatus());
     }
     messages.value = sortMessages([...messages.value, sent]);
+    replyingTo.value = null;
     scrollToBottom();
   } catch (cause) {
     draft.value = body;
@@ -254,6 +318,11 @@ async function submitMessage(): Promise<void> {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && replyingTo.value) {
+    event.preventDefault();
+    clearReply();
+    return;
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     void submitMessage();
@@ -309,6 +378,7 @@ onUnmounted(() => {
 });
 
 watch(jid, () => {
+  replyingTo.value = null;
   // Clear the reload timer when switching conversations
   if (historyReloadTimer) {
     clearTimeout(historyReloadTimer);
@@ -371,8 +441,19 @@ watch(jid, () => {
           <!-- Message row -->
           <div
             class="group relative rounded px-2 py-0.5 transition-colors hover:bg-hover"
-            :class="showHeader(index) ? 'mt-4' : 'mt-0'"
+            :class="[
+              showHeader(index) ? 'mt-4' : 'mt-0',
+              message.threadId ? 'border-l-2 border-accent/40 pl-3' : '',
+            ]"
           >
+            <button
+              type="button"
+              class="absolute right-2 top-1 hidden rounded bg-surface-raised px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-foreground group-hover:block"
+              @click="beginReply(message)"
+            >
+              Reply
+            </button>
+
             <!-- Full message with avatar -->
             <div v-if="showHeader(index)" class="flex gap-4">
               <div
@@ -399,9 +480,23 @@ watch(jid, () => {
                     {{ senderName(message) }}
                   </span>
                   <span class="text-[11px] text-muted">{{ formatTime(message.timestamp) }}</span>
+                  <span
+                    v-if="threadLabel(message)"
+                    class="rounded bg-surface-raised px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted"
+                    :title="message.threadId ?? undefined"
+                  >
+                    Thread {{ threadLabel(message) }}
+                  </span>
                   <span v-if="deliveryStatusFor(message)" class="text-[11px] text-muted">
                     {{ deliveryIcon(deliveryStatusFor(message)) }}
                   </span>
+                </div>
+                <div
+                  v-if="message.replyTo?.id"
+                  class="mb-1 rounded border-l-2 border-border bg-surface-raised/60 px-2 py-1 text-xs text-muted"
+                >
+                  <p class="font-medium text-foreground/85">{{ replyTargetName(message) }}</p>
+                  <p class="truncate">{{ replyTargetBody(message) }}</p>
                 </div>
                 <p class="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{{ message.body }}</p>
                 <EmbedCard
@@ -420,6 +515,20 @@ watch(jid, () => {
                 </span>
               </div>
               <div class="min-w-0 flex-1">
+                <div
+                  v-if="threadLabel(message)"
+                  class="mb-1 inline-flex rounded bg-surface-raised px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted"
+                  :title="message.threadId ?? undefined"
+                >
+                  Thread {{ threadLabel(message) }}
+                </div>
+                <div
+                  v-if="message.replyTo?.id"
+                  class="mb-1 rounded border-l-2 border-border bg-surface-raised/60 px-2 py-1 text-xs text-muted"
+                >
+                  <p class="font-medium text-foreground/85">{{ replyTargetName(message) }}</p>
+                  <p class="truncate">{{ replyTargetBody(message) }}</p>
+                </div>
                 <p class="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{{ message.body }}</p>
                 <EmbedCard
                   v-for="(embed, embedIdx) in (message.embeds ?? [])"
@@ -435,6 +544,24 @@ watch(jid, () => {
 
     <!-- Message input -->
     <div class="flex-shrink-0 px-4 pb-6">
+      <div
+        v-if="replyingTo"
+        class="mb-2 flex items-start justify-between gap-2 rounded-lg border border-border bg-surface-raised px-3 py-2"
+      >
+        <div class="min-w-0">
+          <p class="text-xs font-semibold uppercase tracking-wide text-muted">
+            Replying to {{ senderName(replyingTo) }}
+          </p>
+          <p class="truncate text-sm text-foreground">{{ replyingTo.body }}</p>
+        </div>
+        <button
+          type="button"
+          class="flex-shrink-0 rounded px-2 py-1 text-xs text-muted transition-colors hover:bg-hover hover:text-foreground"
+          @click="clearReply"
+        >
+          Cancel
+        </button>
+      </div>
       <form
         class="flex items-center rounded-lg bg-surface-raised"
         @submit.prevent="submitMessage"

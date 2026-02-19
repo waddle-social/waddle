@@ -1,6 +1,10 @@
 declare module 'waddle-wasm' {
   export interface WaddleCore {
-    send_message(to: string, body: string): Promise<import('./composables/useWaddle').ChatMessage>;
+    send_message(
+      to: string,
+      body: string,
+      options?: import('./composables/useWaddle').SendMessageOptions,
+    ): Promise<import('./composables/useWaddle').ChatMessage>;
     get_roster(): Promise<import('./composables/useWaddle').RosterItem[]>;
     set_presence(show: string, status?: string): Promise<void>;
     join_room(roomJid: string, nick: string): Promise<void>;
