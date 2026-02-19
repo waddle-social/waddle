@@ -124,6 +124,14 @@ enum Commands {
         /// Keep interop container after run (for debugging)
         #[arg(long)]
         keep_containers: bool,
+
+        /// Optional path to a prebuilt waddle-server binary
+        #[arg(long)]
+        server_bin: Option<String>,
+
+        /// Skip rebuilding waddle-server inside the compliance harness
+        #[arg(long)]
+        skip_server_build: bool,
     },
 }
 
@@ -535,6 +543,8 @@ async fn main() -> Result<()> {
             disabled_tests,
             artifact_dir,
             keep_containers,
+            server_bin,
+            skip_server_build,
         }) => {
             return run_compliance(
                 &profile,
@@ -549,6 +559,8 @@ async fn main() -> Result<()> {
                 disabled_tests.as_deref(),
                 &artifact_dir,
                 keep_containers,
+                server_bin.as_deref(),
+                skip_server_build,
             );
         }
         None => {
@@ -650,6 +662,8 @@ fn run_compliance(
     disabled_tests: Option<&str>,
     artifact_dir: &str,
     keep_containers: bool,
+    server_bin: Option<&str>,
+    skip_server_build: bool,
 ) -> Result<()> {
     let workspace = workspace_root();
     let resolved_artifact_dir = resolve_artifact_dir(artifact_dir)?;
@@ -689,6 +703,17 @@ fn run_compliance(
     if let Some(value) = disabled_tests {
         println!("  Disabled tests: {value}");
     }
+    if let Some(value) = server_bin {
+        println!("  Server bin:    {value}");
+    }
+    println!(
+        "  Server build:  {}",
+        if skip_server_build {
+            "skip"
+        } else {
+            "auto-build"
+        }
+    );
 
     let mut command = std::process::Command::new("cargo");
     command
@@ -716,6 +741,10 @@ fn run_compliance(
         .env(
             "WADDLE_COMPLIANCE_KEEP_CONTAINERS",
             if keep_containers { "true" } else { "false" },
+        )
+        .env(
+            "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD",
+            if skip_server_build { "true" } else { "false" },
         );
 
     if !admin_username.trim().is_empty() {
@@ -736,6 +765,9 @@ fn run_compliance(
     }
     if let Some(value) = disabled_tests {
         command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", value);
+    }
+    if let Some(value) = server_bin {
+        command.env("WADDLE_SERVER_BIN", value);
     }
 
     let status = command

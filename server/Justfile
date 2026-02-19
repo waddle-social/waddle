@@ -105,3 +105,75 @@ quick-caas artifact_dir="test-logs/quick-caas" jid="admin@localhost" password="p
       --xmpp-port "$xmpp_port" \
       --host-meta-base-url "http://${xmpp_host}:${http_port}" \
       --xep0368-starttls-fallback
+
+# Fast local compliance profile: one non-heavy shard plus six heavy shards.
+compliance-fast-local artifact_root="test-logs/fast-local":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    artifact_root="{{artifact_root}}"
+    mkdir -p "$artifact_root"
+
+    heavy_tests="RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest,RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest"
+
+    cargo build --package waddle-server --bin waddle-server
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 3500 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --disabled-tests "$heavy_tests" \
+      --artifact-dir "$artifact_root/core-nonheavy" \
+      --skip-server-build
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 2000 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --enabled-tests RFC6121Section8_5_2_1_1_MessageIntegrationTest \
+      --artifact-dir "$artifact_root/heavy-1" \
+      --skip-server-build
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 2000 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --enabled-tests RFC6121Section8_5_3_2_3_IqIntegrationTest \
+      --artifact-dir "$artifact_root/heavy-2" \
+      --skip-server-build
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 2000 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --enabled-tests RFC6121Section8_5_2_1_3_IqIntegrationTest \
+      --artifact-dir "$artifact_root/heavy-3" \
+      --skip-server-build
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 2000 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --enabled-tests RFC6121Section8_5_3_2_2_PresenceIntegrationTest \
+      --artifact-dir "$artifact_root/heavy-4" \
+      --skip-server-build
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 2000 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --enabled-tests RFC6121Section8_5_3_2_1_MessageIntegrationTest \
+      --artifact-dir "$artifact_root/heavy-5" \
+      --skip-server-build
+
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance \
+      --profile best_effort_full \
+      --timeout-ms 2000 \
+      --enabled-specs RFC6120,RFC6121,XEP-0030 \
+      --enabled-tests RFC6121Section8_5_2_1_2_PresenceIntegrationTest \
+      --artifact-dir "$artifact_root/heavy-6" \
+      --skip-server-build
+
+# Full local compliance run (preserves existing managed harness behavior).
+compliance-full-local artifact_dir="test-logs/full-managed":
+    WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS=0 cargo run --bin waddle -- compliance --profile best_effort_full --artifact-dir {{artifact_dir}}

@@ -118,7 +118,7 @@ jobs:
   xmpp-interop-fast:
     name: XMPP Interop Fast (${{ matrix.shard.name }})
     if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly') }}
-    needs: build
+    needs: [build, unit-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
@@ -133,15 +133,29 @@ jobs:
             enabled_tests: ''
             disabled_tests: >-
               RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest,RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest
-          - name: heavy-a
+          - name: heavy-1
             timeout_ms: '2000'
-            enabled_tests: >-
-              RFC6121Section8_5_2_1_1_MessageIntegrationTest,RFC6121Section8_5_3_2_3_IqIntegrationTest,RFC6121Section8_5_2_1_3_IqIntegrationTest
+            enabled_tests: 'RFC6121Section8_5_2_1_1_MessageIntegrationTest'
             disabled_tests: ''
-          - name: heavy-b
+          - name: heavy-2
             timeout_ms: '2000'
-            enabled_tests: >-
-              RFC6121Section8_5_3_2_2_PresenceIntegrationTest,RFC6121Section8_5_3_2_1_MessageIntegrationTest,RFC6121Section8_5_2_1_2_PresenceIntegrationTest
+            enabled_tests: 'RFC6121Section8_5_3_2_3_IqIntegrationTest'
+            disabled_tests: ''
+          - name: heavy-3
+            timeout_ms: '2000'
+            enabled_tests: 'RFC6121Section8_5_2_1_3_IqIntegrationTest'
+            disabled_tests: ''
+          - name: heavy-4
+            timeout_ms: '2000'
+            enabled_tests: 'RFC6121Section8_5_3_2_2_PresenceIntegrationTest'
+            disabled_tests: ''
+          - name: heavy-5
+            timeout_ms: '2000'
+            enabled_tests: 'RFC6121Section8_5_3_2_1_MessageIntegrationTest'
+            disabled_tests: ''
+          - name: heavy-6
+            timeout_ms: '2000'
+            enabled_tests: 'RFC6121Section8_5_2_1_2_PresenceIntegrationTest'
             disabled_tests: ''
 
     steps:
@@ -197,6 +211,9 @@ jobs:
           tail -n 200 "$LOG_DIR/waddle-server.log" || true
           exit 1
 
+      - name: Record shard start time
+        run: echo "INTEROP_START_TS=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Run XMPP Interop Tests
         uses: ./.github/actions/xmpp-interop-tests-action
         with:
@@ -221,10 +238,15 @@ jobs:
           python - <<'PY'
           import os
           import pathlib
+          import time
           import xml.etree.ElementTree as ET
 
           junit = pathlib.Path(os.environ['JUNIT_PATH'])
           shard_name = os.environ.get('SHARD_NAME', 'unknown')
+          start_ts_raw = os.environ.get('INTEROP_START_TS', '')
+          runtime_secs = None
+          if start_ts_raw.isdigit():
+              runtime_secs = max(0, int(time.time()) - int(start_ts_raw))
 
           if not junit.exists():
               print('No JUnit report found at', junit)
@@ -251,6 +273,7 @@ jobs:
               f'- total testcases: **{total}**',
               f'- failed testcases: **{len(failed)}**',
               f'- skipped testcases: **{skipped}**',
+              f'- runtime: **{runtime_secs}s**' if runtime_secs is not None else '- runtime: **unknown**',
               ''
           ]
 
@@ -349,6 +372,9 @@ jobs:
           tail -n 200 ./xmpp-interop-logs-nightly/waddle-server.log || true
           exit 1
 
+      - name: Record nightly start time
+        run: echo "INTEROP_START_TS=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Run XMPP Interop Tests (nightly full)
         uses: ./.github/actions/xmpp-interop-tests-action
         with:
@@ -371,10 +397,15 @@ jobs:
           python - <<'PY'
           import os
           import pathlib
+          import time
           import xml.etree.ElementTree as ET
 
           junit = pathlib.Path(os.environ['JUNIT_PATH'])
           shard_name = os.environ.get('SHARD_NAME', 'unknown')
+          start_ts_raw = os.environ.get('INTEROP_START_TS', '')
+          runtime_secs = None
+          if start_ts_raw.isdigit():
+              runtime_secs = max(0, int(time.time()) - int(start_ts_raw))
 
           if not junit.exists():
               print('No JUnit report found at', junit)
@@ -401,6 +432,7 @@ jobs:
               f'- total testcases: **{total}**',
               f'- failed testcases: **{len(failed)}**',
               f'- skipped testcases: **{skipped}**',
+              f'- runtime: **{runtime_secs}s**' if runtime_secs is not None else '- runtime: **unknown**',
               ''
           ]
 
@@ -460,6 +492,9 @@ jobs:
             ~/.cargo/git/db/
             server/target/
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('server/Cargo.lock', 'server/**/Cargo.toml', 'server/rust-toolchain.toml') }}
+
+      - name: Run compliance fast regression tests
+        run: cargo test --package waddle-xmpp --test compliance_fast_regression --verbose
 
       - name: Run XMPP crate tests
         run: cargo test --package waddle-xmpp --verbose
