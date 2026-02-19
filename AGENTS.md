@@ -17,7 +17,11 @@ tests/
 
 ## Commands
 
-npm test && npm run lint
+bun test && bun run lint
+
+- Bun-only hard rule:
+  - Never use `npm`, `yarn`, or `pnpm` for installs, scripts, or CI.
+  - Use `bun` and `bunx` exclusively.
 
 ## Code Style
 

@@ -25,28 +25,6 @@ const { joinedRooms } = storeToRefs(roomsStore);
 
 const directJid = ref('');
 
-function getInitials(name: string): string {
-  const parts = name.split(/[@.\s]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    const first = parts[0]?.[0] ?? '';
-    const second = parts[1]?.[0] ?? '';
-    return `${first}${second}`.toUpperCase();
-  }
-  return name.slice(0, 2).toUpperCase();
-}
-
-function getAvatarColor(jid: string): string {
-  const colors = [
-    '#5865f2', '#57f287', '#fee75c', '#eb459e',
-    '#ed4245', '#3ba55c', '#faa61a', '#5865f2',
-  ];
-  let hash = 0;
-  for (const ch of jid) {
-    hash = ch.charCodeAt(0) + ((hash << 5) - hash);
-  }
-  return colors[Math.abs(hash) % colors.length] ?? colors[0] ?? '#5865f2';
-}
-
 function isActiveChat(jid: string): boolean {
   if (route.name !== 'chat') return false;
   return decodeRouteParam(String(route.params.jid ?? '')) === jid;
