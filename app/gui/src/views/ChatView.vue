@@ -11,6 +11,7 @@ import { useRuntimeStore, type MessageDeliveryStatus } from '../stores/runtime';
 import { useRoomsStore } from '../stores/rooms';
 import { useAuthStore } from '../stores/auth';
 import { useVCardStore } from '../stores/vcard';
+import { extractMessageFromEventPayload } from '../utils/eventPayload';
 
 const route = useRoute();
 const router = useRouter();
@@ -56,18 +57,6 @@ const messagesByCanonicalId = computed<Map<string, ChatMessage>>(() => {
   }
   return map;
 });
-
-interface EventPayloadEnvelope {
-  type?: string;
-  data?: {
-    message?: ChatMessage;
-  };
-}
-
-interface BackendEventEnvelope {
-  channel?: string;
-  payload?: EventPayloadEnvelope;
-}
 
 function sortMessages(items: ChatMessage[]): ChatMessage[] {
   return [...items].sort((left, right) => {
@@ -336,10 +325,8 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 }
 
-function maybeRefreshForEvent(event: BackendEventEnvelope): void {
-  const payload = event.payload;
-  if (!payload || payload.type !== 'messageReceived') return;
-  const message = payload.data?.message;
+function maybeRefreshForEvent(event: unknown): void {
+  const message = extractMessageFromEventPayload<ChatMessage>(event);
   if (!message) return;
 
   const fromBare = bareJid(message.from);
@@ -368,7 +355,7 @@ onMounted(async () => {
   await runtimeStore.bootstrap();
 
   // Set up the message listener FIRST so we don't miss messages
-  stopMessageListener = await listen<BackendEventEnvelope>('xmpp.message.received', ({ payload }) => {
+  stopMessageListener = await listen<unknown>('xmpp.message.received', ({ payload }) => {
     maybeRefreshForEvent(payload);
   });
 

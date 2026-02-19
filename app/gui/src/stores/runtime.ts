@@ -7,19 +7,10 @@ import {
   type ConnectionSnapshot,
   type UnlistenFn,
 } from '../composables/useWaddle';
+import { normalizeEventPayload } from '../utils/eventPayload';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'offline';
 export type MessageDeliveryStatus = 'queued' | 'sent' | 'delivered';
-
-interface EventPayloadEnvelope {
-  type?: string;
-  data?: Record<string, unknown>;
-}
-
-interface BackendEventEnvelope {
-  channel?: string;
-  payload?: EventPayloadEnvelope;
-}
 
 export const useRuntimeStore = defineStore('runtime', () => {
   const connectionStatus = ref<ConnectionStatus>('offline');
@@ -88,8 +79,8 @@ export const useRuntimeStore = defineStore('runtime', () => {
     }
   }
 
-  function handleSystemEvent(envelope: BackendEventEnvelope): void {
-    const payload = envelope.payload;
+  function handleSystemEvent(envelope: unknown): void {
+    const payload = normalizeEventPayload<Record<string, unknown>>(envelope);
     if (!payload?.type) return;
 
     switch (payload.type) {
@@ -127,15 +118,15 @@ export const useRuntimeStore = defineStore('runtime', () => {
     }
   }
 
-  function handleMessageSent(envelope: BackendEventEnvelope): void {
-    const payload = envelope.payload;
+  function handleMessageSent(envelope: unknown): void {
+    const payload = normalizeEventPayload<Record<string, unknown>>(envelope);
     if (payload?.type !== 'messageSent') return;
     const message = payload.data?.message as ChatMessage | undefined;
     if (message?.id) setMessageDelivery(message.id, 'sent');
   }
 
-  function handleMessageDelivered(envelope: BackendEventEnvelope): void {
-    const payload = envelope.payload;
+  function handleMessageDelivered(envelope: unknown): void {
+    const payload = normalizeEventPayload<Record<string, unknown>>(envelope);
     if (payload?.type !== 'messageDelivered') return;
     const id = typeof payload.data?.id === 'string' ? payload.data.id : null;
     if (id) setMessageDelivery(id, 'delivered');
@@ -160,7 +151,7 @@ export const useRuntimeStore = defineStore('runtime', () => {
 
     for (const channel of subscriptions) {
       try {
-        const unlisten = await waddle.listen<BackendEventEnvelope>(channel, ({ payload }) => {
+        const unlisten = await waddle.listen<unknown>(channel, ({ payload }) => {
           if (channel.startsWith('system.')) {
             handleSystemEvent(payload);
             return;
