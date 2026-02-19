@@ -12,6 +12,7 @@ const authStore = useAuthStore();
 const displayName = ref('');
 const avatarPreview = ref<string | null>(null);
 const avatarFile = ref<File | null>(null);
+const avatarRemoved = ref(false);
 const saving = ref(false);
 const error = ref<string | null>(null);
 const success = ref(false);
@@ -54,11 +55,17 @@ function onAvatarSelect(event: Event) {
   }
 
   avatarFile.value = file;
+  avatarRemoved.value = false;
 
   // Preview
   const reader = new FileReader();
   reader.onload = (e) => {
     avatarPreview.value = e.target?.result as string;
+  };
+  reader.onerror = () => {
+    error.value = 'Failed to read image file. Please try another image.';
+    avatarPreview.value = null;
+    avatarFile.value = null;
   };
   reader.readAsDataURL(file);
 }
@@ -105,12 +112,19 @@ async function resizeImage(file: File): Promise<{ base64: string; mimeType: stri
         base64 = dataUrl.split(',')[1] || '';
       }
 
+      // Final hard limit: reject if still too large after all attempts
+      if (base64.length > MAX_OUTPUT_SIZE * 1.37) {
+        resolve(null);
+        return;
+      }
+
       resolve({ base64, mimeType });
     };
     img.onerror = () => resolve(null);
 
     const reader = new FileReader();
     reader.onload = (e) => { img.src = e.target?.result as string; };
+    reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
   });
 }
@@ -135,13 +149,16 @@ async function saveProfile() {
       photoMimeType = resized.mimeType;
     }
 
+    // If avatar was explicitly removed and no new file uploaded, send update without photo
+    // This clears the avatar on the server
     await vcardStore.updateOwnVCard({
       fullName: displayName.value.trim() || undefined,
-      photoBase64,
-      photoMimeType,
+      photoBase64: avatarRemoved.value && !avatarFile.value ? undefined : photoBase64,
+      photoMimeType: avatarRemoved.value && !avatarFile.value ? undefined : photoMimeType,
     });
 
     avatarFile.value = null;
+    avatarRemoved.value = false;
     success.value = true;
     setTimeout(() => { success.value = false; }, 3000);
   } catch (e) {
@@ -154,6 +171,7 @@ async function saveProfile() {
 function removeAvatar() {
   avatarPreview.value = null;
   avatarFile.value = null;
+  avatarRemoved.value = true;
 }
 </script>
 

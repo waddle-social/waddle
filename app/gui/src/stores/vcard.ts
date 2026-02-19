@@ -61,9 +61,11 @@ export const useVCardStore = defineStore('vcard', () => {
 
     fetching.value.add(bare);
     try {
+      // NFR-2: 5s timeout. Note: the underlying fetch continues in background
+      // if timeout fires first, but the result is safely discarded.
       const data = await Promise.race([
         _getVCard(bare),
-        timeout(5000), // NFR-2: 5s timeout
+        timeout(5000),
       ]);
       if (data) {
         cache.value.set(bare, data);
