@@ -100,12 +100,8 @@ pub async fn fetch_bluesky_profile(
     });
 
     // Filter empty strings to None
-    let display_name = profile
-        .display_name
-        .filter(|s| !s.trim().is_empty());
-    let description = profile
-        .description
-        .filter(|s| !s.trim().is_empty());
+    let display_name = profile.display_name.filter(|s| !s.trim().is_empty());
+    let description = profile.description.filter(|s| !s.trim().is_empty());
 
     debug!(
         did = %did,
@@ -129,10 +125,7 @@ pub fn build_vcard_from_profile(profile: &BlueskyProfile) -> String {
     let mut xml = String::from("<vCard xmlns='vcard-temp'>");
 
     // FN: display name, falling back to handle
-    let display_name = profile
-        .display_name
-        .as_deref()
-        .unwrap_or(&profile.handle);
+    let display_name = profile.display_name.as_deref().unwrap_or(&profile.handle);
     xml.push_str(&format!("<FN>{}</FN>", escape_xml(display_name)));
 
     // PHOTO/EXTVAL: avatar URL (HTTPS-validated upstream)
@@ -169,7 +162,9 @@ mod tests {
     fn test_build_vcard_full_profile() {
         let profile = BlueskyProfile {
             display_name: Some("David Flanagan".to_string()),
-            avatar_url: Some("https://cdn.bsky.app/img/avatar/plain/did:plc:abc/cid@jpeg".to_string()),
+            avatar_url: Some(
+                "https://cdn.bsky.app/img/avatar/plain/did:plc:abc/cid@jpeg".to_string(),
+            ),
             description: Some("Software engineer".to_string()),
             handle: "david.bsky.social".to_string(),
         };
@@ -177,7 +172,9 @@ mod tests {
         let xml = build_vcard_from_profile(&profile);
 
         assert!(xml.contains("<FN>David Flanagan</FN>"));
-        assert!(xml.contains("<EXTVAL>https://cdn.bsky.app/img/avatar/plain/did:plc:abc/cid@jpeg</EXTVAL>"));
+        assert!(xml.contains(
+            "<EXTVAL>https://cdn.bsky.app/img/avatar/plain/did:plc:abc/cid@jpeg</EXTVAL>"
+        ));
         assert!(xml.contains("<DESC>Software engineer</DESC>"));
         assert!(xml.starts_with("<vCard xmlns='vcard-temp'>"));
         assert!(xml.ends_with("</vCard>"));

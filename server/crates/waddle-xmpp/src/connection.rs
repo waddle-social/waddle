@@ -75,8 +75,7 @@ use crate::xep::xep0049::{
     parse_private_storage_get, parse_private_storage_set,
 };
 use crate::xep::xep0054::{
-    build_empty_vcard_response, build_vcard_success, is_vcard_get,
-    is_vcard_set,
+    build_empty_vcard_response, build_vcard_success, is_vcard_get, is_vcard_set,
 };
 use crate::xep::xep0077::RegistrationError;
 use crate::xep::xep0191::{
@@ -5489,35 +5488,37 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     if let Some((avatar_info, avatar_data_b64)) =
                         converter.on_vcard_photo_updated(data, mime_type)
                     {
-                    // Publish avatar data to PEP
-                    let data_elem = crate::xep::xep0084::build_avatar_data(&avatar_data_b64);
-                    let data_item = PubSubItem::new(Some(avatar_info.id.clone()), Some(data_elem));
-                    let _ = self
-                        .pubsub_storage
-                        .publish_item(
-                            &sender_jid.to_bare(),
-                            crate::xep::xep0084::NODE_AVATAR_DATA,
-                            &data_item,
-                            Some(&sender_jid.to_bare()),
-                            true,
-                        )
-                        .await;
+                        // Publish avatar data to PEP
+                        let data_elem = crate::xep::xep0084::build_avatar_data(&avatar_data_b64);
+                        let data_item =
+                            PubSubItem::new(Some(avatar_info.id.clone()), Some(data_elem));
+                        let _ = self
+                            .pubsub_storage
+                            .publish_item(
+                                &sender_jid.to_bare(),
+                                crate::xep::xep0084::NODE_AVATAR_DATA,
+                                &data_item,
+                                Some(&sender_jid.to_bare()),
+                                true,
+                            )
+                            .await;
 
-                    // Publish avatar metadata to PEP
-                    let metadata_elem = crate::xep::xep0084::build_avatar_metadata(&avatar_info);
-                    let metadata_item =
-                        PubSubItem::new(Some(avatar_info.id.clone()), Some(metadata_elem));
-                    let _ = self
-                        .pubsub_storage
-                        .publish_item(
-                            &sender_jid.to_bare(),
-                            crate::xep::xep0084::NODE_AVATAR_METADATA,
-                            &metadata_item,
-                            Some(&sender_jid.to_bare()),
-                            true,
-                        )
-                        .await;
-                }
+                        // Publish avatar metadata to PEP
+                        let metadata_elem =
+                            crate::xep::xep0084::build_avatar_metadata(&avatar_info);
+                        let metadata_item =
+                            PubSubItem::new(Some(avatar_info.id.clone()), Some(metadata_elem));
+                        let _ = self
+                            .pubsub_storage
+                            .publish_item(
+                                &sender_jid.to_bare(),
+                                crate::xep::xep0084::NODE_AVATAR_METADATA,
+                                &metadata_item,
+                                Some(&sender_jid.to_bare()),
+                                true,
+                            )
+                            .await;
+                    }
                     self.converting_avatar = false;
                 }
             }

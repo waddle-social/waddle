@@ -379,8 +379,7 @@ pub async fn callback_handler(
                     info!("Session created: {} for {}", session.id, pending.handle);
 
                     // Auto-populate vCard from Bluesky profile (FR-1, non-blocking)
-                    super::device::auto_populate_vcard(&state, &pending.did, &pending.handle)
-                        .await;
+                    super::device::auto_populate_vcard(&state, &pending.did, &pending.handle).await;
 
                     // Check if this OAuth flow was initiated by an XMPP client.
                     // Peek (don't remove) — xmpp_callback_handler owns removal.
