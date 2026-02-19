@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - "server/Cargo.toml"
-      - "server/Cargo.lock"
       - "server/crates/**"
       - "server/Containerfile"
       - "server/.dockerignore"
