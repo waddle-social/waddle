@@ -26,7 +26,7 @@ use waddle_xmpp::{
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
-use waddle_xmpp_xep_github::MessageEnricher;
+use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
 
@@ -735,7 +735,7 @@ fn handle_iq(
         if let Some(request_iq) = parsed_iq.as_ref() {
             if to.as_deref() == Some(muc_domain) {
                 let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-                let features = vec![Feature::muc(), Feature::replies()];
+                let features = vec![Feature::muc(), Feature::replies(), Feature::waddle_github()];
                 let response = build_disco_info_response(request_iq, &identities, &features, None);
                 return vec![iq_to_xml(response)];
             }
@@ -750,7 +750,8 @@ fn handle_iq(
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string());
                         let identities = vec![Identity::muc_room(Some(&room_name))];
-                        let features = vec![Feature::muc(), Feature::replies()];
+                        let features =
+                            vec![Feature::muc(), Feature::replies(), Feature::waddle_github()];
                         let response =
                             build_disco_info_response(request_iq, &identities, &features, None);
                         return vec![iq_to_xml(response)];
@@ -763,6 +764,7 @@ fn handle_iq(
             let features = vec![
                 Feature::ping(),
                 Feature::replies(),
+                Feature::waddle_github(),
                 Feature::disco_info(),
                 Feature::disco_items(),
             ];
@@ -1010,6 +1012,7 @@ async fn handle_message(
 
             // Enrich: detect GitHub links and append embed XML elements
             let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
+            let has_github_embed = message_has_github_embed(&prototype);
 
             // Route the enriched message
             if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
@@ -1034,6 +1037,12 @@ async fn handle_message(
                         .send_to(&resource_jid, stanza)
                         .await;
                 }
+            }
+
+            if has_github_embed {
+                let mut echo = prototype.clone();
+                echo.to = Some(jid::Jid::from(sender_jid.clone()));
+                return vec![stanza_to_xml(&Stanza::Message(echo))];
             }
         } else {
             warn!("Direct chat message without 'to' attribute");
@@ -1193,6 +1202,40 @@ fn extract_domain(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ServerConfig;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::AppState;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use waddle_xmpp_xep_github::GitHubClient;
+
+    async fn create_test_websocket_state() -> Arc<WebSocketState> {
+        let config = DatabaseConfig::default();
+        let pool_config = PoolConfig::default();
+        let db_pool = DatabasePool::new(config, pool_config)
+            .await
+            .expect("db pool");
+
+        let runner = MigrationRunner::global();
+        runner.run(db_pool.global()).await.expect("migrations");
+
+        let app_state = Arc::new(AppState::new(
+            Arc::new(db_pool),
+            ServerConfig::test_homeserver(),
+        ));
+        let auth_state = Arc::new(AuthState::new(
+            app_state,
+            "https://waddle.social",
+            Some(b"test-encryption-key-32-bytes!!!"),
+        ));
+
+        Arc::new(WebSocketState {
+            auth_state,
+            connection_registry: Arc::new(ConnectionRegistry::new()),
+            muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
+            github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
+        })
+    }
 
     #[test]
     fn test_parse_room_jid_valid() {
@@ -1233,11 +1276,64 @@ mod tests {
         let server_responses = handle_iq(server_query, server_domain, muc_domain, &muc_registry);
         let server_response = server_responses.first().expect("server disco response");
         assert!(server_response.contains("urn:xmpp:reply:0"));
+        assert!(server_response.contains("urn:waddle:github:0"));
 
         let muc_query = r#"<iq xmlns="jabber:client" id="muc1" type="get" to="muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
         let muc_responses = handle_iq(muc_query, server_domain, muc_domain, &muc_registry);
         let muc_response = muc_responses.first().expect("muc disco response");
         assert!(muc_response.contains("urn:xmpp:reply:0"));
+        assert!(muc_response.contains("urn:waddle:github:0"));
+    }
+
+    #[tokio::test]
+    async fn handle_message_direct_with_github_embed_returns_sender_echo() {
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let recipient_jid: FullJid = "bob@example.com/mobile".parse().expect("recipient jid");
+        let state = create_test_websocket_state().await;
+
+        let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
+        state
+            .connection_registry
+            .register(recipient_jid.clone(), recipient_tx);
+
+        let frame = format!(
+            "<message xmlns='jabber:client' to='{}' type='chat' id='dm-github-1'>\
+                <body>Repo payload already attached</body>\
+                <repo xmlns='urn:waddle:github:0' owner='rust-lang' name='rust' \
+                      url='https://github.com/rust-lang/rust'/>\
+             </message>",
+            recipient_jid
+        );
+
+        let responses =
+            handle_message(&frame, "muc.example.com", state.as_ref(), &Some(sender_jid)).await;
+
+        assert_eq!(responses.len(), 1, "sender should get an echo response");
+        let sender_echo = &responses[0];
+        assert!(
+            sender_echo.contains("to=\"alice@example.com/web\"")
+                || sender_echo.contains("to='alice@example.com/web'"),
+            "sender echo should target sender JID: {sender_echo}"
+        );
+        assert!(
+            sender_echo.contains("urn:waddle:github:0"),
+            "sender echo should include GitHub payload: {sender_echo}"
+        );
+
+        let routed = recipient_rx
+            .recv()
+            .await
+            .expect("recipient should receive routed stanza");
+        let routed_xml = stanza_to_xml(&routed.stanza);
+        assert!(
+            routed_xml.contains("to=\"bob@example.com/mobile\"")
+                || routed_xml.contains("to='bob@example.com/mobile'"),
+            "routed stanza should target recipient resource: {routed_xml}"
+        );
+        assert!(
+            routed_xml.contains("urn:waddle:github:0"),
+            "routed stanza should preserve GitHub payload: {routed_xml}"
+        );
     }
 
     #[test]

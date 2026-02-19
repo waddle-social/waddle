@@ -1,13 +1,13 @@
 #[cfg(all(test, feature = "native"))]
 mod tests {
+    use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
     use waddle_core::event::{
         BroadcastEventBus, Channel, ChatMessage, Event, EventBus, EventPayload, EventSource,
-        MessageType, MessageEmbed,
+        MessageEmbed, MessageType,
     };
-    use serde_json::json;
     use waddle_messaging::MessageManager;
     use waddle_storage::Database;
 
@@ -65,13 +65,13 @@ mod tests {
             "alice@example.com",
             "Check out https://github.com/rust-lang/rust",
         );
-        
+
         // We'll manually construct the JSON embed that represents the GitHub data
         // In a real flow, this comes from the parser/enricher. Here we just need to ensure
         // it round-trips through the database.
-        
+
         let embed = MessageEmbed {
-            namespace: "urn:xmpp:waddle:github:0".to_string(),
+            namespace: "urn:waddle:github:0".to_string(),
             data: json!({
                 "owner": "rust-lang",
                 "repo": "rust",
@@ -79,9 +79,8 @@ mod tests {
                 "description": "Rust Programming Language"
             }),
         };
-            
-        msg.embeds.push(embed);
 
+        msg.embeds.push(embed);
 
         // Inject the connection event FIRST
         let connect_event = Event::new(
@@ -92,12 +91,14 @@ mod tests {
             },
         );
         messaging.handle_event(&connect_event).await;
-        
+
         // Inject the message
         let event = Event::new(
             Channel::new("xmpp.message.received").unwrap(),
             EventSource::Xmpp,
-            EventPayload::MessageReceived { message: msg.clone() },
+            EventPayload::MessageReceived {
+                message: msg.clone(),
+            },
         );
         messaging.handle_event(&event).await;
 
@@ -106,15 +107,18 @@ mod tests {
             .get_messages("bob@example.com", 50, None)
             .await
             .unwrap();
-        
+
         assert_eq!(stored.len(), 1);
         let stored_msg = &stored[0];
-        assert_eq!(stored_msg.body, "Check out https://github.com/rust-lang/rust");
+        assert_eq!(
+            stored_msg.body,
+            "Check out https://github.com/rust-lang/rust"
+        );
         assert_eq!(stored_msg.embeds.len(), 1);
-        
+
         let stored_embed = &stored_msg.embeds[0];
-        assert_eq!(stored_embed.namespace, "urn:xmpp:waddle:github:0");
-        
+        assert_eq!(stored_embed.namespace, "urn:waddle:github:0");
+
         let data = &stored_embed.data;
         assert_eq!(data["owner"], "rust-lang");
         assert_eq!(data["repo"], "rust");

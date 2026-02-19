@@ -168,6 +168,322 @@ function notConnected(method: string): Error {
   return new Error(`Not connected — cannot call ${method}. Please log in first.`);
 }
 
+const NS_WADDLE_GITHUB = 'urn:waddle:github:0';
+const MAX_GITHUB_LINKS_PER_MESSAGE = 3;
+const RESERVED_GITHUB_PATHS = new Set([
+  'settings',
+  'notifications',
+  'login',
+  'logout',
+  'signup',
+  'explore',
+  'marketplace',
+  'pricing',
+  'features',
+  'enterprise',
+  'sponsors',
+  'topics',
+  'collections',
+  'trending',
+  'about',
+  'security',
+  'site',
+  'orgs',
+  'users',
+  'codespaces',
+  'pulls',
+  'issues',
+  'stars',
+  'new',
+]);
+
+interface DetectedGitHubLink {
+  type: 'repo' | 'issue' | 'pr';
+  owner: string;
+  repo: string;
+  number?: string;
+  url: string;
+}
+
+function textFromElement(element: any): string {
+  if (!element) return '';
+  if (typeof element.text === 'function') {
+    return String(element.text() ?? '');
+  }
+  if (typeof element.text === 'string') {
+    return element.text;
+  }
+  return '';
+}
+
+function attrFromElement(element: any, name: string): string {
+  if (!element) return '';
+  if (typeof element.attr === 'function') {
+    const viaFn = element.attr(name);
+    if (typeof viaFn === 'string') return viaFn.trim();
+  }
+  const viaAttrs = element.attrs?.[name];
+  if (typeof viaAttrs === 'string') return viaAttrs.trim();
+  return '';
+}
+
+function childElements(element: any, name: string, namespace: string): any[] {
+  if (!element || typeof element.getChildren !== 'function') return [];
+  const withNs = element.getChildren(name, namespace);
+  if (Array.isArray(withNs) && withNs.length > 0) return withNs;
+  const withoutNs = element.getChildren(name);
+  if (!Array.isArray(withoutNs)) return [];
+  return withoutNs.filter((child: any) => {
+    const ns = typeof child?.getNS === 'function' ? child.getNS() : child?.ns;
+    return ns === namespace;
+  });
+}
+
+function childElement(element: any, name: string, namespace: string): any | null {
+  if (!element || typeof element.getChild !== 'function') return null;
+  return element.getChild(name, namespace) ?? null;
+}
+
+function toEmbedKey(embed: MessageEmbed): string {
+  const namespace = embed.namespace ?? '';
+  const data = embed.data ?? {};
+  const url = typeof data.url === 'string' ? data.url : '';
+  const type = typeof data.type === 'string' ? data.type : '';
+  const owner = typeof data.owner === 'string' ? data.owner : '';
+  const name = typeof data.name === 'string' ? data.name : '';
+  const repo = typeof data.repo === 'string' ? data.repo : '';
+  const number = typeof data.number === 'string' || typeof data.number === 'number'
+    ? String(data.number)
+    : '';
+  return `${namespace}|${url}|${type}|${owner}|${name}|${repo}|${number}`;
+}
+
+function mergeEmbeds(existing: MessageEmbed[], incoming: MessageEmbed[]): MessageEmbed[] {
+  const merged = new Map<string, MessageEmbed>();
+  for (const embed of existing) {
+    merged.set(toEmbedKey(embed), embed);
+  }
+  for (const embed of incoming) {
+    const key = toEmbedKey(embed);
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, embed);
+      continue;
+    }
+    merged.set(key, {
+      namespace: current.namespace,
+      data: {
+        ...current.data,
+        ...embed.data,
+      },
+    });
+  }
+  return Array.from(merged.values());
+}
+
+function pickString(incoming: string, fallback: string): string {
+  return incoming.trim().length > 0 ? incoming : fallback;
+}
+
+function mergeMessage(existing: ChatMessage, incoming: ChatMessage): ChatMessage {
+  return {
+    ...existing,
+    from: pickString(incoming.from, existing.from),
+    to: pickString(incoming.to, existing.to),
+    body: pickString(incoming.body, existing.body),
+    timestamp: pickString(existing.timestamp, incoming.timestamp),
+    messageType: incoming.messageType ?? existing.messageType,
+    threadId: incoming.threadId ?? existing.threadId ?? null,
+    replyTo: incoming.replyTo ?? existing.replyTo ?? null,
+    stanzaId: incoming.stanzaId ?? existing.stanzaId ?? null,
+    originId: incoming.originId ?? existing.originId ?? null,
+    embeds: mergeEmbeds(existing.embeds ?? [], incoming.embeds ?? []),
+  };
+}
+
+function stripCodeBlocks(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ');
+}
+
+function isReservedGitHubPath(segment: string): boolean {
+  return RESERVED_GITHUB_PATHS.has(segment);
+}
+
+function detectGitHubLinks(body: string): DetectedGitHubLink[] {
+  const cleaned = stripCodeBlocks(body);
+  const regex = /https?:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(issues|pull)\/(\d+))?(?:[#?]\S*)?/g;
+  const results: DetectedGitHubLink[] = [];
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(cleaned)) !== null) {
+    if (results.length >= MAX_GITHUB_LINKS_PER_MESSAGE) break;
+    const owner = (match[1] ?? '').trim();
+    const repo = (match[2] ?? '').trim();
+    const kind = (match[3] ?? '').trim();
+    const number = (match[4] ?? '').trim();
+
+    if (!owner || !repo) continue;
+    if (owner === '.' || repo === '.') continue;
+    if (owner.includes('..') || repo.includes('..')) continue;
+    if (isReservedGitHubPath(owner) || isReservedGitHubPath(repo)) continue;
+
+    if (kind === 'issues' && number) {
+      const url = `https://github.com/${owner}/${repo}/issues/${number}`;
+      if (seen.has(url)) continue;
+      seen.add(url);
+      results.push({ type: 'issue', owner, repo, number, url });
+      continue;
+    }
+
+    if (kind === 'pull' && number) {
+      const url = `https://github.com/${owner}/${repo}/pull/${number}`;
+      if (seen.has(url)) continue;
+      seen.add(url);
+      results.push({ type: 'pr', owner, repo, number, url });
+      continue;
+    }
+
+    const url = `https://github.com/${owner}/${repo}`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    results.push({ type: 'repo', owner, repo, url });
+  }
+
+  return results;
+}
+
+function fallbackGithubEmbeds(body: string): MessageEmbed[] {
+  return detectGitHubLinks(body).map((link): MessageEmbed => {
+    if (link.type === 'repo') {
+      return {
+        namespace: NS_WADDLE_GITHUB,
+        data: {
+          type: 'repo',
+          owner: link.owner,
+          name: link.repo,
+          url: link.url,
+        },
+      };
+    }
+
+    return {
+      namespace: NS_WADDLE_GITHUB,
+      data: {
+        type: link.type,
+        repo: `${link.owner}/${link.repo}`,
+        number: link.number ?? '',
+        url: link.url,
+      },
+    };
+  });
+}
+
+function withGithubFallbackEmbeds(embeds: MessageEmbed[], body: string): MessageEmbed[] {
+  return mergeEmbeds(embeds, fallbackGithubEmbeds(body));
+}
+
+function parseGithubEmbedsFromStanza(stanza: any): MessageEmbed[] {
+  const payloads = [
+    ...childElements(stanza, 'repo', NS_WADDLE_GITHUB),
+    ...childElements(stanza, 'issue', NS_WADDLE_GITHUB),
+    ...childElements(stanza, 'pr', NS_WADDLE_GITHUB),
+  ];
+
+  const embeds: MessageEmbed[] = [];
+  for (const payload of payloads) {
+    const data: Record<string, unknown> = {};
+    const name = payload?.name ?? payload?.getName?.();
+
+    if (name === 'repo') {
+      data.type = 'repo';
+      const owner = attrFromElement(payload, 'owner');
+      const repo = attrFromElement(payload, 'name');
+      const url = attrFromElement(payload, 'url');
+      if (owner) data.owner = owner;
+      if (repo) data.name = repo;
+      if (url) data.url = url;
+
+      const description = textFromElement(childElement(payload, 'description', NS_WADDLE_GITHUB));
+      if (description) data.description = description;
+
+      const starsText = textFromElement(childElement(payload, 'stars', NS_WADDLE_GITHUB));
+      const stars = Number.parseInt(starsText, 10);
+      if (!Number.isNaN(stars)) data.stars = stars;
+
+      const forksText = textFromElement(childElement(payload, 'forks', NS_WADDLE_GITHUB));
+      const forks = Number.parseInt(forksText, 10);
+      if (!Number.isNaN(forks)) data.forks = forks;
+
+      const license = textFromElement(childElement(payload, 'license', NS_WADDLE_GITHUB));
+      if (license) data.license = license;
+
+      const defaultBranch = textFromElement(
+        childElement(payload, 'default-branch', NS_WADDLE_GITHUB),
+      );
+      if (defaultBranch) data.defaultBranch = defaultBranch;
+
+      const topics = childElements(payload, 'topic', NS_WADDLE_GITHUB)
+        .map((topic) => textFromElement(topic))
+        .filter((topic) => topic.length > 0);
+      if (topics.length > 0) data.topics = topics;
+
+      const primaryLanguage = attrFromElement(
+        childElements(payload, 'language', NS_WADDLE_GITHUB)[0],
+        'name',
+      );
+      if (primaryLanguage) data.language = primaryLanguage;
+    } else if (name === 'issue') {
+      data.type = 'issue';
+      const repo = attrFromElement(payload, 'repo');
+      const number = attrFromElement(payload, 'number');
+      const state = attrFromElement(payload, 'state');
+      const url = attrFromElement(payload, 'url');
+      if (repo) data.repo = repo;
+      if (number) data.number = number;
+      if (state) data.state = state;
+      if (url) data.url = url;
+
+      const title = textFromElement(childElement(payload, 'title', NS_WADDLE_GITHUB));
+      if (title) data.title = title;
+
+      const author = textFromElement(childElement(payload, 'author', NS_WADDLE_GITHUB));
+      if (author) data.author = author;
+    } else if (name === 'pr') {
+      data.type = 'pr';
+      const repo = attrFromElement(payload, 'repo');
+      const number = attrFromElement(payload, 'number');
+      const state = attrFromElement(payload, 'state');
+      const url = attrFromElement(payload, 'url');
+      const draft = attrFromElement(payload, 'draft');
+      const merged = attrFromElement(payload, 'merged');
+      if (repo) data.repo = repo;
+      if (number) data.number = number;
+      if (state) data.state = state;
+      if (url) data.url = url;
+      if (draft) data.draft = draft === 'true';
+      if (merged) data.merged = merged === 'true';
+
+      const title = textFromElement(childElement(payload, 'title', NS_WADDLE_GITHUB));
+      if (title) data.title = title;
+
+      const author = textFromElement(childElement(payload, 'author', NS_WADDLE_GITHUB));
+      if (author) data.author = author;
+    }
+
+    if (Object.keys(data).length > 0) {
+      embeds.push({
+        namespace: NS_WADDLE_GITHUB,
+        data,
+      });
+    }
+  }
+
+  return embeds;
+}
+
 interface LegacyChatMessageShape {
   id?: unknown;
   from?: unknown;
@@ -236,6 +552,8 @@ function normalizeChatMessage(input: unknown): ChatMessage {
       ? message.thread.trim()
       : '';
   const originIdRaw = typeof message.originId === 'string' ? message.originId.trim() : '';
+  const body = typeof message.body === 'string' ? message.body : '';
+  const embeds = withGithubFallbackEmbeds(normalizeEmbeds(message.embeds), body);
 
   return {
     id:
@@ -244,7 +562,7 @@ function normalizeChatMessage(input: unknown): ChatMessage {
         : randomId('msg'),
     from: typeof message.from === 'string' ? message.from : '',
     to: typeof message.to === 'string' ? message.to : '',
-    body: typeof message.body === 'string' ? message.body : '',
+    body,
     timestamp:
       typeof message.timestamp === 'string' && message.timestamp.trim().length > 0
         ? message.timestamp
@@ -254,7 +572,7 @@ function normalizeChatMessage(input: unknown): ChatMessage {
     replyTo: normalizeReplyTo(message.replyTo),
     stanzaId: normalizeStanzaId(message.stanzaId),
     originId: originIdRaw || null,
-    embeds: normalizeEmbeds(message.embeds),
+    embeds,
   };
 }
 
@@ -359,12 +677,21 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       key = bareJid(message.from) === selfJid ? bareJid(message.to) : bareJid(message.from);
     }
     const current = historyByJid.get(key) ?? [];
-    if (current.some((m) => m.id === message.id)) {
-      console.debug(`[waddle:history] dup skipped for key=${key} id=${message.id}`);
+    const existingIdx = current.findIndex((m) => m.id === message.id);
+    if (existingIdx >= 0) {
+      const existing = current[existingIdx];
+      if (existing) {
+        const next = [...current];
+        next[existingIdx] = mergeMessage(existing, message);
+        historyByJid.set(key, next);
+        console.debug(`[waddle:history] merged key=${key} id=${message.id}`);
+      }
       return;
     }
     historyByJid.set(key, [...current, message]);
-    console.debug(`[waddle:history] stored key=${key} total=${current.length + 1} from=${message.from}`);
+    console.debug(
+      `[waddle:history] stored key=${key} total=${current.length + 1} from=${message.from}`,
+    );
   };
 
   const withTimeout = async <T>(
@@ -459,6 +786,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       replyTo,
       stanzaId,
       originId,
+      embeds: withGithubFallbackEmbeds(parseGithubEmbedsFromStanza(messageStanza), body),
     };
   };
 
@@ -760,11 +1088,23 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       const isSelfEcho = isGroupchat &&
         roomNickByJid.get(bareJid(rawFrom)) === rawFrom.split('/')[1];
 
-      if (!isSelfEcho && bareJid(rawFrom) !== selfJid) {
-        emit('xmpp.message.received', 'messageReceived', { message });
-      } else {
-        console.debug(`[waddle:msg] suppressed (selfEcho=${isSelfEcho}, fromSelf=${bareJid(rawFrom) === selfJid})`);
+      if (isGroupchat) {
+        if (!isSelfEcho && bareJid(rawFrom) !== selfJid) {
+          emit('xmpp.message.received', 'messageReceived', { message });
+        } else {
+          console.debug(
+            `[waddle:msg] suppressed groupchat echo (selfEcho=${isSelfEcho}, fromSelf=${bareJid(rawFrom) === selfJid})`,
+          );
+        }
+        return;
       }
+
+      if (bareJid(rawFrom) === selfJid) {
+        emit('xmpp.message.sent', 'messageSent', { message });
+        return;
+      }
+
+      emit('xmpp.message.received', 'messageReceived', { message });
     });
   };
 
@@ -896,6 +1236,7 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
         replyTo,
         stanzaId: null,
         originId: null,
+        embeds: withGithubFallbackEmbeds([], body),
       };
       const originId = message.id;
       message.originId = originId;

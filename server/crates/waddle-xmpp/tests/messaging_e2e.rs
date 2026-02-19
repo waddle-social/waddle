@@ -9,11 +9,10 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    encode_sasl_plain, extract_bound_jid, MockAppState, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
+    encode_sasl_plain, extract_bound_jid, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 /// Initialize tracing and crypto provider for tests.
@@ -365,6 +364,63 @@ async fn test_chat_message_direct() {
     println!("Bidirectional direct messaging verified");
 
     // Cleanup
+    alice.send("</stream:stream>").await.ok();
+    bob.send("</stream:stream>").await.ok();
+}
+
+/// Test that direct messages with GitHub payloads are echoed back to the sender.
+#[tokio::test]
+async fn test_chat_message_direct_github_payload_echoed_to_sender() {
+    init_test();
+
+    let server = TestServer::start().await;
+
+    let mut alice = RawXmppClient::connect(server.addr).await.unwrap();
+    let mut bob = RawXmppClient::connect(server.addr).await.unwrap();
+
+    let alice_jid = establish_session(&mut alice, &server, "alice", "github1").await;
+    let bob_jid = establish_session(&mut bob, &server, "bob", "github2").await;
+
+    alice.clear();
+    bob.clear();
+
+    alice
+        .send(&format!(
+            "<message to='{}' type='chat' id='dm-gh-1' xmlns='jabber:client'>\
+                <body>Repo payload attached</body>\
+                <repo xmlns='urn:waddle:github:0' owner='rust-lang' name='rust' \
+                      url='https://github.com/rust-lang/rust'/>\
+            </message>",
+            bob_jid
+        ))
+        .await
+        .expect("Send GitHub direct message");
+
+    let bob_msg = bob
+        .read_until("</message>", Duration::from_secs(3))
+        .await
+        .expect("Bob receives GitHub message");
+    assert!(
+        bob_msg.contains("urn:waddle:github:0"),
+        "Bob should receive GitHub payload, got: {}",
+        bob_msg
+    );
+
+    let alice_echo = alice
+        .read_until("</message>", Duration::from_secs(3))
+        .await
+        .expect("Alice receives GitHub echo");
+    assert!(
+        alice_echo.contains("urn:waddle:github:0"),
+        "Alice echo should contain GitHub payload, got: {}",
+        alice_echo
+    );
+    assert!(
+        alice_echo.contains(&alice_jid),
+        "Alice echo should target sender JID, got: {}",
+        alice_echo
+    );
+
     alice.send("</stream:stream>").await.ok();
     bob.send("</stream:stream>").await.ok();
 }

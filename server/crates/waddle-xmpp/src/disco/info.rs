@@ -107,6 +107,11 @@ impl Feature {
         Self::new("urn:xmpp:reply:0")
     }
 
+    /// Waddle GitHub embed feature namespace.
+    pub fn waddle_github() -> Self {
+        Self::new("urn:waddle:github:0")
+    }
+
     /// Stream Management feature
     pub fn stream_management() -> Self {
         Self::new("urn:xmpp:sm:3")
@@ -437,6 +442,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::roster_versioning(),
         Feature::mam(),
         Feature::replies(),
+        Feature::waddle_github(),
         Feature::stream_management(),
         Feature::roster(),
         Feature::carbons(),
@@ -492,6 +498,7 @@ pub fn muc_service_features() -> Vec<Feature> {
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::muc(),
+        Feature::waddle_github(),
         Feature::muc_self_ping_optimization(),
     ]
 }
@@ -503,6 +510,7 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::muc(),
         Feature::mam(),
         Feature::replies(),
+        Feature::waddle_github(),
         Feature::vcard(),
         Feature::occupant_id(),
         Feature::muc_semianonymous(),
@@ -611,6 +619,7 @@ mod tests {
         assert!(features.contains(&Feature::disco_items()));
         assert!(features.contains(&Feature::mam()));
         assert!(features.contains(&Feature::replies()));
+        assert!(features.contains(&Feature::waddle_github()));
         assert!(features.contains(&Feature::stream_management()));
     }
 
@@ -622,5 +631,13 @@ mod tests {
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
         assert!(features.contains(&Feature::replies()));
+        assert!(features.contains(&Feature::waddle_github()));
+    }
+
+    #[test]
+    fn test_muc_service_features() {
+        let features = muc_service_features();
+        assert!(features.contains(&Feature::muc()));
+        assert!(features.contains(&Feature::waddle_github()));
     }
 }

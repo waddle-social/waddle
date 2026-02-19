@@ -12,33 +12,56 @@ interface Embed {
 }
 
 const props = defineProps<{ embed: Embed }>();
-
-function isGitHubRepo(embed: Embed): boolean {
-  return (
-    embed.namespace === 'urn:waddle:github:0' &&
-    (embed.data.type === 'repo' || (!!embed.data.owner && !embed.data.number))
-  );
-}
-
-function isGitHubIssueOrPr(embed: Embed): boolean {
-  return (
-    embed.namespace === 'urn:waddle:github:0' &&
-    !!embed.data.number &&
-    !!embed.data.title
-  );
-}
+const NS_WADDLE_GITHUB = 'urn:waddle:github:0';
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function isGitHubRepo(embed: Embed): boolean {
+  const type = str(embed.data.type).toLowerCase();
+  const owner = str(embed.data.owner);
+  const name = str(embed.data.name);
+  const url = str(embed.data.url);
+  return (
+    embed.namespace === NS_WADDLE_GITHUB &&
+    (type === 'repo' || (!!owner && !!name && !!url))
+  );
+}
+
+function isGitHubIssueOrPr(embed: Embed): boolean {
+  const type = str(embed.data.type).toLowerCase();
+  const repo = str(embed.data.repo);
+  const number = str(embed.data.number);
+  const url = str(embed.data.url);
+  return (
+    embed.namespace === NS_WADDLE_GITHUB &&
+    !!repo &&
+    !!number &&
+    !!url &&
+    (type === 'issue' || type === 'pr' || type === '')
+  );
+}
+
 function num(value: unknown): number | null {
-  return typeof value === 'number' ? value : null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 function formatStars(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
+}
+
+function githubIssueKind(embed: Embed): string {
+  const type = str(embed.data.type).toLowerCase();
+  if (type === 'pr') return 'PR';
+  if (type === 'issue') return 'Issue';
+  return str(embed.data.url).includes('/pull/') ? 'PR' : 'Issue';
 }
 </script>
 
@@ -91,11 +114,11 @@ function formatStars(n: number): string {
         rel="noopener"
         class="text-sm font-semibold text-accent hover:underline"
       >
-        {{ str(props.embed.data.repo) }}#{{ str(props.embed.data.number) }}
+        {{ githubIssueKind(props.embed) }} · {{ str(props.embed.data.repo) }}#{{ str(props.embed.data.number) }}
       </a>
     </div>
-    <p v-if="str(props.embed.data.title)" class="mt-1 text-xs leading-snug text-foreground">
-      {{ str(props.embed.data.title) }}
+    <p class="mt-1 text-xs leading-snug text-foreground">
+      {{ str(props.embed.data.title) || `${githubIssueKind(props.embed)} #${str(props.embed.data.number)}` }}
     </p>
     <div class="mt-1 flex items-center gap-2 text-xs text-muted">
       <span v-if="str(props.embed.data.author)">by {{ str(props.embed.data.author) }}</span>

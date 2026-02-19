@@ -91,7 +91,7 @@ use crate::xep::xep0363::{
 use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
 use crate::{AppState, Session, XmppError};
-use waddle_xmpp_xep_github::MessageEnricher;
+use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
@@ -1985,6 +1985,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Send "sent" carbons to sender's other connected clients
         if should_carbon {
             self.send_sent_carbons(&msg_with_from).await;
+        }
+
+        // Echo enriched GitHub direct messages back to sender so clients can
+        // merge upgraded embed metadata for already-sent messages.
+        if message_has_github_embed(&msg_with_from) {
+            let mut echo = msg_with_from.clone();
+            echo.to = Some(sender_jid.clone().into());
+            if let Err(error) = self.stream.write_stanza(&Stanza::Message(echo)).await {
+                warn!(
+                    error = %error,
+                    sender = %sender_jid,
+                    "Failed to send GitHub direct-message echo to sender"
+                );
+            }
         }
 
         debug!(
