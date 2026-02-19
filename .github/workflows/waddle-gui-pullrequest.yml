@@ -7,7 +7,6 @@ on:
     paths:
     - .github/workflows/waddle-gui-pullrequest.yml
     - app/gui/bun.lock
-    - app/gui/dist/**
     - app/gui/env.cue
     - app/gui/index.html
     - app/gui/package.json
@@ -16,7 +15,6 @@ on:
     - app/gui/src/**
     - app/gui/tsconfig*.json
     - app/gui/vite.config.ts
-    - app/gui/wrangler.jsonc
     - cue.mod/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
