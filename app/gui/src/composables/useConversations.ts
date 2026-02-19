@@ -16,6 +16,7 @@ import {
   peerJidForDirectMessage,
 } from '../utils/conversationState';
 import { extractMessageFromEventPayload } from '../utils/eventPayload';
+import { isTauriRuntime } from '../utils/runtime';
 
 export interface ConversationSummary extends ConversationSummaryLike {}
 
@@ -25,10 +26,6 @@ function conversationTitle(item: RosterItem): string {
 
 function titleFromJid(jid: string): string {
   return jid.split('@')[0] || jid;
-}
-
-function isTauriRuntime(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
 export const useConversationsStore = defineStore('conversations', () => {
@@ -43,6 +40,22 @@ export const useConversationsStore = defineStore('conversations', () => {
 
   const unlistenFns: UnlistenFn[] = [];
   let listening = false;
+  let notificationPermissionRequest: Promise<NotificationPermission> | null = null;
+
+  async function requestBrowserNotificationPermission(): Promise<NotificationPermission> {
+    if (typeof Notification === 'undefined') return 'denied';
+    if (Notification.permission !== 'default') return Notification.permission;
+
+    if (!notificationPermissionRequest) {
+      notificationPermissionRequest = Notification.requestPermission()
+        .catch(() => 'default' as NotificationPermission)
+        .finally(() => {
+          notificationPermissionRequest = null;
+        });
+    }
+
+    return notificationPermissionRequest;
+  }
 
   function sortSummaries(items: ConversationSummary[]): ConversationSummary[] {
     return items.sort((left, right) => {
@@ -91,14 +104,7 @@ export const useConversationsStore = defineStore('conversations', () => {
     if (activeConversationJid.value === summary.jid) return;
     if (typeof window === 'undefined' || typeof Notification === 'undefined') return;
 
-    let permission = Notification.permission;
-    if (permission === 'default') {
-      try {
-        permission = await Notification.requestPermission();
-      } catch {
-        return;
-      }
-    }
+    const permission = await requestBrowserNotificationPermission();
     if (permission !== 'granted') return;
 
     const body = message.body.trim() || 'New message';

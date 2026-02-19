@@ -12,6 +12,7 @@ import { useRoomsStore } from '../stores/rooms';
 import { useAuthStore } from '../stores/auth';
 import { useVCardStore } from '../stores/vcard';
 import { extractMessageFromEventPayload } from '../utils/eventPayload';
+import { decodeRouteParam } from '../utils/routeParams';
 
 const route = useRoute();
 const router = useRouter();
@@ -23,15 +24,7 @@ const vcardStore = useVCardStore();
 const { connectionStatus } = storeToRefs(runtimeStore);
 const { joinedRooms } = storeToRefs(roomsStore);
 
-function decodeRouteJid(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-const jid = computed(() => decodeRouteJid(String(route.params.jid ?? '')));
+const jid = computed(() => decodeRouteParam(String(route.params.jid ?? '')));
 
 const isRoom = computed(() => joinedRooms.value.has(jid.value));
 
