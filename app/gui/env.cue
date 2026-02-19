@@ -129,6 +129,9 @@ tasks: {
 			marker='<!-- waddle-gui-preview -->'
 			worker_name="waddle-gui-pr-${pr_number}"
 			run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
+			if [ -n "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
+			  export GH_TOKEN="$GITHUB_TOKEN"
+			fi
 
 			upsert_comment() {
 			  local body="$1"
@@ -138,9 +141,9 @@ tasks: {
 			  local existing_id
 			  existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" --paginate | jq -r --arg marker "$marker" '.[] | select(.user.type=="Bot" and (.body | contains($marker))) | .id' | head -n1 || true)"
 			  if [ -n "$existing_id" ]; then
-			    gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$body" >/dev/null
+			    gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$body" >/dev/null || true
 			  else
-			    gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -f body="$body" >/dev/null
+			    gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -f body="$body" >/dev/null || true
 			  fi
 			}
 
