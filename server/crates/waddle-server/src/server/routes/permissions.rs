@@ -58,7 +58,7 @@ pub fn router(permission_state: Arc<PermissionState>) -> Router {
 /// Request body for permission check endpoint
 #[derive(Debug, Deserialize)]
 pub struct CheckRequest {
-    /// Subject in format "type:id" (e.g., "user:did:plc:alice")
+    /// Subject in format "type:id" (e.g., "user:user-alice")
     pub subject: String,
     /// Permission to check (e.g., "view", "delete", "send_message")
     pub permission: String,
@@ -88,7 +88,7 @@ impl From<PermCheckResponse> for CheckResponse {
 /// Query parameters for list endpoint
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-    /// Subject in format "type:id" (e.g., "user:did:plc:alice")
+    /// Subject in format "type:id" (e.g., "user:user-alice")
     pub subject: String,
     /// Object in format "type:id" (e.g., "waddle:penguin-club")
     pub object: String,
@@ -410,7 +410,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         r#"{
-                            "subject": "user:did:plc:alice",
+                            "subject": "user:user-alice",
                             "permission": "delete",
                             "object": "waddle:test"
                         }"#,
@@ -445,7 +445,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -459,7 +459,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert!(json["id"].is_string());
-        assert_eq!(json["tuple"], "waddle:test#owner@user:did:plc:alice");
+        assert_eq!(json["tuple"], "waddle:test#owner@user:user-alice");
 
         // Check the permission
         let response = app
@@ -471,7 +471,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         r#"{
-                            "subject": "user:did:plc:alice",
+                            "subject": "user:user-alice",
                             "permission": "owner",
                             "object": "waddle:test"
                         }"#,
@@ -506,7 +506,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -526,7 +526,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         r#"{
-                            "subject": "user:did:plc:alice",
+                            "subject": "user:user-alice",
                             "permission": "delete",
                             "object": "waddle:test"
                         }"#,
@@ -560,7 +560,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -578,7 +578,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "admin",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -592,7 +592,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/permissions/list?subject=user:did:plc:alice&object=waddle:test")
+                    .uri("/v1/permissions/list?subject=user:user-alice&object=waddle:test")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -626,7 +626,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -646,7 +646,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -666,7 +666,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         r#"{
-                            "subject": "user:did:plc:alice",
+                            "subject": "user:user-alice",
                             "permission": "owner",
                             "object": "waddle:test"
                         }"#,
@@ -726,7 +726,7 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         r#"{
-                            "subject": "user:did:plc:alice",
+                            "subject": "user:user-alice",
                             "permission": "view",
                             "object": "invalid"
                         }"#,
@@ -760,7 +760,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -780,7 +780,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),
@@ -811,7 +811,7 @@ mod tests {
                         r#"{
                             "object": "waddle:test",
                             "relation": "owner",
-                            "subject": "user:did:plc:alice"
+                            "subject": "user:user-alice"
                         }"#,
                     ))
                     .unwrap(),

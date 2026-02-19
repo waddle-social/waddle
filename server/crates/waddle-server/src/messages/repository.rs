@@ -46,14 +46,14 @@ impl MessageRepository {
             conn.execute(
                 r#"
                 INSERT INTO messages (
-                    id, channel_id, author_did, content, reply_to_id, thread_id,
+                    id, channel_id, author_user_id, content, reply_to_id, thread_id,
                     flags, edited_at, created_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 "#,
                 libsql::params![
                     id.clone(),
                     create.channel_id.clone(),
-                    create.author_did.clone(),
+                    create.author_user_id.clone(),
                     content.clone(),
                     create.reply_to_id.clone(),
                     create.thread_id.clone(),
@@ -71,14 +71,14 @@ impl MessageRepository {
             conn.execute(
                 r#"
                 INSERT INTO messages (
-                    id, channel_id, author_did, content, reply_to_id, thread_id,
+                    id, channel_id, author_user_id, content, reply_to_id, thread_id,
                     flags, edited_at, created_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 "#,
                 libsql::params![
                     id.clone(),
                     create.channel_id.clone(),
-                    create.author_did.clone(),
+                    create.author_user_id.clone(),
                     content.clone(),
                     create.reply_to_id.clone(),
                     create.thread_id.clone(),
@@ -96,7 +96,7 @@ impl MessageRepository {
         Ok(Message {
             id,
             channel_id: create.channel_id,
-            author_did: create.author_did,
+            author_user_id: create.author_user_id,
             content: Some(content),
             reply_to_id: create.reply_to_id,
             thread_id: create.thread_id,
@@ -111,7 +111,7 @@ impl MessageRepository {
     #[instrument(skip(self))]
     pub async fn get_by_id(&self, id: &str) -> Result<Option<Message>, MessageError> {
         let query = r#"
-            SELECT id, channel_id, author_did, content, reply_to_id, thread_id,
+            SELECT id, channel_id, author_user_id, content, reply_to_id, thread_id,
                    flags, edited_at, created_at, expires_at
             FROM messages
             WHERE id = ?
@@ -237,7 +237,7 @@ impl MessageRepository {
 
                 (
                     r#"
-                    SELECT id, channel_id, author_did, content, reply_to_id, thread_id,
+                    SELECT id, channel_id, author_user_id, content, reply_to_id, thread_id,
                            flags, edited_at, created_at, expires_at
                     FROM messages
                     WHERE channel_id = ? AND created_at < ?
@@ -253,7 +253,7 @@ impl MessageRepository {
             }
             None => (
                 r#"
-                SELECT id, channel_id, author_did, content, reply_to_id, thread_id,
+                SELECT id, channel_id, author_user_id, content, reply_to_id, thread_id,
                        flags, edited_at, created_at, expires_at
                 FROM messages
                 WHERE channel_id = ?
@@ -417,9 +417,9 @@ impl MessageRepository {
             .get(1)
             .map_err(|e| MessageError::DatabaseError(format!("Failed to get channel_id: {}", e)))?;
 
-        let author_did: String = row
-            .get(2)
-            .map_err(|e| MessageError::DatabaseError(format!("Failed to get author_did: {}", e)))?;
+        let author_user_id: String = row.get(2).map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to get author_user_id: {}", e))
+        })?;
 
         let content: Option<String> = row.get(3).ok();
 
@@ -458,7 +458,7 @@ impl MessageRepository {
         Ok(Message {
             id,
             channel_id,
-            author_did,
+            author_user_id,
             content,
             reply_to_id,
             thread_id,

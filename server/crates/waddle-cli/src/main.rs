@@ -47,11 +47,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Login to Waddle using your Bluesky account
+    /// Login to Waddle using a configured auth provider
     Login {
-        /// Your Bluesky handle (e.g., user.bsky.social)
-        #[arg(short = 'u', long)]
-        handle: String,
+        /// Provider ID (e.g., github, google)
+        #[arg(short = 'p', long)]
+        provider: String,
 
         /// Waddle server URL (default: http://localhost:3000)
         #[arg(short, long, default_value = "http://localhost:3000")]
@@ -514,8 +514,8 @@ async fn main() -> Result<()> {
 
     // Handle subcommands first (before TUI mode)
     match cli.command {
-        Some(Commands::Login { handle, server }) => {
-            return login::run_login(&handle, &server).await;
+        Some(Commands::Login { provider, server }) => {
+            return login::run_login(&provider, &server).await;
         }
         Some(Commands::Status) => {
             return run_status().await;
@@ -601,7 +601,7 @@ async fn main() -> Result<()> {
         config.xmpp.token = Some(creds.token.clone());
         config.xmpp.server = Some(creds.xmpp_host);
         config.xmpp.port = creds.xmpp_port;
-        info!("Loaded saved credentials for: {}", creds.handle);
+        info!("Loaded saved credentials for: {}", creds.username);
 
         // Fetch waddles and channels from the API
         info!("Fetching waddles and channels from server...");
@@ -897,8 +897,9 @@ fn workspace_root() -> PathBuf {
 async fn run_status() -> Result<()> {
     match login::load_credentials() {
         Ok(creds) => {
-            println!("Logged in as: @{}", creds.handle);
-            println!("DID: {}", creds.did);
+            println!("Logged in as: @{}", creds.username);
+            println!("User ID: {}", creds.user_id);
+            println!("Provider: {}", creds.provider_id);
             println!("JID: {}", creds.jid);
             println!("XMPP: {}:{}", creds.xmpp_host, creds.xmpp_port);
             println!("API: {}", creds.server_url);
@@ -906,7 +907,7 @@ async fn run_status() -> Result<()> {
         Err(_) => {
             println!("Not logged in.");
             println!();
-            println!("Run 'waddle login -u <handle>' to login with your Bluesky account.");
+            println!("Run 'waddle login -p <provider>' to login.");
         }
     }
     Ok(())
@@ -929,7 +930,7 @@ async fn run_logout() -> Result<()> {
 async fn run_create(name: &str, description: Option<&str>, is_public: bool) -> Result<()> {
     // Load credentials
     let creds = login::load_credentials()
-        .map_err(|_| anyhow::anyhow!("Not logged in. Run 'waddle login -u <handle>' first."))?;
+        .map_err(|_| anyhow::anyhow!("Not logged in. Run 'waddle login -p <provider>' first."))?;
 
     println!("Creating waddle \"{}\"...", name);
 

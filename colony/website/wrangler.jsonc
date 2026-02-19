@@ -18,32 +18,11 @@
 				"pattern": "colony.waddle.social",
 				"custom_domain": true
 			},
-            "vars": {
-                "COLONY_ALLOWED_REDIRECTS": "http://localhost:4322,http://127.0.0.1:4322"
-            },
 			"d1_databases": [
 				{
 					"binding": "DB",
 					"database_name": "colony",
 					"database_id": "ba0f22e3-6428-4715-a9d3-ae1ae8aab02d"
-				}
-			],
-			"secrets_store_secrets": [
-				{
-					"binding": "ATPROTO_PRIVATE_KEY",
-					"store_id": "421985d6f384493c938c0554fea33c77",
-					"secret_name": "ATPROTO_PRIVATE_KEY"
-				},
-				{
-					"binding": "BETTER_AUTH_SECRET",
-					"store_id": "421985d6f384493c938c0554fea33c77",
-					"secret_name": "BETTER_AUTH_SECRET"
-				}
-			],
-			"kv_namespaces": [
-				{
-					"binding": "USER_CACHE",
-					"id": "8e308e3ea45c4cbd9d8184189d25b694"
 				}
 			]
 		},

@@ -13,10 +13,12 @@ use crate::config::Config;
 /// Saved credentials from a successful login
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedCredentials {
-    /// User's DID
-    pub did: String,
-    /// User's handle (e.g., "user.bsky.social")
-    pub handle: String,
+    /// User's UUID principal
+    pub user_id: String,
+    /// User's immutable username
+    pub username: String,
+    /// Auth provider ID used during login
+    pub provider_id: String,
     /// Session ID / XMPP token
     pub token: String,
     /// JID for XMPP connection
@@ -31,7 +33,7 @@ pub struct SavedCredentials {
     pub saved_at: String,
 }
 
-/// Response from POST /v1/auth/device
+/// Response from POST /v2/auth/device/start
 #[derive(Debug, Deserialize)]
 struct DeviceAuthResponse {
     device_code: String,
@@ -44,7 +46,7 @@ struct DeviceAuthResponse {
     expires_in: u32,
 }
 
-/// Response from POST /v1/auth/device/poll when pending
+/// Response from POST /v2/auth/device/poll when pending
 #[derive(Debug, Deserialize)]
 struct DevicePollPendingResponse {
     status: String,
@@ -52,16 +54,15 @@ struct DevicePollPendingResponse {
     expires_in: u32,
 }
 
-/// Response from POST /v1/auth/device/poll when complete
+/// Response from POST /v2/auth/device/poll when complete
 #[derive(Debug, Deserialize)]
 struct DevicePollCompleteResponse {
     status: String,
     session_id: String,
-    did: String,
-    handle: String,
+    user_id: String,
+    username: String,
+    provider_id: String,
     jid: String,
-    #[allow(dead_code)]
-    xmpp_token: String,
     xmpp_host: String,
     xmpp_port: u16,
 }
@@ -74,9 +75,9 @@ struct ErrorResponse {
 }
 
 /// Run the device flow login process
-pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
+pub async fn run_login(provider: &str, server_url: &str) -> Result<()> {
     println!();
-    println!("  Logging in as @{}", handle);
+    println!("  Starting device login with provider '{}'", provider);
     println!();
 
     let client = reqwest::Client::new();
@@ -86,8 +87,8 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let device_auth: DeviceAuthResponse = client
-        .post(format!("{}/v1/auth/device", server_url))
-        .json(&serde_json::json!({ "handle": handle }))
+        .post(format!("{}/v2/auth/device/start", server_url))
+        .json(&serde_json::json!({ "provider": provider }))
         .send()
         .await
         .context("Failed to connect to server")?
@@ -144,7 +145,7 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
         tokio::time::sleep(poll_interval).await;
 
         let response = client
-            .post(format!("{}/v1/auth/device/poll", server_url))
+            .post(format!("{}/v2/auth/device/poll", server_url))
             .json(&serde_json::json!({ "device_code": device_auth.device_code }))
             .send()
             .await
@@ -173,8 +174,9 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
 
                     // Save credentials
                     let creds = SavedCredentials {
-                        did: complete.did.clone(),
-                        handle: complete.handle.clone(),
+                        user_id: complete.user_id.clone(),
+                        username: complete.username.clone(),
+                        provider_id: complete.provider_id.clone(),
                         token: complete.session_id.clone(),
                         jid: complete.jid.clone(),
                         xmpp_host: complete.xmpp_host.clone(),
@@ -185,7 +187,7 @@ pub async fn run_login(handle: &str, server_url: &str) -> Result<()> {
 
                     save_credentials(&creds)?;
 
-                    println!("  Success! Logged in as @{}", complete.handle);
+                    println!("  Success! Logged in as @{}", complete.username);
                     println!();
                     println!("  You can now run 'waddle' to start the TUI.");
                     println!();
@@ -314,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_format_url_long() {
-        let result = format_url("http://localhost:3000/v1/auth/device/verify");
+        let result = format_url("http://localhost:3000/v2/auth/device/verify");
         assert!(result.contains("..."));
         assert_eq!(result.len(), 30);
     }

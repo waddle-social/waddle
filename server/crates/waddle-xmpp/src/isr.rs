@@ -49,8 +49,8 @@ pub struct IsrToken {
     pub token: String,
     /// When the token expires
     pub expiry: DateTime<Utc>,
-    /// Associated session DID
-    pub did: String,
+    /// Associated session user identifier
+    pub user_id: String,
     /// Associated JID
     pub jid: jid::BareJid,
     /// Stream Management stream ID (for SM state restoration)
@@ -65,7 +65,7 @@ pub struct IsrToken {
 
 impl IsrToken {
     /// Create a new ISR token.
-    pub fn new(did: String, jid: jid::BareJid, validity_secs: u64) -> Self {
+    pub fn new(user_id: String, jid: jid::BareJid, validity_secs: u64) -> Self {
         let validity = validity_secs.min(MAX_TOKEN_VALIDITY_SECS);
         let token = generate_token();
         let expiry = Utc::now() + chrono::Duration::seconds(validity as i64);
@@ -73,7 +73,7 @@ impl IsrToken {
         Self {
             token,
             expiry,
-            did,
+            user_id,
             jid,
             sm_stream_id: None,
             sm_inbound_count: 0,
@@ -84,14 +84,14 @@ impl IsrToken {
 
     /// Create a token with SM state.
     pub fn with_sm_state(
-        did: String,
+        user_id: String,
         jid: jid::BareJid,
         validity_secs: u64,
         sm_stream_id: String,
         inbound_count: u32,
         outbound_count: u32,
     ) -> Self {
-        let mut token = Self::new(did, jid, validity_secs);
+        let mut token = Self::new(user_id, jid, validity_secs);
         token.sm_stream_id = Some(sm_stream_id);
         token.sm_inbound_count = inbound_count;
         token.sm_outbound_count = outbound_count;
@@ -186,8 +186,8 @@ impl IsrTokenStore {
     }
 
     /// Create and store a new token for a session.
-    pub fn create_token(&self, did: String, jid: jid::BareJid) -> IsrToken {
-        let token = IsrToken::new(did, jid, self.default_validity);
+    pub fn create_token(&self, user_id: String, jid: jid::BareJid) -> IsrToken {
+        let token = IsrToken::new(user_id, jid, self.default_validity);
         self.store_token(token.clone());
         token
     }
@@ -195,14 +195,14 @@ impl IsrTokenStore {
     /// Create and store a token with SM state.
     pub fn create_token_with_sm(
         &self,
-        did: String,
+        user_id: String,
         jid: jid::BareJid,
         sm_stream_id: String,
         inbound_count: u32,
         outbound_count: u32,
     ) -> IsrToken {
         let token = IsrToken::with_sm_state(
-            did,
+            user_id,
             jid,
             self.default_validity,
             sm_stream_id,
@@ -322,7 +322,7 @@ impl IsrTokenStore {
             Some(old) if !old.is_expired() => {
                 // Create new token with same session info
                 let new_token = IsrToken::with_sm_state(
-                    old.did,
+                    old.user_id,
                     old.jid,
                     self.default_validity,
                     old.sm_stream_id.unwrap_or_default(),
@@ -361,18 +361,18 @@ impl IsrTokenStore {
         }
     }
 
-    /// Remove all tokens for a specific DID (e.g., on logout).
-    pub fn revoke_tokens_for_did(&self, did: &str) {
+    /// Remove all tokens for a specific user identifier (e.g., on logout).
+    pub fn revoke_tokens_for_user_id(&self, user_id: &str) {
         let mut tokens = self.tokens.write().unwrap_or_else(|e| {
             warn!("ISR token store write lock was poisoned, recovering");
             e.into_inner()
         });
         let initial_count = tokens.len();
-        tokens.retain(|_, t| t.did != did);
+        tokens.retain(|_, t| t.user_id != user_id);
         let removed = initial_count - tokens.len();
 
         if removed > 0 {
-            debug!(did = %did, removed = removed, "Revoked ISR tokens for DID");
+            debug!(user_id = %user_id, removed = removed, "Revoked ISR tokens for user");
         }
     }
 
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn test_token_creation() {
         let token = IsrToken::new(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
             300,
         );
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn test_token_with_sm_state() {
         let token = IsrToken::with_sm_state(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
             300,
             "stream-123".to_string(),
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn test_token_xml() {
         let token = IsrToken::new(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
             300,
         );
@@ -606,14 +606,14 @@ mod tests {
         let store = IsrTokenStore::new();
 
         let token = store.create_token(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
         );
 
         // Should be able to validate
         let validated = store.validate_token(&token.token);
         assert!(validated.is_some());
-        assert_eq!(validated.unwrap().did, "did:plc:test123");
+        assert_eq!(validated.unwrap().user_id, "user-test123");
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
         let store = IsrTokenStore::new();
 
         let token = store.create_token(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
         );
 
@@ -643,7 +643,7 @@ mod tests {
         let store = IsrTokenStore::new();
 
         let old_token = store.create_token(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
         );
         let old_token_str = old_token.token.clone();
@@ -664,23 +664,23 @@ mod tests {
     }
 
     #[test]
-    fn test_token_store_revoke_for_did() {
+    fn test_token_store_revoke_for_user_id() {
         let store = IsrTokenStore::new();
 
-        // Create tokens for two different DIDs
+        // Create tokens for two different users
         let _token1 = store.create_token(
-            "did:plc:user1".to_string(),
+            "user-user1".to_string(),
             "user1@example.com".parse().unwrap(),
         );
         let token2 = store.create_token(
-            "did:plc:user2".to_string(),
+            "user-user2".to_string(),
             "user2@example.com".parse().unwrap(),
         );
 
         assert_eq!(store.token_count(), 2);
 
         // Revoke tokens for user1
-        store.revoke_tokens_for_did("did:plc:user1");
+        store.revoke_tokens_for_user_id("user-user1");
 
         assert_eq!(store.token_count(), 1);
 
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn test_sasl_success_with_isr() {
         let token = IsrToken::new(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
             300,
         );
@@ -722,7 +722,7 @@ mod tests {
         let store = IsrTokenStore::new();
 
         let token = store.create_token_with_sm(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
             "stream-123".to_string(),
             0,
@@ -820,7 +820,7 @@ mod tests {
         };
 
         let isr_token = IsrToken::new(
-            "did:plc:test123".to_string(),
+            "user-test123".to_string(),
             "user@example.com".parse().unwrap(),
             300,
         );

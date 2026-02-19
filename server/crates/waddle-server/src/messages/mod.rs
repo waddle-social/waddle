@@ -19,7 +19,7 @@
 //! let repo = MessageRepository::new(db);
 //! let msg = MessageCreate::new(
 //!     "channel-123".to_string(),
-//!     "did:plc:alice".to_string(),
+//!     "user-alice".to_string(),
 //!     "Hello, world!".to_string(),
 //! );
 //! let message = repo.create(msg).await?;
@@ -104,13 +104,13 @@ mod tests {
         // Create a message
         let create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             "Hello, world!".to_string(),
         );
 
         let message = repo.create(create).await.unwrap();
         assert_eq!(message.content, Some("Hello, world!".to_string()));
-        assert_eq!(message.author_did, "did:plc:alice");
+        assert_eq!(message.author_user_id, "user-alice");
         assert_eq!(message.channel_id, "channel-123");
 
         // Get the message by ID
@@ -141,7 +141,7 @@ mod tests {
         for i in 0..10 {
             let create = MessageCreate::new(
                 "channel-test".to_string(),
-                "did:plc:alice".to_string(),
+                "user-alice".to_string(),
                 format!("Message {}", i),
             );
             repo.create(create).await.unwrap();
@@ -178,7 +178,7 @@ mod tests {
         // Create a message
         let create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             "Original content".to_string(),
         );
         let message = repo.create(create).await.unwrap();
@@ -210,7 +210,7 @@ mod tests {
         // Create a message
         let create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             "To be deleted".to_string(),
         );
         let message = repo.create(create).await.unwrap();
@@ -240,7 +240,7 @@ mod tests {
         // Create a parent message
         let parent_create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:alice".to_string(),
+            "user-alice".to_string(),
             "Parent message".to_string(),
         );
         let parent = repo.create(parent_create).await.unwrap();
@@ -248,7 +248,7 @@ mod tests {
         // Create a reply
         let reply_create = MessageCreate::new(
             "channel-123".to_string(),
-            "did:plc:bob".to_string(),
+            "user-bob".to_string(),
             "Reply to parent".to_string(),
         )
         .with_reply_to(parent.id.clone());

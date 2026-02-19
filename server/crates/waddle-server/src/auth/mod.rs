@@ -1,68 +1,53 @@
-//! Authentication Module
+//! Authentication module.
 //!
-//! This module implements authentication for Waddle, supporting both:
-//! - ATProto OAuth authentication for Bluesky/ATProto users
-//! - Native XMPP authentication via XEP-0077 In-Band Registration
-//!
-//! # ATProto OAuth Flow
-//!
-//! 1. Client provides a Bluesky handle (e.g., `user.bsky.social`)
-//! 2. Server resolves the handle to a DID (Decentralized Identifier)
-//! 3. Server fetches the DID document to discover the user's PDS (Personal Data Server)
-//! 4. Server discovers the OAuth authorization server from the PDS
-//! 5. Server initiates OAuth flow with PKCE
-//! 6. User authenticates with their PDS
-//! 7. Server exchanges authorization code for tokens
-//! 8. Session is created and stored
-//!
-//! # Native XMPP Authentication
-//!
-//! Native users can register via XEP-0077 In-Band Registration and authenticate
-//! using SCRAM-SHA-256. This provides a fallback for users without ATProto accounts.
-//!
-//! # Architecture
-//!
-//! - `did`: DID resolution (handle -> DID, DID document retrieval)
-//! - `atproto`: OAuth flow implementation (authorization, token exchange)
-//! - `session`: Session management and storage
-//! - `jid`: DID to JID conversion for XMPP authentication
-//! - `native`: Native user storage with Argon2id hashing for XEP-0077
+//! This module implements provider-based authentication for Waddle using:
+//! - OIDC providers (discovery, ID token verification via JWKS)
+//! - OAuth2 providers (token + userinfo)
+//! - Local session management with UUID principals
+//! - Optional native XMPP auth (XEP-0077/SCRAM)
 
-pub mod atproto;
-pub mod did;
-pub mod dpop;
+pub mod identity;
 pub mod jid;
 pub mod native;
-pub mod profile;
+pub mod oauth2;
+pub mod oidc;
+pub mod providers;
 pub mod session;
 
 use thiserror::Error;
 
-pub use atproto::AtprotoOAuth;
-pub use jid::{did_to_jid, jid_to_did};
+pub use identity::IdentityClaims;
+pub use jid::{jid_to_localpart, localpart_to_jid, username_to_localpart};
 pub use native::{NativeUserStore, RegisterRequest};
+pub use providers::{AuthProviderConfig, AuthProviderKind, ProviderRegistry};
 pub use session::{Session, SessionManager};
 
-/// Authentication-related errors
+/// Authentication-related errors.
 #[derive(Error, Debug)]
 pub enum AuthError {
-    #[error("Invalid handle format: {0}")]
-    InvalidHandle(String),
+    #[error("Invalid provider: {0}")]
+    InvalidProvider(String),
 
-    #[error("DID resolution failed: {0}")]
-    DidResolutionFailed(String),
+    #[error("Invalid authentication request: {0}")]
+    InvalidRequest(String),
 
-    #[error("DID document fetch failed: {0}")]
-    DidDocumentFetchFailed(String),
+    #[error("Invalid state parameter")]
+    InvalidState,
 
-    #[error("OAuth server discovery failed: {0}")]
-    OAuthDiscoveryFailed(String),
+    #[error("Invalid nonce")]
+    InvalidNonce,
 
-    #[error("OAuth authorization failed: {0}")]
-    OAuthAuthorizationFailed(String),
+    #[error("Authorization failed: {0}")]
+    AuthorizationFailed(String),
 
     #[error("Token exchange failed: {0}")]
     TokenExchangeFailed(String),
+
+    #[error("User info fetch failed: {0}")]
+    UserInfoFailed(String),
+
+    #[error("JWT validation failed: {0}")]
+    JwtError(String),
 
     #[error("Session not found: {0}")]
     SessionNotFound(String),
@@ -70,22 +55,12 @@ pub enum AuthError {
     #[error("Session expired")]
     SessionExpired,
 
-    #[error("Invalid state parameter")]
-    InvalidState,
-
     #[error("Database error: {0}")]
     DatabaseError(String),
 
     #[error("HTTP request failed: {0}")]
     HttpError(String),
 
-    #[error("DNS resolution failed: {0}")]
-    DnsError(String),
-
-    #[error("Invalid DID: {0}")]
-    InvalidDid(String),
-
-    // Native user authentication errors (XEP-0077)
     #[error("User already exists: {0}")]
     UserAlreadyExists(String),
 
@@ -108,5 +83,11 @@ pub enum AuthError {
 impl From<reqwest::Error> for AuthError {
     fn from(err: reqwest::Error) -> Self {
         AuthError::HttpError(err.to_string())
+    }
+}
+
+impl From<jsonwebtoken::errors::Error> for AuthError {
+    fn from(err: jsonwebtoken::errors::Error) -> Self {
+        AuthError::JwtError(err.to_string())
     }
 }

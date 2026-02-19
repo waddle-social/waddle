@@ -281,7 +281,7 @@ pub async fn create_channel_handler(
     }
 
     // Check if user has permission to create channels in this waddle
-    let subject = Subject::user(&session.did);
+    let subject = Subject::user(&session.user_id);
     let waddle_object = Object::new(ObjectType::Waddle, &waddle_id);
 
     let can_create = state
@@ -398,7 +398,7 @@ pub async fn list_channels_handler(
     };
 
     // Check if user has permission to view this waddle
-    let subject = Subject::user(&session.did);
+    let subject = Subject::user(&session.user_id);
     let waddle_object = Object::new(ObjectType::Waddle, &waddle_id);
 
     let can_view = state
@@ -504,7 +504,7 @@ pub async fn get_channel_handler(
     };
 
     // Check if user has permission to view this channel (via waddle membership)
-    let subject = Subject::user(&session.did);
+    let subject = Subject::user(&session.user_id);
     let channel_object = Object::new(ObjectType::Channel, &channel_id);
 
     let can_view = state
@@ -552,7 +552,7 @@ pub async fn update_channel_handler(
     let waddle_id = &params.waddle_id;
 
     // Check if user has permission to manage this channel
-    let subject = Subject::user(&session.did);
+    let subject = Subject::user(&session.user_id);
     let channel_object = Object::new(ObjectType::Channel, &channel_id);
 
     let can_manage = state
@@ -692,7 +692,7 @@ pub async fn delete_channel_handler(
     }
 
     // Check if user has permission to delete this channel
-    let subject = Subject::user(&session.did);
+    let subject = Subject::user(&session.user_id);
     let channel_object = Object::new(ObjectType::Channel, &channel_id);
 
     let can_delete = state
@@ -1038,7 +1038,6 @@ mod tests {
     use crate::permissions::{Object, ObjectType, Relation, Subject, Tuple};
     use axum::body::Body;
     use axum::http::Request;
-    use chrono::{Duration, Utc};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -1062,21 +1061,9 @@ mod tests {
     }
 
     async fn create_test_session(state: &ChannelState) -> Session {
-        let session = Session {
-            id: format!("test-session-{}", Uuid::new_v4()),
-            did: format!(
-                "did:plc:test{}",
-                Uuid::new_v4().to_string().replace('-', "")[..16].to_string()
-            ),
-            handle: "test.bsky.social".to_string(),
-            access_token: "test-token".to_string(),
-            refresh_token: None,
-            token_endpoint: "https://bsky.social/oauth/token".to_string(),
-            pds_url: "https://bsky.social".to_string(),
-            expires_at: Some(Utc::now() + Duration::hours(1)),
-            created_at: Utc::now(),
-            last_used_at: Utc::now(),
-        };
+        let user_id = Uuid::new_v4().to_string();
+        let username = format!("test{}", &user_id[..8]);
+        let session = Session::new(&user_id, &username, &username);
 
         state
             .session_manager
@@ -1097,7 +1084,7 @@ mod tests {
         let owner_tuple = Tuple::new(
             Object::new(ObjectType::Waddle, &waddle_id),
             Relation::new("owner"),
-            Subject::user(&session.did),
+            Subject::user(&session.user_id),
         );
         state
             .permission_service
@@ -1109,7 +1096,7 @@ mod tests {
         let admin_tuple = Tuple::new(
             Object::new(ObjectType::Waddle, &waddle_id),
             Relation::new("admin"),
-            Subject::user(&session.did),
+            Subject::user(&session.user_id),
         );
         state
             .permission_service
@@ -1121,7 +1108,7 @@ mod tests {
         let member_tuple = Tuple::new(
             Object::new(ObjectType::Waddle, &waddle_id),
             Relation::new("member"),
-            Subject::user(&session.did),
+            Subject::user(&session.user_id),
         );
         state
             .permission_service
@@ -1517,7 +1504,7 @@ mod tests {
         let member_tuple = Tuple::new(
             Object::new(ObjectType::Waddle, &waddle_id),
             Relation::new("member"),
-            Subject::user(&other_session.did),
+            Subject::user(&other_session.user_id),
         );
         channel_state
             .permission_service

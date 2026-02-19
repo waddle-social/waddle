@@ -1,7 +1,7 @@
 //! Native user authentication storage for XEP-0077 In-Band Registration.
 //!
 //! This module provides storage and verification for native XMPP users who
-//! authenticate via SCRAM-SHA-256 rather than ATProto OAuth. Native users
+//! authenticate via SCRAM-SHA-256 rather than external OAuth/OIDC. Native users
 //! can be registered via XEP-0077 In-Band Registration.
 //!
 //! ## Security Model

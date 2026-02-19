@@ -411,7 +411,7 @@ async fn handle_sasl_plain(
         .await
     {
         Ok(session) => {
-            info!(jid = %username, did = %session.did, "SASL PLAIN authentication successful");
+            info!(jid = %username, user_id = %session.user_id, "SASL PLAIN authentication successful");
             *authenticated = true;
 
             // Create a bare JID string (full JID is set during resource binding)

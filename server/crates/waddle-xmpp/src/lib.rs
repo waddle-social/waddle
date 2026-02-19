@@ -125,8 +125,7 @@ pub trait AppState: Send + Sync + 'static {
     /// Used for SCRAM-SHA-256 authentication (RFC 5802/7677).
     /// Returns (StoredKey, ServerKey, salt_b64, iterations) if the user exists.
     ///
-    /// For ATProto-only deployments, this can return None to indicate
-    /// native JID authentication is not supported.
+    /// If native JID auth is disabled, this can return None.
     fn lookup_scram_credentials(
         &self,
         username: &str,
@@ -379,7 +378,7 @@ pub trait AppState: Send + Sync + 'static {
     /// Returns a list of (waddle_id, waddle_name) pairs.
     fn list_user_waddles(
         &self,
-        did: &str,
+        user_id: &str,
     ) -> impl std::future::Future<Output = Result<Vec<WaddleInfo>, XmppError>> + Send;
 
     /// List all channels in a waddle.
@@ -426,8 +425,8 @@ pub struct UploadSlotInfo {
 /// User session information.
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// ATProto DID
-    pub did: String,
+    /// Internal user ID
+    pub user_id: String,
     /// XMPP JID (bare)
     pub jid: jid::BareJid,
     /// Session creation time

@@ -400,13 +400,13 @@ mod tests {
         let tuple = Tuple::new(
             Object::new(ObjectType::Waddle, "test"),
             Relation::new("owner"),
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
         );
         store.write(tuple).await.unwrap();
 
         // Check: alice has owner permission on waddle:test
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "owner",
             Object::new(ObjectType::Waddle, "test"),
         );
@@ -415,7 +415,7 @@ mod tests {
 
         // Check: bob does NOT have owner permission
         let request = CheckRequest::new(
-            Subject::user("did:plc:bob"),
+            Subject::user("user-bob"),
             "owner",
             Object::new(ObjectType::Waddle, "test"),
         );
@@ -432,13 +432,13 @@ mod tests {
         let tuple = Tuple::new(
             Object::new(ObjectType::Waddle, "test"),
             Relation::new("admin"),
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
         );
         store.write(tuple).await.unwrap();
 
         // Check: alice has manage_settings permission (granted to owner OR admin)
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "manage_settings",
             Object::new(ObjectType::Waddle, "test"),
         );
@@ -458,7 +458,7 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Waddle, "test"),
                 Relation::new("admin"),
-                Subject::user("did:plc:alice"),
+                Subject::user("user-alice"),
             ))
             .await
             .unwrap();
@@ -474,7 +474,7 @@ mod tests {
 
         // Check: alice can delete channel:general (requires parent->admin)
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "delete",
             Object::new(ObjectType::Channel, "general"),
         );
@@ -497,7 +497,7 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Waddle, "test"),
                 Relation::new("member"),
-                Subject::user("did:plc:alice"),
+                Subject::user("user-alice"),
             ))
             .await
             .unwrap();
@@ -513,7 +513,7 @@ mod tests {
 
         // Check: alice can view channel:general (via parent->member)
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "view",
             Object::new(ObjectType::Channel, "general"),
         );
@@ -536,7 +536,7 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Waddle, "test"),
                 Relation::new("member"),
-                Subject::user("did:plc:alice"),
+                Subject::user("user-alice"),
             ))
             .await
             .unwrap();
@@ -552,7 +552,7 @@ mod tests {
 
         // Check: alice has viewer permission via userset
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "viewer",
             Object::new(ObjectType::Channel, "general"),
         );
@@ -573,14 +573,14 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Waddle, "test"),
                 Relation::new("owner"),
-                Subject::user("did:plc:alice"),
+                Subject::user("user-alice"),
             ))
             .await
             .unwrap();
 
         // First check
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "owner",
             Object::new(ObjectType::Waddle, "test"),
         );
@@ -603,14 +603,14 @@ mod tests {
             .write(Tuple::new(
                 Object::new(ObjectType::Waddle, "test"),
                 Relation::new("owner"),
-                Subject::user("did:plc:alice"),
+                Subject::user("user-alice"),
             ))
             .await
             .unwrap();
 
         // Check delete permission (computed from owner relation)
         let request = CheckRequest::new(
-            Subject::user("did:plc:alice"),
+            Subject::user("user-alice"),
             "delete",
             Object::new(ObjectType::Waddle, "test"),
         );

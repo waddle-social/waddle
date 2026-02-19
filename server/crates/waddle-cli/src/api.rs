@@ -14,7 +14,7 @@ pub struct WaddleResponse {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub owner_did: String,
+    pub owner_user_id: String,
     pub icon_url: Option<String>,
     pub is_public: bool,
     pub role: Option<String>,
