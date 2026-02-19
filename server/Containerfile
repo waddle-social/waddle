@@ -1,27 +1,59 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1-bookworm AS chef
+# ── Cross-compilation builder ───────────────────────────────────────
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
+# Install cross-compilation toolchains
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev ca-certificates \
+    gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Rust targets
+RUN rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+# Install cargo-chef for dependency caching
 RUN cargo install cargo-chef
+
 WORKDIR /workspace
 
-FROM chef AS planner
+# ── Plan dependencies ───────────────────────────────────────────────
+FROM builder AS planner
 COPY Cargo.toml ./
 COPY crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM chef AS builder
+# ── Cook dependencies (cached layer) ───────────────────────────────
+FROM builder AS deps
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Set cross-compilation env based on target platform
+ARG TARGETPLATFORM
+RUN <<EOF
+  case "$TARGETPLATFORM" in
+    linux/arm64) echo "CARGO_TARGET=aarch64-unknown-linux-gnu" >> /etc/environment \
+      && echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> /etc/environment \
+      && echo 'PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu' >> /etc/environment ;;
+    *) echo "CARGO_TARGET=x86_64-unknown-linux-gnu" >> /etc/environment ;;
+  esac
+EOF
 
 COPY --from=planner /workspace/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json --package waddle-server
+
+RUN . /etc/environment && \
+    cargo chef cook --release --target "$CARGO_TARGET" --recipe-path recipe.json --package waddle-server
 
 COPY Cargo.toml ./
 COPY crates ./crates
-RUN cargo build --release --package waddle-server --bin waddle-server
 
+RUN . /etc/environment && \
+    cargo build --release --target "$CARGO_TARGET" --package waddle-server --bin waddle-server && \
+    mkdir -p /out && \
+    cp "target/$CARGO_TARGET/release/waddle-server" /out/waddle-server
+
+# ── Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
@@ -31,7 +63,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /workspace/target/release/waddle-server /usr/local/bin/waddle-server
+COPY --from=deps /out/waddle-server /usr/local/bin/waddle-server
 COPY certs ./certs
 
 EXPOSE 3000 5222 5269
