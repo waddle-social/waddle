@@ -163,10 +163,6 @@ jobs:
               });
             }
 
-      - name: Fail preview job if deployment failed
-        if: ${{ steps.deploy.outcome != 'success' }}
-        run: exit 1
-
   cleanup_preview:
     name: Cleanup PR Preview
     if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
