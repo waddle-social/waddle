@@ -3,8 +3,8 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, extdisco_services_query, extdisco_services_set_query,
-    init_test_env, RawXmppClient, TestServer,
+    disco_info_query, establish_bound_session, extdisco_services_query,
+    extdisco_services_set_query, init_test_env, RawXmppClient, TestServer,
 };
 
 #[tokio::test]
