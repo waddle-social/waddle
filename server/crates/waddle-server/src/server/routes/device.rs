@@ -23,7 +23,7 @@ use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Device authorization request
 #[derive(Debug, Clone)]
@@ -776,6 +776,9 @@ pub async fn device_callback_handler(
                         auth.session_id = Some(session.id.clone());
                     }
 
+                    // Auto-populate vCard from Bluesky profile (FR-1, non-blocking)
+                    auto_populate_vcard(&auth_state, &pending.did, &pending.handle).await;
+
                     Html(success_page(&pending.handle)).into_response()
                 }
                 Err(err) => {
@@ -798,6 +801,100 @@ pub struct DeviceCallbackQuery {
     pub state: String,
     #[serde(rename = "iss")]
     pub _iss: Option<String>,
+}
+
+/// Auto-populate a user's vCard from their Bluesky profile (FR-1).
+///
+/// This is called after successful ATProto authentication. It fetches the
+/// user's Bluesky profile and writes it as a vCard, but only if the user
+/// hasn't manually edited their vCard (FR-1.3).
+///
+/// Failure is logged and never blocks authentication (FR-1.4).
+pub async fn auto_populate_vcard(auth_state: &AuthState, did: &str, handle: &str) {
+    use crate::auth::did_to_jid;
+    use crate::auth::profile::{build_vcard_from_profile, fetch_bluesky_profile};
+    use crate::vcard::VCardStore;
+
+    let domain = &auth_state.base_url;
+    // Extract domain from base URL for JID construction
+    let domain = domain
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(':')
+        .next()
+        .unwrap_or("localhost");
+
+    let jid_str = match did_to_jid(did, domain) {
+        Ok(jid) => jid,
+        Err(e) => {
+            warn!(did = %did, error = %e, "Failed to convert DID to JID for vCard auto-populate");
+            return;
+        }
+    };
+
+    let jid: jid::BareJid = match jid_str.parse() {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(jid = %jid_str, error = %e, "Failed to parse JID for vCard auto-populate");
+            return;
+        }
+    };
+
+    // Build HTTP client with short timeout for profile fetch
+    let http_client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .user_agent("Waddle/1.0")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "Failed to build HTTP client for profile fetch");
+            return;
+        }
+    };
+
+    let profile = match fetch_bluesky_profile(&http_client, did).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                did = %did,
+                handle = %handle,
+                error = %e,
+                "Failed to fetch Bluesky profile for vCard auto-populate"
+            );
+            return;
+        }
+    };
+
+    let vcard_xml = build_vcard_from_profile(&profile);
+
+    // Access database through app_state
+    let db = Arc::new(auth_state.app_state.db_pool.global().clone());
+    let vcard_store = VCardStore::new(db);
+
+    match vcard_store.set_if_auto(&jid, &vcard_xml).await {
+        Ok(true) => {
+            info!(
+                jid = %jid,
+                display_name = ?profile.display_name,
+                has_avatar = profile.avatar_url.is_some(),
+                "vCard auto-populated from Bluesky profile"
+            );
+        }
+        Ok(false) => {
+            debug!(
+                jid = %jid,
+                "Skipped vCard auto-populate — user has manual vCard"
+            );
+        }
+        Err(e) => {
+            warn!(
+                jid = %jid,
+                error = %e,
+                "Failed to store auto-populated vCard"
+            );
+        }
+    }
 }
 
 /// Generate success page HTML

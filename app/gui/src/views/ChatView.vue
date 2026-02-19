@@ -6,9 +6,11 @@ import { useRoute } from 'vue-router';
 import { useRouter } from 'vue-router';
 import { type ChatMessage, type UnlistenFn, useWaddle } from '../composables/useWaddle';
 import EmbedCard from '../components/EmbedCard.vue';
+import AvatarImage from '../components/AvatarImage.vue';
 import { useRuntimeStore, type MessageDeliveryStatus } from '../stores/runtime';
 import { useRoomsStore } from '../stores/rooms';
 import { useAuthStore } from '../stores/auth';
+import { useVCardStore } from '../stores/vcard';
 
 const route = useRoute();
 const router = useRouter();
@@ -16,6 +18,7 @@ const { getHistory, listen, sendMessage } = useWaddle();
 const runtimeStore = useRuntimeStore();
 const roomsStore = useRoomsStore();
 const authStore = useAuthStore();
+const vcardStore = useVCardStore();
 const { connectionStatus } = storeToRefs(runtimeStore);
 const { joinedRooms } = storeToRefs(roomsStore);
 
@@ -32,9 +35,11 @@ const jid = computed(() => decodeRouteJid(String(route.params.jid ?? '')));
 const isRoom = computed(() => joinedRooms.value.has(jid.value));
 
 const displayName = computed(() => {
-  const j = jid.value;
-  const local = j.split('@')[0];
-  return local || j;
+  return vcardStore.getDisplayName(jid.value);
+});
+
+const displayAvatar = computed(() => {
+  return vcardStore.getAvatarUrl(jid.value);
 });
 
 const messages = ref<ChatMessage[]>([]);
@@ -102,7 +107,13 @@ function senderName(message: ChatMessage): string {
     const resource = from.split('/')[1];
     if (resource) return resource;
   }
-  return from.split('@')[0] || from;
+  return vcardStore.getDisplayName(bareJid(from));
+}
+
+function senderAvatar(message: ChatMessage): string | null {
+  if (isOutbound(message)) return vcardStore.ownAvatarUrl;
+  const from = message.from || jid.value;
+  return vcardStore.getAvatarUrl(bareJid(from));
 }
 
 /**
@@ -331,12 +342,12 @@ watch(jid, () => {
       <p v-if="loading" class="py-8 text-center text-sm text-muted">Loading messages…</p>
 
       <div v-else-if="messages.length === 0" class="flex flex-col items-center justify-center py-16">
-        <div
-          class="mb-4 flex h-16 w-16 items-center justify-center rounded-full text-2xl font-bold text-white"
-          :style="{ backgroundColor: getAvatarColor(jid) }"
-        >
-          {{ isRoom ? '#' : getInitials(displayName) }}
-        </div>
+        <AvatarImage
+          :jid="jid"
+          :name="displayName"
+          :photo-url="displayAvatar"
+          :size="64"
+        />
         <h3 class="text-xl font-semibold text-foreground">{{ displayName }}</h3>
         <p class="mt-1 text-sm text-muted">
           <template v-if="isRoom">
@@ -365,13 +376,16 @@ watch(jid, () => {
             <!-- Full message with avatar -->
             <div v-if="showHeader(index)" class="flex gap-4">
               <div
-                class="mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white"
-                :class="senderBareJid(message) ? 'cursor-pointer ring-0 transition-all hover:ring-2 hover:ring-accent' : ''"
-                :style="{ backgroundColor: getAvatarColor(senderName(message)) }"
+                :class="senderBareJid(message) ? 'cursor-pointer ring-0 transition-all hover:ring-2 hover:ring-accent rounded-full' : ''"
                 :title="senderBareJid(message) ? `DM ${senderBareJid(message)}` : undefined"
                 @click="openDmWithSender(message)"
               >
-                {{ getInitials(senderName(message)) }}
+                <AvatarImage
+                  :jid="bareJid(message.from)"
+                  :name="senderName(message)"
+                  :photo-url="senderAvatar(message)"
+                  :size="40"
+                />
               </div>
               <div class="min-w-0 flex-1">
                 <div class="flex items-baseline gap-2">

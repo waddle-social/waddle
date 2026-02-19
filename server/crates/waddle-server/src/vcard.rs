@@ -84,22 +84,24 @@ impl VCardStore {
         }
     }
 
-    /// Store or update the vCard for a user.
+    /// Store or update the vCard for a user (marks source as 'manual').
     ///
     /// This uses an UPSERT to handle both new vCards and updates.
+    /// Always sets source = 'manual' since this is a user-initiated write.
     pub async fn set(&self, jid: &jid::BareJid, vcard_xml: &str) -> Result<(), VCardError> {
         let jid_str = jid.to_string();
-        debug!(jid = %jid_str, "Storing vCard");
+        debug!(jid = %jid_str, "Storing vCard (manual)");
 
         let conn = self.get_connection().await?;
 
         conn.as_ref()
             .execute(
                 r#"
-                INSERT INTO vcard_storage (jid, vcard_xml, created_at, updated_at)
-                VALUES (?, ?, datetime('now'), datetime('now'))
+                INSERT INTO vcard_storage (jid, vcard_xml, source, created_at, updated_at)
+                VALUES (?, ?, 'manual', datetime('now'), datetime('now'))
                 ON CONFLICT(jid) DO UPDATE SET
                     vcard_xml = excluded.vcard_xml,
+                    source = 'manual',
                     updated_at = datetime('now')
                 "#,
                 (jid_str.as_str(), vcard_xml),
@@ -107,8 +109,84 @@ impl VCardStore {
             .await
             .map_err(db_err)?;
 
-        debug!(jid = %jid_str, "vCard stored successfully");
+        debug!(jid = %jid_str, "vCard stored successfully (manual)");
         Ok(())
+    }
+
+    /// Store/update vCard only if source is 'atproto_auto' or no vCard exists.
+    ///
+    /// Used for ATProto auto-population to avoid overwriting manual user edits (FR-1.3).
+    /// Returns `Ok(true)` if the vCard was written, `Ok(false)` if skipped (manual edit exists).
+    pub async fn set_if_auto(
+        &self,
+        jid: &jid::BareJid,
+        vcard_xml: &str,
+    ) -> Result<bool, VCardError> {
+        let jid_str = jid.to_string();
+        debug!(jid = %jid_str, "Storing vCard (atproto_auto, guarded)");
+
+        let conn = self.get_connection().await?;
+
+        // Check current source — skip if user has manually edited
+        let mut rows = conn
+            .as_ref()
+            .query(
+                "SELECT source FROM vcard_storage WHERE jid = ?",
+                [jid_str.as_str()],
+            )
+            .await
+            .map_err(db_err)?;
+
+        if let Some(row) = rows.next().await.map_err(db_err)? {
+            let source: String = row.get(0).map_err(db_err)?;
+            if source == "manual" {
+                debug!(jid = %jid_str, "Skipping auto-populate — user has manual vCard");
+                return Ok(false);
+            }
+        }
+        // Drop rows before executing write
+        drop(rows);
+
+        conn.as_ref()
+            .execute(
+                r#"
+                INSERT INTO vcard_storage (jid, vcard_xml, source, created_at, updated_at)
+                VALUES (?, ?, 'atproto_auto', datetime('now'), datetime('now'))
+                ON CONFLICT(jid) DO UPDATE SET
+                    vcard_xml = excluded.vcard_xml,
+                    source = 'atproto_auto',
+                    updated_at = datetime('now')
+                "#,
+                (jid_str.as_str(), vcard_xml),
+            )
+            .await
+            .map_err(db_err)?;
+
+        debug!(jid = %jid_str, "vCard auto-populated from ATProto");
+        Ok(true)
+    }
+
+    /// Get the source of a vCard ('manual' or 'atproto_auto').
+    pub async fn get_source(&self, jid: &jid::BareJid) -> Result<Option<String>, VCardError> {
+        let jid_str = jid.to_string();
+        let conn = self.get_connection().await?;
+
+        let mut rows = conn
+            .as_ref()
+            .query(
+                "SELECT source FROM vcard_storage WHERE jid = ?",
+                [jid_str.as_str()],
+            )
+            .await
+            .map_err(db_err)?;
+
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => {
+                let source: String = row.get(0).map_err(db_err)?;
+                Ok(Some(source))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Delete the vCard for a user.
@@ -294,5 +372,113 @@ mod tests {
 
         assert_eq!(retrieved1, Some(vcard1.to_string()));
         assert_eq!(retrieved2, Some(vcard2.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_if_auto_new_vcard() {
+        let db = create_test_db().await;
+        let store = VCardStore::new(db);
+
+        let jid: jid::BareJid = "auto@example.com".parse().unwrap();
+        let vcard_xml = "<vCard xmlns='vcard-temp'><FN>Auto User</FN></vCard>";
+
+        let written = store
+            .set_if_auto(&jid, vcard_xml)
+            .await
+            .expect("Failed to set_if_auto");
+        assert!(written);
+
+        let retrieved = store.get(&jid).await.expect("Failed to get vCard");
+        assert_eq!(retrieved, Some(vcard_xml.to_string()));
+
+        let source = store.get_source(&jid).await.expect("Failed to get source");
+        assert_eq!(source, Some("atproto_auto".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_if_auto_existing_auto() {
+        let db = create_test_db().await;
+        let store = VCardStore::new(db);
+
+        let jid: jid::BareJid = "auto@example.com".parse().unwrap();
+        let vcard_v1 = "<vCard xmlns='vcard-temp'><FN>V1</FN></vCard>";
+        let vcard_v2 = "<vCard xmlns='vcard-temp'><FN>V2</FN></vCard>";
+
+        store.set_if_auto(&jid, vcard_v1).await.unwrap();
+        let written = store.set_if_auto(&jid, vcard_v2).await.unwrap();
+        assert!(written);
+
+        let retrieved = store.get(&jid).await.unwrap();
+        assert_eq!(retrieved, Some(vcard_v2.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_if_auto_existing_manual() {
+        let db = create_test_db().await;
+        let store = VCardStore::new(db);
+
+        let jid: jid::BareJid = "manual@example.com".parse().unwrap();
+        let manual_vcard = "<vCard xmlns='vcard-temp'><FN>Manual</FN></vCard>";
+        let auto_vcard = "<vCard xmlns='vcard-temp'><FN>Auto</FN></vCard>";
+
+        // User sets their vCard manually
+        store.set(&jid, manual_vcard).await.unwrap();
+
+        // ATProto auto-populate should NOT overwrite
+        let written = store.set_if_auto(&jid, auto_vcard).await.unwrap();
+        assert!(!written);
+
+        // Original manual vCard should be preserved
+        let retrieved = store.get(&jid).await.unwrap();
+        assert_eq!(retrieved, Some(manual_vcard.to_string()));
+        assert_eq!(
+            store.get_source(&jid).await.unwrap(),
+            Some("manual".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_marks_manual() {
+        let db = create_test_db().await;
+        let store = VCardStore::new(db);
+
+        let jid: jid::BareJid = "user@example.com".parse().unwrap();
+        let vcard = "<vCard xmlns='vcard-temp'><FN>User</FN></vCard>";
+
+        store.set(&jid, vcard).await.unwrap();
+        let source = store.get_source(&jid).await.unwrap();
+        assert_eq!(source, Some("manual".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_overrides_auto_source() {
+        let db = create_test_db().await;
+        let store = VCardStore::new(db);
+
+        let jid: jid::BareJid = "user@example.com".parse().unwrap();
+        let auto_vcard = "<vCard xmlns='vcard-temp'><FN>Auto</FN></vCard>";
+        let manual_vcard = "<vCard xmlns='vcard-temp'><FN>Manual</FN></vCard>";
+
+        // First auto-populate
+        store.set_if_auto(&jid, auto_vcard).await.unwrap();
+        assert_eq!(
+            store.get_source(&jid).await.unwrap(),
+            Some("atproto_auto".to_string())
+        );
+
+        // Then user manually sets — should override to manual
+        store.set(&jid, manual_vcard).await.unwrap();
+        assert_eq!(
+            store.get_source(&jid).await.unwrap(),
+            Some("manual".to_string())
+        );
+
+        // Future auto-populate should be blocked
+        let written = store.set_if_auto(&jid, auto_vcard).await.unwrap();
+        assert!(!written);
+        assert_eq!(
+            store.get(&jid).await.unwrap(),
+            Some(manual_vcard.to_string())
+        );
     }
 }

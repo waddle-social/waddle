@@ -274,6 +274,14 @@ CREATE TABLE IF NOT EXISTS private_xml_storage (
 );
 "#;
 
+    /// Migration to add source column to vcard_storage for profile auto-population tracking
+    pub const V0010_VCARD_SOURCE: &str = r#"
+-- Add source column to track whether vCard was auto-populated from ATProto or manually set.
+-- 'atproto_auto' = populated from Bluesky profile on login
+-- 'manual' = set by user via XEP-0054 IQ set
+ALTER TABLE vcard_storage ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+"#;
+
     /// Get all global migrations in order
     pub fn all() -> Vec<Migration> {
         vec![
@@ -322,6 +330,12 @@ CREATE TABLE IF NOT EXISTS private_xml_storage (
                 description: "Add private_xml_storage table for XEP-0049 Private XML Storage"
                     .to_string(),
                 sql: V0009_PRIVATE_XML_STORAGE,
+            },
+            Migration {
+                version: 10,
+                description: "Add source column to vcard_storage for profile auto-population"
+                    .to_string(),
+                sql: V0010_VCARD_SOURCE,
             },
         ]
     }
@@ -651,9 +665,9 @@ mod tests {
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
-        // Check version (9 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items + blocking list + private xml storage)
+        // Check version (10 migrations: initial schema + token endpoint + permission tuples + native users + vcard storage + upload slots + roster items + blocking list + private xml storage + vcard source)
         let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(9));
+        assert_eq!(version, Some(10));
     }
 
     #[tokio::test]

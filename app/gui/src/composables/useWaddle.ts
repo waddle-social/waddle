@@ -50,6 +50,23 @@ export interface RoomInfo {
   name: string;
 }
 
+export interface VCardData {
+  jid: string;
+  fullName: string | null;
+  photoUrl: string | null;      // EXTVAL URL or data: URI from BINVAL
+  description: string | null;
+  rawXml: string;               // preserved for round-trip editing
+  fetchedAt: number;            // timestamp for cache freshness
+}
+
+export interface VCardSetRequest {
+  fullName?: string;
+  photoBase64?: string;         // base64-encoded image for BINVAL
+  photoMimeType?: string;       // e.g., "image/jpeg"
+  photoUrl?: string;            // external URL for EXTVAL
+  description?: string;
+}
+
 export type PluginAction =
   | { action: 'install'; reference: string }
   | { action: 'uninstall'; pluginId: string }
@@ -94,6 +111,10 @@ export interface WaddleTransport {
 
   /* config */
   getConfig(): Promise<UiConfig>;
+
+  /* vCard (XEP-0054) */
+  getVCard(jid: string): Promise<VCardData | null>;
+  setVCard(vcard: VCardSetRequest): Promise<void>;
 
   /* event bus */
   listen<T>(channel: string, callback: EventCallback<T>): Promise<UnlistenFn>;
@@ -154,6 +175,8 @@ async function createTauriTransport(): Promise<WaddleTransport> {
       invoke<ChatMessage[]>('get_history', { jid, limit, before }),
     managePlugins: (action) => invoke<PluginInfo>('manage_plugins', { action }),
     getConfig: () => invoke<UiConfig>('get_config'),
+    getVCard: (jid) => invoke<VCardData | null>('get_vcard', { jid }),
+    setVCard: (vcard) => invoke<void>('set_vcard', { vcard }),
     listen: <T>(channel: string, callback: EventCallback<T>) =>
       listen<T>(toFrontendEventChannel(channel), (event) =>
         callback({ payload: event.payload }),
@@ -796,6 +819,93 @@ async function createBrowserXmppTransport(): Promise<WaddleTransport> {
       customThemePath: null,
     }),
 
+    /* ---------- vCard (XEP-0054) ---------- */
+    getVCard: async (jid: string): Promise<VCardData | null> => {
+      requireConnection('getVCard');
+      try {
+        const result = await sendIq(
+          { type: 'get', to: jid },
+          xml('vCard', { xmlns: 'vcard-temp' }),
+        );
+        const vCardEl = result.getChild?.('vCard', 'vcard-temp') ?? result;
+        if (!vCardEl || vCardEl.name !== 'vCard') return null;
+
+        // Parse FN
+        const fnEl = vCardEl.getChild?.('FN');
+        const fullName = fnEl ? (typeof fnEl.text === 'function' ? fnEl.text() : String(fnEl.text ?? '')) : null;
+
+        // Parse PHOTO (EXTVAL or BINVAL)
+        let photoUrl: string | null = null;
+        const photoEl = vCardEl.getChild?.('PHOTO');
+        if (photoEl) {
+          const extval = photoEl.getChild?.('EXTVAL');
+          if (extval) {
+            photoUrl = typeof extval.text === 'function' ? extval.text() : String(extval.text ?? '');
+          } else {
+            const binval = photoEl.getChild?.('BINVAL');
+            const typeEl = photoEl.getChild?.('TYPE');
+            if (binval) {
+              const data = typeof binval.text === 'function' ? binval.text() : String(binval.text ?? '');
+              const mimeType = typeEl ? (typeof typeEl.text === 'function' ? typeEl.text() : String(typeEl.text ?? '')) : 'image/png';
+              if (data) photoUrl = `data:${mimeType};base64,${data}`;
+            }
+          }
+        }
+
+        // Parse DESC
+        const descEl = vCardEl.getChild?.('DESC');
+        const description = descEl ? (typeof descEl.text === 'function' ? descEl.text() : String(descEl.text ?? '')) : null;
+
+        // Serialize raw XML
+        const rawXml = typeof result.toString === 'function' ? result.toString() : '';
+
+        return {
+          jid: bareJid(jid),
+          fullName: fullName && fullName.trim() ? fullName.trim() : null,
+          photoUrl: photoUrl && photoUrl.trim() ? photoUrl.trim() : null,
+          description: description && description.trim() ? description.trim() : null,
+          rawXml,
+          fetchedAt: Date.now(),
+        };
+      } catch (err) {
+        console.warn(`[waddle:vcard] Failed to fetch vCard for ${jid}:`, err);
+        return null;
+      }
+    },
+
+    setVCard: async (vcard: VCardSetRequest): Promise<void> => {
+      requireConnection('setVCard');
+      const children: any[] = [];
+
+      if (vcard.fullName) {
+        children.push(xml('FN', {}, vcard.fullName));
+      }
+
+      if (vcard.photoBase64 && vcard.photoMimeType) {
+        children.push(
+          xml('PHOTO', {},
+            xml('TYPE', {}, vcard.photoMimeType),
+            xml('BINVAL', {}, vcard.photoBase64),
+          ),
+        );
+      } else if (vcard.photoUrl) {
+        children.push(
+          xml('PHOTO', {},
+            xml('EXTVAL', {}, vcard.photoUrl),
+          ),
+        );
+      }
+
+      if (vcard.description) {
+        children.push(xml('DESC', {}, vcard.description));
+      }
+
+      await sendIq(
+        { type: 'set' },
+        xml('vCard', { xmlns: 'vcard-temp' }, ...children),
+      );
+    },
+
     /* ---------- event bus ---------- */
     listen: async <T>(channel: string, callback: EventCallback<T>) => {
       const callbacks = listeners.get(channel) ?? new Set<EventCallback<any>>();
@@ -853,6 +963,8 @@ function createDisconnectedTransport(): WaddleTransport {
       themeName: 'light',
       customThemePath: null,
     }),
+    getVCard: async () => null,
+    setVCard: async () => { throw notConnected('setVCard'); },
     listen: async () => () => {},
   };
 }
@@ -974,6 +1086,14 @@ export function useWaddle() {
     return (await transport).getConfig();
   }
 
+  async function getVCard(jid: string): Promise<VCardData | null> {
+    return (await transport).getVCard(jid);
+  }
+
+  async function setVCard(vcard: VCardSetRequest): Promise<void> {
+    return (await transport).setVCard(vcard);
+  }
+
   async function listen<T>(channel: string, callback: EventCallback<T>): Promise<UnlistenFn> {
     return (await transport).listen(channel, callback);
   }
@@ -997,6 +1117,8 @@ export function useWaddle() {
     getHistory,
     managePlugins,
     getConfig,
+    getVCard,
+    setVCard,
     listen,
   };
 }
