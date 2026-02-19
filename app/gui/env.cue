@@ -40,9 +40,9 @@ ci: pipelines: {
 
 tasks: {
 	lockfileCheck: {
-		command: "sh"
+		command: "bash"
 		args: [
-			"-c",
+			"-lc",
 			"""
 			set -euo pipefail
 			forbidden_lockfiles="$(find . -type f | grep -E '/(package-lock[.]json|yarn[.]lock|pnpm-lock[.]yaml)$' | grep -Ev '^./(node_modules|dist)/' || true)"
