@@ -1,8 +1,9 @@
-import { ref, readonly, computed, watch } from 'vue';
-import { useConversations, type ConversationSummary } from './useConversations';
+import { ref, readonly, watch } from 'vue';
+import { useConversations } from './useConversations';
 import { useWaddle, type ChatMessage, type UnlistenFn } from './useWaddle';
 import { useRoomsStore } from '../stores/rooms';
 import { storeToRefs } from 'pinia';
+import { extractMessageFromEventPayload } from '../utils/eventPayload';
 
 export interface FeedMessage extends ChatMessage {
   /** Used for deduplication */
@@ -119,9 +120,8 @@ export function useFeed() {
 
     // Listen for new messages
     try {
-      const unlisten = await listen<any>('xmpp.message.received', ({ payload }) => {
-        const envelope = payload?.payload ?? payload;
-        const msg = envelope?.data?.message;
+      const unlisten = await listen<unknown>('xmpp.message.received', ({ payload }) => {
+        const msg = extractMessageFromEventPayload<ChatMessage>(payload);
         if (msg) {
           const source = msg.messageType === 'groupchat'
             ? msg.from.split('/')[0]

@@ -18,7 +18,8 @@ const roomsStore = useRoomsStore();
 const vcardStore = useVCardStore();
 const { connectionStatus } = storeToRefs(runtimeStore);
 
-const { conversations } = useConversations();
+const conversationsStore = useConversations();
+const { conversations } = storeToRefs(conversationsStore);
 const { joinedRooms } = storeToRefs(roomsStore);
 
 const directJid = ref('');
@@ -206,9 +207,17 @@ onUnmounted(() => {
                 >
                   {{ vcardStore.getDisplayName(convo.jid) || convo.title }}
                 </span>
-                <span v-if="convo.updatedAt" class="flex-shrink-0 text-[10px] text-muted">
-                  {{ formatTime(convo.updatedAt) }}
-                </span>
+                <div class="ml-2 flex items-center gap-1">
+                  <span v-if="convo.updatedAt" class="flex-shrink-0 text-[10px] text-muted">
+                    {{ formatTime(convo.updatedAt) }}
+                  </span>
+                  <span
+                    v-if="convo.unreadCount > 0"
+                    class="inline-flex min-w-5 items-center justify-center rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-semibold text-white"
+                  >
+                    {{ convo.unreadCount > 99 ? '99+' : convo.unreadCount }}
+                  </span>
+                </div>
               </div>
               <p v-if="convo.preview" class="truncate text-xs text-muted">{{ convo.preview }}</p>
             </div>

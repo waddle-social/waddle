@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue';
+import { computed, watch } from 'vue';
 import { useRoute } from 'vue-router';
 
 import { useTheme } from './composables/useTheme';
@@ -13,9 +13,17 @@ useTheme();
 const route = useRoute();
 const runtimeStore = useRuntimeStore();
 const authStore = useAuthStore();
-const { startListening, stopListening } = useConversations();
+const { setActiveConversation, startListening, stopListening } = useConversations();
 
 const isLoginRoute = computed(() => route.name === 'login');
+
+function decodeRouteJid(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 // Only bootstrap runtime & conversations when authenticated
 watch(
@@ -27,7 +35,20 @@ watch(
     } else {
       runtimeStore.shutdown();
       stopListening();
+      setActiveConversation(null);
     }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [authStore.isAuthenticated, route.name, route.params.jid] as const,
+  ([authed, routeName, routeJid]) => {
+    if (!authed || routeName !== 'chat') {
+      setActiveConversation(null);
+      return;
+    }
+    setActiveConversation(decodeRouteJid(String(routeJid ?? '')));
   },
   { immediate: true },
 );

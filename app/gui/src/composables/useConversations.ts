@@ -7,43 +7,37 @@ import {
   useWaddle,
 } from './useWaddle';
 import { useAuthStore } from '../stores/auth';
+import { useSettingsStore } from '../stores/settings';
+import {
+  buildConversationUpdateFromMessage,
+  clearConversationUnreadCount,
+  type ConversationSummaryLike,
+  normalizeConversationJid,
+  peerJidForDirectMessage,
+} from '../utils/conversationState';
+import { extractMessageFromEventPayload } from '../utils/eventPayload';
 
-export interface ConversationSummary {
-  jid: string;
-  title: string;
-  preview: string;
-  updatedAt: string | null;
-}
+export interface ConversationSummary extends ConversationSummaryLike {}
 
 function conversationTitle(item: RosterItem): string {
   return item.name?.trim() || item.jid;
-}
-
-function bareJid(value: string): string {
-  return value.split('/')[0] || value;
 }
 
 function titleFromJid(jid: string): string {
   return jid.split('@')[0] || jid;
 }
 
-interface ConversationMessageEventEnvelope {
-  data?: {
-    message?: ChatMessage;
-  };
-}
-
-interface ConversationTransportEvent {
-  payload?: ConversationMessageEventEnvelope;
-  data?: {
-    message?: ChatMessage;
-  };
+function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
 export const useConversationsStore = defineStore('conversations', () => {
   const { getHistory, getRoster, listen } = useWaddle();
+  const authStore = useAuthStore();
+  const settingsStore = useSettingsStore();
 
   const conversations = ref<ConversationSummary[]>([]);
+  const activeConversationJid = ref<string | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
 
@@ -74,38 +68,56 @@ export const useConversationsStore = defineStore('conversations', () => {
         title: summary.title || existing.title,
         preview: summary.preview || existing.preview,
         updatedAt: summary.updatedAt ?? existing.updatedAt,
+        unreadCount: summary.unreadCount ?? existing.unreadCount ?? 0,
       };
     } else {
-      current.push(summary);
+      current.push({
+        ...summary,
+        unreadCount: summary.unreadCount ?? 0,
+      });
     }
 
     conversations.value = sortSummaries(current);
   }
 
-  function summaryFromMessage(message: ChatMessage): ConversationSummary | null {
-    if (message.messageType === 'groupchat') return null;
+  async function maybeNotifyIncomingDm(
+    message: ChatMessage,
+    summary: ConversationSummary,
+    isIncoming: boolean,
+  ): Promise<void> {
+    if (!isIncoming || isTauriRuntime()) return;
+    if (!settingsStore.notificationsEnabled) return;
+    if (activeConversationJid.value === summary.jid) return;
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') return;
 
-    const auth = useAuthStore();
-    const self = bareJid(auth.jid);
-    const from = bareJid(message.from);
-    const to = bareJid(message.to);
-    const peerJid = from === self ? to : from;
+    let permission = Notification.permission;
+    if (permission === 'default') {
+      try {
+        permission = await Notification.requestPermission();
+      } catch {
+        return;
+      }
+    }
+    if (permission !== 'granted') return;
 
-    if (!peerJid || peerJid === self) return null;
-
-    const existing = conversations.value.find((item) => item.jid === peerJid);
-    return {
-      jid: peerJid,
-      title: existing?.title || titleFromJid(peerJid),
-      preview: message.body?.trim() || existing?.preview || '',
-      updatedAt: message.timestamp ?? existing?.updatedAt ?? null,
-    };
+    const body = message.body.trim() || 'New message';
+    try {
+      new Notification(summary.title || titleFromJid(summary.jid), {
+        body,
+        tag: `dm:${summary.jid}`,
+      });
+    } catch {
+      // Notification API can fail in restricted environments.
+    }
   }
 
-  function extractMessageFromEvent(payload: unknown): ChatMessage | null {
-    const eventPayload = payload as ConversationTransportEvent;
-    const envelope = eventPayload.payload ?? eventPayload;
-    return envelope.data?.message ?? null;
+  function setActiveConversation(jid: string | null): void {
+    activeConversationJid.value = normalizeConversationJid(jid);
+    if (!activeConversationJid.value) return;
+
+    conversations.value = sortSummaries(
+      clearConversationUnreadCount(conversations.value, activeConversationJid.value),
+    );
   }
 
   async function summarizeConversation(item: RosterItem): Promise<ConversationSummary> {
@@ -122,6 +134,7 @@ export const useConversationsStore = defineStore('conversations', () => {
       title: conversationTitle(item),
       preview: latestMessage?.body?.trim() || '',
       updatedAt: latestMessage?.timestamp ?? null,
+      unreadCount: 0,
     };
   }
 
@@ -132,8 +145,17 @@ export const useConversationsStore = defineStore('conversations', () => {
     try {
       const roster = await getRoster();
       const summaries = await Promise.all(roster.map((item) => summarizeConversation(item)));
+      const existingByJid = new Map<string, ConversationSummary>(
+        conversations.value.map((item) => [item.jid, item]),
+      );
       const merged = new Map<string, ConversationSummary>();
-      for (const summary of summaries) merged.set(summary.jid, summary);
+      for (const summary of summaries) {
+        const existing = existingByJid.get(summary.jid);
+        merged.set(summary.jid, {
+          ...summary,
+          unreadCount: existing?.unreadCount ?? 0,
+        });
+      }
       for (const existing of conversations.value) {
         if (!merged.has(existing.jid)) {
           merged.set(existing.jid, existing);
@@ -178,14 +200,24 @@ export const useConversationsStore = defineStore('conversations', () => {
 
     for (const channel of ['xmpp.message.received', 'xmpp.message.sent']) {
       void listen<unknown>(channel, ({ payload }) => {
-        const message = extractMessageFromEvent(payload);
+        const message = extractMessageFromEventPayload<ChatMessage>(payload);
         if (!message) {
           void refreshConversations();
           return;
         }
-        const summary = summaryFromMessage(message);
-        if (!summary) return;
-        upsertConversation(summary);
+        const peerJid = peerJidForDirectMessage(message, authStore.jid);
+        if (!peerJid) return;
+        const existing = conversations.value.find((item) => item.jid === peerJid) ?? null;
+        const update = buildConversationUpdateFromMessage<ConversationSummary>(message, {
+          selfJid: authStore.jid,
+          activeConversationJid: activeConversationJid.value,
+          existing,
+          titleFromJid,
+        });
+        if (!update) return;
+
+        upsertConversation(update.summary);
+        void maybeNotifyIncomingDm(message, update.summary, update.isIncoming);
       })
         .then((unlisten) => {
           unlistenFns.push(unlisten);
@@ -206,8 +238,10 @@ export const useConversationsStore = defineStore('conversations', () => {
 
   return {
     conversations: readonly(conversations),
+    activeConversationJid: readonly(activeConversationJid),
     loading: readonly(loading),
     error: readonly(error),
+    setActiveConversation,
     refreshConversations,
     startListening,
     stopListening,
