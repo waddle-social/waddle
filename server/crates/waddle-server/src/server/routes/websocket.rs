@@ -322,7 +322,7 @@ async fn handle_xmpp_frame(
 
     // Handle IQ stanzas
     if frame.starts_with("<iq") {
-        return handle_iq(frame, domain, &muc_domain, state).await;
+        return handle_iq(frame, domain, &muc_domain, state.muc_registry.as_ref());
     }
 
     // Handle message stanzas
@@ -693,11 +693,11 @@ async fn handle_muc_leave(
 }
 
 /// Handle IQ stanzas
-async fn handle_iq(
+fn handle_iq(
     frame: &str,
     _domain: &str,
     muc_domain: &str,
-    state: &WebSocketState,
+    muc_registry: &MucRoomRegistry,
 ) -> Vec<String> {
     let parsed_iq = parse_iq_frame(frame);
     let id = parsed_iq
@@ -735,7 +735,7 @@ async fn handle_iq(
         if let Some(request_iq) = parsed_iq.as_ref() {
             if to.as_deref() == Some(muc_domain) {
                 let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-                let features = vec![Feature::muc()];
+                let features = vec![Feature::muc(), Feature::replies()];
                 let response = build_disco_info_response(request_iq, &identities, &features, None);
                 return vec![iq_to_xml(response)];
             }
@@ -744,13 +744,13 @@ async fn handle_iq(
             if let Some(target) = to.as_deref() {
                 let room_target = target.split('/').next().unwrap_or(target);
                 if let Ok(room_jid) = room_target.parse::<BareJid>() {
-                    if state.muc_registry.is_muc_jid(&room_jid) {
+                    if muc_registry.is_muc_jid(&room_jid) {
                         let room_name = room_jid
                             .node()
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string());
                         let identities = vec![Identity::muc_room(Some(&room_name))];
-                        let features = vec![Feature::muc()];
+                        let features = vec![Feature::muc(), Feature::replies()];
                         let response =
                             build_disco_info_response(request_iq, &identities, &features, None);
                         return vec![iq_to_xml(response)];
@@ -762,6 +762,7 @@ async fn handle_iq(
             let identities = vec![Identity::server(Some("Waddle"))];
             let features = vec![
                 Feature::ping(),
+                Feature::replies(),
                 Feature::disco_info(),
                 Feature::disco_items(),
             ];
@@ -777,7 +778,7 @@ async fn handle_iq(
         if let Some(request_iq) = parsed_iq.as_ref() {
             if to.as_deref() == Some(muc_domain) {
                 debug!("Disco items query on MUC service");
-                let mut rooms = state.muc_registry.list_rooms();
+                let mut rooms = muc_registry.list_rooms();
                 rooms.sort_by_key(|room| room.to_string());
 
                 let items: Vec<DiscoItem> = if rooms.is_empty() {
@@ -830,7 +831,7 @@ async fn handle_iq(
             )];
         };
 
-        if !state.muc_registry.is_muc_jid(&room_jid) {
+        if !muc_registry.is_muc_jid(&room_jid) {
             return vec![format!(
                 r#"<iq id="{}" type="error"><error type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
                 id
@@ -838,7 +839,7 @@ async fn handle_iq(
         }
 
         if frame.contains("<destroy") {
-            if state.muc_registry.destroy_room(&room_jid).is_some() {
+            if muc_registry.destroy_room(&room_jid).is_some() {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
                 return vec![format!(
                     r#"<iq id="{}" from="{}" type="result"/>"#,
@@ -1220,6 +1221,23 @@ mod tests {
         let (waddle, channel) = parse_room_jid_context(&jid);
         assert_eq!(waddle, "default");
         assert_eq!(channel, "default");
+    }
+
+    #[test]
+    fn handle_iq_disco_info_advertises_replies() {
+        let server_domain = "example.com";
+        let muc_domain = "muc.example.com";
+        let muc_registry = MucRoomRegistry::new(muc_domain.to_string());
+
+        let server_query = r#"<iq id="srv1" type="get" to="example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let server_responses = handle_iq(server_query, server_domain, muc_domain, &muc_registry);
+        let server_response = server_responses.first().expect("server disco response");
+        assert!(server_response.contains("urn:xmpp:reply:0"));
+
+        let muc_query = r#"<iq id="muc1" type="get" to="muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let muc_responses = handle_iq(muc_query, server_domain, muc_domain, &muc_registry);
+        let muc_response = muc_responses.first().expect("muc disco response");
+        assert!(muc_response.contains("urn:xmpp:reply:0"));
     }
 
     #[test]
