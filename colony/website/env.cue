@@ -2,7 +2,11 @@ package cuenv
 
 import "github.com/cuenv/cuenv/schema"
 
-schema.#Cuenv
+schema.#Project
+
+name: "waddle-colony-website"
+
+let _t = tasks
 
 env: {
 	environment: production: {
@@ -15,21 +19,23 @@ env: {
 	}
 }
 
-ci: pipelines: [
-	{
-		name: "default"
+ci: pipelines: {
+	default: {
+		environment: "production"
 		when: {
 			branch:        ["main"]
 			defaultBranch: true
 		}
-		tasks: ["install", "build", "deploy"]
-	},
-	{
-		name: "pull-request"
-		when: pullRequest: true
-		tasks: ["install", "build"]
-	},
-]
+		tasks: [_t.deploy]
+	}
+	pullRequest: {
+		environment: "production"
+		when: {
+			pullRequest: true
+		}
+		tasks: [_t.build]
+	}
+}
 
 tasks: {
 	install: {
@@ -39,16 +45,16 @@ tasks: {
 	build: {
 		command: "bun"
 		args: ["run", "build"]
-		dependsOn: ["install"]
+		dependsOn: [_t.install]
 	}
 	dev: {
 		command: "bun"
 		args: ["run", "dev"]
-		dependsOn: ["install"]
+		dependsOn: [_t.install]
 	}
 	deploy: {
-		command: "npx"
-		args: ["wrangler", "deploy"]
-		dependsOn: ["build"]
+		command: "bun"
+		args: ["x", "wrangler", "deploy"]
+		dependsOn: [_t.build]
 	}
 }
