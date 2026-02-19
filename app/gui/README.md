@@ -19,6 +19,18 @@ bun run build
   - Deploys production using `--env production`.
   - Production route is configured for `app.waddle.chat`.
 
+## Deployment Commands (cuenv)
+
+```bash
+# Preview
+PR_NUMBER=123 cuenv exec --path . --env production \
+  bun x wrangler deploy --config wrangler.jsonc --name waddle-gui-pr-$PR_NUMBER
+
+# Production
+cuenv exec --path . --env production \
+  bun x wrangler deploy --config wrangler.jsonc --env production
+```
+
 ## Domain Mapping
 
 - `app.waddle.chat`: GUI Cloudflare Worker
