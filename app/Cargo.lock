@@ -6959,6 +6959,7 @@ dependencies = [
  "waddle-roster",
  "waddle-storage",
  "waddle-xmpp",
+ "xmpp-parsers 0.22.0",
 ]
 
 [[package]]

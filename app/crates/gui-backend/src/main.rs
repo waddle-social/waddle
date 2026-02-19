@@ -1,13 +1,15 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use directories::{BaseDirs, ProjectDirs};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+use xmpp_parsers::{disco, iq::Iq, minidom::Element};
 
 use waddle_core::config::{self, Config};
 use waddle_core::event::{
@@ -27,8 +29,8 @@ use waddle_roster::RosterManager;
 use waddle_storage::{self, NativeDatabase, StorageError};
 use waddle_xmpp::{
     ChatStateProcessor, ConnectionConfig, ConnectionManager, ConnectionState, MamProcessor,
-    MessageProcessor, MucProcessor, OutboundRouter, PresenceProcessor, RosterProcessor,
-    StanzaPipeline, stanza_channel,
+    MessageProcessor, MucProcessor, OutboundRouter, PresenceProcessor, RosterProcessor, Stanza,
+    StanzaPipeline, parse_stanza, stanza_channel,
 };
 
 #[cfg(debug_assertions)]
@@ -39,6 +41,10 @@ const CONNECTION_TIMEOUT_SECONDS: u32 = 30;
 const CONNECTION_MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const WIRE_CHANNEL_CAPACITY: usize = 256;
 const SHUTDOWN_CLEANUP_TIMEOUT_SECONDS: u64 = 5;
+const MUC_OWNER_SUBMIT_QUERY_XML: &str = "<query xmlns='http://jabber.org/protocol/muc#owner'><x xmlns='jabber:x:data' type='submit'/></query>";
+const MUC_OWNER_DESTROY_QUERY_XML: &str =
+    "<query xmlns='http://jabber.org/protocol/muc#owner'><destroy/></query>";
+static NEXT_IQ_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, thiserror::Error)]
 enum GuiBackendError {
@@ -240,7 +246,25 @@ async fn connect(
         max_reconnect_attempts: CONNECTION_MAX_RECONNECT_ATTEMPTS,
     };
 
+    let current_bare_jid = {
+        let own_jid = state.own_jid.lock().await;
+        own_jid
+            .split('/')
+            .next()
+            .unwrap_or(own_jid.as_str())
+            .trim()
+            .to_string()
+    };
+
     let mut connection = state.connection_manager.lock().await;
+    if !current_bare_jid.is_empty()
+        && current_bare_jid != bare_jid
+        && !matches!(connection.state(), ConnectionState::Disconnected)
+    {
+        return Err(
+            "Switching connected JIDs at runtime is not supported. Disconnect first.".to_string(),
+        );
+    }
     let _ = connection.disconnect().await;
     *connection = ConnectionManager::with_event_bus(new_config, state.event_bus.clone());
     connection
@@ -392,9 +416,7 @@ async fn list_rooms(
     };
 
     let iq_id = next_iq_id();
-    let iq = format!(
-        "<iq type='get' id='{iq_id}' to='{service}'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
-    );
+    let iq = build_disco_items_query_stanza(&iq_id, &service)?;
 
     let response =
         send_iq_and_wait_for_result(state.inner(), &iq_id, iq, Duration::from_secs(8)).await?;
@@ -433,9 +455,7 @@ async fn create_room(
 
     // Accept instant-room defaults with an owner config submit (XEP-0045).
     let iq_id = next_iq_id();
-    let iq = format!(
-        "<iq type='set' id='{iq_id}' to='{room_jid}'><query xmlns='http://jabber.org/protocol/muc#owner'><x xmlns='jabber:x:data' type='submit'/></query></iq>"
-    );
+    let iq = build_muc_owner_submit_stanza(&iq_id, &room_jid)?;
 
     send_iq_and_wait_for_result(state.inner(), &iq_id, iq, Duration::from_secs(8))
         .await
@@ -445,9 +465,7 @@ async fn create_room(
 #[tauri::command]
 async fn delete_room(room_jid: String, state: State<'_, AppState>) -> Result<(), String> {
     let iq_id = next_iq_id();
-    let iq = format!(
-        "<iq type='set' id='{iq_id}' to='{room_jid}'><query xmlns='http://jabber.org/protocol/muc#owner'><destroy/></query></iq>"
-    );
+    let iq = build_muc_owner_destroy_stanza(&iq_id, &room_jid)?;
 
     send_iq_and_wait_for_result(state.inner(), &iq_id, iq, Duration::from_secs(8)).await?;
 
@@ -460,11 +478,8 @@ async fn delete_room(room_jid: String, state: State<'_, AppState>) -> Result<(),
 }
 
 fn next_iq_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("gui-iq-{nanos}")
+    let sequence = NEXT_IQ_ID.fetch_add(1, Ordering::Relaxed);
+    format!("gui-iq-{sequence}")
 }
 
 fn domain_from_jid(jid: &str) -> Option<String> {
@@ -503,68 +518,106 @@ fn parse_endpoint_server_override(endpoint: &str) -> Option<(String, Option<u16>
     Some((authority.trim_matches(['[', ']']).to_string(), None))
 }
 
-fn extract_attr(xml: &str, attr: &str) -> Option<String> {
-    let pattern_double = format!("{attr}=\"");
-    if let Some(start) = xml.find(&pattern_double) {
-        let rest = &xml[start + pattern_double.len()..];
-        if let Some(end) = rest.find('"') {
-            return Some(rest[..end].to_string());
-        }
-    }
-
-    let pattern_single = format!("{attr}='");
-    if let Some(start) = xml.find(&pattern_single) {
-        let rest = &xml[start + pattern_single.len()..];
-        if let Some(end) = rest.find('\'') {
-            return Some(rest[..end].to_string());
-        }
-    }
-
-    None
+fn serialize_iq_stanza(iq: Iq) -> Result<Vec<u8>, String> {
+    waddle_xmpp::serialize_stanza(&Stanza::Iq(Box::new(iq))).map_err(|error| error.to_string())
 }
 
-fn extract_disco_items(xml: &str) -> Vec<(String, Option<String>)> {
-    let mut items = Vec::new();
-    let mut cursor = 0usize;
-
-    while let Some(start_rel) = xml[cursor..].find("<item") {
-        let start = cursor + start_rel;
-        let rest = &xml[start..];
-        let Some(end_rel) = rest.find('>') else {
-            break;
-        };
-        let tag = &rest[..=end_rel];
-        if let Some(jid) = extract_attr(tag, "jid") {
-            let name = extract_attr(tag, "name");
-            items.push((jid, name));
-        }
-        cursor = start + end_rel + 1;
-    }
-
-    items
+fn parse_query_element(xml: &str) -> Result<Element, String> {
+    xml.parse::<Element>()
+        .map_err(|error| format!("Failed to parse IQ query payload XML: {error}"))
 }
 
-fn is_iq_result(xml: &str) -> bool {
-    xml.starts_with("<iq") && (xml.contains("type='result'") || xml.contains("type=\"result\""))
+fn parse_jid(jid: &str) -> Result<xmpp_parsers::jid::Jid, String> {
+    jid.parse()
+        .map_err(|_| format!("Invalid JID in IQ command: '{jid}'"))
 }
 
-fn is_iq_error(xml: &str) -> bool {
-    xml.starts_with("<iq") && (xml.contains("type='error'") || xml.contains("type=\"error\""))
+fn build_disco_items_query_stanza(iq_id: &str, to: &str) -> Result<Vec<u8>, String> {
+    let to_jid = parse_jid(to)?;
+    let query = disco::DiscoItemsQuery {
+        node: None,
+        rsm: None,
+    };
+    let iq = Iq::from_get(iq_id.to_string(), query).with_to(to_jid);
+    serialize_iq_stanza(iq)
 }
 
-fn is_conference_text_identity(xml: &str) -> bool {
-    let conference =
-        xml.contains("category='conference'") || xml.contains("category=\"conference\"");
-    let text = xml.contains("type='text'") || xml.contains("type=\"text\"");
-    conference && text
+fn build_disco_info_query_stanza(iq_id: &str, to: &str) -> Result<Vec<u8>, String> {
+    let to_jid = parse_jid(to)?;
+    let query = disco::DiscoInfoQuery { node: None };
+    let iq = Iq::from_get(iq_id.to_string(), query).with_to(to_jid);
+    serialize_iq_stanza(iq)
+}
+
+fn build_muc_owner_submit_stanza(iq_id: &str, room_jid: &str) -> Result<Vec<u8>, String> {
+    let to_jid = parse_jid(room_jid)?;
+    let payload = parse_query_element(MUC_OWNER_SUBMIT_QUERY_XML)?;
+    let iq = Iq::Set {
+        from: None,
+        to: Some(to_jid),
+        id: iq_id.to_string(),
+        payload,
+    };
+    serialize_iq_stanza(iq)
+}
+
+fn build_muc_owner_destroy_stanza(iq_id: &str, room_jid: &str) -> Result<Vec<u8>, String> {
+    let to_jid = parse_jid(room_jid)?;
+    let payload = parse_query_element(MUC_OWNER_DESTROY_QUERY_XML)?;
+    let iq = Iq::Set {
+        from: None,
+        to: Some(to_jid),
+        id: iq_id.to_string(),
+        payload,
+    };
+    serialize_iq_stanza(iq)
+}
+
+fn extract_disco_items(iq: &Iq) -> Vec<(String, Option<String>)> {
+    let payload = match iq {
+        Iq::Result {
+            payload: Some(payload),
+            ..
+        } => payload,
+        _ => return Vec::new(),
+    };
+
+    let Ok(result) = disco::DiscoItemsResult::try_from(payload.clone()) else {
+        return Vec::new();
+    };
+
+    result
+        .items
+        .into_iter()
+        .map(|item| (item.jid.to_string(), item.name))
+        .collect()
+}
+
+fn is_conference_text_identity(iq: &Iq) -> bool {
+    let payload = match iq {
+        Iq::Result {
+            payload: Some(payload),
+            ..
+        } => payload,
+        _ => return false,
+    };
+
+    let Ok(result) = disco::DiscoInfoResult::try_from(payload.clone()) else {
+        return false;
+    };
+
+    result
+        .identities
+        .iter()
+        .any(|identity| identity.category == "conference" && identity.type_ == "text")
 }
 
 async fn send_iq_and_wait_for_result(
     state: &AppState,
     iq_id: &str,
-    iq_stanza: String,
+    iq_stanza: Vec<u8>,
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<Iq, String> {
     let mut subscription = state
         .event_bus
         .subscribe("xmpp.raw.stanza.received")
@@ -573,7 +626,7 @@ async fn send_iq_and_wait_for_result(
     {
         let mut connection = state.connection_manager.lock().await;
         connection
-            .send_stanza(iq_stanza.as_bytes())
+            .send_stanza(&iq_stanza)
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -595,34 +648,38 @@ async fn send_iq_and_wait_for_result(
             continue;
         };
 
-        if extract_attr(&stanza, "id").as_deref() != Some(iq_id) {
+        let Ok(parsed) = parse_stanza(stanza.as_bytes()) else {
+            continue;
+        };
+        let Stanza::Iq(iq) = parsed else {
+            continue;
+        };
+        let iq = *iq;
+
+        if iq.id() != iq_id {
             continue;
         }
 
-        if is_iq_result(&stanza) {
-            return Ok(stanza);
+        if matches!(&iq, Iq::Result { .. }) {
+            return Ok(iq);
         }
 
-        if is_iq_error(&stanza) {
-            return Err(format!("Server returned IQ error: {stanza}"));
+        if matches!(&iq, Iq::Error { .. }) {
+            return Err(format!("Server returned IQ error for id={iq_id}: {stanza}"));
         }
     }
 }
 
 async fn discover_muc_service_via_disco(state: &AppState, domain: &str) -> Result<String, String> {
     let iq_id = next_iq_id();
-    let disco_items = format!(
-        "<iq type='get' id='{iq_id}' to='{domain}'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
-    );
+    let disco_items = build_disco_items_query_stanza(&iq_id, domain)?;
 
     let response =
         send_iq_and_wait_for_result(state, &iq_id, disco_items, Duration::from_secs(8)).await?;
 
     for (jid, _) in extract_disco_items(&response) {
         let info_id = next_iq_id();
-        let disco_info = format!(
-            "<iq type='get' id='{info_id}' to='{jid}'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>"
-        );
+        let disco_info = build_disco_info_query_stanza(&info_id, &jid)?;
 
         if let Ok(info_response) =
             send_iq_and_wait_for_result(state, &info_id, disco_info, Duration::from_secs(5)).await
@@ -1009,16 +1066,6 @@ fn spawn_inbound_pump(
                 }
             };
 
-            let raw_stanza = String::from_utf8_lossy(&frame).into_owned();
-            if let Err(error) = publish_event(
-                &event_bus,
-                "xmpp.raw.stanza.received",
-                EventSource::Xmpp,
-                EventPayload::RawStanzaReceived { stanza: raw_stanza },
-            ) {
-                warn!(%error, "failed to publish raw stanza event");
-            }
-
             let stream_management_handled = {
                 let mut manager = connection.lock().await;
                 match manager.handle_stream_management_frame(&frame).await {
@@ -1062,6 +1109,16 @@ fn spawn_inbound_pump(
                 let mut manager = connection.lock().await;
                 manager.mark_inbound_stanza_handled();
                 continue;
+            }
+
+            let raw_stanza = String::from_utf8_lossy(&frame).into_owned();
+            if let Err(error) = publish_event(
+                &event_bus,
+                "xmpp.raw.stanza.received",
+                EventSource::Xmpp,
+                EventPayload::RawStanzaReceived { stanza: raw_stanza },
+            ) {
+                warn!(%error, "failed to publish raw stanza event");
             }
 
             if let Err(error) = pipeline.process_inbound(&frame).await {

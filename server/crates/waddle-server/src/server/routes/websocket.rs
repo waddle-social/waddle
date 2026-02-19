@@ -13,11 +13,12 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use jid::{BareJid, FullJid};
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     connection::Stanza,
+    disco::{build_disco_info_response, build_disco_items_response, DiscoItem, Feature, Identity},
     muc::{MucRoomRegistry, Occupant, RoomConfig},
     registry::{ConnectionRegistry, OutboundStanza},
     Affiliation, Role,
@@ -196,12 +197,46 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
 /// without hand-rolled format strings.
 fn stanza_to_xml(stanza: &Stanza) -> String {
     let element = stanza.to_element();
+    element_to_xml(element)
+}
+
+fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String {
     let mut buf = Vec::new();
     // write_to cannot fail on a Vec<u8> in practice.
     element
         .write_to(&mut buf)
         .expect("serializing stanza to Vec<u8> should not fail");
     String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
+}
+
+fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
+    stanza_to_xml(&Stanza::Iq(iq))
+}
+
+fn parse_iq_frame(frame: &str) -> Option<xmpp_parsers::iq::Iq> {
+    let element = xmpp_parsers::minidom::Element::from_str(frame).ok()?;
+    xmpp_parsers::iq::Iq::try_from(element).ok()
+}
+
+fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
+    let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+        .attr("id", id)
+        .attr("type", "error")
+        .append(
+            xmpp_parsers::minidom::Element::builder("error", "jabber:client")
+                .attr("type", error_type)
+                .append(
+                    xmpp_parsers::minidom::Element::builder(
+                        condition,
+                        "urn:ietf:params:xml:ns:xmpp-stanzas",
+                    )
+                    .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    element_to_xml(iq)
 }
 
 /// Handle an XMPP frame per RFC 7395
@@ -644,12 +679,20 @@ async fn handle_muc_leave(
 /// Handle IQ stanzas
 async fn handle_iq(
     frame: &str,
-    domain: &str,
+    _domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
 ) -> Vec<String> {
-    let id = extract_attr(frame, "id").unwrap_or_default();
-    let to = extract_attr(frame, "to");
+    let parsed_iq = parse_iq_frame(frame);
+    let id = parsed_iq
+        .as_ref()
+        .map(|iq| iq.id.clone())
+        .or_else(|| extract_attr(frame, "id"))
+        .unwrap_or_default();
+    let to = parsed_iq
+        .as_ref()
+        .and_then(|iq| iq.to.as_ref().map(|jid| jid.to_string()))
+        .or_else(|| extract_attr(frame, "to"));
 
     // Ping
     if frame.contains("urn:xmpp:ping") {
@@ -673,66 +716,78 @@ async fn handle_iq(
 
     // Disco info on MUC service
     if frame.contains("http://jabber.org/protocol/disco#info") {
-        if to.as_deref() == Some(muc_domain) {
-            return vec![format!(
-                r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#info"><identity category="conference" type="text" name="Waddle Chatrooms"/><feature var="http://jabber.org/protocol/muc"/></query></iq>"#,
-                id, muc_domain
-            )];
-        }
-        // Disco info on a specific room
-        if let Some(target) = to.as_deref() {
-            let room_target = target.split('/').next().unwrap_or(target);
-            if let Ok(room_jid) = room_target.parse::<BareJid>() {
-                if state.muc_registry.is_muc_jid(&room_jid) {
-                    let room_name = room_jid
-                        .node()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "Room".to_string());
-                    return vec![format!(
-                        r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#info"><identity category="conference" type="text" name="{}"/><feature var="http://jabber.org/protocol/muc"/></query></iq>"#,
-                        id, room_jid, room_name
-                    )];
+        if let Some(request_iq) = parsed_iq.as_ref() {
+            if to.as_deref() == Some(muc_domain) {
+                let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
+                let features = vec![Feature::muc()];
+                let response = build_disco_info_response(request_iq, &identities, &features, None);
+                return vec![iq_to_xml(response)];
+            }
+
+            // Disco info on a specific room
+            if let Some(target) = to.as_deref() {
+                let room_target = target.split('/').next().unwrap_or(target);
+                if let Ok(room_jid) = room_target.parse::<BareJid>() {
+                    if state.muc_registry.is_muc_jid(&room_jid) {
+                        let room_name = room_jid
+                            .node()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "Room".to_string());
+                        let identities = vec![Identity::muc_room(Some(&room_name))];
+                        let features = vec![Feature::muc()];
+                        let response =
+                            build_disco_info_response(request_iq, &identities, &features, None);
+                        return vec![iq_to_xml(response)];
+                    }
                 }
             }
+
+            // Disco info on server
+            let identities = vec![Identity::server(Some("Waddle"))];
+            let features = vec![Feature::ping(), Feature::disco_info(), Feature::disco_items()];
+            let response = build_disco_info_response(request_iq, &identities, &features, None);
+            return vec![iq_to_xml(response)];
         }
-        // Disco info on server
-        return vec![format!(
-            r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#info"><identity category="server" type="im" name="Waddle"/><feature var="urn:xmpp:ping"/><feature var="http://jabber.org/protocol/disco#info"/><feature var="http://jabber.org/protocol/disco#items"/></query></iq>"#,
-            id, domain
-        )];
+
+        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
     }
 
     // Disco items - list services/rooms
     if frame.contains("http://jabber.org/protocol/disco#items") {
-        if to.as_deref() == Some(muc_domain) {
-            debug!("Disco items query on MUC service");
-            let mut rooms = state.muc_registry.list_rooms();
-            rooms.sort_by_key(|room| room.to_string());
-            let items_xml = if rooms.is_empty() {
-                format!(r#"<item jid="lobby@{}" name="Lobby"/>"#, muc_domain)
-            } else {
-                rooms
-                    .into_iter()
-                    .map(|room_jid| {
-                        let name = room_jid
-                            .node()
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| room_jid.to_string());
-                        format!(r#"<item jid="{}" name="{}"/>"#, room_jid, name)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            };
-            return vec![format!(
-                r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#items">{}</query></iq>"#,
-                id, muc_domain, items_xml
-            )];
+        if let Some(request_iq) = parsed_iq.as_ref() {
+            if to.as_deref() == Some(muc_domain) {
+                debug!("Disco items query on MUC service");
+                let mut rooms = state.muc_registry.list_rooms();
+                rooms.sort_by_key(|room| room.to_string());
+
+                let items: Vec<DiscoItem> = if rooms.is_empty() {
+                    let lobby_jid = format!("lobby@{muc_domain}");
+                    vec![DiscoItem::muc_room(&lobby_jid, "Lobby")]
+                } else {
+                    rooms
+                        .into_iter()
+                        .map(|room_jid| {
+                            let room_jid_string = room_jid.to_string();
+                            let name = room_jid
+                                .node()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| room_jid_string.clone());
+                            DiscoItem::muc_room(&room_jid_string, &name)
+                        })
+                        .collect()
+                };
+
+                let response = build_disco_items_response(request_iq, &items, None);
+                return vec![iq_to_xml(response)];
+            }
+
+            debug!("Disco items query on server");
+            let items = vec![DiscoItem::muc_service(muc_domain, Some("Chatrooms"))];
+            let response = build_disco_items_response(request_iq, &items, None);
+            return vec![iq_to_xml(response)];
         }
-        debug!("Disco items query on server");
-        return vec![format!(
-            r#"<iq id="{}" from="{}" type="result"><query xmlns="http://jabber.org/protocol/disco#items"><item jid="{}" name="Chatrooms"/></query></iq>"#,
-            id, domain, muc_domain
-        )];
+
+        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
     }
 
     // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
