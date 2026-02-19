@@ -45,7 +45,6 @@ tasks: {
 			"-lc",
 			"""
 			set -euo pipefail
-			trap 'rc=$?; echo "deployPreview error at line ${LINENO} (exit ${rc})"; exit "${rc}"' ERR
 			forbidden_lockfiles="$(find . -type f | grep -E '/(package-lock[.]json|yarn[.]lock|pnpm-lock[.]yaml)$' | grep -Ev '^./(node_modules|dist)/' || true)"
 			if [ -n "$forbidden_lockfiles" ]; then
 			  echo "Forbidden lockfiles found in app/gui:"
@@ -87,7 +86,7 @@ tasks: {
 	}
 	deployProduction: {
 		command: "bun"
-		args: ["x", "wrangler", "deploy", "--config", "wrangler.jsonc", "--env", "production"]
+		args: ["run", "wrangler", "deploy", "--config", "wrangler.jsonc", "--env", "production"]
 		dependsOn: [_t.build]
 		inputs: [
 			"wrangler.jsonc",
@@ -133,53 +132,20 @@ tasks: {
 			  exit 2
 			fi
 
-			marker='<!-- waddle-gui-preview -->'
 			worker_name="waddle-gui-pr-${pr_number}"
-			run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
-			if [ -n "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
-			  export GH_TOKEN="$GITHUB_TOKEN"
-			fi
-
-			upsert_comment() {
-			  local body="$1"
-			  if [ -z "${GITHUB_REPOSITORY:-}" ]; then
-			    return 0
-			  fi
-			  if [ -z "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
-			    echo "Skipping PR comment: no GitHub token available."
-			    return 0
-			  fi
-			  if ! command -v gh >/dev/null 2>&1; then
-			    echo "Skipping PR comment: gh CLI unavailable."
-			    return 0
-			  fi
-
-			  set +e
-			  local existing_id=""
-			  existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" --paginate 2>/dev/null | jq -r --arg marker "$marker" '.[] | select(.user.type=="Bot" and (.body | contains($marker))) | .id' 2>/dev/null | head -n1)"
-			  if [ -n "$existing_id" ]; then
-			    gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$body" >/dev/null 2>&1
-			  else
-			    gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -f body="$body" >/dev/null 2>&1
-			  fi
-			  set -e
-
-			  return 0
-			}
 
 			if [ "$event_action" = "closed" ]; then
 			  set +e
-			  bun x wrangler delete --config wrangler.jsonc --name "$worker_name" --force
+			  bun run wrangler delete --config wrangler.jsonc --name "$worker_name" --force
 			  set -e
 			  exit 0
 			fi
 
 			set +e
-			deploy_output="$(bun x wrangler deploy --config wrangler.jsonc --name "$worker_name" 2>&1)"
+			deploy_output="$(bun run wrangler deploy --config wrangler.jsonc --name "$worker_name" 2>&1)"
 			deploy_status=$?
 			set -e
 			printf '%s\n' "$deploy_output"
-			echo "Wrangler deploy exit status: $deploy_status"
 
 			if [ "$deploy_status" -eq 0 ]; then
 			  exit 0
@@ -195,7 +161,7 @@ tasks: {
 		command: "sh"
 		args: [
 			"-c",
-			"bun x wrangler delete --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required} --force",
+			"bun run wrangler delete --config wrangler.jsonc --name waddle-gui-pr-${PR_NUMBER:?PR_NUMBER is required} --force",
 		]
 	}
 }
