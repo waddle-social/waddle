@@ -6,10 +6,12 @@ FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 
-# Install cross-compilation toolchains
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install cross-compilation toolchains (including arm64 OpenSSL headers)
+RUN dpkg --add-architecture arm64 \
+    && apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates \
     gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+    libssl-dev:arm64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Rust targets
@@ -33,10 +35,19 @@ FROM builder AS deps
 ARG TARGETPLATFORM
 RUN <<EOF
   case "$TARGETPLATFORM" in
-    linux/arm64) echo "CARGO_TARGET=aarch64-unknown-linux-gnu" >> /etc/environment \
-      && echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> /etc/environment \
-      && echo 'PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu' >> /etc/environment ;;
-    *) echo "CARGO_TARGET=x86_64-unknown-linux-gnu" >> /etc/environment ;;
+    linux/arm64)
+      echo "CARGO_TARGET=aarch64-unknown-linux-gnu" >> /etc/environment
+      echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> /etc/environment
+      echo "PKG_CONFIG_ALLOW_CROSS=1" >> /etc/environment
+      echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> /etc/environment
+      echo "PKG_CONFIG_SYSROOT_DIR=/" >> /etc/environment
+      echo "OPENSSL_DIR=/usr" >> /etc/environment
+      echo "OPENSSL_INCLUDE_DIR=/usr/include" >> /etc/environment
+      echo "OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> /etc/environment
+      ;;
+    *)
+      echo "CARGO_TARGET=x86_64-unknown-linux-gnu" >> /etc/environment
+      ;;
   esac
 EOF
 
