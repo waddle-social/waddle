@@ -19,7 +19,9 @@ use thiserror::Error;
 pub use identity::IdentityClaims;
 pub use jid::{jid_to_localpart, localpart_to_jid, username_to_localpart};
 pub use native::{NativeUserStore, RegisterRequest};
-pub use providers::{AuthProviderConfig, AuthProviderKind, ProviderRegistry};
+pub use providers::{
+    AuthProviderConfig, AuthProviderKind, AuthProviderTokenEndpointAuthMethod, ProviderRegistry,
+};
 pub use session::{Session, SessionManager};
 
 /// Authentication-related errors.

@@ -366,7 +366,7 @@ impl IdentityService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::AuthProviderKind;
+    use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
     use serde_json::json;
 
     fn provider_with_username_claim(claim: Option<&str>) -> AuthProviderConfig {
@@ -376,6 +376,7 @@ mod tests {
             kind: AuthProviderKind::Oidc,
             client_id: "client".to_string(),
             client_secret: "secret".to_string(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
