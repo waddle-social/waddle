@@ -3,7 +3,7 @@
 //! API:
 //! - GET /api/auth/providers
 //! - GET /api/auth/start
-//! - GET /api/auth/callback/:provider
+//! - GET /api/auth/callback
 //! - GET /api/auth/session
 //! - POST /api/auth/logout
 
@@ -16,7 +16,7 @@ use crate::auth::{
 use crate::config::ServerConfig;
 use crate::server::AppState;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Redirect},
     routing::{get, post},
@@ -70,8 +70,8 @@ impl AuthState {
         }
     }
 
-    fn callback_url(&self, provider: &str) -> String {
-        format!("{}/api/auth/callback/{}", self.base_url, provider)
+    fn callback_url(&self) -> String {
+        format!("{}/api/auth/callback", self.base_url)
     }
 
     fn create_pkce_verifier() -> String {
@@ -98,7 +98,7 @@ impl AuthState {
         let nonce = Self::random_state();
         let code_verifier = Self::create_pkce_verifier();
         let code_challenge = Self::pkce_challenge(&code_verifier);
-        let redirect_uri = self.callback_url(&provider.id);
+        let redirect_uri = self.callback_url();
 
         let authorization_endpoint = match provider.kind {
             AuthProviderKind::Oidc => {
@@ -242,7 +242,7 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
         .route("/api/auth/providers", get(list_providers_handler))
         .route("/api/auth/start", get(start_handler))
-        .route("/api/auth/callback/:provider", get(callback_handler))
+        .route("/api/auth/callback", get(callback_handler))
         .route("/api/auth/session", get(session_handler))
         .route("/api/auth/logout", post(logout_handler))
         .with_state(auth_state)
@@ -406,7 +406,6 @@ pub async fn start_handler(
 #[instrument(skip(state))]
 pub async fn callback_handler(
     State(state): State<Arc<AuthState>>,
-    Path(provider_id): Path<String>,
     Query(query): Query<CallbackQuery>,
 ) -> impl IntoResponse {
     if let Some(err) = query.error {
@@ -422,13 +421,6 @@ pub async fn callback_handler(
             .into_response();
     };
 
-    let provider = match state.providers.get(&provider_id) {
-        Some(p) => p,
-        None => {
-            return auth_error_to_response(AuthError::InvalidProvider(provider_id)).into_response()
-        }
-    };
-
     let pending = match state.pending_auth.remove(&state_key) {
         Some((_, pending)) => pending,
         None => return auth_error_to_response(AuthError::InvalidState).into_response(),
@@ -438,12 +430,17 @@ pub async fn callback_handler(
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
 
-    if pending.provider_id != provider.id {
-        return auth_error_to_response(AuthError::InvalidState).into_response();
-    }
     if pending.state != state_key {
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
+
+    let provider = match state.providers.get(&pending.provider_id) {
+        Some(p) => p,
+        None => {
+            return auth_error_to_response(AuthError::InvalidProvider(pending.provider_id))
+                .into_response();
+        }
+    };
 
     let identity_claims = match provider.kind {
         AuthProviderKind::Oidc => {
