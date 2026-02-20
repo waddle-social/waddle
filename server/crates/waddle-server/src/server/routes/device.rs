@@ -1,4 +1,4 @@
-//! OAuth device flow routes (v2).
+//! OAuth device flow routes.
 
 use super::auth::{AuthState, DeviceAuthStatus, DeviceAuthorization, ErrorResponse, PendingFlow};
 use crate::auth::localpart_to_jid;
@@ -17,10 +17,10 @@ use tracing::{info, instrument, warn};
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
-        .route("/v2/auth/device/start", post(device_start_handler))
-        .route("/v2/auth/device/poll", post(device_poll_handler))
-        .route("/v2/auth/device/verify", get(device_verify_page_handler))
-        .route("/v2/auth/device/verify", post(device_verify_submit_handler))
+        .route("/api/auth/device/start", post(device_start_handler))
+        .route("/api/auth/device/poll", post(device_poll_handler))
+        .route("/api/auth/device/verify", get(device_verify_page_handler))
+        .route("/api/auth/device/verify", post(device_verify_submit_handler))
         .with_state(auth_state)
 }
 
@@ -131,7 +131,7 @@ pub async fn device_start_handler(
 
     state.device_auth.insert(device_code.clone(), auth);
 
-    let verification_uri = format!("{}/v2/auth/device/verify", state.base_url);
+    let verification_uri = format!("{}/api/auth/device/verify", state.base_url);
 
     (
         StatusCode::OK,
@@ -273,7 +273,7 @@ button {{ margin-top:12px; background:#2563eb; border-color:#1d4ed8; cursor:poin
   <div class=\"card\">
     <h1>Authorize Device</h1>
     <p>Enter the code shown in your terminal.</p>
-    <form id=\"f\" method=\"post\" action=\"/v2/auth/device/verify\">
+    <form id=\"f\" method=\"post\" action=\"/api/auth/device/verify\">
       <input name=\"user_code\" value=\"{code}\" placeholder=\"ABCD-1234\" required />
       <button type=\"submit\">Continue</button>
     </form>

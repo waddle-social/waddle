@@ -1,4 +1,4 @@
-//! XMPP OAuth routes (XEP-0493) backed by v2 auth broker.
+//! XMPP OAuth routes (XEP-0493) backed by the auth broker.
 
 use super::auth::{AuthState, ErrorResponse, PendingFlow};
 use axum::{
@@ -20,8 +20,8 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
             "/.well-known/oauth-authorization-server",
             get(oauth_discovery_handler),
         )
-        .route("/v2/auth/xmpp/authorize", get(xmpp_authorize_handler))
-        .route("/v2/auth/xmpp/token", post(xmpp_token_handler))
+        .route("/api/auth/xmpp/authorize", get(xmpp_authorize_handler))
+        .route("/api/auth/xmpp/token", post(xmpp_token_handler))
         .with_state(auth_state)
 }
 
@@ -41,8 +41,8 @@ struct OAuthServerMetadata {
 pub async fn oauth_discovery_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     let metadata = OAuthServerMetadata {
         issuer: state.base_url.clone(),
-        authorization_endpoint: format!("{}/v2/auth/xmpp/authorize", state.base_url),
-        token_endpoint: format!("{}/v2/auth/xmpp/token", state.base_url),
+        authorization_endpoint: format!("{}/api/auth/xmpp/authorize", state.base_url),
+        token_endpoint: format!("{}/api/auth/xmpp/token", state.base_url),
         response_types_supported: vec!["code".to_string()],
         grant_types_supported: vec!["authorization_code".to_string()],
         code_challenge_methods_supported: vec!["S256".to_string()],

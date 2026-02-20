@@ -1,11 +1,11 @@
 //! Provider-based authentication routes.
 //!
-//! v2 API:
-//! - GET /v2/auth/providers
-//! - GET /v2/auth/start
-//! - GET /v2/auth/callback/:provider
-//! - GET /v2/auth/session
-//! - POST /v2/auth/logout
+//! API:
+//! - GET /api/auth/providers
+//! - GET /api/auth/start
+//! - GET /api/auth/callback/:provider
+//! - GET /api/auth/session
+//! - POST /api/auth/logout
 
 use crate::auth::identity::IdentityService;
 use crate::auth::oauth2;
@@ -71,7 +71,7 @@ impl AuthState {
     }
 
     fn callback_url(&self, provider: &str) -> String {
-        format!("{}/v2/auth/callback/{}", self.base_url, provider)
+        format!("{}/api/auth/callback/{}", self.base_url, provider)
     }
 
     fn create_pkce_verifier() -> String {
@@ -240,11 +240,11 @@ impl XmppAuthCode {
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
-        .route("/v2/auth/providers", get(list_providers_handler))
-        .route("/v2/auth/start", get(start_handler))
-        .route("/v2/auth/callback/:provider", get(callback_handler))
-        .route("/v2/auth/session", get(session_handler))
-        .route("/v2/auth/logout", post(logout_handler))
+        .route("/api/auth/providers", get(list_providers_handler))
+        .route("/api/auth/start", get(start_handler))
+        .route("/api/auth/callback/:provider", get(callback_handler))
+        .route("/api/auth/session", get(session_handler))
+        .route("/api/auth/logout", post(logout_handler))
         .with_state(auth_state)
 }
 

@@ -23,6 +23,6 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
 async fn disabled_handler(State(_state): State<Arc<AuthState>>) -> impl IntoResponse {
     (
         StatusCode::GONE,
-        Html("<html><body><h1>410 Gone</h1><p>Legacy auth pages are disabled. Use /v2/auth/providers and /v2/auth/start.</p></body></html>".to_string()),
+        Html("<html><body><h1>410 Gone</h1><p>Legacy auth pages are disabled. Use /api/auth/providers and /api/auth/start.</p></body></html>".to_string()),
     )
 }

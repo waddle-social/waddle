@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 
 const message = {
 	error: "gone",
-	message: "Legacy auth route removed. Use server /v2/auth endpoints.",
+	message: "Legacy auth route removed. Use server /api/auth endpoints.",
 };
 
 export const ALL: APIRoute = async () =>

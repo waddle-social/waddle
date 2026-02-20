@@ -71,7 +71,7 @@ helm upgrade --install waddle ./charts/waddle-server \
 The chart supports an app secret containing:
 
 - `WADDLE_SESSION_KEY` (required by server features relying on encrypted session data)
-- `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/v2/auth/*` broker flows)
+- `WADDLE_AUTH_PROVIDERS_JSON` (optional; required to enable `/api/auth/*` broker flows)
 - `GITHUB_TOKEN` (optional, for GitHub link enrichment)
 
 Provider JSON may also be set in `config.authProvidersJson`, but `secret.authProvidersJson`
