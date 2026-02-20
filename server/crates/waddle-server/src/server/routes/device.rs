@@ -20,7 +20,10 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
         .route("/api/auth/device/start", post(device_start_handler))
         .route("/api/auth/device/poll", post(device_poll_handler))
         .route("/api/auth/device/verify", get(device_verify_page_handler))
-        .route("/api/auth/device/verify", post(device_verify_submit_handler))
+        .route(
+            "/api/auth/device/verify",
+            post(device_verify_submit_handler),
+        )
         .with_state(auth_state)
 }
 
