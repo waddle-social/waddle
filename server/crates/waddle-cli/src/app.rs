@@ -3,7 +3,7 @@
 
 //! Application state and business logic for the Waddle TUI.
 
-use xmpp::BareJid;
+use xmpp::jid::BareJid;
 
 /// Connection state for the XMPP client
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

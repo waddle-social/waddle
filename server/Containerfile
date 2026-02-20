@@ -3,9 +3,9 @@
 # ── Cross-compilation builder ───────────────────────────────────────
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
-# Install cross-compilation toolchains + OpenSSL build deps (for vendored build)
+# Install cross-compilation toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config ca-certificates perl make \
+    pkg-config ca-certificates \
     gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 

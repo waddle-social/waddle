@@ -19,7 +19,8 @@ tui-textarea = { workspace = true }
 
 # XMPP Client
 xmpp = { workspace = true }
-native-tls = { workspace = true }
+tokio-xmpp = { workspace = true }
+
 
 # Serialization
 serde = { workspace = true }

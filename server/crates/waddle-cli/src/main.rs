@@ -30,7 +30,7 @@ mod ui;
 mod xmpp;
 
 use crate::xmpp::{XmppClient, XmppClientEvent};
-use ::xmpp::BareJid;
+use ::xmpp::jid::BareJid;
 use app::{App, ConnectionState, Focus};
 use config::Config;
 use event::{key_to_action, Event, EventHandler, KeyAction};

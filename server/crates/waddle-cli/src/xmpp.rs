@@ -13,8 +13,9 @@ use anyhow::{Context, Result};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+use xmpp::jid::{BareJid, Jid};
 use xmpp::parsers::message::MessageType;
-use xmpp::{Agent, BareJid, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent, Jid};
+use xmpp::{Agent, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent};
 
 use crate::config::XmppConfig;
 
@@ -48,7 +49,7 @@ pub enum XmppClientEvent {
 
 /// XMPP client wrapper for the Waddle TUI
 pub struct XmppClient {
-    agent: Agent,
+    agent: Agent<tokio_xmpp::starttls::ServerConfig>,
     jid: BareJid,
     nickname: String,
     muc_domain: String,
@@ -159,8 +160,8 @@ impl XmppClient {
                 info!("XMPP client connected");
                 let _ = self.event_tx.send(XmppClientEvent::Connected);
             }
-            XmppEvent::Disconnected => {
-                info!("XMPP client disconnected");
+            XmppEvent::Disconnected(err) => {
+                info!("XMPP client disconnected: {}", err);
                 let _ = self.event_tx.send(XmppClientEvent::Disconnected);
             }
             XmppEvent::RoomJoined(room_jid) => {
@@ -171,7 +172,7 @@ impl XmppClient {
                 info!("Left room: {}", room_jid);
                 let _ = self.event_tx.send(XmppClientEvent::RoomLeft { room_jid });
             }
-            XmppEvent::RoomMessage(id, room_jid, sender_nick, body) => {
+            XmppEvent::RoomMessage(id, room_jid, sender_nick, body, _time) => {
                 let body_str = body.0.clone();
                 debug!(
                     "Room message in {}: {}: {}",
@@ -184,7 +185,7 @@ impl XmppClient {
                     id,
                 });
             }
-            XmppEvent::ChatMessage(id, from, body) => {
+            XmppEvent::ChatMessage(id, from, body, _time) => {
                 let body_str = body.0.clone();
                 debug!("Chat message from {}: {}", from, body_str);
                 let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
@@ -193,7 +194,7 @@ impl XmppClient {
                     id,
                 });
             }
-            XmppEvent::RoomPrivateMessage(id, room_jid, sender_nick, body) => {
+            XmppEvent::RoomPrivateMessage(id, room_jid, sender_nick, body, _time) => {
                 let body_str = body.0.clone();
                 debug!(
                     "Private message in {} from {}: {}",
@@ -218,7 +219,7 @@ impl XmppClient {
             XmppEvent::AvatarRetrieved(jid, _hash) => {
                 debug!("Avatar retrieved for: {}", jid);
             }
-            XmppEvent::ServiceMessage(_id, from, body) => {
+            XmppEvent::ServiceMessage(_id, from, body, _time) => {
                 debug!("Service message from {}: {}", from, body.0);
             }
             XmppEvent::HttpUploadedFile(url) => {
