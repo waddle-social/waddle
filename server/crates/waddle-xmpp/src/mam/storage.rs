@@ -260,13 +260,6 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_sender
 CREATE INDEX IF NOT EXISTS idx_mam_room_id
     ON mam_messages(room_jid, id);
 
--- Index for thread message retrieval
-CREATE INDEX IF NOT EXISTS idx_mam_room_thread
-    ON mam_messages(room_jid, thread_id, timestamp DESC);
-
--- Index for reply message lookup
-CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to
-    ON mam_messages(room_jid, reply_to_id, timestamp DESC);
 "#;
 
 #[async_trait]
