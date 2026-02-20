@@ -17,9 +17,10 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 tui-textarea = { workspace = true }
 
-# XMPP Client
-xmpp = { workspace = true }
+# XMPP Client (direct tokio-xmpp for raw stanza access)
 tokio-xmpp = { workspace = true }
+xmpp-parsers = { workspace = true }
+minidom = { workspace = true }
 
 
 # Serialization

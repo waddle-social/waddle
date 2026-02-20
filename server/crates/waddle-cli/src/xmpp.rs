@@ -3,68 +3,141 @@
 
 //! XMPP client module for the Waddle TUI.
 //!
-//! This module provides a wrapper around the `xmpp` crate to handle:
-//! - Connection management with STARTTLS
-//! - SASL PLAIN authentication using session tokens
-//! - MUC (Multi-User Chat) room operations
-//! - Message sending and receiving
+//! Uses `tokio-xmpp::AsyncClient` directly instead of the `xmpp` crate's
+//! `Agent`, giving us full access to raw stanzas including custom payloads
+//! (embed elements, MAM results, etc.).
+
+use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use std::str::FromStr;
+use futures::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
-use xmpp::jid::{BareJid, Jid};
-use xmpp::parsers::message::MessageType;
-use xmpp::{Agent, ClientBuilder, ClientFeature, ClientType, Event as XmppEvent};
+use tokio_xmpp::AsyncClient;
+use tokio_xmpp::Event as TokioXmppEvent;
+use tracing::{error, info, warn};
+use xmpp_parsers::jid::BareJid;
 
 use crate::config::XmppConfig;
+use crate::stanza::{self, RawEmbed, StanzaEvent};
 
-/// Events produced by the XMPP client for the application
+/// Events produced by the XMPP client for the application.
 #[derive(Debug, Clone)]
 pub enum XmppClientEvent {
-    /// Successfully connected and authenticated
     Connected,
-    /// Disconnected from the server
     Disconnected,
-    /// Connection error occurred
     Error(String),
-    /// Successfully joined a MUC room
-    RoomJoined { room_jid: BareJid },
-    /// Left a MUC room
-    RoomLeft { room_jid: BareJid },
-    /// Received a message from a MUC room
+    RoomJoined {
+        room_jid: BareJid,
+    },
+    RoomLeft {
+        room_jid: BareJid,
+    },
     RoomMessage {
         room_jid: BareJid,
         sender_nick: String,
         body: String,
         id: Option<String>,
+        embeds: Vec<RawEmbed>,
     },
-    /// Received a direct chat message
     ChatMessage {
         from: BareJid,
         body: String,
         id: Option<String>,
+        embeds: Vec<RawEmbed>,
+    },
+    RoomSubject {
+        room_jid: BareJid,
+        subject: String,
+    },
+    RosterItem {
+        jid: BareJid,
+        name: Option<String>,
+    },
+    ContactPresence {
+        jid: BareJid,
+        available: bool,
+        show: Option<String>,
+    },
+    MamMessage {
+        room_jid: Option<BareJid>,
+        sender_nick: Option<String>,
+        body: String,
+        id: Option<String>,
+        embeds: Vec<RawEmbed>,
+        timestamp: Option<String>,
+    },
+    MamFinished {
+        complete: bool,
+    },
+    /// Connection retry state for status bar display.
+    RetryScheduled {
+        attempt: u32,
+        delay_secs: f64,
     },
 }
 
-/// XMPP client wrapper for the Waddle TUI
+/// Connection retry state with jittered exponential backoff.
+#[derive(Debug)]
+struct RetryState {
+    attempt: u32,
+    next_retry_at: Option<Instant>,
+}
+
+impl RetryState {
+    fn new() -> Self {
+        Self {
+            attempt: 0,
+            next_retry_at: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.attempt = 0;
+        self.next_retry_at = None;
+    }
+
+    /// Calculate next retry delay with jittered exponential backoff.
+    /// Base: 1s, max: 30s, jitter: ±25%.
+    fn schedule_retry(&mut self) -> Duration {
+        self.attempt += 1;
+        let base_secs: f64 = (2.0f64).powi(self.attempt as i32 - 1).min(30.0);
+        // ±25% jitter
+        let jitter = 1.0 + (rand_jitter() * 0.5 - 0.25);
+        let delay_secs = (base_secs * jitter).max(0.5);
+        let delay = Duration::from_secs_f64(delay_secs);
+        self.next_retry_at = Some(Instant::now() + delay);
+        delay
+    }
+
+    fn seconds_until_retry(&self) -> Option<f64> {
+        self.next_retry_at
+            .map(|t| t.saturating_duration_since(Instant::now()).as_secs_f64())
+    }
+}
+
+/// Simple deterministic-ish jitter in [0, 1) using time-based seed.
+/// We avoid pulling in a full RNG crate just for this.
+fn rand_jitter() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    (nanos as f64 % 1000.0) / 1000.0
+}
+
+/// XMPP client wrapper using tokio-xmpp directly.
 pub struct XmppClient {
-    agent: Agent<tokio_xmpp::starttls::ServerConfig>,
+    client: AsyncClient<tokio_xmpp::starttls::ServerConfig>,
     jid: BareJid,
     nickname: String,
     muc_domain: String,
     event_tx: mpsc::UnboundedSender<XmppClientEvent>,
+    retry: RetryState,
 }
 
 impl XmppClient {
-    /// Create a new XMPP client with the given configuration
-    ///
-    /// # Arguments
-    /// * `config` - XMPP configuration with JID, server, and token
-    /// * `event_tx` - Channel sender for emitting events to the application
-    ///
-    /// # Returns
-    /// A new XmppClient instance ready to process events
+    /// Create a new XMPP client with the given configuration.
     pub async fn new(
         config: &XmppConfig,
         event_tx: mpsc::UnboundedSender<XmppClientEvent>,
@@ -72,257 +145,261 @@ impl XmppClient {
         let jid_str = config
             .jid
             .as_ref()
-            .context("XMPP JID is required in configuration")?;
+            .context("XMPP JID is required")?;
 
         let jid = BareJid::from_str(jid_str)
-            .with_context(|| format!("Invalid JID format: {}", jid_str))?;
+            .with_context(|| format!("Invalid JID: {jid_str}"))?;
 
         let token = config
             .token
             .as_ref()
             .context("XMPP session token is required")?;
 
-        // Extract nickname from JID (local part)
         let nickname = jid
             .node()
             .map(|n| n.to_string())
             .unwrap_or_else(|| "user".to_string());
 
-        // Determine MUC domain
         let muc_domain = config
             .muc_domain
             .clone()
             .unwrap_or_else(|| format!("muc.{}", jid.domain()));
 
-        info!(
-            "Creating XMPP client for {} (MUC domain: {})",
-            jid, muc_domain
-        );
+        info!("Creating XMPP client for {} (MUC: {})", jid, muc_domain);
 
-        // Build the XMPP agent
-        // Note: The xmpp crate uses the password field for SASL PLAIN auth
-        // We pass our session token as the "password"
-        let agent = ClientBuilder::new(jid.clone(), token)
-            .set_client(ClientType::Pc, "waddle-cli")
-            .set_website("https://waddle.social")
-            .set_default_nick(&nickname)
-            .enable_feature(ClientFeature::ContactList)
-            .build();
+        // Build server connector
+        let server_config = if let Some(ref host) = config.server {
+            tokio_xmpp::starttls::ServerConfig::Manual {
+                host: host.clone(),
+                port: config.port,
+            }
+        } else {
+            tokio_xmpp::starttls::ServerConfig::UseSrv
+        };
+
+        let client_config = tokio_xmpp::AsyncConfig {
+            jid: xmpp_parsers::jid::Jid::from(jid.clone()),
+            password: token.clone(),
+            server: server_config,
+        };
+
+        let mut client = AsyncClient::new_with_config(client_config);
+        client.set_reconnect(true);
 
         Ok(Self {
-            agent,
+            client,
             jid,
             nickname,
             muc_domain,
             event_tx,
+            retry: RetryState::new(),
         })
     }
 
-    /// Get our JID
     pub fn jid(&self) -> &BareJid {
         &self.jid
     }
 
-    /// Get our nickname
     pub fn nickname(&self) -> &str {
         &self.nickname
     }
 
-    /// Get the MUC domain
     pub fn muc_domain(&self) -> &str {
         &self.muc_domain
     }
 
-    /// Process pending XMPP events
-    ///
-    /// This should be called in a loop to handle incoming events.
-    /// Returns true if the client is still connected, false if disconnected.
+    /// Poll for the next XMPP event. Returns false if stream ended.
     pub async fn poll_events(&mut self) -> bool {
-        match self.agent.wait_for_events().await {
-            Some(events) => {
-                for event in events {
-                    self.handle_event(event);
+        match self.client.next().await {
+            Some(TokioXmppEvent::Online { .. }) => {
+                info!("XMPP connected");
+                self.retry.reset();
+                let _ = self.event_tx.send(XmppClientEvent::Connected);
+
+                // Send initial presence
+                if let Err(e) = self.client.send_stanza(stanza::build_initial_presence()).await {
+                    warn!("Failed to send initial presence: {e}");
+                }
+
+                // Request roster
+                if let Err(e) = self.client.send_stanza(stanza::build_roster_query()).await {
+                    warn!("Failed to send roster query: {e}");
+                }
+
+                true
+            }
+            Some(TokioXmppEvent::Disconnected(err)) => {
+                warn!("XMPP disconnected: {err}");
+                let _ = self.event_tx.send(XmppClientEvent::Disconnected);
+
+                let delay = self.retry.schedule_retry();
+                info!(
+                    "Scheduling reconnect attempt {} in {:.1}s",
+                    self.retry.attempt,
+                    delay.as_secs_f64()
+                );
+                let _ = self.event_tx.send(XmppClientEvent::RetryScheduled {
+                    attempt: self.retry.attempt,
+                    delay_secs: delay.as_secs_f64(),
+                });
+
+                // tokio-xmpp handles reconnection internally when set_reconnect(true),
+                // but we track state for UI display
+                true
+            }
+            Some(TokioXmppEvent::Stanza(elem)) => {
+                let stanza_events = stanza::dispatch_stanza(elem);
+                for event in stanza_events {
+                    self.forward_stanza_event(event);
                 }
                 true
             }
             None => {
-                // Connection closed
                 let _ = self.event_tx.send(XmppClientEvent::Disconnected);
                 false
             }
         }
     }
 
-    /// Handle a single XMPP event
-    fn handle_event(&mut self, event: XmppEvent) {
-        match event {
-            XmppEvent::Online => {
-                info!("XMPP client connected");
-                let _ = self.event_tx.send(XmppClientEvent::Connected);
-            }
-            XmppEvent::Disconnected(err) => {
-                info!("XMPP client disconnected: {}", err);
-                let _ = self.event_tx.send(XmppClientEvent::Disconnected);
-            }
-            XmppEvent::RoomJoined(room_jid) => {
-                info!("Joined room: {}", room_jid);
-                let _ = self.event_tx.send(XmppClientEvent::RoomJoined { room_jid });
-            }
-            XmppEvent::RoomLeft(room_jid) => {
-                info!("Left room: {}", room_jid);
-                let _ = self.event_tx.send(XmppClientEvent::RoomLeft { room_jid });
-            }
-            XmppEvent::RoomMessage(id, room_jid, sender_nick, body, _time) => {
-                let body_str = body.0.clone();
-                debug!(
-                    "Room message in {}: {}: {}",
-                    room_jid, sender_nick, body_str
-                );
-                let _ = self.event_tx.send(XmppClientEvent::RoomMessage {
-                    room_jid,
-                    sender_nick,
-                    body: body_str,
-                    id,
-                });
-            }
-            XmppEvent::ChatMessage(id, from, body, _time) => {
-                let body_str = body.0.clone();
-                debug!("Chat message from {}: {}", from, body_str);
-                let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
-                    from,
-                    body: body_str,
-                    id,
-                });
-            }
-            XmppEvent::RoomPrivateMessage(id, room_jid, sender_nick, body, _time) => {
-                let body_str = body.0.clone();
-                debug!(
-                    "Private message in {} from {}: {}",
-                    room_jid, sender_nick, body_str
-                );
-                // Treat room private messages as regular chat messages
-                let _ = self.event_tx.send(XmppClientEvent::ChatMessage {
-                    from: room_jid,
-                    body: body_str,
-                    id,
-                });
-            }
-            XmppEvent::ContactAdded(item) => {
-                debug!("Contact added: {:?}", item);
-            }
-            XmppEvent::ContactRemoved(item) => {
-                debug!("Contact removed: {:?}", item);
-            }
-            XmppEvent::ContactChanged(item) => {
-                debug!("Contact changed: {:?}", item);
-            }
-            XmppEvent::AvatarRetrieved(jid, _hash) => {
-                debug!("Avatar retrieved for: {}", jid);
-            }
-            XmppEvent::ServiceMessage(_id, from, body, _time) => {
-                debug!("Service message from {}: {}", from, body.0);
-            }
-            XmppEvent::HttpUploadedFile(url) => {
-                debug!("File uploaded: {}", url);
-            }
-            _ => {
-                debug!("Unhandled XMPP event");
-            }
-        }
-    }
-
-    /// Join a MUC room
-    ///
-    /// # Arguments
-    /// * `room_name` - The room name (without domain), e.g., "general"
-    /// * `nickname` - Optional nickname to use; defaults to our JID's local part
-    pub async fn join_room(&mut self, room_name: &str, nickname: Option<&str>) {
-        let room_jid = match BareJid::from_str(&format!("{}@{}", room_name, self.muc_domain)) {
-            Ok(jid) => jid,
-            Err(e) => {
-                error!("Invalid room JID for {}: {}", room_name, e);
-                return;
-            }
+    /// Convert a StanzaEvent to an XmppClientEvent and send it.
+    fn forward_stanza_event(&self, event: StanzaEvent) {
+        let client_event = match event {
+            StanzaEvent::RoomMessage {
+                room_jid,
+                sender_nick,
+                body,
+                id,
+                embeds,
+            } => XmppClientEvent::RoomMessage {
+                room_jid,
+                sender_nick,
+                body,
+                id,
+                embeds,
+            },
+            StanzaEvent::ChatMessage {
+                from,
+                body,
+                id,
+                embeds,
+            } => XmppClientEvent::ChatMessage {
+                from,
+                body,
+                id,
+                embeds,
+            },
+            StanzaEvent::RoomSubject {
+                room_jid, subject, ..
+            } => XmppClientEvent::RoomSubject { room_jid, subject },
+            StanzaEvent::RoomJoined { room_jid } => XmppClientEvent::RoomJoined { room_jid },
+            StanzaEvent::RoomLeft { room_jid } => XmppClientEvent::RoomLeft { room_jid },
+            StanzaEvent::RosterItem(item) => XmppClientEvent::RosterItem {
+                jid: item.jid,
+                name: item.name,
+            },
+            StanzaEvent::ContactPresence {
+                jid,
+                available,
+                show,
+                ..
+            } => XmppClientEvent::ContactPresence {
+                jid,
+                available,
+                show,
+            },
+            StanzaEvent::MamMessage {
+                room_jid,
+                sender_nick,
+                body,
+                id,
+                embeds,
+                timestamp,
+                ..
+            } => XmppClientEvent::MamMessage {
+                room_jid,
+                sender_nick,
+                body,
+                id,
+                embeds,
+                timestamp,
+            },
+            StanzaEvent::MamFinished { complete } => XmppClientEvent::MamFinished { complete },
+            StanzaEvent::UnhandledIq(_) => return,
         };
 
-        let nick = nickname.unwrap_or(&self.nickname);
-        info!("Joining room {} as {}", room_jid, nick);
-
-        self.agent
-            .join_room(room_jid, Some(nick.to_string()), None, "en", "")
-            .await;
+        let _ = self.event_tx.send(client_event);
     }
 
-    /// Join a MUC room by full JID
-    ///
-    /// # Arguments
-    /// * `room_jid` - The full room JID, e.g., "general@muc.waddle.social"
-    /// * `nickname` - Optional nickname to use; defaults to our JID's local part
+    /// Join a MUC room by JID.
     pub async fn join_room_jid(&mut self, room_jid: &BareJid, nickname: Option<&str>) {
         let nick = nickname.unwrap_or(&self.nickname);
         info!("Joining room {} as {}", room_jid, nick);
-
-        self.agent
-            .join_room(room_jid.clone(), Some(nick.to_string()), None, "en", "")
-            .await;
+        let elem = stanza::build_muc_join(room_jid, nick);
+        if let Err(e) = self.client.send_stanza(elem).await {
+            error!("Failed to send MUC join: {e}");
+        }
     }
 
-    /// Leave a MUC room
-    ///
-    /// # Arguments
-    /// * `room_jid` - The room JID to leave
-    pub async fn leave_room(&mut self, room_jid: &BareJid) {
+    /// Leave a MUC room.
+    pub async fn leave_room(&mut self, room_jid: &BareJid, nickname: Option<&str>) {
+        let nick = nickname.unwrap_or(&self.nickname);
         info!("Leaving room {}", room_jid);
-        // The xmpp crate doesn't have a direct leave_room method in Agent
-        // We need to send unavailable presence
-        // For now, we'll just log it
-        warn!("leave_room not fully implemented yet for {}", room_jid);
+        let elem = stanza::build_muc_leave(room_jid, nick);
+        if let Err(e) = self.client.send_stanza(elem).await {
+            error!("Failed to send MUC leave: {e}");
+        }
     }
 
-    /// Send a message to a MUC room
-    ///
-    /// # Arguments
-    /// * `room_jid` - The room JID to send to
-    /// * `message` - The message body
+    /// Send a message to a MUC room.
     pub async fn send_room_message(&mut self, room_jid: &BareJid, message: &str) {
-        info!("Sending message to {}: {}", room_jid, message);
-
-        self.agent
-            .send_message(
-                Jid::Bare(room_jid.clone()),
-                MessageType::Groupchat,
-                "en",
-                message,
-            )
-            .await;
+        let elem = stanza::build_room_message(room_jid, message);
+        if let Err(e) = self.client.send_stanza(elem).await {
+            error!("Failed to send room message: {e}");
+        }
     }
 
-    /// Send a direct chat message
-    ///
-    /// # Arguments
-    /// * `to` - The recipient's JID
-    /// * `message` - The message body
+    /// Send a direct chat message.
     pub async fn send_chat_message(&mut self, to: &BareJid, message: &str) {
-        info!("Sending chat message to {}: {}", to, message);
-
-        self.agent
-            .send_message(Jid::Bare(to.clone()), MessageType::Chat, "en", message)
-            .await;
+        let elem = stanza::build_chat_message(to, message);
+        if let Err(e) = self.client.send_stanza(elem).await {
+            error!("Failed to send chat message: {e}");
+        }
     }
 
-    /// Disconnect from the XMPP server
+    /// Request MAM history for a room (or user archive if `room_jid` is None).
+    pub async fn request_mam_history(
+        &mut self,
+        query_id: &str,
+        room_jid: Option<&BareJid>,
+        max_results: u32,
+    ) {
+        info!(
+            "Requesting MAM history (query_id={}, to={:?}, max={})",
+            query_id, room_jid, max_results
+        );
+        let elem = stanza::build_mam_query(query_id, room_jid, max_results);
+        if let Err(e) = self.client.send_stanza(elem).await {
+            error!("Failed to send MAM query: {e}");
+        }
+    }
+
+    /// Disconnect from the XMPP server.
     pub async fn disconnect(&mut self) {
         info!("Disconnecting XMPP client");
-        self.agent.disconnect().await;
+        let _ = self.client.send_end().await;
+    }
+
+    /// Get seconds until next retry (for status bar display).
+    pub fn retry_countdown(&self) -> Option<f64> {
+        self.retry.seconds_until_retry()
     }
 }
 
-/// Helper function to create a room JID from a channel name and MUC domain
+/// Helper to create a room JID from a channel name and MUC domain.
 pub fn make_room_jid(channel_name: &str, muc_domain: &str) -> Result<BareJid> {
-    // Remove leading # from channel names if present
     let room_name = channel_name.trim_start_matches('#');
     let jid_str = format!("{}@{}", room_name, muc_domain);
-    BareJid::from_str(&jid_str).with_context(|| format!("Invalid room JID: {}", jid_str))
+    BareJid::from_str(&jid_str).with_context(|| format!("Invalid room JID: {jid_str}"))
 }
 
 #[cfg(test)]
@@ -333,8 +410,36 @@ mod tests {
     fn test_make_room_jid() {
         let jid = make_room_jid("#general", "muc.waddle.social").unwrap();
         assert_eq!(jid.to_string(), "general@muc.waddle.social");
+    }
 
+    #[test]
+    fn test_make_room_jid_no_hash() {
         let jid = make_room_jid("random", "muc.waddle.social").unwrap();
         assert_eq!(jid.to_string(), "random@muc.waddle.social");
+    }
+
+    #[test]
+    fn test_retry_state_backoff() {
+        let mut retry = RetryState::new();
+        assert_eq!(retry.attempt, 0);
+
+        let d1 = retry.schedule_retry();
+        assert_eq!(retry.attempt, 1);
+        assert!(d1.as_secs_f64() >= 0.5);
+        assert!(d1.as_secs_f64() <= 2.0);
+
+        let d2 = retry.schedule_retry();
+        assert_eq!(retry.attempt, 2);
+        assert!(d2.as_secs_f64() >= 1.0);
+
+        // After many attempts, should cap at ~30s
+        for _ in 0..20 {
+            retry.schedule_retry();
+        }
+        let d_cap = retry.schedule_retry();
+        assert!(d_cap.as_secs_f64() <= 40.0); // 30 * 1.25 jitter
+
+        retry.reset();
+        assert_eq!(retry.attempt, 0);
     }
 }
