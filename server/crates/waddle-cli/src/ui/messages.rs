@@ -17,6 +17,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::config::Config;
+use crate::sanitize::sanitize_for_terminal;
 use crate::stanza::RawEmbed;
 
 /// Messages widget showing the message history
@@ -93,7 +94,11 @@ fn format_embed(embed: &RawEmbed) -> Vec<Line<'static>> {
     // Show a compact representation based on namespace
     let label = match embed.namespace.as_str() {
         "urn:waddle:github:0" => format_github_embed(embed),
-        _ => format!("  📎 [{}:{}]", embed.namespace, embed.name),
+        _ => {
+            let namespace = sanitize_for_terminal(&embed.namespace, None);
+            let name = sanitize_for_terminal(&embed.name, None);
+            format!("  📎 [{}:{}]", namespace, name)
+        }
     };
 
     lines.push(Line::from(vec![Span::styled(label, value_style)]));
@@ -140,7 +145,10 @@ fn format_github_embed(embed: &RawEmbed) -> String {
             }
             "  🔀 [GitHub PR]".to_string()
         }
-        _ => format!("  📎 [github:{}]", embed.name),
+        _ => {
+            let name = sanitize_for_terminal(&embed.name, None);
+            format!("  📎 [github:{}]", name)
+        }
     }
 }
 
@@ -150,7 +158,10 @@ fn extract_attr<'a>(xml: &'a str, attr_name: &str) -> Option<String> {
     if let Some(start) = xml.find(&pattern) {
         let value_start = start + pattern.len();
         if let Some(end) = xml[value_start..].find('\'') {
-            return Some(xml[value_start..value_start + end].to_string());
+            return Some(sanitize_for_terminal(
+                &xml[value_start..value_start + end],
+                None,
+            ));
         }
     }
     // Also try double quotes
@@ -158,7 +169,10 @@ fn extract_attr<'a>(xml: &'a str, attr_name: &str) -> Option<String> {
     if let Some(start) = xml.find(&pattern) {
         let value_start = start + pattern.len();
         if let Some(end) = xml[value_start..].find('"') {
-            return Some(xml[value_start..value_start + end].to_string());
+            return Some(sanitize_for_terminal(
+                &xml[value_start..value_start + end],
+                None,
+            ));
         }
     }
     None
@@ -271,6 +285,12 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_attr_sanitizes_terminal_escapes() {
+        let xml = "<repo owner='safe\x1b[31mred\x1b[0m'/>";
+        assert_eq!(extract_attr(xml, "owner"), Some("safered".to_string()));
+    }
+
+    #[test]
     fn test_format_github_repo_embed() {
         let embed = RawEmbed {
             namespace: "urn:waddle:github:0".into(),
@@ -301,5 +321,33 @@ mod tests {
         };
         let lines = format_embed(&embed);
         assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_format_unknown_embed_sanitizes_namespace_and_name() {
+        let embed = RawEmbed {
+            namespace: "urn:custom:\x1b[31mext\x1b[0m:0".into(),
+            name: "wid\x1b]0;evil\x07get".into(),
+            xml: "<widget xmlns='urn:custom:ext:0'/>".into(),
+        };
+        let lines = format_embed(&embed);
+        let rendered = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("[urn:custom:ext:0:widget]"));
+        assert!(!rendered.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_format_github_unknown_embed_sanitizes_name() {
+        let embed = RawEmbed {
+            namespace: "urn:waddle:github:0".into(),
+            name: "unk\x1b[2Jnown".into(),
+            xml: "<unknown xmlns='urn:waddle:github:0'/>".into(),
+        };
+        let rendered = format_github_embed(&embed);
+        assert_eq!(rendered, "  📎 [github:unknown]");
     }
 }
