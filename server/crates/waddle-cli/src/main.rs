@@ -33,11 +33,11 @@ mod ui;
 mod xmpp;
 
 use crate::xmpp::{XmppClient, XmppClientEvent};
-use xmpp_parsers::jid::BareJid;
 use app::{App, ConnectionState, Focus};
 use config::Config;
 use event::{key_to_action, Event, EventHandler, KeyAction};
 use ui::render_layout;
+use xmpp_parsers::jid::BareJid;
 
 /// Waddle CLI - Terminal client for Waddle Social
 #[derive(Parser)]
@@ -306,7 +306,11 @@ async fn handle_terminal_event(
     }
 }
 
-async fn handle_xmpp_event(app: &mut App, xmpp_client: &mut Option<XmppClient>, event: XmppClientEvent) {
+async fn handle_xmpp_event(
+    app: &mut App,
+    xmpp_client: &mut Option<XmppClient>,
+    event: XmppClientEvent,
+) {
     match event {
         XmppClientEvent::Connected => {
             app.set_connection_state(ConnectionState::Connected);
@@ -335,7 +339,9 @@ async fn handle_xmpp_event(app: &mut App, xmpp_client: &mut Option<XmppClient>, 
             if let Some(ref mut client) = xmpp_client {
                 let query_id = format!("mam-{}", room_jid);
                 app.mam_loading = true;
-                client.request_mam_history(&query_id, Some(&room_jid), 50).await;
+                client
+                    .request_mam_history(&query_id, Some(&room_jid), 50)
+                    .await;
             }
         }
         XmppClientEvent::RoomLeft { room_jid } => {
@@ -394,10 +400,7 @@ async fn handle_xmpp_event(app: &mut App, xmpp_client: &mut Option<XmppClient>, 
             embeds,
             timestamp,
         } => {
-            let view_key = room_jid
-                .as_ref()
-                .map(|j| j.to_string())
-                .unwrap_or_default();
+            let view_key = room_jid.as_ref().map(|j| j.to_string()).unwrap_or_default();
             if !view_key.is_empty() {
                 let author = sender_nick.unwrap_or_else(|| "?".to_string());
                 let ts = timestamp
@@ -533,7 +536,9 @@ async fn main() -> Result<()> {
             .with_ansi(false);
         tracing_subscriber::registry()
             .with(file_layer)
-            .with(tracing_subscriber::filter::LevelFilter::from_level(Level::INFO))
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                Level::INFO,
+            ))
             .init();
     }
 
@@ -553,7 +558,11 @@ async fn main() -> Result<()> {
         let api_client = api::ApiClient::new(&creds.server_url, &creds.token);
         match api_client.fetch_all().await {
             Ok((waddles, channels)) => {
-                info!("Fetched {} waddles and {} channels", waddles.len(), channels.len());
+                info!(
+                    "Fetched {} waddles and {} channels",
+                    waddles.len(),
+                    channels.len()
+                );
                 let waddle_data: Vec<(String, String)> =
                     waddles.into_iter().map(|w| (w.id, w.name)).collect();
                 let channel_data: Vec<(String, String)> =
@@ -561,7 +570,10 @@ async fn main() -> Result<()> {
                 app.set_waddles_and_channels(waddle_data, channel_data);
             }
             Err(e) => {
-                warn!("Failed to fetch data from server: {}. Running in offline mode.", e);
+                warn!(
+                    "Failed to fetch data from server: {}. Running in offline mode.",
+                    e
+                );
             }
         }
     } else {
@@ -624,10 +636,22 @@ fn run_compliance(
         .env("WADDLE_COMPLIANCE_DOMAIN", domain)
         .env("WADDLE_COMPLIANCE_HOST", host)
         .env("WADDLE_COMPLIANCE_TIMEOUT_MS", timeout_ms.to_string())
-        .env("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS", container_timeout_secs.trim())
-        .env("WADDLE_COMPLIANCE_ARTIFACT_DIR", resolved_artifact_dir.to_string_lossy().to_string())
-        .env("WADDLE_COMPLIANCE_KEEP_CONTAINERS", if keep_containers { "true" } else { "false" })
-        .env("WADDLE_COMPLIANCE_SKIP_SERVER_BUILD", if skip_server_build { "true" } else { "false" });
+        .env(
+            "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS",
+            container_timeout_secs.trim(),
+        )
+        .env(
+            "WADDLE_COMPLIANCE_ARTIFACT_DIR",
+            resolved_artifact_dir.to_string_lossy().to_string(),
+        )
+        .env(
+            "WADDLE_COMPLIANCE_KEEP_CONTAINERS",
+            if keep_containers { "true" } else { "false" },
+        )
+        .env(
+            "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD",
+            if skip_server_build { "true" } else { "false" },
+        );
 
     if !admin_username.trim().is_empty() {
         command.env("WADDLE_COMPLIANCE_ADMIN_USERNAME", admin_username);
@@ -635,17 +659,31 @@ fn run_compliance(
     if !admin_password.trim().is_empty() {
         command.env("WADDLE_COMPLIANCE_ADMIN_PASSWORD", admin_password);
     }
-    if let Some(v) = enabled_specs { command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", v); }
-    if let Some(v) = disabled_specs { command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", v); }
-    if let Some(v) = enabled_tests { command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", v); }
-    if let Some(v) = disabled_tests { command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", v); }
-    if let Some(v) = server_bin { command.env("WADDLE_SERVER_BIN", v); }
+    if let Some(v) = enabled_specs {
+        command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", v);
+    }
+    if let Some(v) = disabled_specs {
+        command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", v);
+    }
+    if let Some(v) = enabled_tests {
+        command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", v);
+    }
+    if let Some(v) = disabled_tests {
+        command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", v);
+    }
+    if let Some(v) = server_bin {
+        command.env("WADDLE_SERVER_BIN", v);
+    }
 
-    let status = command.status().context("Running compliance harness command")?;
+    let status = command
+        .status()
+        .context("Running compliance harness command")?;
     if status.success() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("Compliance harness exited with status {status}"))
+        Err(anyhow::anyhow!(
+            "Compliance harness exited with status {status}"
+        ))
     }
 }
 

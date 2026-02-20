@@ -36,11 +36,7 @@ pub trait EmbedProcessor: Send + Sync {
     ///
     /// Returns a list of `ProcessedEmbed`s — plugins may produce new embeds
     /// from URL detection in the body, or enrich existing raw embeds.
-    fn process(
-        &self,
-        body: &str,
-        raw_embeds: &[RawEmbed],
-    ) -> Vec<ProcessedEmbed>;
+    fn process(&self, body: &str, raw_embeds: &[RawEmbed]) -> Vec<ProcessedEmbed>;
 }
 
 /// No-op processor that passes all embeds through unchanged.
@@ -49,11 +45,7 @@ pub trait EmbedProcessor: Send + Sync {
 pub struct NoopEmbedProcessor;
 
 impl EmbedProcessor for NoopEmbedProcessor {
-    fn process(
-        &self,
-        _body: &str,
-        raw_embeds: &[RawEmbed],
-    ) -> Vec<ProcessedEmbed> {
+    fn process(&self, _body: &str, raw_embeds: &[RawEmbed]) -> Vec<ProcessedEmbed> {
         raw_embeds
             .iter()
             .map(|e| ProcessedEmbed::Raw(e.clone()))

@@ -142,13 +142,9 @@ impl XmppClient {
         config: &XmppConfig,
         event_tx: mpsc::UnboundedSender<XmppClientEvent>,
     ) -> Result<Self> {
-        let jid_str = config
-            .jid
-            .as_ref()
-            .context("XMPP JID is required")?;
+        let jid_str = config.jid.as_ref().context("XMPP JID is required")?;
 
-        let jid = BareJid::from_str(jid_str)
-            .with_context(|| format!("Invalid JID: {jid_str}"))?;
+        let jid = BareJid::from_str(jid_str).with_context(|| format!("Invalid JID: {jid_str}"))?;
 
         let token = config
             .token
@@ -217,7 +213,11 @@ impl XmppClient {
                 let _ = self.event_tx.send(XmppClientEvent::Connected);
 
                 // Send initial presence
-                if let Err(e) = self.client.send_stanza(stanza::build_initial_presence()).await {
+                if let Err(e) = self
+                    .client
+                    .send_stanza(stanza::build_initial_presence())
+                    .await
+                {
                     warn!("Failed to send initial presence: {e}");
                 }
 

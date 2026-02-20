@@ -86,9 +86,7 @@ pub enum StanzaEvent {
         timestamp: Option<String>,
     },
     /// MAM query completed (fin element received).
-    MamFinished {
-        complete: bool,
-    },
+    MamFinished { complete: bool },
     /// An IQ result we don't specifically handle.
     UnhandledIq(Iq),
 }
@@ -181,7 +179,10 @@ fn dispatch_message(msg: Message) -> Vec<StanzaEvent> {
             // Check for subject
             if let Some((_lang, subject)) = msg.get_best_subject(vec!["en", ""]) {
                 let nick = match from.clone().try_into_full() {
-                    Ok(full) => Some(sanitize_for_terminal(full.resource().as_str(), Some(MAX_NICK_LEN))),
+                    Ok(full) => Some(sanitize_for_terminal(
+                        full.resource().as_str(),
+                        Some(MAX_NICK_LEN),
+                    )),
                     Err(_) => None,
                 };
                 events.push(StanzaEvent::RoomSubject {
@@ -237,10 +238,7 @@ fn dispatch_presence(pres: Presence) -> Vec<StanzaEvent> {
     };
 
     // Check if this is a MUC presence (has MucUser payload)
-    let is_muc = pres
-        .payloads
-        .iter()
-        .any(|p| p.is("x", ns::MUC_USER));
+    let is_muc = pres.payloads.iter().any(|p| p.is("x", ns::MUC_USER));
 
     if is_muc {
         // Parse MUC user payload to check for self-presence (status 110)
@@ -249,11 +247,7 @@ fn dispatch_presence(pres: Presence) -> Vec<StanzaEvent> {
                 return false;
             }
             MucUser::try_from(p.clone())
-                .map(|mu| {
-                    mu.status
-                        .iter()
-                        .any(|s| *s == Status::SelfPresence)
-                })
+                .map(|mu| mu.status.iter().any(|s| *s == Status::SelfPresence))
                 .unwrap_or(false)
         });
 
@@ -327,14 +321,14 @@ fn dispatch_iq(iq: Iq) -> Vec<StanzaEvent> {
 
 /// Parse a MAM `<result>` element containing a forwarded message.
 fn parse_mam_result(result_elem: &Element) -> Option<StanzaEvent> {
-    let forwarded = result_elem
-        .get_child("forwarded", "urn:xmpp:forward:0")?;
+    let forwarded = result_elem.get_child("forwarded", "urn:xmpp:forward:0")?;
 
     let delay_elem = forwarded.get_child("delay", ns::DELAY);
-    let timestamp = delay_elem.and_then(|d| d.attr("stamp")).map(|s| s.to_string());
+    let timestamp = delay_elem
+        .and_then(|d| d.attr("stamp"))
+        .map(|s| s.to_string());
 
-    let msg_elem = forwarded
-        .get_child("message", "jabber:client")?;
+    let msg_elem = forwarded.get_child("message", "jabber:client")?;
 
     let message = Message::try_from(msg_elem.clone()).ok()?;
     let from = message.from.clone();
@@ -439,9 +433,7 @@ pub fn build_mam_query(query_id: &str, to: Option<&BareJid>, max_results: u32) -
                 .append(max_results.to_string())
                 .build(),
         )
-        .append(
-            Element::builder("before", "http://jabber.org/protocol/rsm").build(),
-        )
+        .append(Element::builder("before", "http://jabber.org/protocol/rsm").build())
         .build();
 
     let query = Element::builder("query", "urn:xmpp:mam:2")
@@ -596,10 +588,7 @@ mod tests {
         let room = BareJid::from_str("room@muc.example.com").unwrap();
         let elem = build_muc_join(&room, "mynick");
         assert_eq!(elem.name(), "presence");
-        assert_eq!(
-            elem.attr("to").unwrap(),
-            "room@muc.example.com/mynick"
-        );
+        assert_eq!(elem.attr("to").unwrap(), "room@muc.example.com/mynick");
         // Should have <x xmlns='...muc'> child
         assert!(elem.get_child("x", ns::MUC).is_some());
     }
