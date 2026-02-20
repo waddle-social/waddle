@@ -3,44 +3,52 @@
 
 //! Application state and business logic for the Waddle TUI.
 
-use xmpp::jid::BareJid;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use xmpp_parsers::jid::BareJid;
+
+use crate::embed::{EmbedProcessor, NoopEmbedProcessor};
+use crate::stanza::RawEmbed;
+
+/// Maximum messages to retain per room/conversation.
+const MAX_MESSAGES_PER_ROOM: usize = 1000;
 
 /// Connection state for the XMPP client
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ConnectionState {
-    /// Not connected to the XMPP server
     #[default]
     Disconnected,
-    /// Currently connecting to the XMPP server
     Connecting,
-    /// Successfully connected and authenticated
     Connected,
-    /// Connection error occurred
     Error(String),
+    /// Reconnecting with countdown.
+    Reconnecting { attempt: u32, countdown_secs: f64 },
 }
 
 impl ConnectionState {
-    /// Get a display string for the connection state
-    pub fn display(&self) -> &str {
+    pub fn display(&self) -> String {
         match self {
-            ConnectionState::Disconnected => "Disconnected",
-            ConnectionState::Connecting => "Connecting...",
-            ConnectionState::Connected => "Connected",
-            ConnectionState::Error(_) => "Error",
+            ConnectionState::Disconnected => "Disconnected".to_string(),
+            ConnectionState::Connecting => "Connecting...".to_string(),
+            ConnectionState::Connected => "Connected".to_string(),
+            ConnectionState::Error(_) => "Error".to_string(),
+            ConnectionState::Reconnecting {
+                attempt,
+                countdown_secs,
+            } => format!("Retry #{} in {:.0}s", attempt, countdown_secs),
         }
     }
 
-    /// Get a short status indicator
     pub fn indicator(&self) -> &str {
         match self {
             ConnectionState::Disconnected => "○",
-            ConnectionState::Connecting => "◐",
+            ConnectionState::Connecting | ConnectionState::Reconnecting { .. } => "◐",
             ConnectionState::Connected => "●",
             ConnectionState::Error(_) => "✕",
         }
     }
 
-    /// Check if connected
     pub fn is_connected(&self) -> bool {
         matches!(self, ConnectionState::Connected)
     }
@@ -56,7 +64,6 @@ pub enum Focus {
 }
 
 impl Focus {
-    /// Cycle to the next panel
     pub fn next(self) -> Self {
         match self {
             Focus::Sidebar => Focus::Messages,
@@ -65,7 +72,6 @@ impl Focus {
         }
     }
 
-    /// Cycle to the previous panel
     pub fn prev(self) -> Self {
         match self {
             Focus::Sidebar => Focus::Input,
@@ -87,7 +93,6 @@ pub enum SidebarItem {
 }
 
 impl SidebarItem {
-    /// Check if this item is a header (non-selectable)
     pub fn is_header(&self) -> bool {
         matches!(
             self,
@@ -95,7 +100,6 @@ impl SidebarItem {
         )
     }
 
-    /// Get the display name for this item
     pub fn display_name(&self) -> &str {
         match self {
             SidebarItem::WaddleHeader => "🐧 Waddles",
@@ -108,80 +112,79 @@ impl SidebarItem {
     }
 }
 
-/// A message in the message view
+/// A message in the message view.
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: String,
     pub author: String,
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Raw embed payloads from the XMPP stanza (processed by plugins).
+    pub embeds: Vec<RawEmbed>,
 }
 
-/// Modal dialog types
-#[derive(Debug, Clone, PartialEq)]
-pub enum Modal {
-    /// No modal open
-    None,
-    /// Create waddle dialog
-    CreateWaddle,
+/// Presence state for a contact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactPresence {
+    pub available: bool,
+    pub show: Option<String>,
+}
+
+impl ContactPresence {
+    /// Presence indicator for sidebar display.
+    pub fn indicator(&self) -> &str {
+        if !self.available {
+            return "○";
+        }
+        match self.show.as_deref() {
+            Some("Away") | Some("Xa") => "◐",
+            Some("Dnd") => "⊘",
+            _ => "●",
+        }
+    }
 }
 
 /// Main application state
-#[derive(Debug)]
 pub struct App {
-    /// Whether the application should exit
     pub should_quit: bool,
-
-    /// Which panel currently has focus
     pub focus: Focus,
-
-    /// Sidebar items (waddles, channels, DMs)
     pub sidebar_items: Vec<SidebarItem>,
-
-    /// Currently selected index in the sidebar
     pub sidebar_selected: usize,
-
-    /// Messages in the current view
-    pub messages: Vec<Message>,
-
-    /// Current scroll position in messages (0 = bottom/newest)
+    /// Per-room/conversation message storage.
+    room_messages: HashMap<String, Vec<Message>>,
     pub message_scroll: usize,
-
-    /// Input buffer for composing messages
     pub input_buffer: String,
-
-    /// Cursor position in the input buffer
     pub input_cursor: usize,
-
-    /// Currently selected channel/conversation name (for display)
     pub current_view_name: String,
-
-    /// XMPP connection state
+    /// Key into room_messages for the active view.
+    current_view_key: Option<String>,
     pub connection_state: ConnectionState,
-
-    /// Currently active MUC room JID (if any)
     pub current_room_jid: Option<BareJid>,
-
-    /// Currently active direct message conversation JID (if any)
     pub current_dm_jid: Option<BareJid>,
-
-    /// Set of joined MUC rooms
     pub joined_rooms: std::collections::HashSet<BareJid>,
-
-    /// Our own JID (set after connection)
     pub own_jid: Option<BareJid>,
-
-    /// Our nickname in rooms
     pub nickname: String,
+    /// Contact presence states.
+    pub presence_map: HashMap<BareJid, ContactPresence>,
+    /// Roster contacts (JID -> display name).
+    pub roster: HashMap<BareJid, Option<String>>,
+    /// Whether MAM history is currently loading.
+    pub mam_loading: bool,
+    /// Unread message counts per view key.
+    pub unread_counts: HashMap<String, usize>,
+    /// Embed processor (plugin pipeline).
+    embed_processor: Arc<dyn EmbedProcessor>,
+}
 
-    /// Currently open modal dialog
-    pub modal: Modal,
-
-    /// Input buffer for create waddle modal
-    pub modal_input: String,
-
-    /// Cursor position in modal input
-    pub modal_cursor: usize,
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("focus", &self.focus)
+            .field("connection_state", &self.connection_state)
+            .field("current_view_name", &self.current_view_name)
+            .field("nickname", &self.nickname)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for App {
@@ -191,9 +194,7 @@ impl Default for App {
 }
 
 impl App {
-    /// Create a new App with default (empty) state
     pub fn new() -> Self {
-        // Initialize with empty sidebar - data will be populated from API
         let sidebar_items = vec![
             SidebarItem::WaddleHeader,
             SidebarItem::ChannelHeader,
@@ -205,90 +206,172 @@ impl App {
             focus: Focus::Sidebar,
             sidebar_items,
             sidebar_selected: 0,
-            messages: Vec::new(),
+            room_messages: HashMap::new(),
             message_scroll: 0,
             input_buffer: String::new(),
             input_cursor: 0,
             current_view_name: "Welcome".into(),
+            current_view_key: None,
             connection_state: ConnectionState::Disconnected,
             current_room_jid: None,
             current_dm_jid: None,
             joined_rooms: std::collections::HashSet::new(),
             own_jid: None,
             nickname: "user".into(),
-            modal: Modal::None,
-            modal_input: String::new(),
-            modal_cursor: 0,
+            presence_map: HashMap::new(),
+            roster: HashMap::new(),
+            mam_loading: false,
+            unread_counts: HashMap::new(),
+            embed_processor: Arc::new(NoopEmbedProcessor),
         }
     }
 
-    /// Open the create waddle modal
-    pub fn open_create_waddle_modal(&mut self) {
-        self.modal = Modal::CreateWaddle;
-        self.modal_input.clear();
-        self.modal_cursor = 0;
+    /// Set a custom embed processor (for plugin integration).
+    pub fn set_embed_processor(&mut self, processor: Arc<dyn EmbedProcessor>) {
+        self.embed_processor = processor;
     }
 
-    /// Close any open modal
-    pub fn close_modal(&mut self) {
-        self.modal = Modal::None;
-        self.modal_input.clear();
-        self.modal_cursor = 0;
+    /// Get messages for the current active view.
+    pub fn messages(&self) -> &[Message] {
+        self.current_view_key
+            .as_ref()
+            .and_then(|key| self.room_messages.get(key))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
-    /// Check if a modal is open
-    pub fn has_modal(&self) -> bool {
-        self.modal != Modal::None
+    /// Add a message to a specific room/conversation.
+    pub fn add_message_to(
+        &mut self,
+        view_key: &str,
+        author: String,
+        content: String,
+        embeds: Vec<RawEmbed>,
+    ) {
+        self.add_message_to_with_id(view_key, None, author, content, embeds);
     }
 
-    /// Insert a character into the modal input at the cursor position
-    pub fn modal_insert_char(&mut self, c: char) {
-        self.modal_input.insert(self.modal_cursor, c);
-        self.modal_cursor += 1;
-    }
+    /// Add a message with an optional ID for deduplication.
+    pub fn add_message_to_with_id(
+        &mut self,
+        view_key: &str,
+        id: Option<String>,
+        author: String,
+        content: String,
+        embeds: Vec<RawEmbed>,
+    ) {
+        let messages = self
+            .room_messages
+            .entry(view_key.to_string())
+            .or_default();
 
-    /// Delete the character before the cursor in modal input
-    pub fn modal_delete_char(&mut self) {
-        if self.modal_cursor > 0 {
-            self.modal_cursor -= 1;
-            self.modal_input.remove(self.modal_cursor);
+        // Deduplicate by message ID
+        if let Some(ref msg_id) = id {
+            if !msg_id.is_empty() && messages.iter().any(|m| m.id == *msg_id) {
+                return;
+            }
+        }
+
+        messages.push(Message {
+            id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            author,
+            content,
+            timestamp: chrono::Utc::now(),
+            embeds,
+        });
+
+        // Cap message buffer
+        if messages.len() > MAX_MESSAGES_PER_ROOM {
+            let excess = messages.len() - MAX_MESSAGES_PER_ROOM;
+            messages.drain(..excess);
+        }
+
+        // Auto-scroll to newest if viewing this room, otherwise increment unread
+        if self.current_view_key.as_deref() == Some(view_key) {
+            self.message_scroll = 0;
+        } else {
+            *self.unread_counts.entry(view_key.to_string()).or_insert(0) += 1;
         }
     }
 
-    /// Get the modal input value (for submitting)
-    pub fn get_modal_input(&self) -> &str {
-        &self.modal_input
+    /// Prepend a historical message (from MAM) to a room.
+    pub fn prepend_message(
+        &mut self,
+        view_key: &str,
+        id: Option<String>,
+        author: String,
+        content: String,
+        embeds: Vec<RawEmbed>,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let messages = self
+            .room_messages
+            .entry(view_key.to_string())
+            .or_default();
+
+        // Deduplicate
+        if let Some(ref msg_id) = id {
+            if !msg_id.is_empty() && messages.iter().any(|m| m.id == *msg_id) {
+                return;
+            }
+        }
+
+        messages.insert(
+            0,
+            Message {
+                id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                author,
+                content,
+                timestamp: timestamp.unwrap_or_else(chrono::Utc::now),
+                embeds,
+            },
+        );
+
+        // Cap from front if needed
+        if messages.len() > MAX_MESSAGES_PER_ROOM {
+            messages.truncate(MAX_MESSAGES_PER_ROOM);
+        }
     }
 
-    /// Populate sidebar with waddles and channels from the API
+    /// Convenience: add a message to the current view.
+    pub fn add_message(&mut self, author: String, content: String) {
+        if let Some(key) = self.current_view_key.clone() {
+            self.add_message_to(&key, author, content, vec![]);
+        }
+    }
+
+    /// Populate sidebar with waddles and channels from the API.
     pub fn set_waddles_and_channels(
         &mut self,
-        waddles: Vec<(String, String)>,  // (id, name)
-        channels: Vec<(String, String)>, // (id, name)
+        waddles: Vec<(String, String)>,
+        channels: Vec<(String, String)>,
     ) {
         let mut items = vec![SidebarItem::WaddleHeader];
-
-        // Add waddles
         for (id, name) in waddles {
             items.push(SidebarItem::Waddle { id, name });
         }
-
         items.push(SidebarItem::ChannelHeader);
-
-        // Add channels
         for (id, name) in channels {
             items.push(SidebarItem::Channel {
                 id,
                 name: format!("#{}", name),
             });
         }
-
         items.push(SidebarItem::DmHeader);
-        // DMs would be added here when we have that data
+
+        // Add roster contacts to DM section
+        for (jid, name) in &self.roster {
+            let display = name
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| jid.to_string());
+            items.push(SidebarItem::DirectMessage {
+                id: jid.to_string(),
+                name: display,
+            });
+        }
 
         self.sidebar_items = items;
-
-        // Select first non-header item if available
         self.sidebar_selected = self
             .sidebar_items
             .iter()
@@ -296,42 +379,62 @@ impl App {
             .unwrap_or(0);
     }
 
-    /// Request the application to quit
+    /// Add a roster contact and refresh sidebar DMs.
+    pub fn add_roster_contact(&mut self, jid: BareJid, name: Option<String>) {
+        self.roster.insert(jid.clone(), name.clone());
+
+        // Add to sidebar if not already present
+        let id = jid.to_string();
+        if !self.sidebar_items.iter().any(|item| {
+            matches!(item, SidebarItem::DirectMessage { id: did, .. } if *did == id)
+        }) {
+            let display = name.unwrap_or_else(|| jid.to_string());
+            self.sidebar_items.push(SidebarItem::DirectMessage {
+                id,
+                name: display,
+            });
+        }
+    }
+
+    /// Update contact presence.
+    pub fn update_presence(&mut self, jid: BareJid, available: bool, show: Option<String>) {
+        self.presence_map
+            .insert(jid, ContactPresence { available, show });
+    }
+
+    /// Get presence for a contact.
+    pub fn get_presence(&self, jid: &BareJid) -> Option<&ContactPresence> {
+        self.presence_map.get(jid)
+    }
+
     pub fn quit(&mut self) {
         self.should_quit = true;
     }
 
-    /// Cycle focus to the next panel
     pub fn focus_next(&mut self) {
         self.focus = self.focus.next();
     }
 
-    /// Cycle focus to the previous panel
     pub fn focus_prev(&mut self) {
         self.focus = self.focus.prev();
     }
 
-    /// Move selection up in the sidebar
     pub fn sidebar_up(&mut self) {
         if self.sidebar_selected > 0 {
             self.sidebar_selected -= 1;
-            // Skip headers
             while self.sidebar_selected > 0 && self.sidebar_items[self.sidebar_selected].is_header()
             {
                 self.sidebar_selected -= 1;
             }
-            // If we landed on a header at index 0, move down
             if self.sidebar_items[self.sidebar_selected].is_header() {
                 self.sidebar_down();
             }
         }
     }
 
-    /// Move selection down in the sidebar
     pub fn sidebar_down(&mut self) {
         if self.sidebar_selected < self.sidebar_items.len() - 1 {
             self.sidebar_selected += 1;
-            // Skip headers
             while self.sidebar_selected < self.sidebar_items.len() - 1
                 && self.sidebar_items[self.sidebar_selected].is_header()
             {
@@ -340,49 +443,40 @@ impl App {
         }
     }
 
-    /// Select the currently highlighted sidebar item
     pub fn sidebar_select(&mut self) -> Option<&SidebarItem> {
         let item = self.sidebar_items.get(self.sidebar_selected)?;
         if item.is_header() {
             return None;
         }
-
-        // Update the current view name
         self.current_view_name = item.display_name().to_string();
-
         tracing::info!("Selected sidebar item: {:?}", item);
         Some(item)
     }
 
-    /// Get the currently selected sidebar item
     pub fn selected_sidebar_item(&self) -> Option<&SidebarItem> {
         self.sidebar_items.get(self.sidebar_selected)
     }
 
-    /// Scroll messages up (towards older)
     pub fn scroll_messages_up(&mut self) {
-        if self.message_scroll < self.messages.len().saturating_sub(1) {
+        let msg_count = self.messages().len();
+        if self.message_scroll < msg_count.saturating_sub(1) {
             self.message_scroll += 1;
         }
     }
 
-    /// Scroll messages down (towards newer)
     pub fn scroll_messages_down(&mut self) {
         if self.message_scroll > 0 {
             self.message_scroll -= 1;
         }
     }
 
-    /// Insert a character at the current cursor position
     pub fn input_insert(&mut self, c: char) {
         self.input_buffer.insert(self.input_cursor, c);
         self.input_cursor += c.len_utf8();
     }
 
-    /// Delete the character before the cursor (backspace)
     pub fn input_backspace(&mut self) {
         if self.input_cursor > 0 {
-            // Find the previous character boundary
             let prev_char = self.input_buffer[..self.input_cursor]
                 .chars()
                 .last()
@@ -392,14 +486,12 @@ impl App {
         }
     }
 
-    /// Delete the character at the cursor (delete key)
     pub fn input_delete(&mut self) {
         if self.input_cursor < self.input_buffer.len() {
             self.input_buffer.remove(self.input_cursor);
         }
     }
 
-    /// Move cursor left
     pub fn input_cursor_left(&mut self) {
         if self.input_cursor > 0 {
             let prev_char = self.input_buffer[..self.input_cursor]
@@ -410,7 +502,6 @@ impl App {
         }
     }
 
-    /// Move cursor right
     pub fn input_cursor_right(&mut self) {
         if self.input_cursor < self.input_buffer.len() {
             let next_char = self.input_buffer[self.input_cursor..]
@@ -421,107 +512,101 @@ impl App {
         }
     }
 
-    /// Move cursor to start of input
     pub fn input_cursor_home(&mut self) {
         self.input_cursor = 0;
     }
 
-    /// Move cursor to end of input
     pub fn input_cursor_end(&mut self) {
         self.input_cursor = self.input_buffer.len();
     }
 
-    /// Submit the current input (send message)
-    /// Returns the message text if not empty, without adding to local messages
-    /// (The actual sending is done by the XMPP client, which will receive it back)
     pub fn input_submit(&mut self) -> Option<String> {
         if self.input_buffer.is_empty() {
             return None;
         }
-
         let message = std::mem::take(&mut self.input_buffer);
         self.input_cursor = 0;
-
-        tracing::info!("Submitted message: {}", message);
         Some(message)
     }
 
-    /// Add a message to the current view (called when receiving XMPP messages)
-    pub fn add_message(&mut self, author: String, content: String) {
-        self.messages.push(Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            author,
-            content,
-            timestamp: chrono::Utc::now(),
-        });
-        // Auto-scroll to newest message
-        self.message_scroll = 0;
-    }
-
-    /// Set the connection state
     pub fn set_connection_state(&mut self, state: ConnectionState) {
         tracing::info!("Connection state: {:?}", state);
         self.connection_state = state;
     }
 
-    /// Mark a room as joined
     pub fn room_joined(&mut self, room_jid: BareJid) {
         tracing::info!("Room joined: {}", room_jid);
         self.joined_rooms.insert(room_jid);
     }
 
-    /// Mark a room as left
     pub fn room_left(&mut self, room_jid: &BareJid) {
         tracing::info!("Room left: {}", room_jid);
         self.joined_rooms.remove(room_jid);
     }
 
-    /// Check if we're in a specific room
     pub fn is_in_room(&self, room_jid: &BareJid) -> bool {
         self.joined_rooms.contains(room_jid)
     }
 
-    /// Set the current active room
     pub fn set_current_room(&mut self, room_jid: Option<BareJid>) {
         self.current_room_jid = room_jid.clone();
+        self.current_dm_jid = None;
         if let Some(jid) = room_jid {
-            // Update the view name to show the room
+            let key = jid.to_string();
             if let Some(node) = jid.node() {
                 self.current_view_name = format!("#{}", node);
             } else {
                 self.current_view_name = jid.to_string();
             }
-            // Clear messages when switching rooms
-            // (In a real app, we'd load from MAM storage)
-            self.messages.clear();
+            self.unread_counts.remove(&key);
+            self.current_view_key = Some(key);
             self.message_scroll = 0;
+        } else {
+            self.current_view_key = None;
         }
     }
 
-    /// Clear all XMPP-related state (on disconnect)
-    pub fn clear_xmpp_state(&mut self) {
-        self.joined_rooms.clear();
-        self.current_room_jid = None;
-        self.current_dm_jid = None;
-        self.connection_state = ConnectionState::Disconnected;
-    }
-
-    /// Set the current active DM conversation
     pub fn set_current_dm(&mut self, dm_jid: Option<BareJid>) {
         self.current_dm_jid = dm_jid.clone();
-        self.current_room_jid = None; // DMs are not MUC rooms
+        self.current_room_jid = None;
         if let Some(jid) = dm_jid {
-            // Update the view name to show the DM partner
+            let key = jid.to_string();
             if let Some(node) = jid.node() {
                 self.current_view_name = format!("@{}", node);
             } else {
                 self.current_view_name = jid.to_string();
             }
-            // Clear messages when switching conversations
-            // (In a real app, we'd load from MAM storage)
-            self.messages.clear();
+            self.unread_counts.remove(&key);
+            self.current_view_key = Some(key);
             self.message_scroll = 0;
+        } else {
+            self.current_view_key = None;
         }
+    }
+
+    /// Get unread count for a view key.
+    pub fn unread_count(&self, view_key: &str) -> usize {
+        self.unread_counts.get(view_key).copied().unwrap_or(0)
+    }
+
+    /// Get unread count for a channel by name (matches `name@*` in view keys).
+    pub fn unread_for_channel(&self, channel_name: &str) -> usize {
+        self.unread_counts
+            .iter()
+            .filter(|(key, _)| {
+                // View keys for rooms are "room@muc.domain" — match the local part
+                key.split('@').next() == Some(channel_name)
+            })
+            .map(|(_, count)| count)
+            .sum()
+    }
+
+    pub fn clear_xmpp_state(&mut self) {
+        self.joined_rooms.clear();
+        self.current_room_jid = None;
+        self.current_dm_jid = None;
+        self.connection_state = ConnectionState::Disconnected;
+        self.presence_map.clear();
     }
 }
 
@@ -538,13 +623,70 @@ mod tests {
     }
 
     #[test]
-    fn test_sidebar_navigation() {
+    fn test_per_room_messages() {
         let mut app = App::new();
-        let initial = app.sidebar_selected;
-        app.sidebar_down();
-        assert!(app.sidebar_selected > initial || app.sidebar_selected == initial);
-        app.sidebar_up();
-        // Should be back to initial or still at a valid non-header position
+        app.add_message_to("room1", "alice".into(), "hello".into(), vec![]);
+        app.add_message_to("room2", "bob".into(), "world".into(), vec![]);
+
+        // No view selected -> empty
+        assert!(app.messages().is_empty());
+
+        // Select room1
+        app.current_view_key = Some("room1".into());
+        assert_eq!(app.messages().len(), 1);
+        assert_eq!(app.messages()[0].author, "alice");
+
+        // Select room2
+        app.current_view_key = Some("room2".into());
+        assert_eq!(app.messages().len(), 1);
+        assert_eq!(app.messages()[0].author, "bob");
+    }
+
+    #[test]
+    fn test_message_dedup() {
+        let mut app = App::new();
+        app.add_message_to_with_id("room", Some("id1".into()), "a".into(), "hi".into(), vec![]);
+        app.add_message_to_with_id("room", Some("id1".into()), "a".into(), "hi".into(), vec![]);
+
+        app.current_view_key = Some("room".into());
+        assert_eq!(app.messages().len(), 1);
+    }
+
+    #[test]
+    fn test_message_cap() {
+        let mut app = App::new();
+        for i in 0..1100 {
+            app.add_message_to("room", "a".into(), format!("msg {i}"), vec![]);
+        }
+        app.current_view_key = Some("room".into());
+        assert!(app.messages().len() <= MAX_MESSAGES_PER_ROOM);
+    }
+
+    #[test]
+    fn test_prepend_message() {
+        let mut app = App::new();
+        app.add_message_to("room", "a".into(), "recent".into(), vec![]);
+        app.prepend_message("room", None, "b".into(), "old".into(), vec![], None);
+
+        app.current_view_key = Some("room".into());
+        assert_eq!(app.messages()[0].content, "old");
+        assert_eq!(app.messages()[1].content, "recent");
+    }
+
+    #[test]
+    fn test_presence_tracking() {
+        let mut app = App::new();
+        let jid: BareJid = "alice@example.com".parse().unwrap();
+        app.update_presence(jid.clone(), true, None);
+        let p = app.get_presence(&jid).unwrap();
+        assert!(p.available);
+        assert_eq!(p.indicator(), "●");
+
+        app.update_presence(jid.clone(), true, Some("Away".into()));
+        assert_eq!(app.get_presence(&jid).unwrap().indicator(), "◐");
+
+        app.update_presence(jid.clone(), false, None);
+        assert_eq!(app.get_presence(&jid).unwrap().indicator(), "○");
     }
 
     #[test]
@@ -558,5 +700,50 @@ mod tests {
         app.input_backspace();
         assert_eq!(app.input_buffer, "H");
         assert_eq!(app.input_cursor, 1);
+    }
+
+    #[test]
+    fn test_connection_state_display() {
+        let state = ConnectionState::Reconnecting {
+            attempt: 3,
+            countdown_secs: 4.5,
+        };
+        let display = state.display();
+        assert!(display.starts_with("Retry #3 in "), "got: {display}");
+        assert_eq!(state.indicator(), "◐");
+    }
+
+    #[test]
+    fn test_unread_counts() {
+        let mut app = App::new();
+        // Set active view to room1
+        app.current_view_key = Some("room1@muc.example.com".into());
+
+        // Message to active view — no unread
+        app.add_message_to("room1@muc.example.com", "a".into(), "hi".into(), vec![]);
+        assert_eq!(app.unread_count("room1@muc.example.com"), 0);
+
+        // Message to inactive view — unread increments
+        app.add_message_to("room2@muc.example.com", "b".into(), "yo".into(), vec![]);
+        assert_eq!(app.unread_count("room2@muc.example.com"), 1);
+        app.add_message_to("room2@muc.example.com", "b".into(), "hey".into(), vec![]);
+        assert_eq!(app.unread_count("room2@muc.example.com"), 2);
+
+        // Channel name lookup
+        assert_eq!(app.unread_for_channel("room2"), 2);
+        assert_eq!(app.unread_for_channel("room1"), 0);
+
+        // Switching view clears unread
+        let jid: BareJid = "room2@muc.example.com".parse().unwrap();
+        app.set_current_room(Some(jid));
+        assert_eq!(app.unread_count("room2@muc.example.com"), 0);
+    }
+
+    #[test]
+    fn test_sidebar_navigation() {
+        let mut app = App::new();
+        let initial = app.sidebar_selected;
+        app.sidebar_down();
+        assert!(app.sidebar_selected >= initial);
     }
 }
