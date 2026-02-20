@@ -19,7 +19,7 @@ pub enum AuthProviderTokenEndpointAuthMethod {
     ClientSecretPost,
     /// Public client using PKCE without client authentication.
     #[serde(rename = "none")]
-    NoneAuth,
+    NoAuthentication,
 }
 
 /// Static auth provider configuration loaded from environment.
@@ -171,10 +171,7 @@ impl AuthProviderConfig {
 
 impl AuthProviderTokenEndpointAuthMethod {
     pub fn requires_client_secret(self) -> bool {
-        matches!(
-            self,
-            AuthProviderTokenEndpointAuthMethod::ClientSecretPost
-        )
+        matches!(self, AuthProviderTokenEndpointAuthMethod::ClientSecretPost)
     }
 }
 
@@ -317,7 +314,7 @@ mod tests {
     fn none_auth_allows_empty_client_secret() {
         let mut provider = oidc_provider();
         provider.client_secret = "".to_string();
-        provider.token_endpoint_auth_method = AuthProviderTokenEndpointAuthMethod::NoneAuth;
+        provider.token_endpoint_auth_method = AuthProviderTokenEndpointAuthMethod::NoAuthentication;
         provider.validate().expect("public client should be valid");
     }
 
@@ -356,7 +353,7 @@ mod tests {
         provider.validate().expect("provider should validate");
         assert_eq!(
             provider.token_endpoint_auth_method,
-            AuthProviderTokenEndpointAuthMethod::NoneAuth
+            AuthProviderTokenEndpointAuthMethod::NoAuthentication
         );
         assert!(provider.client_secret.is_empty());
     }

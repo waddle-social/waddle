@@ -152,3 +152,106 @@ pub fn claims_from_userinfo(
         raw_claims: userinfo,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn oidc_provider_for(auth_method: AuthProviderTokenEndpointAuthMethod) -> AuthProviderConfig {
+        AuthProviderConfig {
+            id: "rawkode".to_string(),
+            display_name: "rawkode.academy".to_string(),
+            kind: AuthProviderKind::Oidc,
+            client_id: "public-client".to_string(),
+            client_secret: "super-secret".to_string(),
+            token_endpoint_auth_method: auth_method,
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
+            issuer: Some("https://id.rawkode.academy/auth".to_string()),
+            authorization_endpoint: None,
+            token_endpoint: Some("https://id.rawkode.academy/auth/token".to_string()),
+            userinfo_endpoint: Some("https://id.rawkode.academy/auth/userinfo".to_string()),
+            jwks_uri: None,
+            subject_claim: "sub".to_string(),
+            username_claim: Some("preferred_username".to_string()),
+            email_claim: Some("email".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_code_includes_client_secret_for_client_secret_post() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "access-token",
+                "token_type": "Bearer"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let provider = oidc_provider_for(AuthProviderTokenEndpointAuthMethod::ClientSecretPost);
+        let token_endpoint = format!("{}/token", mock_server.uri());
+        let _ = exchange_code(
+            &Client::new(),
+            &provider,
+            &token_endpoint,
+            "auth-code",
+            "https://app.example/callback",
+            "pkce-verifier",
+        )
+        .await
+        .expect("token exchange should succeed");
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests should be available");
+        let body =
+            String::from_utf8(requests[0].body.clone()).expect("request body should be utf8");
+        assert!(body.contains("client_secret=super-secret"));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_omits_client_secret_for_public_client() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "access-token",
+                "token_type": "Bearer"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let provider = oidc_provider_for(AuthProviderTokenEndpointAuthMethod::NoAuthentication);
+        let token_endpoint = format!("{}/token", mock_server.uri());
+        let _ = exchange_code(
+            &Client::new(),
+            &provider,
+            &token_endpoint,
+            "auth-code",
+            "https://app.example/callback",
+            "pkce-verifier",
+        )
+        .await
+        .expect("token exchange should succeed");
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests should be available");
+        let body =
+            String::from_utf8(requests[0].body.clone()).expect("request body should be utf8");
+        assert!(!body.contains("client_secret="));
+    }
+}
