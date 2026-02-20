@@ -29,8 +29,8 @@ impl<'a> SidebarWidget<'a> {
         self
     }
 
-    /// Convert a sidebar item to a styled list item
-    fn item_to_list_item(item: &SidebarItem, selected: bool) -> ListItem<'static> {
+    /// Convert a sidebar item to a styled list item, with presence indicator for DMs.
+    fn item_to_list_item(&self, item: &SidebarItem, selected: bool) -> ListItem<'static> {
         let (text, style) = match item {
             SidebarItem::WaddleHeader => (
                 "🐧 Waddles".to_string(),
@@ -63,26 +63,55 @@ impl<'a> SidebarWidget<'a> {
                     },
                 )
             }
-            SidebarItem::Channel { name, .. } => {
+            SidebarItem::Channel { id: _, name } => {
                 let prefix = if selected { "▸ " } else { "  " };
+                // Look up unread by trying all view keys that end with the channel name
+                let room_name = name.trim_start_matches('#');
+                let unread = self.app.unread_for_channel(room_name);
+                let badge = if unread > 0 {
+                    format!(" ({})", unread)
+                } else {
+                    String::new()
+                };
                 (
-                    format!("{}{}", prefix, name),
+                    format!("{}{}{}", prefix, name, badge),
                     if selected {
                         Style::default()
                             .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else if unread > 0 {
+                        Style::default()
+                            .fg(Color::White)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Green)
                     },
                 )
             }
-            SidebarItem::DirectMessage { name, .. } => {
+            SidebarItem::DirectMessage { id, name } => {
                 let prefix = if selected { "▸ " } else { "  " };
+                // Add presence indicator
+                let indicator = id
+                    .parse::<xmpp_parsers::jid::BareJid>()
+                    .ok()
+                    .and_then(|jid| self.app.get_presence(&jid))
+                    .map(|p| p.indicator())
+                    .unwrap_or("○");
+                let unread = self.app.unread_count(id);
+                let badge = if unread > 0 {
+                    format!(" ({})", unread)
+                } else {
+                    String::new()
+                };
                 (
-                    format!("{}{}", prefix, name),
+                    format!("{}{} {}{}", prefix, indicator, name, badge),
                     if selected {
                         Style::default()
                             .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else if unread > 0 {
+                        Style::default()
+                            .fg(Color::White)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Magenta)
@@ -103,13 +132,12 @@ impl<'a> SidebarWidget<'a> {
 
 impl<'a> Widget for SidebarWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Create list items from sidebar items
         let items: Vec<ListItem> = self
             .app
             .sidebar_items
             .iter()
             .enumerate()
-            .map(|(i, item)| Self::item_to_list_item(item, i == self.app.sidebar_selected))
+            .map(|(i, item)| self.item_to_list_item(item, i == self.app.sidebar_selected))
             .collect();
 
         let mut list = List::new(items);
@@ -128,11 +156,12 @@ mod tests {
 
     #[test]
     fn test_item_to_list_item() {
+        let app = App::new();
+        let widget = SidebarWidget::new(&app);
         let item = SidebarItem::Channel {
             id: "test".into(),
             name: "#test".into(),
         };
-        let _list_item = SidebarWidget::item_to_list_item(&item, false);
-        // Just test it doesn't panic
+        let _list_item = widget.item_to_list_item(&item, false);
     }
 }

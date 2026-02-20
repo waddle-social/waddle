@@ -2,6 +2,10 @@
 // Copyright (C) 2025 Waddle Social
 
 //! Messages widget for displaying channel/DM messages.
+//!
+//! Renders message content and any raw embed payloads. Embed rendering
+//! is generic — the CLI shows namespace and element name for unknown
+//! embeds. Plugin-driven rich rendering happens through the WASM runtime.
 
 use ratatui::{
     buffer::Buffer,
@@ -13,6 +17,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::config::Config;
+use crate::stanza::RawEmbed;
 
 /// Messages widget showing the message history
 pub struct MessagesWidget<'a> {
@@ -39,7 +44,6 @@ impl<'a> MessagesWidget<'a> {
     fn format_message(&self, msg: &crate::app::Message) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        // Format timestamp
         let timestamp = if self.config.ui.show_timestamps {
             let formatted = msg
                 .timestamp
@@ -50,35 +54,118 @@ impl<'a> MessagesWidget<'a> {
             String::new()
         };
 
-        // Author style
         let author_style = Style::default()
             .fg(author_color(&msg.author))
             .add_modifier(Modifier::BOLD);
 
-        // Build the header line: [timestamp] <author>
         let header = Line::from(vec![
             Span::styled(timestamp, Style::default().fg(Color::DarkGray)),
             Span::styled(format!("<{}>", msg.author), author_style),
         ]);
         lines.push(header);
 
-        // Content line(s)
         let content = Line::from(vec![Span::styled(
             format!("  {}", msg.content),
             Style::default().fg(Color::White),
         )]);
         lines.push(content);
 
-        // Empty line for spacing
+        // Render embeds (generic; plugins can provide richer rendering)
+        for embed in &msg.embeds {
+            lines.extend(format_embed(embed));
+        }
+
+        // Spacing
         lines.push(Line::default());
 
         lines
     }
 }
 
+/// Format a raw embed for TUI display.
+/// This provides a generic rendering; the WASM plugin system can override
+/// this with richer formatting via the `tui_renderer` hook.
+fn format_embed(embed: &RawEmbed) -> Vec<Line<'static>> {
+    let mut lines = vec![];
+
+    let value_style = Style::default().fg(Color::Cyan);
+
+    // Show a compact representation based on namespace
+    let label = match embed.namespace.as_str() {
+        "urn:waddle:github:0" => format_github_embed(embed),
+        _ => format!("  📎 [{}:{}]", embed.namespace, embed.name),
+    };
+
+    lines.push(Line::from(vec![Span::styled(label, value_style)]));
+    lines
+}
+
+/// Format a GitHub embed with a compact representation.
+/// This is a basic fallback — the real rendering lives in the GitHub WASM plugin.
+fn format_github_embed(embed: &RawEmbed) -> String {
+    match embed.name.as_str() {
+        "repo" => {
+            // Parse basic attrs from XML for a one-line summary
+            if let Some(owner) = extract_attr(&embed.xml, "owner") {
+                if let Some(name) = extract_attr(&embed.xml, "name") {
+                    return format!("  📦 {}/{}", owner, name);
+                }
+            }
+            "  📦 [GitHub repo]".to_string()
+        }
+        "issue" => {
+            if let Some(repo) = extract_attr(&embed.xml, "repo") {
+                if let Some(number) = extract_attr(&embed.xml, "number") {
+                    let state = extract_attr(&embed.xml, "state").unwrap_or_default();
+                    let icon = if state == "closed" { "🟣" } else { "🟢" };
+                    return format!("  {} {}#{}", icon, repo, number);
+                }
+            }
+            "  🔵 [GitHub issue]".to_string()
+        }
+        "pr" => {
+            if let Some(repo) = extract_attr(&embed.xml, "repo") {
+                if let Some(number) = extract_attr(&embed.xml, "number") {
+                    let state = extract_attr(&embed.xml, "state").unwrap_or_default();
+                    let merged = extract_attr(&embed.xml, "merged").unwrap_or_default();
+                    let icon = if merged == "true" {
+                        "🟣"
+                    } else if state == "closed" {
+                        "🔴"
+                    } else {
+                        "🟢"
+                    };
+                    return format!("  {} {}#{} (PR)", icon, repo, number);
+                }
+            }
+            "  🔀 [GitHub PR]".to_string()
+        }
+        _ => format!("  📎 [github:{}]", embed.name),
+    }
+}
+
+/// Quick attribute extraction from serialized XML (no full parse needed for display).
+fn extract_attr<'a>(xml: &'a str, attr_name: &str) -> Option<String> {
+    let pattern = format!("{}='", attr_name);
+    if let Some(start) = xml.find(&pattern) {
+        let value_start = start + pattern.len();
+        if let Some(end) = xml[value_start..].find('\'') {
+            return Some(xml[value_start..value_start + end].to_string());
+        }
+    }
+    // Also try double quotes
+    let pattern = format!("{}=\"", attr_name);
+    if let Some(start) = xml.find(&pattern) {
+        let value_start = start + pattern.len();
+        if let Some(end) = xml[value_start..].find('"') {
+            return Some(xml[value_start..value_start + end].to_string());
+        }
+    }
+    None
+}
+
 /// Generate a consistent color for a username
 fn author_color(author: &str) -> Color {
-    // Simple hash to color mapping
     let hash: u32 = author.chars().map(|c| c as u32).sum();
     let colors = [
         Color::Red,
@@ -99,29 +186,41 @@ fn author_color(author: &str) -> Color {
 
 impl<'a> Widget for MessagesWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Collect all formatted lines
         let mut all_lines: Vec<Line<'static>> = Vec::new();
 
-        // Add a welcome message if no messages
-        if self.app.messages.is_empty() {
-            all_lines.push(Line::from(vec![Span::styled(
-                "No messages yet. Say something!",
-                Style::default().fg(Color::DarkGray),
-            )]));
+        let messages = self.app.messages();
+
+        if messages.is_empty() {
+            if self.app.mam_loading {
+                all_lines.push(Line::from(vec![Span::styled(
+                    "Loading history...",
+                    Style::default().fg(Color::Yellow),
+                )]));
+            } else {
+                all_lines.push(Line::from(vec![Span::styled(
+                    "No messages yet. Say something!",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            }
         } else {
-            for msg in &self.app.messages {
+            if self.app.mam_loading {
+                all_lines.push(Line::from(vec![Span::styled(
+                    "⏳ Loading older messages...",
+                    Style::default().fg(Color::Yellow),
+                )]));
+                all_lines.push(Line::default());
+            }
+            for msg in messages {
                 all_lines.extend(self.format_message(msg));
             }
         }
 
-        // Calculate scroll offset
         let visible_height = self.block.as_ref().map_or(area.height, |_| {
-            area.height.saturating_sub(2) // Account for borders
+            area.height.saturating_sub(2)
         }) as usize;
 
         let total_lines = all_lines.len();
         let scroll_offset = if total_lines > visible_height {
-            // Scroll from bottom by default, adjusted by message_scroll
             let max_scroll = total_lines.saturating_sub(visible_height);
             max_scroll.saturating_sub(self.app.message_scroll)
         } else {
@@ -145,15 +244,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_author_color() {
-        // Same author should always get same color
+    fn test_author_color_deterministic() {
         let color1 = author_color("alice");
         let color2 = author_color("alice");
         assert_eq!(color1, color2);
+    }
 
-        // Different authors might get different colors
-        let color3 = author_color("bob");
-        // (color3 might or might not equal color1, depending on hash collision)
-        let _ = color3; // Just ensure it doesn't panic
+    #[test]
+    fn test_extract_attr_single_quotes() {
+        let xml = "<repo xmlns='urn:waddle:github:0' owner='rust-lang' name='rust'/>";
+        assert_eq!(extract_attr(xml, "owner"), Some("rust-lang".to_string()));
+        assert_eq!(extract_attr(xml, "name"), Some("rust".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attr_double_quotes() {
+        let xml = r#"<repo xmlns="urn:waddle:github:0" owner="a" name="b"/>"#;
+        assert_eq!(extract_attr(xml, "owner"), Some("a".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attr_missing() {
+        let xml = "<repo xmlns='urn:waddle:github:0'/>";
+        assert_eq!(extract_attr(xml, "owner"), None);
+    }
+
+    #[test]
+    fn test_format_github_repo_embed() {
+        let embed = RawEmbed {
+            namespace: "urn:waddle:github:0".into(),
+            name: "repo".into(),
+            xml: "<repo xmlns='urn:waddle:github:0' owner='rust-lang' name='rust'/>".into(),
+        };
+        let result = format_github_embed(&embed);
+        assert!(result.contains("rust-lang/rust"));
+    }
+
+    #[test]
+    fn test_format_github_issue_embed() {
+        let embed = RawEmbed {
+            namespace: "urn:waddle:github:0".into(),
+            name: "issue".into(),
+            xml: "<issue xmlns='urn:waddle:github:0' repo='a/b' number='42' state='open'/>".into(),
+        };
+        let result = format_github_embed(&embed);
+        assert!(result.contains("a/b#42"));
+    }
+
+    #[test]
+    fn test_format_unknown_embed() {
+        let embed = RawEmbed {
+            namespace: "urn:custom:ext:0".into(),
+            name: "widget".into(),
+            xml: "<widget xmlns='urn:custom:ext:0'/>".into(),
+        };
+        let lines = format_embed(&embed);
+        assert!(!lines.is_empty());
     }
 }
