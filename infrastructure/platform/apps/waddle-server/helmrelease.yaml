@@ -24,7 +24,7 @@ spec:
       baseUrl: https://chat.waddle.social
       corsOrigins: https://chat.waddle.social
       authProvidersJson: >-
-        [{"id":"rawkode","display_name":"rawkode.academy","kind":"oidc","issuer":"https://id.rawkode.academy/auth","client_id":"REPLACE_WITH_RAWKODE_OIDC_CLIENT_ID","token_endpoint_auth_method":"none","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]
+        [{"id":"rawkode","display_name":"Rawkode Chat","kind":"oidc","issuer":"https://id.rawkode.academy/auth","client_id":"rawkode-chat","token_endpoint_auth_method":"none","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]
     xmpp:
       domain: chat.waddle.social
     persistence:
