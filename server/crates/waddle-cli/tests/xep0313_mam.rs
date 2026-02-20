@@ -259,7 +259,10 @@ fn mam_query_with_rsm_paging() {
     let before = query
         .children()
         .find(|c| c.is("set", "http://jabber.org/protocol/rsm"))
-        .and_then(|s| s.children().find(|c| c.is("before", "http://jabber.org/protocol/rsm")))
+        .and_then(|s| {
+            s.children()
+                .find(|c| c.is("before", "http://jabber.org/protocol/rsm"))
+        })
         .map(|c| c.text());
     assert_eq!(before, Some("msg-001".to_string()));
 }

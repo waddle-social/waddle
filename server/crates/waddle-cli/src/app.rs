@@ -23,7 +23,10 @@ pub enum ConnectionState {
     Connected,
     Error(String),
     /// Reconnecting with countdown.
-    Reconnecting { attempt: u32, countdown_secs: f64 },
+    Reconnecting {
+        attempt: u32,
+        countdown_secs: f64,
+    },
 }
 
 impl ConnectionState {
@@ -260,10 +263,7 @@ impl App {
         content: String,
         embeds: Vec<RawEmbed>,
     ) {
-        let messages = self
-            .room_messages
-            .entry(view_key.to_string())
-            .or_default();
+        let messages = self.room_messages.entry(view_key.to_string()).or_default();
 
         // Deduplicate by message ID
         if let Some(ref msg_id) = id {
@@ -304,10 +304,7 @@ impl App {
         embeds: Vec<RawEmbed>,
         timestamp: Option<chrono::DateTime<chrono::Utc>>,
     ) {
-        let messages = self
-            .room_messages
-            .entry(view_key.to_string())
-            .or_default();
+        let messages = self.room_messages.entry(view_key.to_string()).or_default();
 
         // Deduplicate
         if let Some(ref msg_id) = id {
@@ -361,10 +358,7 @@ impl App {
 
         // Add roster contacts to DM section
         for (jid, name) in &self.roster {
-            let display = name
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| jid.to_string());
+            let display = name.as_ref().cloned().unwrap_or_else(|| jid.to_string());
             items.push(SidebarItem::DirectMessage {
                 id: jid.to_string(),
                 name: display,
@@ -385,14 +379,14 @@ impl App {
 
         // Add to sidebar if not already present
         let id = jid.to_string();
-        if !self.sidebar_items.iter().any(|item| {
-            matches!(item, SidebarItem::DirectMessage { id: did, .. } if *did == id)
-        }) {
+        if !self
+            .sidebar_items
+            .iter()
+            .any(|item| matches!(item, SidebarItem::DirectMessage { id: did, .. } if *did == id))
+        {
             let display = name.unwrap_or_else(|| jid.to_string());
-            self.sidebar_items.push(SidebarItem::DirectMessage {
-                id,
-                name: display,
-            });
+            self.sidebar_items
+                .push(SidebarItem::DirectMessage { id, name: display });
         }
     }
 

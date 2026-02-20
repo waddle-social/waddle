@@ -215,9 +215,10 @@ impl<'a> Widget for MessagesWidget<'a> {
             }
         }
 
-        let visible_height = self.block.as_ref().map_or(area.height, |_| {
-            area.height.saturating_sub(2)
-        }) as usize;
+        let visible_height =
+            self.block
+                .as_ref()
+                .map_or(area.height, |_| area.height.saturating_sub(2)) as usize;
 
         let total_lines = all_lines.len();
         let scroll_offset = if total_lines > visible_height {

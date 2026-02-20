@@ -129,9 +129,7 @@ fn muc_subject_change() {
 #[test]
 fn build_muc_join_presence_has_correct_structure() {
     // Verify our join presence builder creates valid MUC join stanzas
-    let room_jid: xmpp_parsers::jid::BareJid = "room@conference.example.com"
-        .parse()
-        .unwrap();
+    let room_jid: xmpp_parsers::jid::BareJid = "room@conference.example.com".parse().unwrap();
     let nick = "testuser";
 
     // Build the full JID: room@conference.example.com/testuser
@@ -164,8 +162,7 @@ fn build_muc_join_presence_has_correct_structure() {
 
 #[test]
 fn build_muc_leave_presence_is_unavailable() {
-    let full_jid: xmpp_parsers::jid::Jid =
-        "room@conference.example.com/testuser".parse().unwrap();
+    let full_jid: xmpp_parsers::jid::Jid = "room@conference.example.com/testuser".parse().unwrap();
 
     let pres = xmpp_parsers::presence::Presence {
         from: None,
@@ -185,12 +182,9 @@ fn build_muc_leave_presence_is_unavailable() {
 
 #[test]
 fn build_groupchat_message_stanza() {
-    let room_jid: xmpp_parsers::jid::BareJid = "room@conference.example.com"
-        .parse()
-        .unwrap();
+    let room_jid: xmpp_parsers::jid::BareJid = "room@conference.example.com".parse().unwrap();
 
-    let mut msg =
-        xmpp_parsers::message::Message::new(Some(xmpp_parsers::jid::Jid::from(room_jid)));
+    let mut msg = xmpp_parsers::message::Message::new(Some(xmpp_parsers::jid::Jid::from(room_jid)));
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
     msg.bodies.insert(
         String::new(),
@@ -200,10 +194,7 @@ fn build_groupchat_message_stanza() {
 
     assert_eq!(elem.name(), "message");
     assert_eq!(elem.attr("type"), Some("groupchat"));
-    assert_eq!(
-        elem.attr("to"),
-        Some("room@conference.example.com")
-    );
+    assert_eq!(elem.attr("to"), Some("room@conference.example.com"));
     let body = elem
         .children()
         .find(|c| c.is("body", "jabber:client"))

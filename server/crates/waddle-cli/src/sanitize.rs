@@ -140,7 +140,10 @@ mod tests {
 
     #[test]
     fn plain_text_unchanged() {
-        assert_eq!(sanitize_for_terminal("Hello, world!", None), "Hello, world!");
+        assert_eq!(
+            sanitize_for_terminal("Hello, world!", None),
+            "Hello, world!"
+        );
     }
 
     #[test]
@@ -228,10 +231,7 @@ mod tests {
 
     #[test]
     fn strips_bidi_isolates() {
-        assert_eq!(
-            sanitize_for_terminal("a\u{2066}b\u{2069}c", None),
-            "abc"
-        );
+        assert_eq!(sanitize_for_terminal("a\u{2066}b\u{2069}c", None), "abc");
     }
 
     #[test]
