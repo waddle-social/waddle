@@ -33,7 +33,7 @@ pub struct SavedCredentials {
     pub saved_at: String,
 }
 
-/// Response from POST /v2/auth/device/start
+/// Response from POST /api/auth/device/start
 #[derive(Debug, Deserialize)]
 struct DeviceAuthResponse {
     device_code: String,
@@ -46,7 +46,7 @@ struct DeviceAuthResponse {
     expires_in: u32,
 }
 
-/// Response from POST /v2/auth/device/poll when pending
+/// Response from POST /api/auth/device/poll when pending
 #[derive(Debug, Deserialize)]
 struct DevicePollPendingResponse {
     status: String,
@@ -54,7 +54,7 @@ struct DevicePollPendingResponse {
     expires_in: u32,
 }
 
-/// Response from POST /v2/auth/device/poll when complete
+/// Response from POST /api/auth/device/poll when complete
 #[derive(Debug, Deserialize)]
 struct DevicePollCompleteResponse {
     status: String,
@@ -87,7 +87,7 @@ pub async fn run_login(provider: &str, server_url: &str) -> Result<()> {
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let device_auth: DeviceAuthResponse = client
-        .post(format!("{}/v2/auth/device/start", server_url))
+        .post(format!("{}/api/auth/device/start", server_url))
         .json(&serde_json::json!({ "provider": provider }))
         .send()
         .await
@@ -145,7 +145,7 @@ pub async fn run_login(provider: &str, server_url: &str) -> Result<()> {
         tokio::time::sleep(poll_interval).await;
 
         let response = client
-            .post(format!("{}/v2/auth/device/poll", server_url))
+            .post(format!("{}/api/auth/device/poll", server_url))
             .json(&serde_json::json!({ "device_code": device_auth.device_code }))
             .send()
             .await
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_format_url_long() {
-        let result = format_url("http://localhost:3000/v2/auth/device/verify");
+        let result = format_url("http://localhost:3000/api/auth/device/verify");
         assert!(result.contains("..."));
         assert_eq!(result.len(), 30);
     }

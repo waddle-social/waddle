@@ -665,7 +665,7 @@ fn create_router(
         );
     }
 
-    // Always merge v2 auth surfaces. If no providers are configured these endpoints
+    // Always merge auth surfaces. If no providers are configured these endpoints
     // return explicit errors.
     let auth_router = routes::auth::router(auth_state.clone());
     let device_router = routes::device::router(auth_state.clone());
