@@ -26,14 +26,16 @@ pub async fn exchange_code(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Result<OAuthTokenResponse, AuthError> {
-    let params = [
+    let mut params = vec![
         ("grant_type", "authorization_code"),
         ("client_id", provider.client_id.as_str()),
-        ("client_secret", provider.client_secret.as_str()),
         ("code", code),
         ("redirect_uri", redirect_uri),
         ("code_verifier", code_verifier),
     ];
+    if provider.includes_client_secret_in_token_request() {
+        params.push(("client_secret", provider.client_secret.as_str()));
+    }
 
     let res = client
         .post(token_endpoint)

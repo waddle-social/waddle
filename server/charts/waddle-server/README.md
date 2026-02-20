@@ -109,6 +109,14 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set-json secret.authProvidersJson='[{"id":"google","display_name":"Google","kind":"oidc","issuer":"https://accounts.google.com","client_id":"...","client_secret":"...","scopes":["openid","profile","email"]}]'
 ```
 
+Example provider config (OIDC public client with PKCE, no client secret):
+
+```bash
+helm upgrade --install waddle ./charts/waddle-server \
+  --namespace waddle \
+  --set-json config.authProvidersJson='[{"id":"rawkode","display_name":"rawkode.academy","kind":"oidc","issuer":"https://id.rawkode.academy/auth","client_id":"...","token_endpoint_auth_method":"none","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
+```
+
 ## Env overrides
 
 This chart supports two extra env mechanisms:

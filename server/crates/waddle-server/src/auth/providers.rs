@@ -10,6 +10,18 @@ pub enum AuthProviderKind {
     OAuth2,
 }
 
+/// OAuth2 token endpoint authentication method for a provider client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthProviderTokenEndpointAuthMethod {
+    /// RFC 6749 client credentials in request body.
+    #[default]
+    ClientSecretPost,
+    /// Public client using PKCE without client authentication.
+    #[serde(rename = "none")]
+    NoneAuth,
+}
+
 /// Static auth provider configuration loaded from environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthProviderConfig {
@@ -17,7 +29,10 @@ pub struct AuthProviderConfig {
     pub display_name: String,
     pub kind: AuthProviderKind,
     pub client_id: String,
+    #[serde(default)]
     pub client_secret: String,
+    #[serde(default)]
+    pub token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod,
     pub scopes: Vec<String>,
 
     #[serde(default)]
@@ -62,9 +77,11 @@ impl AuthProviderConfig {
                 self.id
             )));
         }
-        if self.client_secret.trim().is_empty() {
+        if self.token_endpoint_auth_method.requires_client_secret()
+            && self.client_secret.trim().is_empty()
+        {
             return Err(AuthError::InvalidRequest(format!(
-                "provider '{}' client_secret cannot be empty",
+                "provider '{}' client_secret cannot be empty for token_endpoint_auth_method=client_secret_post",
                 self.id
             )));
         }
@@ -146,6 +163,19 @@ impl AuthProviderConfig {
             self.scopes.join(" ")
         }
     }
+
+    pub fn includes_client_secret_in_token_request(&self) -> bool {
+        self.token_endpoint_auth_method.requires_client_secret()
+    }
+}
+
+impl AuthProviderTokenEndpointAuthMethod {
+    pub fn requires_client_secret(self) -> bool {
+        matches!(
+            self,
+            AuthProviderTokenEndpointAuthMethod::ClientSecretPost
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +243,7 @@ mod tests {
             kind: AuthProviderKind::Oidc,
             client_id: "client".to_string(),
             client_secret: "secret".to_string(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -236,6 +267,7 @@ mod tests {
             kind: AuthProviderKind::OAuth2,
             client_id: "client".to_string(),
             client_secret: "secret".to_string(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
             scopes: vec!["read:user".to_string(), "user:email".to_string()],
             issuer: None,
             authorization_endpoint: Some("https://github.com/login/oauth/authorize".to_string()),
@@ -273,6 +305,23 @@ mod tests {
     }
 
     #[test]
+    fn client_secret_post_requires_client_secret() {
+        let mut provider = oidc_provider();
+        provider.client_secret = "".to_string();
+        provider.token_endpoint_auth_method = AuthProviderTokenEndpointAuthMethod::ClientSecretPost;
+        let err = provider.validate().unwrap_err().to_string();
+        assert!(err.contains("client_secret cannot be empty"));
+    }
+
+    #[test]
+    fn none_auth_allows_empty_client_secret() {
+        let mut provider = oidc_provider();
+        provider.client_secret = "".to_string();
+        provider.token_endpoint_auth_method = AuthProviderTokenEndpointAuthMethod::NoneAuth;
+        provider.validate().expect("public client should be valid");
+    }
+
+    #[test]
     fn registry_rejects_duplicate_provider_ids() {
         let providers = vec![oidc_provider(), oidc_provider()];
         let err = ProviderRegistry::new(providers).unwrap_err().to_string();
@@ -287,5 +336,28 @@ mod tests {
         assert_eq!(registry.list().len(), 2);
         assert!(registry.get("google").is_some());
         assert!(registry.get("github").is_some());
+    }
+
+    #[test]
+    fn deserialize_public_client_without_client_secret() {
+        let raw = r#"{
+            "id":"rawkode",
+            "display_name":"rawkode.academy",
+            "kind":"oidc",
+            "client_id":"public-client",
+            "token_endpoint_auth_method":"none",
+            "scopes":["openid","profile","email"],
+            "issuer":"https://id.rawkode.academy/auth",
+            "subject_claim":"sub"
+        }"#;
+
+        let provider: AuthProviderConfig =
+            serde_json::from_str(raw).expect("provider should deserialize");
+        provider.validate().expect("provider should validate");
+        assert_eq!(
+            provider.token_endpoint_auth_method,
+            AuthProviderTokenEndpointAuthMethod::NoneAuth
+        );
+        assert!(provider.client_secret.is_empty());
     }
 }
