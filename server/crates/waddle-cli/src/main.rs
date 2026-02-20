@@ -24,13 +24,16 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod api;
 mod app;
 mod config;
+mod embed;
 mod event;
 mod login;
+mod sanitize;
+mod stanza;
 mod ui;
 mod xmpp;
 
 use crate::xmpp::{XmppClient, XmppClientEvent};
-use ::xmpp::jid::BareJid;
+use xmpp_parsers::jid::BareJid;
 use app::{App, ConnectionState, Focus};
 use config::Config;
 use event::{key_to_action, Event, EventHandler, KeyAction};
@@ -49,11 +52,8 @@ struct Cli {
 enum Commands {
     /// Login to Waddle using a configured auth provider
     Login {
-        /// Provider ID (e.g., github, google)
         #[arg(short = 'p', long)]
         provider: String,
-
-        /// Waddle server URL (default: http://localhost:3000)
         #[arg(short, long, default_value = "http://localhost:3000")]
         server: String,
     },
@@ -63,79 +63,46 @@ enum Commands {
     Logout,
     /// Create a new waddle
     Create {
-        /// Name of the waddle
         #[arg(short, long)]
         name: String,
-
-        /// Description of the waddle (optional)
         #[arg(short, long)]
         description: Option<String>,
-
-        /// Make the waddle private (default is public)
         #[arg(long)]
         private: bool,
     },
     /// Run XMPP compliance suite via the managed testcontainers harness
     Compliance {
-        /// Compliance profile: best_effort_full | core_strict | full_strict
         #[arg(long, default_value = "best_effort_full")]
         profile: String,
-
-        /// XMPP domain advertised by the server under test
         #[arg(short = 'd', long, default_value = "localhost")]
         domain: String,
-
-        /// Hostname/IP used by interop clients to connect
         #[arg(short = 'H', long, default_value = "host.docker.internal")]
         host: String,
-
-        /// Reply timeout for interop tests in milliseconds
         #[arg(short = 't', long, default_value_t = 10_000)]
         timeout_ms: u32,
-
-        /// Optional admin username to force service-administration account mode
         #[arg(short = 'u', long, default_value = "")]
         admin_username: String,
-
-        /// Optional admin password to force service-administration account mode
         #[arg(short = 'P', long, default_value = "")]
         admin_password: String,
-
-        /// Comma-separated enabled specifications (e.g. RFC6120,RFC6121,XEP-0030)
         #[arg(short = 'e', long)]
         enabled_specs: Option<String>,
-
-        /// Comma-separated disabled specifications
         #[arg(short = 'D', long)]
         disabled_specs: Option<String>,
-
-        /// Comma-separated enabled Smack SINT test classes
         #[arg(long)]
         enabled_tests: Option<String>,
-
-        /// Comma-separated disabled Smack SINT test classes
         #[arg(long)]
         disabled_tests: Option<String>,
-
-        /// Directory for logs/artifacts written by the harness
         #[arg(short = 'l', long, default_value = "./test-logs")]
         artifact_dir: String,
-
-        /// Keep interop container after run (for debugging)
         #[arg(long)]
         keep_containers: bool,
-
-        /// Optional path to a prebuilt waddle-server binary
         #[arg(long)]
         server_bin: Option<String>,
-
-        /// Skip rebuilding waddle-server inside the compliance harness
         #[arg(long)]
         skip_server_build: bool,
     },
 }
 
-/// Initialize the terminal for TUI mode
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -145,7 +112,6 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Ok(terminal)
 }
 
-/// Restore the terminal to its original state
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(
@@ -157,18 +123,13 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     Ok(())
 }
 
-/// Run the main application loop
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut app: App,
     config: Config,
 ) -> Result<()> {
     let mut events = EventHandler::new(Duration::from_millis(250));
-
-    // Create channel for XMPP client events
     let (xmpp_event_tx, mut xmpp_event_rx) = mpsc::unbounded_channel::<XmppClientEvent>();
-
-    // Try to create XMPP client if configuration is present
     let mut xmpp_client: Option<XmppClient> = None;
 
     if config.xmpp.jid.is_some() && config.xmpp.token.is_some() {
@@ -190,79 +151,58 @@ async fn run_app(
         info!("XMPP not configured - running in offline mode");
     }
 
-    // Spawn XMPP event polling task if client was created
-    let _xmpp_poll_handle: Option<tokio::task::JoinHandle<()>> =
-        if let Some(ref mut _client) = xmpp_client {
-            // We need to move the client into a task, but we also need to send commands to it
-            // For simplicity, we'll poll in the main loop using tokio::select!
-            None
-        } else {
-            None
-        };
-
     loop {
-        // Check quit flag first, before any blocking operations
         if app.should_quit {
             break;
         }
 
-        // Render the UI
         terminal.draw(|frame| {
             render_layout(frame, &app, &config);
         })?;
 
-        // Use tokio::select! with biased to prioritize terminal events
         tokio::select! {
             biased;
 
-            // Handle terminal events (highest priority)
             event = events.next() => {
                 if let Some(event) = event {
                     handle_terminal_event(&mut app, &mut xmpp_client, event, &config).await;
                 }
             }
 
-            // Handle XMPP client events
             xmpp_event = xmpp_event_rx.recv() => {
                 if let Some(event) = xmpp_event {
-                    handle_xmpp_event(&mut app, event);
+                    handle_xmpp_event(&mut app, &mut xmpp_client, event).await;
                 }
             }
 
-            // Poll XMPP client for new events (if connected) - with timeout
             _ = async {
                 if let Some(ref mut client) = xmpp_client {
-                    if app.connection_state == ConnectionState::Connected
-                        || app.connection_state == ConnectionState::Connecting
+                    if app.connection_state.is_connected()
+                        || matches!(app.connection_state, ConnectionState::Connecting)
+                        || matches!(app.connection_state, ConnectionState::Reconnecting { .. })
                     {
-                        // Use timeout to ensure we don't block forever
                         let _ = tokio::time::timeout(
-                            std::time::Duration::from_millis(100),
+                            Duration::from_millis(100),
                             client.poll_events()
                         ).await;
                     }
                 } else {
-                    // No XMPP client, just yield briefly
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    // No XMPP client — sleep to avoid busy loop. Terminal events
+                    // and tick will still drive redraws.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             } => {}
         }
     }
 
-    // Clean shutdown of XMPP client (with timeout to avoid hanging)
     if let Some(ref mut client) = xmpp_client {
         info!("Disconnecting XMPP client...");
-        let disconnect_timeout =
-            tokio::time::timeout(std::time::Duration::from_secs(2), client.disconnect());
-        if disconnect_timeout.await.is_err() {
-            warn!("XMPP disconnect timed out, forcing exit");
-        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), client.disconnect()).await;
     }
 
     Ok(())
 }
 
-/// Handle a terminal event
 async fn handle_terminal_event(
     app: &mut App,
     xmpp_client: &mut Option<XmppClient>,
@@ -275,15 +215,9 @@ async fn handle_terminal_event(
             let action = key_to_action(key, in_input_mode);
 
             match action {
-                KeyAction::Quit => {
-                    app.quit();
-                }
-                KeyAction::FocusNext => {
-                    app.focus_next();
-                }
-                KeyAction::FocusPrev => {
-                    app.focus_prev();
-                }
+                KeyAction::Quit => app.quit(),
+                KeyAction::FocusNext => app.focus_next(),
+                KeyAction::FocusPrev => app.focus_prev(),
                 KeyAction::Up => match app.focus {
                     Focus::Sidebar => app.sidebar_up(),
                     Focus::Messages => app.scroll_messages_up(),
@@ -306,8 +240,6 @@ async fn handle_terminal_event(
                 }
                 KeyAction::Select => {
                     if app.focus == Focus::Sidebar {
-                        // Handle channel selection and potentially join MUC room
-                        // Clone the item to avoid holding a borrow on app
                         let selected_item = app.sidebar_select().cloned();
                         if let Some(item) = selected_item {
                             handle_sidebar_selection(app, xmpp_client, item).await;
@@ -315,7 +247,6 @@ async fn handle_terminal_event(
                     }
                 }
                 KeyAction::Back => {
-                    // Escape goes back to sidebar
                     app.focus = Focus::Sidebar;
                 }
                 KeyAction::Backspace => {
@@ -340,7 +271,6 @@ async fn handle_terminal_event(
                 }
                 KeyAction::PageUp => {
                     if app.focus == Focus::Messages {
-                        // Scroll up by multiple lines
                         for _ in 0..5 {
                             app.scroll_messages_up();
                         }
@@ -348,7 +278,6 @@ async fn handle_terminal_event(
                 }
                 KeyAction::PageDown => {
                     if app.focus == Focus::Messages {
-                        // Scroll down by multiple lines
                         for _ in 0..5 {
                             app.scroll_messages_down();
                         }
@@ -358,13 +287,11 @@ async fn handle_terminal_event(
                     if app.focus == Focus::Input {
                         app.input_insert(c);
                     } else if c == 'i' {
-                        // 'i' enters input mode from normal mode
                         app.focus = Focus::Input;
                     }
                 }
                 KeyAction::Submit => {
                     if app.focus == Focus::Input {
-                        // Get the message and send via XMPP if connected
                         if let Some(message) = app.input_submit() {
                             send_message(app, xmpp_client, &message).await;
                         }
@@ -373,41 +300,46 @@ async fn handle_terminal_event(
                 KeyAction::None => {}
             }
         }
-        Event::Resize(_, _) => {
-            // Terminal will re-render automatically
-        }
-        Event::Tick => {
-            // Could update animations, check for new messages, etc.
-        }
-        Event::Mouse(_) => {
-            // Mouse support could be added later
-        }
+        Event::Resize(_, _) => {}
+        Event::Tick => {}
+        Event::Mouse(_) => {}
     }
 }
 
-/// Handle an XMPP client event
-fn handle_xmpp_event(app: &mut App, event: XmppClientEvent) {
+async fn handle_xmpp_event(app: &mut App, xmpp_client: &mut Option<XmppClient>, event: XmppClientEvent) {
     match event {
         XmppClientEvent::Connected => {
             app.set_connection_state(ConnectionState::Connected);
         }
         XmppClientEvent::Disconnected => {
             app.set_connection_state(ConnectionState::Disconnected);
-            app.clear_xmpp_state();
         }
         XmppClientEvent::Error(err) => {
             app.set_connection_state(ConnectionState::Error(err));
         }
+        XmppClientEvent::RetryScheduled {
+            attempt,
+            delay_secs,
+        } => {
+            app.set_connection_state(ConnectionState::Reconnecting {
+                attempt,
+                countdown_secs: delay_secs,
+            });
+        }
         XmppClientEvent::RoomJoined { room_jid } => {
             app.room_joined(room_jid.clone());
-            // If this is the first room or we don't have a current room, make it current
             if app.current_room_jid.is_none() {
-                app.set_current_room(Some(room_jid));
+                app.set_current_room(Some(room_jid.clone()));
+            }
+            // Request MAM history for the room
+            if let Some(ref mut client) = xmpp_client {
+                let query_id = format!("mam-{}", room_jid);
+                app.mam_loading = true;
+                client.request_mam_history(&query_id, Some(&room_jid), 50).await;
             }
         }
         XmppClientEvent::RoomLeft { room_jid } => {
             app.room_left(&room_jid);
-            // If we left the current room, clear it
             if app.current_room_jid.as_ref() == Some(&room_jid) {
                 app.set_current_room(None);
             }
@@ -416,32 +348,71 @@ fn handle_xmpp_event(app: &mut App, event: XmppClientEvent) {
             room_jid,
             sender_nick,
             body,
-            id: _,
+            id,
+            embeds,
         } => {
-            // Only show messages from the current room
-            if app.current_room_jid.as_ref() == Some(&room_jid) {
-                // Don't show our own messages (we'll get an echo)
-                // Actually, we should show them - the server echoes messages back
-                app.add_message(sender_nick, body);
+            let view_key = room_jid.to_string();
+            app.add_message_to_with_id(&view_key, id, sender_nick, body, embeds);
+        }
+        XmppClientEvent::ChatMessage {
+            from,
+            body,
+            id,
+            embeds,
+        } => {
+            let view_key = from.to_string();
+            let sender = from
+                .node()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| from.to_string());
+            app.add_message_to_with_id(&view_key, id, sender, body, embeds);
+        }
+        XmppClientEvent::RoomSubject { room_jid, subject } => {
+            let view_key = room_jid.to_string();
+            app.add_message_to(
+                &view_key,
+                "📋".to_string(),
+                format!("Topic: {}", subject),
+                vec![],
+            );
+        }
+        XmppClientEvent::RosterItem { jid, name } => {
+            app.add_roster_contact(jid, name);
+        }
+        XmppClientEvent::ContactPresence {
+            jid,
+            available,
+            show,
+        } => {
+            app.update_presence(jid, available, show);
+        }
+        XmppClientEvent::MamMessage {
+            room_jid,
+            sender_nick,
+            body,
+            id,
+            embeds,
+            timestamp,
+        } => {
+            let view_key = room_jid
+                .as_ref()
+                .map(|j| j.to_string())
+                .unwrap_or_default();
+            if !view_key.is_empty() {
+                let author = sender_nick.unwrap_or_else(|| "?".to_string());
+                let ts = timestamp
+                    .as_ref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc));
+                app.prepend_message(&view_key, id, author, body, embeds, ts);
             }
         }
-        XmppClientEvent::ChatMessage { from, body, id: _ } => {
-            // Show direct messages if we're viewing that conversation
-            if app.current_dm_jid.as_ref() == Some(&from) {
-                let sender_name = from
-                    .node()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| from.to_string());
-                app.add_message(sender_name, body);
-            } else {
-                // TODO: Store for later / show notification
-                info!("Direct message from {} (not in view): {}", from, body);
-            }
+        XmppClientEvent::MamFinished { .. } => {
+            app.mam_loading = false;
         }
     }
 }
 
-/// Handle sidebar item selection (join rooms, switch views)
 async fn handle_sidebar_selection(
     app: &mut App,
     xmpp_client: &mut Option<XmppClient>,
@@ -451,59 +422,51 @@ async fn handle_sidebar_selection(
 
     match item {
         SidebarItem::Channel { id: _, name } => {
-            // Try to construct room JID and join if connected
+            let room_name = name.trim_start_matches('#');
             if let Some(ref mut client) = xmpp_client {
-                if app.connection_state.is_connected() {
-                    let room_name = name.trim_start_matches('#');
-                    if let Ok(room_jid) = xmpp::make_room_jid(room_name, client.muc_domain()) {
-                        // Switch to this room
-                        app.set_current_room(Some(room_jid.clone()));
-
-                        // Join if not already in the room
-                        if !app.is_in_room(&room_jid) {
-                            client.join_room_jid(&room_jid, None).await;
-                        }
+                if let Ok(room_jid) = xmpp::make_room_jid(room_name, client.muc_domain()) {
+                    // Always switch view
+                    app.set_current_room(Some(room_jid.clone()));
+                    app.focus = Focus::Input;
+                    // Only join if connected and not already in room
+                    if app.connection_state.is_connected() && !app.is_in_room(&room_jid) {
+                        client.join_room_jid(&room_jid, None).await;
                     }
                 }
+            } else {
+                // Offline mode — just set the view name
+                app.current_view_name = format!("#{}", room_name);
             }
         }
         SidebarItem::DirectMessage { id, name: _ } => {
-            // For DMs, switch to that conversation
-            // The id is the JID of the DM partner
             if let Ok(dm_jid) = id.parse::<BareJid>() {
                 app.set_current_dm(Some(dm_jid));
+                app.focus = Focus::Input;
             }
         }
         SidebarItem::Waddle { id, name } => {
-            // Selecting a Waddle could show its info or channels
             info!("Selected Waddle: {} ({})", name, id);
         }
         _ => {}
     }
 }
 
-/// Send a message to the current room/conversation
 async fn send_message(app: &mut App, xmpp_client: &mut Option<XmppClient>, message: &str) {
     if let Some(ref mut client) = xmpp_client {
         if app.connection_state.is_connected() {
             if let Some(ref room_jid) = app.current_room_jid {
-                // Send to MUC room
                 client.send_room_message(room_jid, message).await;
             } else if let Some(ref dm_jid) = app.current_dm_jid {
-                // Send direct message
                 client.send_chat_message(dm_jid, message).await;
-                // Add our own message to the view (DMs don't echo back like MUC)
-                app.add_message(app.nickname.clone(), message.to_string());
+                let view_key = dm_jid.to_string();
+                app.add_message_to(&view_key, app.nickname.clone(), message.to_string(), vec![]);
             } else {
-                // Not in a room or DM - just show locally
                 app.add_message(app.nickname.clone(), message.to_string());
             }
         } else {
-            // Not connected - add message locally
             app.add_message(app.nickname.clone(), message.to_string());
         }
     } else {
-        // No XMPP client - add message locally (offline mode)
         app.add_message("you".to_string(), message.to_string());
     }
 }
@@ -512,24 +475,17 @@ async fn send_message(app: &mut App, xmpp_client: &mut Option<XmppClient>, messa
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle subcommands first (before TUI mode)
     match cli.command {
         Some(Commands::Login { provider, server }) => {
             return login::run_login(&provider, &server).await;
         }
-        Some(Commands::Status) => {
-            return run_status().await;
-        }
-        Some(Commands::Logout) => {
-            return run_logout().await;
-        }
+        Some(Commands::Status) => return run_status().await,
+        Some(Commands::Logout) => return run_logout().await,
         Some(Commands::Create {
             name,
             description,
             private,
-        }) => {
-            return run_create(&name, description.as_deref(), !private).await;
-        }
+        }) => return run_create(&name, description.as_deref(), !private).await,
         Some(Commands::Compliance {
             profile,
             domain,
@@ -563,15 +519,11 @@ async fn main() -> Result<()> {
                 skip_server_build,
             );
         }
-        None => {
-            // No subcommand - run TUI
-        }
+        None => {}
     }
 
-    // Load configuration
     let mut config = Config::load().unwrap_or_default();
 
-    // Set up logging to a file (since we're in TUI mode)
     let log_dir = Config::data_dir().unwrap_or_else(|_| std::env::temp_dir());
     let log_file = std::fs::File::create(log_dir.join("waddle.log")).ok();
 
@@ -579,23 +531,17 @@ async fn main() -> Result<()> {
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(file)
             .with_ansi(false);
-
         tracing_subscriber::registry()
             .with(file_layer)
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::INFO,
-            ))
+            .with(tracing_subscriber::filter::LevelFilter::from_level(Level::INFO))
             .init();
     }
 
     info!("Waddle CLI starting...");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
-    info!("License: AGPL-3.0");
 
-    // Create app state
     let mut app = App::new();
 
-    // Load saved credentials if available
     if let Ok(creds) = login::load_credentials() {
         config.xmpp.jid = Some(creds.jid);
         config.xmpp.token = Some(creds.token.clone());
@@ -603,16 +549,11 @@ async fn main() -> Result<()> {
         config.xmpp.port = creds.xmpp_port;
         info!("Loaded saved credentials for: {}", creds.username);
 
-        // Fetch waddles and channels from the API
         info!("Fetching waddles and channels from server...");
         let api_client = api::ApiClient::new(&creds.server_url, &creds.token);
         match api_client.fetch_all().await {
             Ok((waddles, channels)) => {
-                info!(
-                    "Fetched {} waddles and {} channels",
-                    waddles.len(),
-                    channels.len()
-                );
+                info!("Fetched {} waddles and {} channels", waddles.len(), channels.len());
                 let waddle_data: Vec<(String, String)> =
                     waddles.into_iter().map(|w| (w.id, w.name)).collect();
                 let channel_data: Vec<(String, String)> =
@@ -620,26 +561,17 @@ async fn main() -> Result<()> {
                 app.set_waddles_and_channels(waddle_data, channel_data);
             }
             Err(e) => {
-                warn!(
-                    "Failed to fetch data from server: {}. Running in offline mode.",
-                    e
-                );
+                warn!("Failed to fetch data from server: {}. Running in offline mode.", e);
             }
         }
     } else {
         info!("No saved credentials - run 'waddle login' to authenticate");
     }
 
-    // Initialize terminal
     let mut terminal = setup_terminal()?;
-
-    // Run the application
     let result = run_app(&mut terminal, app, config).await;
-
-    // Always restore terminal, even on error
     restore_terminal(&mut terminal)?;
 
-    // Report any errors after terminal is restored
     if let Err(e) = result {
         eprintln!("Application error: {}", e);
         return Err(e);
@@ -669,51 +601,13 @@ fn run_compliance(
     let resolved_artifact_dir = resolve_artifact_dir(artifact_dir)?;
     let container_timeout_secs = std::env::var("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS")
         .unwrap_or_else(|_| "0".to_string());
-    let timeout_display = match container_timeout_secs.trim().to_ascii_lowercase().as_str() {
-        "0" | "none" | "off" | "unbounded" | "infinite" | "no-limit" => {
-            "none (run until completion)".to_string()
-        }
-        other => other.to_string(),
-    };
 
     println!("Running XMPP compliance harness...");
     println!("  Profile:      {}", profile);
     println!("  Domain:       {}", domain);
     println!("  Host:         {}", host);
     println!("  Timeout (ms): {}", timeout_ms);
-    println!("  Timeout (s):  {}", timeout_display);
-    println!(
-        "  Registration: {}",
-        if !admin_username.trim().is_empty() && !admin_password.trim().is_empty() {
-            "service administration"
-        } else {
-            "in-band registration"
-        }
-    );
     println!("  Artifacts:    {}", resolved_artifact_dir.display());
-    if let Some(value) = enabled_specs {
-        println!("  Enabled specs: {value}");
-    }
-    if let Some(value) = disabled_specs {
-        println!("  Disabled specs: {value}");
-    }
-    if let Some(value) = enabled_tests {
-        println!("  Enabled tests: {value}");
-    }
-    if let Some(value) = disabled_tests {
-        println!("  Disabled tests: {value}");
-    }
-    if let Some(value) = server_bin {
-        println!("  Server bin:    {value}");
-    }
-    println!(
-        "  Server build:  {}",
-        if skip_server_build {
-            "skip"
-        } else {
-            "auto-build"
-        }
-    );
 
     let mut command = std::process::Command::new("cargo");
     command
@@ -730,22 +624,10 @@ fn run_compliance(
         .env("WADDLE_COMPLIANCE_DOMAIN", domain)
         .env("WADDLE_COMPLIANCE_HOST", host)
         .env("WADDLE_COMPLIANCE_TIMEOUT_MS", timeout_ms.to_string())
-        .env(
-            "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS",
-            container_timeout_secs.trim(),
-        )
-        .env(
-            "WADDLE_COMPLIANCE_ARTIFACT_DIR",
-            resolved_artifact_dir.to_string_lossy().to_string(),
-        )
-        .env(
-            "WADDLE_COMPLIANCE_KEEP_CONTAINERS",
-            if keep_containers { "true" } else { "false" },
-        )
-        .env(
-            "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD",
-            if skip_server_build { "true" } else { "false" },
-        );
+        .env("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS", container_timeout_secs.trim())
+        .env("WADDLE_COMPLIANCE_ARTIFACT_DIR", resolved_artifact_dir.to_string_lossy().to_string())
+        .env("WADDLE_COMPLIANCE_KEEP_CONTAINERS", if keep_containers { "true" } else { "false" })
+        .env("WADDLE_COMPLIANCE_SKIP_SERVER_BUILD", if skip_server_build { "true" } else { "false" });
 
     if !admin_username.trim().is_empty() {
         command.env("WADDLE_COMPLIANCE_ADMIN_USERNAME", admin_username);
@@ -753,126 +635,18 @@ fn run_compliance(
     if !admin_password.trim().is_empty() {
         command.env("WADDLE_COMPLIANCE_ADMIN_PASSWORD", admin_password);
     }
+    if let Some(v) = enabled_specs { command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", v); }
+    if let Some(v) = disabled_specs { command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", v); }
+    if let Some(v) = enabled_tests { command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", v); }
+    if let Some(v) = disabled_tests { command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", v); }
+    if let Some(v) = server_bin { command.env("WADDLE_SERVER_BIN", v); }
 
-    if let Some(value) = enabled_specs {
-        command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", value);
-    }
-    if let Some(value) = disabled_specs {
-        command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", value);
-    }
-    if let Some(value) = enabled_tests {
-        command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", value);
-    }
-    if let Some(value) = disabled_tests {
-        command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", value);
-    }
-    if let Some(value) = server_bin {
-        command.env("WADDLE_SERVER_BIN", value);
-    }
-
-    let status = command
-        .status()
-        .context("Running compliance harness command")?;
-    if let Err(error) = print_compliance_summary(&resolved_artifact_dir) {
-        eprintln!("Failed to read compliance summary: {error}");
-    }
+    let status = command.status().context("Running compliance harness command")?;
     if status.success() {
-        return Ok(());
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("Compliance harness exited with status {status}"))
     }
-
-    Err(anyhow::anyhow!(
-        "Compliance harness exited with status {status}"
-    ))
-}
-
-fn print_compliance_summary(artifact_dir: &Path) -> Result<()> {
-    let summary_path = artifact_dir.join("summary.json");
-    if !summary_path.exists() {
-        eprintln!("Compliance summary not found at {}", summary_path.display());
-        return Ok(());
-    }
-
-    let summary_bytes = std::fs::read(&summary_path)
-        .with_context(|| format!("Reading {}", summary_path.display()))?;
-    let summary: serde_json::Value = serde_json::from_slice(&summary_bytes)
-        .with_context(|| format!("Parsing {}", summary_path.display()))?;
-
-    if let Some(progress) = summary.get("interop_progress") {
-        let tests_started = progress
-            .get("tests_started")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let tests_completed = progress
-            .get("tests_completed")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let tests_passed = progress
-            .get("tests_passed")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let tests_failed = progress
-            .get("tests_failed")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let pass_started = progress
-            .get("pass_percentage_of_started")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0);
-        let pass_completed = progress
-            .get("pass_percentage_of_completed")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0);
-        let completion = progress
-            .get("completion_percentage")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0);
-        let running_test = progress
-            .get("running_test")
-            .and_then(serde_json::Value::as_str);
-
-        println!("Compliance pass percentage:");
-        println!("  Tests started:   {}", tests_started);
-        println!("  Tests completed: {}", tests_completed);
-        println!("  Tests passed:    {}", tests_passed);
-        println!("  Tests failed:    {}", tests_failed);
-        println!("  Pass% started:   {:.2}%", pass_started);
-        println!("  Pass% completed: {:.2}%", pass_completed);
-        println!("  Completion:      {:.2}%", completion);
-        if let Some(test_name) = running_test {
-            println!("  Last running:    {}", test_name);
-        }
-        return Ok(());
-    }
-
-    if let Some(junit) = summary.get("junit") {
-        let tests = junit
-            .get("tests")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let failures = junit
-            .get("failures")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let errors = junit
-            .get("errors")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let skipped = junit
-            .get("skipped")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-
-        if tests > 0 {
-            let passed = tests.saturating_sub(failures + errors + skipped);
-            let pass_percent = (passed as f64 / tests as f64) * 100.0;
-            println!(
-                "Compliance pass percentage (JUnit): {:.2}% ({}/{})",
-                pass_percent, passed, tests
-            );
-        }
-    }
-
-    Ok(())
 }
 
 fn resolve_artifact_dir(path: &str) -> Result<PathBuf> {
@@ -880,7 +654,6 @@ fn resolve_artifact_dir(path: &str) -> Result<PathBuf> {
     if candidate.is_absolute() {
         return Ok(candidate);
     }
-
     let cwd = std::env::current_dir().context("Resolving current working directory")?;
     Ok(cwd.join(candidate))
 }
@@ -893,7 +666,6 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Show current login status
 async fn run_status() -> Result<()> {
     match login::load_credentials() {
         Ok(creds) => {
@@ -913,41 +685,31 @@ async fn run_status() -> Result<()> {
     Ok(())
 }
 
-/// Logout and clear saved credentials
 async fn run_logout() -> Result<()> {
     match login::clear_credentials() {
-        Ok(()) => {
-            println!("Logged out successfully.");
-        }
-        Err(e) => {
-            eprintln!("Failed to logout: {}", e);
-        }
+        Ok(()) => println!("Logged out successfully."),
+        Err(e) => eprintln!("Failed to logout: {}", e),
     }
     Ok(())
 }
 
-/// Create a new waddle
 async fn run_create(name: &str, description: Option<&str>, is_public: bool) -> Result<()> {
-    // Load credentials
     let creds = login::load_credentials()
         .map_err(|_| anyhow::anyhow!("Not logged in. Run 'waddle login -p <provider>' first."))?;
 
     println!("Creating waddle \"{}\"...", name);
 
-    // Build the request
     let mut request = api::CreateWaddleRequest::new(name);
     if let Some(desc) = description {
         request = request.with_description(desc);
     }
     request = request.with_public(is_public);
 
-    // Create API client and make the request
     let api_client = api::ApiClient::new(&creds.server_url, &creds.token);
     match api_client.create_waddle(request).await {
         Ok(waddle) => {
             println!();
             println!("✓ Waddle created successfully!");
-            println!();
             println!("  Name: {}", waddle.name);
             println!("  ID: {}", waddle.id);
             if let Some(desc) = &waddle.description {
