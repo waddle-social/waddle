@@ -1,17 +1,27 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { storeToRefs } from 'pinia';
 import { useAuthStore } from '../stores/auth';
 
 const router = useRouter();
 const authStore = useAuthStore();
-const { authError, loggingIn } = storeToRefs(authStore);
+const { authError, loggingIn, loadingOAuthProviders, oauthProviders } = storeToRefs(authStore);
 
 const jid = ref(authStore.jid || '');
 const password = ref('');
 const endpoint = ref(authStore.endpoint || '');
+const oauthServer = ref('');
 const showAdvanced = ref(false);
+const selectedProvider = ref('');
+
+watch(
+  () => oauthServer.value.trim(),
+  () => {
+    selectedProvider.value = '';
+    oauthProviders.value = [];
+  },
+);
 
 async function handleLogin(): Promise<void> {
   const inputJid = jid.value.trim();
@@ -32,6 +42,35 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter') {
     event.preventDefault();
     void handleLogin();
+  }
+}
+
+async function handleOAuthLogin(): Promise<void> {
+  const inputServer = oauthServer.value.trim();
+  const inputEndpoint = endpoint.value.trim() || undefined;
+
+  if (!inputServer) return;
+
+  try {
+    await authStore.loginWithOAuth(
+      inputServer,
+      selectedProvider.value || undefined,
+      inputEndpoint,
+    );
+  } catch {
+    // Error is already set in authStore.authError
+  }
+}
+
+async function handleLoadOAuthProviders(): Promise<void> {
+  const inputServer = oauthServer.value.trim();
+  if (!inputServer) return;
+
+  try {
+    const providers = await authStore.loadOAuthProviders(inputServer);
+    selectedProvider.value = providers[0]?.id ?? '';
+  } catch {
+    // Error is already set in authStore.authError
   }
 }
 </script>
@@ -137,6 +176,73 @@ function handleKeydown(event: KeyboardEvent): void {
         >
           {{ loggingIn ? 'Connecting…' : 'Sign In' }}
         </button>
+
+        <div class="pt-2">
+          <div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-muted">
+            <span class="h-px flex-1 bg-surface" />
+            OAuth
+            <span class="h-px flex-1 bg-surface" />
+          </div>
+
+          <div class="space-y-2">
+            <label
+              for="oauth-server"
+              class="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted"
+            >
+              Server URL or Domain
+            </label>
+            <input
+              id="oauth-server"
+              v-model="oauthServer"
+              type="text"
+              placeholder="https://rawkode.chat or rawkode.chat"
+              autocomplete="url"
+              class="w-full rounded-lg bg-surface px-4 py-3 text-sm text-foreground placeholder-muted outline-none focus:ring-2 focus:ring-accent"
+            />
+
+            <label
+              for="oauth-provider"
+              class="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted"
+            >
+              Provider
+            </label>
+            <select
+              id="oauth-provider"
+              v-model="selectedProvider"
+              class="w-full rounded-lg bg-surface px-4 py-3 text-sm text-foreground outline-none focus:ring-2 focus:ring-accent disabled:opacity-50"
+              :disabled="loadingOAuthProviders || !oauthServer.trim()"
+            >
+              <option value="">
+                Server default (auto)
+              </option>
+              <option
+                v-for="provider in oauthProviders"
+                :key="provider.id"
+                :value="provider.id"
+              >
+                {{ provider.display_name }}
+              </option>
+            </select>
+
+            <button
+              type="button"
+              class="w-full rounded-lg border border-surface py-2 text-xs font-semibold text-muted transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+              :disabled="loadingOAuthProviders || !oauthServer.trim()"
+              @click="handleLoadOAuthProviders"
+            >
+              {{ loadingOAuthProviders ? 'Loading providers…' : 'Load providers for this server' }}
+            </button>
+
+            <button
+              type="button"
+              class="w-full rounded-lg border border-accent py-3 text-sm font-semibold text-accent transition-colors hover:bg-accent/10 disabled:opacity-50"
+              :disabled="loggingIn || loadingOAuthProviders || !oauthServer.trim()"
+              @click="handleOAuthLogin"
+            >
+              {{ loggingIn ? 'Redirecting…' : 'Sign in with OAuth' }}
+            </button>
+          </div>
+        </div>
       </form>
     </div>
   </div>

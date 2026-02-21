@@ -286,3 +286,353 @@ pub async fn xmpp_token_handler(
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{
+        AuthProviderConfig, AuthProviderKind, AuthProviderTokenEndpointAuthMethod, Session,
+    };
+    use crate::config::{AuthConfig, ServerConfig, ServerMode};
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::routes::auth::XmppAuthCode;
+    use crate::server::AppState;
+    use axum::{body::Body, http::Request};
+    use chrono::{Duration, Utc};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_provider() -> AuthProviderConfig {
+        AuthProviderConfig {
+            id: "github".to_string(),
+            display_name: "GitHub".to_string(),
+            kind: AuthProviderKind::OAuth2,
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
+            scopes: vec!["read:user".to_string()],
+            issuer: None,
+            authorization_endpoint: Some("https://github.com/login/oauth/authorize".to_string()),
+            token_endpoint: Some("https://github.com/login/oauth/access_token".to_string()),
+            userinfo_endpoint: Some("https://api.github.com/user".to_string()),
+            jwks_uri: None,
+            subject_claim: "id".to_string(),
+            username_claim: Some("login".to_string()),
+            email_claim: Some("email".to_string()),
+        }
+    }
+
+    fn test_server_config() -> ServerConfig {
+        ServerConfig {
+            mode: ServerMode::HomeServer,
+            base_url: "http://localhost:3000".to_string(),
+            session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
+            auth: AuthConfig {
+                providers: vec![test_provider()],
+            },
+        }
+    }
+
+    async fn create_test_auth_state() -> Arc<AuthState> {
+        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig::default())
+            .await
+            .expect("database pool should initialize");
+
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations should run");
+
+        let server_config = test_server_config();
+        let app_state = Arc::new(AppState::new(Arc::new(db_pool), server_config.clone()));
+
+        Arc::new(AuthState::new(
+            app_state,
+            &server_config,
+            server_config.session_key.as_ref().map(|s| s.as_bytes()),
+        ))
+    }
+
+    async fn create_session(state: &Arc<AuthState>) -> Session {
+        let session = Session::new("user-1", "alice", "alice");
+        state
+            .session_manager
+            .create_session(&session)
+            .await
+            .expect("session should be created");
+        session
+    }
+
+    fn insert_auth_code(
+        state: &Arc<AuthState>,
+        code: &str,
+        session_id: &str,
+        redirect_uri: &str,
+        code_challenge: Option<String>,
+        created_at: chrono::DateTime<Utc>,
+    ) {
+        state.xmpp_auth_codes.insert(
+            code.to_string(),
+            XmppAuthCode {
+                code: code.to_string(),
+                session_id: session_id.to_string(),
+                redirect_uri: redirect_uri.to_string(),
+                code_challenge,
+                created_at,
+            },
+        );
+    }
+
+    fn encode_form(fields: &[(&str, &str)]) -> String {
+        fields
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should be readable")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("response body should be valid json")
+    }
+
+    #[tokio::test]
+    async fn xmpp_authorize_rejects_unsupported_response_type() {
+        let state = create_test_auth_state().await;
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/xmpp/authorize?response_type=token&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], "unsupported_response_type");
+    }
+
+    #[tokio::test]
+    async fn xmpp_token_accepts_valid_pkce_verifier() {
+        let state = create_test_auth_state().await;
+        let session = create_session(&state).await;
+
+        let code = "auth-code-valid-pkce";
+        let redirect_uri = "https://client.example/callback";
+        let code_verifier = "valid-verifier-123";
+        let code_challenge = pkce_s256(code_verifier);
+
+        insert_auth_code(
+            &state,
+            code,
+            &session.id,
+            redirect_uri,
+            Some(code_challenge),
+            Utc::now(),
+        );
+
+        let app = router(state.clone());
+        let body = encode_form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", code_verifier),
+        ]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/xmpp/token")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["access_token"], session.id);
+        assert_eq!(payload["token_type"], "Bearer");
+        assert!(!state.xmpp_auth_codes.contains_key(code));
+    }
+
+    #[tokio::test]
+    async fn xmpp_token_rejects_invalid_pkce_verifier() {
+        let state = create_test_auth_state().await;
+        let session = create_session(&state).await;
+
+        let code = "auth-code-invalid-pkce";
+        let redirect_uri = "https://client.example/callback";
+
+        insert_auth_code(
+            &state,
+            code,
+            &session.id,
+            redirect_uri,
+            Some(pkce_s256("expected-verifier")),
+            Utc::now(),
+        );
+
+        let app = router(state);
+        let body = encode_form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", "wrong-verifier"),
+        ]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/xmpp/token")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"], "invalid_grant");
+        assert_eq!(payload["message"], "PKCE verification failed");
+    }
+
+    #[tokio::test]
+    async fn xmpp_token_rejects_edge_cases() {
+        let state = create_test_auth_state().await;
+        let session = create_session(&state).await;
+        let app = router(state.clone());
+
+        // unsupported grant type
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/xmpp/token")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(encode_form(&[
+                        ("grant_type", "refresh_token"),
+                        ("code", "any-code"),
+                        ("redirect_uri", "https://client.example/callback"),
+                    ])))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"], "unsupported_grant_type");
+
+        // redirect_uri mismatch
+        insert_auth_code(
+            &state,
+            "code-redirect-mismatch",
+            &session.id,
+            "https://client.example/callback-a",
+            None,
+            Utc::now(),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/xmpp/token")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(encode_form(&[
+                        ("grant_type", "authorization_code"),
+                        ("code", "code-redirect-mismatch"),
+                        ("redirect_uri", "https://client.example/callback-b"),
+                    ])))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"], "invalid_grant");
+        assert_eq!(payload["message"], "redirect_uri mismatch");
+
+        // expired code
+        insert_auth_code(
+            &state,
+            "code-expired",
+            &session.id,
+            "https://client.example/callback",
+            None,
+            Utc::now() - Duration::minutes(11),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/xmpp/token")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(encode_form(&[
+                        ("grant_type", "authorization_code"),
+                        ("code", "code-expired"),
+                        ("redirect_uri", "https://client.example/callback"),
+                    ])))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"], "invalid_grant");
+        assert_eq!(payload["message"], "Authorization code expired");
+
+        // missing session
+        insert_auth_code(
+            &state,
+            "code-missing-session",
+            "missing-session-id",
+            "https://client.example/callback",
+            None,
+            Utc::now(),
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/xmpp/token")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(encode_form(&[
+                        ("grant_type", "authorization_code"),
+                        ("code", "code-missing-session"),
+                        ("redirect_uri", "https://client.example/callback"),
+                    ])))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"], "invalid_grant");
+        assert_eq!(payload["message"], "Session not found");
+    }
+}

@@ -8,12 +8,19 @@ import RoomsView from '../views/RoomsView.vue';
 import RosterView from '../views/RosterView.vue';
 import ProfileView from '../views/ProfileView.vue';
 import SettingsView from '../views/SettingsView.vue';
+import XmppOAuthCallbackView from '../views/XmppOAuthCallbackView.vue';
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
     component: LoginView,
+    meta: { public: true },
+  },
+  {
+    path: '/oauth/xmpp/callback',
+    name: 'oauth-xmpp-callback',
+    component: XmppOAuthCallbackView,
     meta: { public: true },
   },
   {
