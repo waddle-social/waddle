@@ -2,6 +2,12 @@ import { ref, computed } from 'vue';
 import { defineStore } from 'pinia';
 import { useWaddle } from '../composables/useWaddle';
 import { discoverWebSocketEndpoint } from '../utils/discover';
+import {
+  beginXmppOAuthFlow,
+  completeXmppOAuthFlow,
+  fetchXmppOAuthProviders,
+  type XmppOAuthProvider,
+} from '../utils/xmppOAuth';
 
 const STORAGE_KEY = 'waddle:auth';
 
@@ -36,7 +42,9 @@ export const useAuthStore = defineStore('auth', () => {
   const endpoint = ref('');
   const authError = ref<string | null>(null);
   const loggingIn = ref(false);
+  const loadingOAuthProviders = ref(false);
   const isAuthenticated = ref(false);
+  const oauthProviders = ref<XmppOAuthProvider[]>([]);
 
   const nickname = computed(() => {
     const local = jid.value.split('@')[0];
@@ -88,6 +96,88 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  async function loadOAuthProviders(serverUrlOrDomain: string): Promise<XmppOAuthProvider[]> {
+    authError.value = null;
+    loadingOAuthProviders.value = true;
+    try {
+      const input = serverUrlOrDomain.trim();
+      if (!input) {
+        throw new Error('Server URL or domain is required');
+      }
+
+      const providers = await fetchXmppOAuthProviders(input);
+      oauthProviders.value = providers;
+      return providers;
+    } catch (err) {
+      authError.value = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      loadingOAuthProviders.value = false;
+    }
+  }
+
+  async function loginWithOAuth(
+    serverUrlOrDomain: string,
+    providerId?: string,
+    inputEndpoint?: string,
+  ): Promise<void> {
+    authError.value = null;
+    loggingIn.value = true;
+
+    try {
+      const input = serverUrlOrDomain.trim();
+      if (!input) {
+        throw new Error('Server URL or domain is required');
+      }
+
+      const { authorizeUrl } = await beginXmppOAuthFlow({
+        jidOrDomain: input,
+        providerId,
+        endpoint: inputEndpoint?.trim(),
+      });
+
+      window.location.assign(authorizeUrl);
+    } catch (err) {
+      authError.value = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      loggingIn.value = false;
+    }
+  }
+
+  async function completeOAuthLogin(
+    code: string,
+    state: string,
+  ): Promise<void> {
+    authError.value = null;
+    loggingIn.value = true;
+
+    try {
+      const completed = await completeXmppOAuthFlow({ code, state });
+
+      const waddle = useWaddle();
+      await waddle.connect(
+        completed.jid,
+        completed.token.access_token,
+        completed.flow.endpoint,
+      );
+
+      jid.value = completed.jid;
+      endpoint.value = completed.flow.endpoint;
+      isAuthenticated.value = true;
+      savePersisted({
+        jid: completed.jid,
+        endpoint: completed.flow.endpoint,
+      });
+    } catch (err) {
+      isAuthenticated.value = false;
+      authError.value = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      loggingIn.value = false;
+    }
+  }
+
   async function logout(): Promise<void> {
     try {
       const waddle = useWaddle();
@@ -106,9 +196,14 @@ export const useAuthStore = defineStore('auth', () => {
     endpoint,
     authError,
     loggingIn,
+    loadingOAuthProviders,
     isAuthenticated,
+    oauthProviders,
     nickname,
     login,
+    loginWithOAuth,
+    completeOAuthLogin,
+    loadOAuthProviders,
     logout,
   };
 });

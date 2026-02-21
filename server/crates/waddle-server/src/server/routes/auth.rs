@@ -33,6 +33,15 @@ use std::sync::Arc;
 use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
+/// A dynamically registered OAuth client (RFC 7591).
+#[derive(Debug, Clone)]
+pub struct DynamicClient {
+    pub client_id: String,
+    pub redirect_uris: Vec<String>,
+    pub client_name: Option<String>,
+    pub registered_at: DateTime<Utc>,
+}
+
 /// Shared auth state.
 pub struct AuthState {
     pub session_manager: SessionManager,
@@ -44,6 +53,8 @@ pub struct AuthState {
     pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
     pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
     pub xmpp_auth_codes: Arc<DashMap<String, XmppAuthCode>>,
+    /// RFC 7591 dynamic client registrations (XEP-0493 §2.3.2).
+    pub dynamic_clients: Arc<DashMap<String, DynamicClient>>,
 }
 
 impl AuthState {
@@ -69,7 +80,26 @@ impl AuthState {
             pending_auth: Arc::new(DashMap::new()),
             device_auth: Arc::new(DashMap::new()),
             xmpp_auth_codes: Arc::new(DashMap::new()),
+            dynamic_clients: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Register a dynamically discovered OAuth client (RFC 7591).
+    pub fn register_dynamic_client(
+        &self,
+        client_id: &str,
+        redirect_uris: &[String],
+        client_name: Option<&str>,
+    ) {
+        self.dynamic_clients.insert(
+            client_id.to_string(),
+            DynamicClient {
+                client_id: client_id.to_string(),
+                redirect_uris: redirect_uris.to_vec(),
+                client_name: client_name.map(String::from),
+                registered_at: Utc::now(),
+            },
+        );
     }
 
     fn callback_url(&self) -> String {
@@ -237,6 +267,8 @@ pub enum PendingFlow {
         client_redirect_uri: String,
         client_state: Option<String>,
         client_code_challenge: Option<String>,
+        /// XEP-0493 §3 validated scope (e.g. "xmpp:client:normal").
+        granted_scope: String,
     },
 }
 
@@ -268,6 +300,8 @@ pub struct XmppAuthCode {
     pub session_id: String,
     pub redirect_uri: String,
     pub code_challenge: Option<String>,
+    /// XEP-0493 scope granted during authorization.
+    pub granted_scope: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -428,6 +462,7 @@ pub async fn start_handler(
                 client_redirect_uri,
                 client_state: query.client_state,
                 client_code_challenge: query.code_challenge,
+                granted_scope: super::xmpp_oauth::SCOPE_CLIENT_NORMAL.to_string(),
             }
         }
         _ => {
@@ -623,6 +658,7 @@ pub async fn callback_handler(
             client_redirect_uri,
             client_state,
             client_code_challenge,
+            granted_scope,
         } => {
             let auth_code = Uuid::new_v4().to_string();
             state.xmpp_auth_codes.insert(
@@ -631,6 +667,7 @@ pub async fn callback_handler(
                     session_id: session.id,
                     redirect_uri: client_redirect_uri.clone(),
                     code_challenge: client_code_challenge,
+                    granted_scope,
                     created_at: Utc::now(),
                 },
             );

@@ -2,7 +2,7 @@
 //!
 //! Implements SASL authentication for XMPP connections, including:
 //! - SASL PLAIN (username/password or JID/token)
-//! - SASL OAUTHBEARER (RFC 7628, XEP-0493)
+//! - SASL OAUTHBEARER (RFC 7628) with XEP-0493 OAuth Client Login discovery
 //! - SASL SCRAM-SHA-256 (RFC 5802, RFC 7677)
 
 pub mod scram;
@@ -21,7 +21,7 @@ use crate::XmppError;
 pub enum SaslMechanism {
     /// PLAIN mechanism (RFC 4616)
     Plain,
-    /// OAUTHBEARER mechanism (RFC 7628, XEP-0493)
+    /// OAUTHBEARER mechanism (RFC 7628)
     OAuthBearer,
     /// SCRAM-SHA-256 mechanism (RFC 5802, RFC 7677)
     ScramSha256,
@@ -108,8 +108,9 @@ pub struct OAuthBearerCredentials {
 /// Result of parsing OAUTHBEARER SASL data.
 #[derive(Debug, Clone)]
 pub enum OAuthBearerResult {
-    /// Client sent an empty/discovery request
-    /// Per XEP-0493 §3.2, server should respond with discovery URL
+    /// Client sent an empty/discovery request.
+    /// Per XEP-0493 §2.3.1 + RFC 7628 §3.2.2, server responds with
+    /// a JSON challenge containing the `openid-configuration` discovery URL.
     DiscoveryRequest,
     /// Client sent valid credentials with a token
     Credentials(OAuthBearerCredentials),
@@ -128,8 +129,8 @@ pub enum OAuthBearerResult {
 /// Example with token: `n,,\x01auth=Bearer TOKEN\x01\x01`
 /// Empty request for discovery: `n,,\x01\x01` (or just empty data)
 ///
-/// Per XEP-0493:
-/// - Empty or minimal data triggers OAuth discovery response
+/// Per XEP-0493 §2.3.1 + RFC 7628:
+/// - Empty or minimal data triggers OAuth discovery (JSON challenge)
 /// - Token data is validated against the session store
 pub fn parse_oauthbearer(data: &[u8]) -> Result<OAuthBearerResult, XmppError> {
     // Empty data or just "n,," means discovery request
@@ -140,7 +141,7 @@ pub fn parse_oauthbearer(data: &[u8]) -> Result<OAuthBearerResult, XmppError> {
     let data_str = String::from_utf8_lossy(data);
 
     // Check for minimal/discovery request patterns
-    // XEP-0493 specifies sending empty OAUTHBEARER or just GS2 header for discovery
+    // XEP-0493 §2.3.1: client sends empty OAUTHBEARER to trigger discovery
     // Common patterns: "", "n,,\x01\x01", "n,,"
     if data_str.trim().is_empty()
         || data_str == "n,,"

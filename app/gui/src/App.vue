@@ -16,7 +16,7 @@ const runtimeStore = useRuntimeStore();
 const authStore = useAuthStore();
 const { setActiveConversation, startListening, stopListening } = useConversations();
 
-const isLoginRoute = computed(() => route.name === 'login');
+const hideSidebar = computed(() => Boolean(route.meta.public));
 
 // Only bootstrap runtime & conversations when authenticated
 watch(
@@ -49,8 +49,8 @@ watch(
 
 <template>
   <div class="flex h-screen overflow-hidden bg-background">
-    <!-- Left sidebar (hidden on login) -->
-    <SidebarNav v-if="!isLoginRoute" />
+    <!-- Left sidebar (hidden on public/auth routes) -->
+    <SidebarNav v-if="!hideSidebar" />
 
     <!-- Main content area -->
     <main class="flex min-w-0 flex-1 flex-col bg-chat-bg">

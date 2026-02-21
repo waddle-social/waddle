@@ -94,10 +94,11 @@ pub trait AppState: Send + Sync + 'static {
     /// Get the domain for this XMPP server.
     fn domain(&self) -> &str;
 
-    /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).
+    /// Get the OAuth discovery URL for XEP-0493 OAuth Client Login.
     ///
-    /// This URL is sent to clients that request OAuth discovery.
-    /// Should point to the RFC 8414 OAuth authorization server metadata endpoint.
+    /// Returned inside the RFC 7628 §3.2.2 JSON challenge as the
+    /// `openid-configuration` field. Should point to the RFC 8414
+    /// authorization server metadata endpoint.
     fn oauth_discovery_url(&self) -> String;
 
     /// List all relations a subject has on an object.

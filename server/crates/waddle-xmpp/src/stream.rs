@@ -648,36 +648,94 @@ impl XmppStream {
         Ok(())
     }
 
-    /// Send OAUTHBEARER discovery response per XEP-0493 §3.2.
+    /// Send OAUTHBEARER discovery response per XEP-0493 §2.3.1 + RFC 7628 §3.2.2.
     ///
     /// When a client sends an empty OAUTHBEARER request, we respond with
     /// the OAuth authorization server discovery URL so the client can
     /// complete the OAuth flow.
     ///
-    /// Response format per XEP-0493:
-    /// ```xml
-    /// <failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>
-    ///   <not-authorized/>
-    ///   <openid-configuration>https://example.com/.well-known/oauth-authorization-server</openid-configuration>
-    /// </failure>
+    /// Per RFC 7628 §3.2.2, the server sends a JSON error object as a SASL
+    /// challenge. The client acknowledges with a dummy `\x01` response, then
+    /// the server sends the final SASL failure.
+    ///
+    /// Wire format:
+    /// ```text
+    /// S: <challenge xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>base64(JSON)</challenge>
+    /// C: <response xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>AQ==</response>
+    /// S: <failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>
+    /// ```
+    ///
+    /// The JSON object contains:
+    /// ```json
+    /// {
+    ///   "status": "invalid_token",
+    ///   "openid-configuration": "https://example.com/.well-known/oauth-authorization-server"
+    /// }
     /// ```
     pub async fn send_oauthbearer_discovery(
         &mut self,
         discovery_url: &str,
     ) -> Result<(), XmppError> {
-        let response = format!(
-            "<failure xmlns='{}'>\
-                <not-authorized/>\
-                <openid-configuration>{}</openid-configuration>\
-            </failure>",
-            ns::SASL,
+        // Step 1: Send RFC 7628 JSON error as a SASL challenge (base64-encoded)
+        let json_payload = format!(
+            r#"{{"status":"invalid_token","openid-configuration":"{}"}}"#,
             discovery_url
         );
-        self.write_all(response.as_bytes()).await?;
+        let encoded = BASE64_STANDARD.encode(json_payload.as_bytes());
+        let challenge = format!("<challenge xmlns='{}'>{}</challenge>", ns::SASL, encoded);
+        self.write_all(challenge.as_bytes()).await?;
         self.flush().await?;
 
-        debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery response");
+        debug!(discovery_url = %discovery_url, "Sent OAUTHBEARER discovery challenge");
+
+        // Step 2: Wait for the client's dummy response (RFC 7628 §3.2.3)
+        // Client MUST send either \x01 or abort
+        self.wait_for_oauthbearer_dummy_response().await?;
+
+        // Step 3: Send the final SASL failure
+        self.send_sasl_failure("not-authorized").await?;
+
+        debug!("Completed OAUTHBEARER discovery sequence");
         Ok(())
+    }
+
+    /// Wait for the client's dummy OAUTHBEARER response per RFC 7628 §3.2.3.
+    ///
+    /// After receiving the JSON discovery challenge, the client MUST send
+    /// a response containing a single `\x01` byte (base64: `AQ==`), or abort.
+    async fn wait_for_oauthbearer_dummy_response(&mut self) -> Result<(), XmppError> {
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let n = self.read(&mut buf).await?;
+            if n == 0 {
+                return Err(XmppError::stream(
+                    "Connection closed during OAUTHBEARER discovery",
+                ));
+            }
+
+            self.parser.feed(&buf[..n]);
+
+            if self.parser.has_complete_stanza() {
+                let stanza = match self.parser.next_stanza()? {
+                    Some(stanza) => stanza,
+                    None => continue,
+                };
+
+                match stanza {
+                    ParsedStanza::SaslResponse { .. } => {
+                        // Got the dummy response — continue to send failure
+                        return Ok(());
+                    }
+                    _ => {
+                        // Unexpected stanza during discovery; treat as abort
+                        return Err(XmppError::auth_failed(
+                            "Unexpected stanza during OAUTHBEARER discovery",
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// Parse SASL PLAIN authentication data.

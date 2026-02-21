@@ -249,7 +249,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self.domain
     }
 
-    /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).
+    /// Get the OAuth discovery URL for XEP-0493 OAuth Client Login.
     ///
     /// Returns the RFC 8414 OAuth authorization server metadata endpoint URL.
     fn oauth_discovery_url(&self) -> String {

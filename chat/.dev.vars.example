@@ -1,2 +1,2 @@
-# Local Cloudflare-compatible vars used by Astro dev.
-SERVER_BASE_URL=http://localhost:3000
+# Not needed — SERVER_BASE_URL is set via env.cue and passed to wrangler with --var.
+# Only create .dev.vars if you need to override something wrangler-specific locally.
