@@ -31,7 +31,7 @@ pub struct UserRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkedIdentity {
-    pub provider_id: String,
+    pub issuer: String,
     pub subject: String,
     pub user: UserRecord,
 }
@@ -50,51 +50,74 @@ impl IdentityService {
         provider: &AuthProviderConfig,
         claims: &IdentityClaims,
     ) -> Result<LinkedIdentity, AuthError> {
-        if claims.subject.trim().is_empty() {
+        let subject = claims.subject.trim();
+        if subject.is_empty() {
             return Err(AuthError::InvalidRequest(
                 "missing provider subject claim".to_string(),
             ));
         }
 
-        if let Some(existing) = self
-            .find_by_provider_subject(&provider.id, &claims.subject)
-            .await?
-        {
-            self.update_identity_last_login(provider, claims).await?;
+        let issuer = Self::identity_issuer(provider, claims)?;
+
+        if let Some(existing) = self.find_by_issuer_subject(&issuer, subject).await? {
+            self.update_identity_last_login(provider, &issuer, subject)
+                .await?;
             return Ok(LinkedIdentity {
-                provider_id: provider.id.clone(),
-                subject: claims.subject.clone(),
+                issuer,
+                subject: subject.to_string(),
                 user: existing,
             });
         }
 
-        let user = self.create_user(provider, claims).await?;
-        self.insert_identity(provider, claims, &user.id).await?;
+        let user = self.create_user(provider, claims, &issuer).await?;
+        self.insert_identity(provider, claims, &issuer, &user.id)
+            .await?;
 
         Ok(LinkedIdentity {
-            provider_id: provider.id.clone(),
-            subject: claims.subject.clone(),
+            issuer,
+            subject: subject.to_string(),
             user,
         })
     }
 
-    async fn find_by_provider_subject(
+    fn identity_issuer(
+        provider: &AuthProviderConfig,
+        claims: &IdentityClaims,
+    ) -> Result<String, AuthError> {
+        claims
+            .issuer
+            .as_deref()
+            .or(provider.issuer.as_deref())
+            .map(Self::normalize_issuer)
+            .filter(|issuer| !issuer.is_empty())
+            .ok_or_else(|| {
+                AuthError::InvalidRequest(
+                    "missing issuer for identity mapping (issuer+sub required)".to_string(),
+                )
+            })
+    }
+
+    fn normalize_issuer(issuer: &str) -> String {
+        issuer.trim().trim_end_matches('/').to_string()
+    }
+
+    async fn find_by_issuer_subject(
         &self,
-        provider_id: &str,
+        issuer: &str,
         subject: &str,
     ) -> Result<Option<UserRecord>, AuthError> {
         let query = r#"
             SELECT u.id, u.username, u.xmpp_localpart, u.display_name, u.avatar_url, u.primary_email
             FROM auth_identities ai
             JOIN users u ON u.id = ai.user_id
-            WHERE ai.provider_id = ? AND ai.subject = ?
+            WHERE ai.issuer = ? AND ai.subject = ?
             LIMIT 1
         "#;
 
         let row = if let Some(persistent) = self.db.persistent_connection() {
             let conn = persistent.lock().await;
             let mut rows = conn
-                .query(query, libsql::params![provider_id, subject])
+                .query(query, libsql::params![issuer, subject])
                 .await
                 .map_err(|e| {
                     AuthError::DatabaseError(format!("Failed to query identity: {}", e))
@@ -107,7 +130,7 @@ impl IdentityService {
                 AuthError::DatabaseError(format!("Failed to connect database: {}", e))
             })?;
             let mut rows = conn
-                .query(query, libsql::params![provider_id, subject])
+                .query(query, libsql::params![issuer, subject])
                 .await
                 .map_err(|e| {
                     AuthError::DatabaseError(format!("Failed to query identity: {}", e))
@@ -136,7 +159,11 @@ impl IdentityService {
         }
     }
 
-    fn derive_base_username(provider: &AuthProviderConfig, claims: &IdentityClaims) -> String {
+    fn derive_base_username(
+        provider: &AuthProviderConfig,
+        claims: &IdentityClaims,
+        issuer: &str,
+    ) -> String {
         if let Some(v) = claims.preferred_username.as_deref() {
             let slug = username_to_localpart(v);
             if !slug.is_empty() {
@@ -169,7 +196,7 @@ impl IdentityService {
             provider_slug
         };
 
-        let digest = Sha256::digest(format!("{}:{}", provider.id, claims.subject).as_bytes());
+        let digest = Sha256::digest(format!("{}:{}", issuer, claims.subject.trim()).as_bytes());
         let short = hex::encode(&digest[..6]);
         format!("ext_{}_{}", provider_component, short)
     }
@@ -178,8 +205,9 @@ impl IdentityService {
         &self,
         provider: &AuthProviderConfig,
         claims: &IdentityClaims,
+        issuer: &str,
     ) -> Result<UserRecord, AuthError> {
-        let base = Self::derive_base_username(provider, claims);
+        let base = Self::derive_base_username(provider, claims, issuer);
 
         for i in 0..200 {
             let username = if i == 0 {
@@ -266,6 +294,7 @@ impl IdentityService {
         &self,
         provider: &AuthProviderConfig,
         claims: &IdentityClaims,
+        issuer: &str,
         user_id: &str,
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
@@ -286,7 +315,7 @@ impl IdentityService {
                     identity_id.as_str(),
                     user_id,
                     provider.id.as_str(),
-                    claims.issuer.clone(),
+                    issuer,
                     claims.subject.as_str(),
                     claims.email.clone(),
                     claims.email_verified.map(|v| if v { 1 } else { 0 }),
@@ -312,7 +341,7 @@ impl IdentityService {
                     identity_id.as_str(),
                     user_id,
                     provider.id.as_str(),
-                    claims.issuer.clone(),
+                    issuer,
                     claims.subject.as_str(),
                     claims.email.clone(),
                     claims.email_verified.map(|v| if v { 1 } else { 0 }),
@@ -331,15 +360,16 @@ impl IdentityService {
     async fn update_identity_last_login(
         &self,
         provider: &AuthProviderConfig,
-        claims: &IdentityClaims,
+        issuer: &str,
+        subject: &str,
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
 
         if let Some(persistent) = self.db.persistent_connection() {
             let conn = persistent.lock().await;
             conn.execute(
-                "UPDATE auth_identities SET last_login_at = ? WHERE provider_id = ? AND subject = ?",
-                libsql::params![now.as_str(), provider.id.as_str(), claims.subject.as_str()],
+                "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
+                libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],
             )
             .await
             .map_err(|e| {
@@ -350,8 +380,8 @@ impl IdentityService {
                 AuthError::DatabaseError(format!("Failed to connect database: {}", e))
             })?;
             conn.execute(
-                "UPDATE auth_identities SET last_login_at = ? WHERE provider_id = ? AND subject = ?",
-                libsql::params![now.as_str(), provider.id.as_str(), claims.subject.as_str()],
+                "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
+                libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],
             )
             .await
             .map_err(|e| {
@@ -413,7 +443,11 @@ mod tests {
         claims.preferred_username = Some("Alice.Dev".to_string());
         claims.raw_claims = json!({ "login": "ignored-login" });
 
-        let username = IdentityService::derive_base_username(&provider, &claims);
+        let username = IdentityService::derive_base_username(
+            &provider,
+            &claims,
+            claims.issuer.as_deref().unwrap(),
+        );
         assert_eq!(username, "alice.dev");
     }
 
@@ -423,7 +457,11 @@ mod tests {
         let mut claims = claims();
         claims.raw_claims = json!({ "login": "octo-cat" });
 
-        let username = IdentityService::derive_base_username(&provider, &claims);
+        let username = IdentityService::derive_base_username(
+            &provider,
+            &claims,
+            claims.issuer.as_deref().unwrap(),
+        );
         assert_eq!(username, "octo-cat");
     }
 
@@ -432,7 +470,11 @@ mod tests {
         let provider = provider_with_username_claim(Some("login"));
         let claims = claims();
 
-        let username = IdentityService::derive_base_username(&provider, &claims);
+        let username = IdentityService::derive_base_username(
+            &provider,
+            &claims,
+            claims.issuer.as_deref().unwrap(),
+        );
         assert_eq!(username, "example.user");
     }
 
@@ -444,11 +486,25 @@ mod tests {
         claims.email = None;
         claims.raw_claims = json!({});
 
-        let username = IdentityService::derive_base_username(&provider, &claims);
+        let username = IdentityService::derive_base_username(
+            &provider,
+            &claims,
+            claims.issuer.as_deref().unwrap(),
+        );
         let prefix = "ext_provider_";
         assert!(username.starts_with(prefix));
         let suffix = &username[prefix.len()..];
         assert_eq!(suffix.len(), 12);
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn issuer_is_normalized_for_identity_mapping() {
+        let provider = provider_with_username_claim(None);
+        let mut claims = claims();
+        claims.issuer = Some("https://issuer.example/".to_string());
+
+        let issuer = IdentityService::identity_issuer(&provider, &claims).expect("issuer");
+        assert_eq!(issuer, "https://issuer.example");
     }
 }

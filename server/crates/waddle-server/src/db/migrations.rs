@@ -77,14 +77,14 @@ CREATE TABLE auth_identities (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     provider_id TEXT NOT NULL,
-    issuer TEXT,
+    issuer TEXT NOT NULL,
     subject TEXT NOT NULL,
     email TEXT,
     email_verified INTEGER,
     raw_claims_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     last_login_at TEXT NOT NULL,
-    UNIQUE(provider_id, subject),
+    UNIQUE(issuer, subject),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -239,7 +239,7 @@ PRAGMA foreign_keys = ON;
     pub fn all() -> Vec<Migration> {
         vec![Migration {
             version: 1,
-            description: "Hard-cut auth broker and UUID principal schema".to_string(),
+            description: "Hard-cut auth broker schema (issuer+subject identity key)".to_string(),
             sql: V0001_AUTH_BROKER_SCHEMA,
         }]
     }

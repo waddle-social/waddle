@@ -119,7 +119,7 @@ secret:
   # JSON object/array for WADDLE_AUTH_PROVIDERS_JSON.
   # This usually contains provider client secrets and should stay in Secret data.
   # Example:
-  # [{"id":"github","display_name":"GitHub","kind":"oauth2","client_id":"...","client_secret":"...","scopes":["read:user","user:email"],"authorization_endpoint":"https://github.com/login/oauth/authorize","token_endpoint":"https://github.com/login/oauth/access_token","userinfo_endpoint":"https://api.github.com/user","subject_claim":"id","username_claim":"login","email_claim":"email"}]
+  # [{"id":"github","display_name":"GitHub","kind":"oauth2","issuer":"https://github.com","client_id":"...","client_secret":"...","scopes":["read:user","user:email"],"authorization_endpoint":"https://github.com/login/oauth/authorize","token_endpoint":"https://github.com/login/oauth/access_token","userinfo_endpoint":"https://api.github.com/user","subject_claim":"id","username_claim":"login","email_claim":"email"}]
   authProvidersJson: ""
   githubToken: ""
 

@@ -114,6 +114,12 @@ impl AuthProviderConfig {
                 }
             }
             AuthProviderKind::OAuth2 => {
+                if self.issuer.as_deref().unwrap_or_default().trim().is_empty() {
+                    return Err(AuthError::InvalidRequest(format!(
+                        "provider '{}' (oauth2) requires issuer",
+                        self.id
+                    )));
+                }
                 if self
                     .authorization_endpoint
                     .as_deref()
@@ -266,7 +272,7 @@ mod tests {
             client_secret: "secret".to_string(),
             token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
             scopes: vec!["read:user".to_string(), "user:email".to_string()],
-            issuer: None,
+            issuer: Some("https://github.com".to_string()),
             authorization_endpoint: Some("https://github.com/login/oauth/authorize".to_string()),
             token_endpoint: Some("https://github.com/login/oauth/access_token".to_string()),
             userinfo_endpoint: Some("https://api.github.com/user".to_string()),
@@ -291,6 +297,14 @@ mod tests {
         provider.userinfo_endpoint = None;
         let err = provider.validate().unwrap_err().to_string();
         assert!(err.contains("requires userinfo_endpoint"));
+    }
+
+    #[test]
+    fn oauth2_requires_issuer() {
+        let mut provider = oauth2_provider();
+        provider.issuer = None;
+        let err = provider.validate().unwrap_err().to_string();
+        assert!(err.contains("requires issuer"));
     }
 
     #[test]
