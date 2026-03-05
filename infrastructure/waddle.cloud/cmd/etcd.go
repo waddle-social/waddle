@@ -52,11 +52,11 @@ func runEtcdSnapshot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	talosconfig, err := loadTalosconfigFromInfisical(ctx, cfg, infClient)
+	talosconfig, err := loadTalosconfigFromSecretStore(ctx, cfg, store)
 	if err != nil {
 		return err
 	}
@@ -100,11 +100,11 @@ func runEtcdRestore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	talosconfig, err := loadTalosconfigFromInfisical(ctx, cfg, infClient)
+	talosconfig, err := loadTalosconfigFromSecretStore(ctx, cfg, store)
 	if err != nil {
 		return err
 	}

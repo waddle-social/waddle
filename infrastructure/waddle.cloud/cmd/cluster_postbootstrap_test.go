@@ -176,7 +176,7 @@ func TestPhasePostBootstrapPassesPreparedKubeconfigToComponents(t *testing.T) {
 	t.Cleanup(restorePostBootstrapFns)
 
 	const kubeconfigPath = "/tmp/bootstrap-kubeconfig"
-	const ociRepo = "oci://ghcr.io/rawkode-academy/rawkode-academy/gitops"
+	const ociRepo = "oci://ghcr.io/waddle-social/waddle/gitops"
 
 	postBootstrapKubeconfigPathFn = func(context.Context, *operation.Operation, *config.Config) (string, func(), error) {
 		return kubeconfigPath, func() {}, nil

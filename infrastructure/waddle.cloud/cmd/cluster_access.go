@@ -88,12 +88,12 @@ func buildClusterAccessMaterials(ctx context.Context, clusterName, cfgFile strin
 		return nil, err
 	}
 
-	infClient, err := getOrCreateInfisicalClient(ctx, cfg)
+	store, err := getOrCreateSecretStore(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create infisical client: %w", err)
+		return nil, fmt.Errorf("create secret store: %w", err)
 	}
 
-	talosconfig, err := loadTalosconfigFromInfisical(ctx, cfg, infClient)
+	talosconfig, err := loadTalosconfigFromSecretStore(ctx, cfg, store)
 	if err != nil {
 		return nil, err
 	}

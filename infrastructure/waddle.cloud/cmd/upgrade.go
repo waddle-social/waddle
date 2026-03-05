@@ -48,11 +48,11 @@ func runUpgradeTalos(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	talosconfig, err := loadTalosconfigFromInfisical(ctx, cfg, infClient)
+	talosconfig, err := loadTalosconfigFromSecretStore(ctx, cfg, store)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func runUpgradeK8s(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -134,14 +134,14 @@ func runUpgradeK8s(cmd *cobra.Command, args []string) error {
 	cfgForUpgrade.Cluster = cfg.Cluster
 	cfgForUpgrade.Cluster.KubernetesVersion = version
 
-	assets, err := ensureTalosAssets(ctx, &cfgForUpgrade, endpoint, infClient)
+	assets, err := ensureTalosAssets(ctx, &cfgForUpgrade, endpoint, store)
 	if err != nil {
 		return err
 	}
 	if len(assets.Talosconfig) == 0 {
 		return fmt.Errorf("generated talosconfig is empty")
 	}
-	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromInfisical(ctx, cfg, infClient)
+	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromSecretStore(ctx, cfg, store)
 	if err != nil {
 		return fmt.Errorf("load netbird setup key: %w", err)
 	}

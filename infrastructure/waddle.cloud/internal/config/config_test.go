@@ -114,3 +114,62 @@ func TestClusterEffectiveControlPlaneTaints(t *testing.T) {
 		t.Fatalf("ClusterConfig{ControlPlaneTaints:false}.EffectiveControlPlaneTaints() = %t, want false", got)
 	}
 }
+
+func TestValidateSecretsConfigurationRequiresProvider(t *testing.T) {
+	cfg := &Config{
+		Secrets: SecretsConfig{
+			SecretPath: "/projects/rawkode-cloud",
+		},
+	}
+
+	err := cfg.validateSecretsConfiguration()
+	if err == nil {
+		t.Fatal("expected secrets.provider validation error")
+	}
+}
+
+func TestValidateSecretsConfigurationInfisical(t *testing.T) {
+	cfg := &Config{
+		Secrets: SecretsConfig{
+			Provider:   "infisical",
+			SecretPath: "/projects/rawkode-cloud",
+		},
+		Infisical: InfisicalConfig{
+			SiteURL:     "https://app.infisical.com",
+			ProjectID:   "project-id",
+			Environment: "production",
+		},
+	}
+
+	err := cfg.validateSecretsConfiguration()
+	if err == nil {
+		t.Fatal("expected infisical client credential validation error")
+	}
+
+	cfg.Infisical.ClientID = "client-id"
+	cfg.Infisical.ClientSecret = "client-secret"
+	err = cfg.validateSecretsConfiguration()
+	if err != nil {
+		t.Fatalf("validateSecretsConfiguration returned error: %v", err)
+	}
+}
+
+func TestValidateSecretsConfigurationOnePasswordRequiresVault(t *testing.T) {
+	cfg := &Config{
+		Secrets: SecretsConfig{
+			Provider:   "1password",
+			SecretPath: "/projects/rawkode-cloud",
+		},
+	}
+
+	err := cfg.validateSecretsConfiguration()
+	if err == nil {
+		t.Fatal("expected onepassword.vault validation error")
+	}
+
+	cfg.OnePassword.Vault = "Employee"
+	err = cfg.validateSecretsConfiguration()
+	if err != nil {
+		t.Fatalf("validateSecretsConfiguration returned error: %v", err)
+	}
+}

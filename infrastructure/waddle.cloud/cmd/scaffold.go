@@ -38,17 +38,26 @@ nodePools:
       os: /dev/nvme0n1
       data: /dev/nvme1n1
 
-infisical:
-  siteUrl: https://app.infisical.com
-  projectId: ""
-  environment: production
+secrets:
+  provider: infisical # valid values: infisical, 1password
   secretPath: /%s # shared secrets live here; cluster secrets use <secretPath>/<environment>
   # Optional NetBird setup key lookup overrides:
   # netbirdSecretPath: /projects/rawkode-cloud
   # netbirdSecretKey: NETBIRD_SETUP_KEY
 
+infisical:
+  siteUrl: https://app.infisical.com
+  projectId: ""
+  environment: production
+  clientId: ""
+  clientSecret: ""
+
+onepassword:
+  vault: ""
+  account: ""
+
 flux:
-  ociRepo: "oci://ghcr.io/rawkode-academy/rawkode-academy/gitops"
+  ociRepo: "oci://ghcr.io/waddle-social/waddle/gitops"
 `
 
 var clusterScaffoldCmd = &cobra.Command{
@@ -98,7 +107,7 @@ func runClusterScaffold(environment, outputFile string) error {
 	}
 
 	fmt.Printf("Scaffolded environment config: %s\n", outputFile)
-	fmt.Println("Edit the file to fill in your Scaleway and Infisical settings.")
+	fmt.Println("Edit the file to fill in your Scaleway and secret backend settings.")
 	return nil
 }
 

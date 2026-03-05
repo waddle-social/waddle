@@ -6,18 +6,20 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/infisical"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/secrets"
 	"gopkg.in/yaml.v3"
 )
 
 // Config is the top-level cluster configuration loaded from YAML.
 type Config struct {
-	Environment string           `yaml:"environment"`
-	Cluster     ClusterConfig    `yaml:"cluster"`
-	Scaleway    ScalewayConfig   `yaml:"scaleway"`
-	NodePools   []NodePoolConfig `yaml:"nodePools"`
-	Infisical   InfisicalConfig  `yaml:"infisical"`
-	Flux        FluxConfig       `yaml:"flux"`
+	Environment string            `yaml:"environment"`
+	Cluster     ClusterConfig     `yaml:"cluster"`
+	Scaleway    ScalewayConfig    `yaml:"scaleway"`
+	NodePools   []NodePoolConfig  `yaml:"nodePools"`
+	Secrets     SecretsConfig     `yaml:"secrets"`
+	Infisical   InfisicalConfig   `yaml:"infisical"`
+	OnePassword OnePasswordConfig `yaml:"onepassword"`
+	Flux        FluxConfig        `yaml:"flux"`
 
 	// Runtime credentials loaded from secret providers, never serialized.
 	scwAccessKey       string
@@ -72,16 +74,27 @@ type DiskConfig struct {
 	Data string `yaml:"data"`
 }
 
-// InfisicalConfig holds secrets management settings.
+// InfisicalConfig holds Infisical backend settings.
 type InfisicalConfig struct {
-	SiteURL           string `yaml:"siteUrl"`
-	ProjectID         string `yaml:"projectId"`
-	Environment       string `yaml:"environment"`
+	SiteURL      string `yaml:"siteUrl"`
+	ProjectID    string `yaml:"projectId"`
+	Environment  string `yaml:"environment"`
+	ClientID     string `yaml:"clientId"`
+	ClientSecret string `yaml:"clientSecret"`
+}
+
+// OnePasswordConfig holds 1Password backend settings.
+type OnePasswordConfig struct {
+	Vault   string `yaml:"vault"`
+	Account string `yaml:"account"`
+}
+
+// SecretsConfig holds provider-agnostic secret settings.
+type SecretsConfig struct {
+	Provider          string `yaml:"provider"`
 	SecretPath        string `yaml:"secretPath"`
 	NetbirdSecretPath string `yaml:"netbirdSecretPath"`
 	NetbirdSecretKey  string `yaml:"netbirdSecretKey"`
-	ClientID          string `yaml:"clientId"`
-	ClientSecret      string `yaml:"clientSecret"`
 }
 
 // FluxConfig holds FluxCD configuration.
@@ -90,8 +103,8 @@ type FluxConfig struct {
 }
 
 const (
-	infisicalSCWAccessKeyKey = "SCW_ACCESS_KEY"
-	infisicalSCWSecretKeyKey = "SCW_SECRET_KEY"
+	scwAccessKeySecretKey = "SCW_ACCESS_KEY"
+	scwSecretKeySecretKey = "SCW_SECRET_KEY"
 )
 
 // Load reads and parses a cluster configuration YAML file.
@@ -124,68 +137,109 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("INFISICAL_CLIENT_SECRET"); v != "" && cfg.Infisical.ClientSecret == "" {
 		cfg.Infisical.ClientSecret = v
 	}
+	if err := cfg.validateSecretsConfiguration(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }
 
-// LoadRuntimeSecrets fetches operational credentials from Infisical.
+func (c *Config) validateSecretsConfiguration() error {
+	if c == nil {
+		return fmt.Errorf("config is required")
+	}
+	if strings.TrimSpace(c.Secrets.SecretPath) == "" {
+		return fmt.Errorf("secrets.secretPath is required")
+	}
+
+	cfg, err := c.secretStoreConfig()
+	if err != nil {
+		return err
+	}
+
+	return secrets.ValidateStoreConfig(cfg)
+}
+
+func (c *Config) secretStoreConfig() (secrets.StoreConfig, error) {
+	if c == nil {
+		return secrets.StoreConfig{}, fmt.Errorf("config is required")
+	}
+
+	switch secrets.NormalizeProvider(c.Secrets.Provider) {
+	case secrets.ProviderInfisical:
+		return secrets.StoreConfig{
+			Provider: secrets.ProviderInfisical,
+			Infisical: secrets.InfisicalConfig{
+				SiteURL:      strings.TrimSpace(c.Infisical.SiteURL),
+				ProjectID:    strings.TrimSpace(c.Infisical.ProjectID),
+				Environment:  strings.TrimSpace(c.Infisical.Environment),
+				ClientID:     strings.TrimSpace(c.Infisical.ClientID),
+				ClientSecret: strings.TrimSpace(c.Infisical.ClientSecret),
+			},
+		}, nil
+	case secrets.Provider1Password:
+		return secrets.StoreConfig{
+			Provider: secrets.Provider1Password,
+			OnePassword: secrets.OnePasswordConfig{
+				Vault:   strings.TrimSpace(c.OnePassword.Vault),
+				Account: strings.TrimSpace(c.OnePassword.Account),
+			},
+		}, nil
+	default:
+		return secrets.StoreConfig{}, fmt.Errorf(
+			"unsupported secrets.provider %q (expected %q or %q)",
+			strings.TrimSpace(c.Secrets.Provider),
+			secrets.ProviderInfisical,
+			secrets.Provider1Password,
+		)
+	}
+}
+
+// SecretStoreConfig returns the provider-specific store configuration.
+func (c *Config) SecretStoreConfig() (secrets.StoreConfig, error) {
+	return c.secretStoreConfig()
+}
+
+// LoadRuntimeSecrets fetches operational credentials from the configured secret backend.
 func (c *Config) LoadRuntimeSecrets(ctx context.Context) error {
 	if c == nil {
 		return fmt.Errorf("config is required")
 	}
 
-	if strings.TrimSpace(c.Infisical.SiteURL) == "" {
-		return fmt.Errorf("infisical.siteUrl is required")
-	}
-	if strings.TrimSpace(c.Infisical.ProjectID) == "" {
-		return fmt.Errorf("infisical.projectId is required")
-	}
-	if strings.TrimSpace(c.Infisical.Environment) == "" {
-		return fmt.Errorf("infisical.environment is required")
-	}
-	if strings.TrimSpace(c.Infisical.SecretPath) == "" {
-		return fmt.Errorf("infisical.secretPath is required")
-	}
-	if strings.TrimSpace(c.Infisical.ClientID) == "" || strings.TrimSpace(c.Infisical.ClientSecret) == "" {
-		return fmt.Errorf("INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET are required")
-	}
-
-	client, err := infisical.NewClient(ctx, c.Infisical.SiteURL, c.Infisical.ClientID, c.Infisical.ClientSecret)
+	storeCfg, err := c.secretStoreConfig()
 	if err != nil {
-		return fmt.Errorf("create infisical client: %w", err)
+		return err
 	}
 
-	return c.LoadRuntimeSecretsWithClient(ctx, client)
+	store, err := secrets.NewStore(ctx, storeCfg)
+	if err != nil {
+		return fmt.Errorf("create secret store: %w", err)
+	}
+
+	return c.LoadRuntimeSecretsWithStore(ctx, store)
 }
 
-// LoadRuntimeSecretsWithClient fetches operational credentials from Infisical using a caller-managed client.
-func (c *Config) LoadRuntimeSecretsWithClient(ctx context.Context, client *infisical.Client) error {
+// LoadRuntimeSecretsWithStore fetches operational credentials using a caller-managed secret store.
+func (c *Config) LoadRuntimeSecretsWithStore(ctx context.Context, store secrets.Store) error {
 	if c == nil {
 		return fmt.Errorf("config is required")
 	}
-	if client == nil {
-		return fmt.Errorf("infisical client is required")
+	if store == nil {
+		return fmt.Errorf("secret store is required")
 	}
-
-	if strings.TrimSpace(c.Infisical.ProjectID) == "" {
-		return fmt.Errorf("infisical.projectId is required")
-	}
-	if strings.TrimSpace(c.Infisical.Environment) == "" {
-		return fmt.Errorf("infisical.environment is required")
-	}
-	if strings.TrimSpace(c.Infisical.SecretPath) == "" {
-		return fmt.Errorf("infisical.secretPath is required")
+	if strings.TrimSpace(c.Secrets.SecretPath) == "" {
+		return fmt.Errorf("secrets.secretPath is required")
 	}
 	var err error
-	c.scwAccessKey, err = requiredInfisicalSecret(
-		ctx, client, c.Infisical.ProjectID, c.Infisical.Environment, c.Infisical.SecretPath, infisicalSCWAccessKeyKey,
+	c.scwAccessKey, err = requiredSecret(
+		ctx, store, c.Secrets.SecretPath, scwAccessKeySecretKey,
 	)
 	if err != nil {
 		return err
 	}
 
-	c.scwSecretKey, err = requiredInfisicalSecret(
-		ctx, client, c.Infisical.ProjectID, c.Infisical.Environment, c.Infisical.SecretPath, infisicalSCWSecretKeyKey,
+	c.scwSecretKey, err = requiredSecret(
+		ctx, store, c.Secrets.SecretPath, scwSecretKeySecretKey,
 	)
 	if err != nil {
 		return err
@@ -194,21 +248,18 @@ func (c *Config) LoadRuntimeSecretsWithClient(ctx context.Context, client *infis
 	return nil
 }
 
-func requiredInfisicalSecret(
+func requiredSecret(
 	ctx context.Context,
-	client *infisical.Client,
-	projectID,
-	environment,
-	secretPath,
-	key string,
+	store secrets.Store,
+	secretPath, key string,
 ) (string, error) {
-	value, err := client.GetSecret(ctx, projectID, environment, secretPath, key)
+	value, err := store.GetSecret(ctx, secretPath, key)
 	if err != nil {
-		return "", fmt.Errorf("load %s from infisical path %s: %w", key, secretPath, err)
+		return "", fmt.Errorf("load %s from secret path %s: %w", key, secretPath, err)
 	}
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return "", fmt.Errorf("%s is empty in infisical path %s", key, secretPath)
+		return "", fmt.Errorf("%s is empty in secret path %s", key, secretPath)
 	}
 
 	return trimmed, nil
@@ -228,7 +279,7 @@ func Save(path string, cfg *Config) error {
 	return nil
 }
 
-// ScalewayCredentials returns the Scaleway credentials loaded from Infisical.
+// ScalewayCredentials returns the Scaleway credentials loaded from the secret backend.
 func (c *Config) ScalewayCredentials() (accessKey, secretKey string) {
 	return c.scwAccessKey, c.scwSecretKey
 }

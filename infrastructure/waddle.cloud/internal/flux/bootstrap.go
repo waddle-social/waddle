@@ -35,7 +35,7 @@ import (
 // BootstrapParams holds parameters for FluxCD bootstrap.
 type BootstrapParams struct {
 	Kubeconfig string
-	OCIRepo    string // OCI repository URL (e.g. oci://ghcr.io/rawkode-academy/flux)
+	OCIRepo    string // OCI repository URL (e.g. oci://ghcr.io/waddle-social/waddle/gitops)
 	Branch     string
 	Version    string // Optional Flux version for install manifest generation.
 }

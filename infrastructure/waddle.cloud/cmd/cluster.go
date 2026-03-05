@@ -13,9 +13,9 @@ import (
 	"github.com/rawkode-academy/rawkode-cloud3/internal/cilium"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/flux"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/infisical"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/operation"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/secrets"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
 	"github.com/scaleway/scaleway-sdk-go/api/baremetal/v1"
 	scw "github.com/scaleway/scaleway-sdk-go/scw"
@@ -32,18 +32,19 @@ var clusterCmd = &cobra.Command{
 }
 
 const (
-	infisicalTalosSecretsKey      = "TALOS_SECRETS_YAML"
-	infisicalTalosControlPlaneKey = "TALOS_CONTROL_PLANE_CONFIG_YAML"
-	infisicalTalosWorkerKey       = "TALOS_WORKER_CONFIG_YAML"
-	infisicalTalosConfigKey       = "TALOSCONFIG_YAML"
-	opContextNetbirdSecretPath    = "netbirdSecretPath"
-	opContextNetbirdSecretKey     = "netbirdSecretKey"
+	talosSecretsSecretKey      = "TALOS_SECRETS_YAML"
+	talosControlPlaneSecretKey = "TALOS_CONTROL_PLANE_CONFIG_YAML"
+	talosWorkerSecretKey       = "TALOS_WORKER_CONFIG_YAML"
+	talosConfigSecretKey       = "TALOSCONFIG_YAML"
+	opContextNetbirdSecretPath = "netbirdSecretPath"
+	opContextNetbirdSecretKey  = "netbirdSecretKey"
+	opContextReinstall         = "reinstall"
 )
 
-var infisicalClientCache struct {
-	mu     sync.Mutex
-	key    string
-	client *infisical.Client
+var secretStoreCache struct {
+	mu    sync.Mutex
+	key   string
+	store secrets.Store
 }
 
 var clusterCreateCmd = &cobra.Command{
@@ -87,8 +88,10 @@ func init() {
 	clusterCreateCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")
 	clusterCreateCmd.Flags().String("node-name", "", "Deprecated: control-plane names are now auto-generated from the pool")
 	clusterCreateCmd.Flags().String("pool", "", "Node pool name (defaults to first control-plane pool)")
-	clusterCreateCmd.Flags().String("netbird-secret-path", "", "Infisical secret path for Netbird setup key lookup (overrides infisical.netbirdSecretPath; defaults to infisical.secretPath)")
-	clusterCreateCmd.Flags().String("netbird-secret-key", "", "Infisical secret key for Netbird setup key lookup (overrides infisical.netbirdSecretKey)")
+	clusterCreateCmd.Flags().String("netbird-secret-path", "", "Secret backend path for Netbird setup key lookup (overrides secrets.netbirdSecretPath; defaults to secrets.secretPath)")
+	clusterCreateCmd.Flags().String("netbird-secret-key", "", "Secret backend key for Netbird setup key lookup (overrides secrets.netbirdSecretKey)")
+	clusterCreateCmd.Flags().String("server-id", "", "Existing Scaleway server ID to reinstall and reuse")
+	clusterCreateCmd.Flags().Bool("confirm-reinstall", false, "Confirm destructive reinstall when --server-id is provided")
 
 	clusterDeleteCmd.Flags().StringP("environment", "e", "", "Cluster/environment name")
 	clusterDeleteCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")
@@ -121,6 +124,12 @@ var (
 	postBootstrapKubernetesAPIRetryInterval = 5 * time.Second
 	postBootstrapKubernetesAPIRetryTimeout  = 10 * time.Minute
 	scalewayNewClientFn                     = scaleway.NewClient
+	scalewayResolveOfferForBillingCycleFn   = scaleway.ResolveOfferForBillingCycle
+	scalewayResolveUbuntuOSIDFn             = scaleway.ResolveUbuntuOSID
+	scalewayOrderServerFn                   = scaleway.OrderServer
+	scalewayReinstallServerFn               = scaleway.ReinstallServer
+	scalewayWaitForReadyFn                  = scaleway.WaitForReady
+	scalewayEnsureServerPrivateNetworkFn    = scaleway.EnsureServerPrivateNetworkAttachment
 	scalewayGetServerFn                     = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
 		return client.Baremetal.GetServer(&baremetal.GetServerRequest{
 			Zone:     zone,
@@ -129,6 +138,9 @@ var (
 	}
 	scalewayEnsureNetworkFoundationFn       = scaleway.EnsureNetworkFoundation
 	scalewayResolvePrivateNetworkIPv4CIDRFn = scaleway.ResolvePrivateNetworkIPv4CIDR
+	scalewayEnsureManagedServerTagsFn       = ensureManagedServerTags
+	secretsNewStoreFn                       = secrets.NewStore
+	secretsCacheKeyFn                       = secrets.CacheKey
 )
 
 func runClusterCreate(cmd *cobra.Command, args []string) error {
@@ -139,6 +151,12 @@ func runClusterCreate(cmd *cobra.Command, args []string) error {
 	poolName, _ := cmd.Flags().GetString("pool")
 	netbirdSecretPathFlag, _ := cmd.Flags().GetString("netbird-secret-path")
 	netbirdSecretKeyFlag, _ := cmd.Flags().GetString("netbird-secret-key")
+	serverIDFlag, _ := cmd.Flags().GetString("server-id")
+	confirmReinstall, _ := cmd.Flags().GetBool("confirm-reinstall")
+
+	if err := validateReinstallFlags(serverIDFlag, confirmReinstall); err != nil {
+		return err
+	}
 
 	cfg, cfgPath, err := loadConfigForClusterOrFile(clusterName, cfgPathFlag)
 	if err != nil {
@@ -167,17 +185,17 @@ func runClusterCreate(cmd *cobra.Command, args []string) error {
 	}
 	netbirdSecretPath := strings.TrimSpace(netbirdSecretPathFlag)
 	if netbirdSecretPath == "" {
-		netbirdSecretPath = strings.TrimSpace(cfg.Infisical.NetbirdSecretPath)
+		netbirdSecretPath = strings.TrimSpace(cfg.Secrets.NetbirdSecretPath)
 	}
 	if netbirdSecretPath == "" {
-		netbirdSecretPath = strings.TrimSpace(cfg.Infisical.SecretPath)
+		netbirdSecretPath = strings.TrimSpace(cfg.Secrets.SecretPath)
 	}
 	if netbirdSecretPath == "" {
-		netbirdSecretPath = infisicalSecretPathForCluster(cfg)
+		netbirdSecretPath = secretPathForCluster(cfg)
 	}
 	netbirdSecretKey := strings.TrimSpace(netbirdSecretKeyFlag)
 	if netbirdSecretKey == "" {
-		netbirdSecretKey = strings.TrimSpace(cfg.Infisical.NetbirdSecretKey)
+		netbirdSecretKey = strings.TrimSpace(cfg.Secrets.NetbirdSecretKey)
 	}
 
 	op := operation.New(operation.GenerateID(), operation.TypeCreateCluster, cfg.Environment, createClusterPhases)
@@ -185,8 +203,12 @@ func runClusterCreate(cmd *cobra.Command, args []string) error {
 	op.SetContext("role", pool.EffectiveType())
 	op.SetContext("poolName", pool.Name)
 	op.SetContext("controlPlaneSlot", "1")
+	op.SetContext(opContextReinstall, confirmReinstall)
 	if privateIP != "" {
 		op.SetContext("privateIP", privateIP)
+	}
+	if serverID := strings.TrimSpace(serverIDFlag); serverID != "" {
+		op.SetContext("serverId", serverID)
 	}
 	op.SetContext(opContextNetbirdSecretPath, netbirdSecretPath)
 	op.SetContext(opContextNetbirdSecretKey, netbirdSecretKey)
@@ -266,28 +288,28 @@ func executeCreateCluster(
 // Phase implementations
 
 func phaseInit(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
-	slog.Info("phase init: ensuring Talos secrets are available in Infisical")
+	slog.Info("phase init: ensuring Talos secrets are available in secret backend")
 
-	client, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	if _, err := ensureTalosSecretsYAML(ctx, cfg, client); err != nil {
+	if _, err := ensureTalosSecretsYAML(ctx, cfg, store); err != nil {
 		return err
 	}
 
-	op.SetContext("secretsPath", infisicalSecretPathForCluster(cfg))
+	op.SetContext("secretsPath", secretPathForCluster(cfg))
 	return nil
 }
 
 func phaseGenerateConfig(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
 	slog.Info("phase generate-config: validating Talos generation prerequisites")
 
-	client, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	if _, err := ensureTalosSecretsYAML(ctx, cfg, client); err != nil {
+	if _, err := ensureTalosSecretsYAML(ctx, cfg, store); err != nil {
 		return err
 	}
 
@@ -323,8 +345,14 @@ func phaseOrderServer(
 		}
 	}
 
+	reinstall := operationContextBool(op, opContextReinstall)
+	reinstallServerID := strings.TrimSpace(op.GetContextString("serverId"))
+	if reinstall && reinstallServerID == "" {
+		return fmt.Errorf("missing server ID in operation context for reinstall")
+	}
+
 	// Check if server already exists from a previous run
-	if serverID := op.GetContextString("serverId"); serverID != "" {
+	if serverID := reinstallServerID; serverID != "" && !reinstall {
 		slog.Info("server already ordered", "server_id", serverID)
 		return nil
 	}
@@ -349,17 +377,6 @@ func phaseOrderServer(
 	op.SetContext("zone", zoneValue)
 	zone := scw.Zone(zoneValue)
 
-	// Resolve offer and OS
-	offerID, _, err := scaleway.ResolveOfferForBillingCycle(ctx, scwClient, zone, pool.Offer, pool.BillingCycle)
-	if err != nil {
-		return fmt.Errorf("resolve offer: %w", err)
-	}
-
-	osID, err := scaleway.ResolveUbuntuOSID(ctx, scwClient, zone, offerID)
-	if err != nil {
-		return fmt.Errorf("resolve ubuntu OS: %w", err)
-	}
-
 	// Ensure network foundation
 	region, _ := zone.Region()
 	vpcName, err := cfg.ScalewayVPCName()
@@ -370,7 +387,7 @@ func phaseOrderServer(
 	if err != nil {
 		return err
 	}
-	network, err := scaleway.EnsureNetworkFoundation(ctx, scwClient, scaleway.NetworkFoundationParams{
+	network, err := scalewayEnsureNetworkFoundationFn(ctx, scwClient, scaleway.NetworkFoundationParams{
 		Region:             region,
 		VPCName:            vpcName,
 		PrivateNetworkName: privateNetworkName,
@@ -387,9 +404,87 @@ func phaseOrderServer(
 		OSDisk:         pool.Disks.OS,
 		DataDisk:       pool.Disks.Data,
 	})
+	if reinstall {
+		serverID := reinstallServerID
+
+		existingServer, err := scalewayGetServerFn(ctx, scwClient, zone, serverID)
+		if err != nil {
+			return fmt.Errorf("load existing server %s for reinstall: %w", serverID, err)
+		}
+		if existingServer == nil || strings.TrimSpace(existingServer.ID) == "" {
+			return fmt.Errorf("existing server %s was not found in zone %s", serverID, zone)
+		}
+
+		existingNodeName := strings.TrimSpace(existingServer.Name)
+		if existingNodeName == "" {
+			return fmt.Errorf("existing server %s has empty name", serverID)
+		}
+		op.SetContext("nodeName", existingNodeName)
+
+		offerID := strings.TrimSpace(existingServer.OfferID)
+		if offerID == "" {
+			return fmt.Errorf("existing server %s has empty offer ID", serverID)
+		}
+
+		osID, err := scalewayResolveUbuntuOSIDFn(ctx, scwClient, zone, offerID)
+		if err != nil {
+			return fmt.Errorf("resolve ubuntu OS for existing server offer %s: %w", offerID, err)
+		}
+
+		if err := scalewayEnsureServerPrivateNetworkFn(
+			ctx,
+			scwClient,
+			zone,
+			serverID,
+			network.PrivateNetworkID,
+			privateIP,
+		); err != nil {
+			return fmt.Errorf("ensure private network attachment for existing server %s: %w", serverID, err)
+		}
+
+		reinstalledServer, err := scalewayReinstallServerFn(ctx, scwClient, scaleway.ReinstallParams{
+			ServerID:        serverID,
+			Zone:            zone,
+			OSID:            osID,
+			CloudInitScript: cloudInit,
+			PivotOSDisk:     pool.Disks.OS,
+			PivotDataDisk:   pool.Disks.Data,
+		})
+		if err != nil {
+			return fmt.Errorf("reinstall server %s: %w", serverID, err)
+		}
+
+		reinstalledServer, err = scalewayEnsureManagedServerTagsFn(
+			ctx,
+			scwClient,
+			zone,
+			reinstalledServer,
+			cfg.Environment,
+			pool.Name,
+			role,
+		)
+		if err != nil {
+			return fmt.Errorf("apply managed tags to reinstalled server %s: %w", serverID, err)
+		}
+
+		op.SetContext("serverId", reinstalledServer.ID)
+		slog.Info("server reinstall triggered", "server_id", reinstalledServer.ID, "node", existingNodeName)
+		return nil
+	}
+
+	// Resolve offer and OS
+	offerID, _, err := scalewayResolveOfferForBillingCycleFn(ctx, scwClient, zone, pool.Offer, pool.BillingCycle)
+	if err != nil {
+		return fmt.Errorf("resolve offer: %w", err)
+	}
+
+	osID, err := scalewayResolveUbuntuOSIDFn(ctx, scwClient, zone, offerID)
+	if err != nil {
+		return fmt.Errorf("resolve ubuntu OS: %w", err)
+	}
 
 	// Order the server
-	server, err := scaleway.OrderServer(ctx, scwClient, scaleway.ProvisionParams{
+	server, err := scalewayOrderServerFn(ctx, scwClient, scaleway.ProvisionParams{
 		OfferID:                  offerID,
 		Zone:                     zone,
 		OSID:                     osID,
@@ -406,8 +501,20 @@ func phaseOrderServer(
 		return fmt.Errorf("order server: %w", err)
 	}
 
-	op.SetContext("serverId", server.ID)
+	server, err = scalewayEnsureManagedServerTagsFn(
+		ctx,
+		scwClient,
+		zone,
+		server,
+		cfg.Environment,
+		pool.Name,
+		role,
+	)
+	if err != nil {
+		return fmt.Errorf("apply managed tags to ordered server %s: %w", server.ID, err)
+	}
 
+	op.SetContext("serverId", server.ID)
 	slog.Info("server ordered", "server_id", server.ID)
 	return nil
 }
@@ -448,7 +555,7 @@ func phaseWaitServer(
 		return fmt.Errorf("node pool %q must define zone", pool.Name)
 	}
 	zone := scw.Zone(zoneValue)
-	server, err := scaleway.WaitForReady(ctx, scwClient, serverID, zone)
+	server, err := scalewayWaitForReadyFn(ctx, scwClient, serverID, zone)
 	if err != nil {
 		return fmt.Errorf("wait for server ready: %w", err)
 	}
@@ -464,6 +571,60 @@ func phaseWaitServer(
 	}
 
 	return nil
+}
+
+func operationContextBool(op *operation.Operation, key string) bool {
+	if op == nil {
+		return false
+	}
+	value, ok := op.GetContext(key)
+	if !ok {
+		return false
+	}
+
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		normalized := strings.TrimSpace(strings.ToLower(typed))
+		return normalized == "true" || normalized == "1" || normalized == "yes"
+	default:
+		return false
+	}
+}
+
+func ensureManagedServerTags(
+	ctx context.Context,
+	client *scaleway.Client,
+	zone scw.Zone,
+	server *baremetal.Server,
+	environment,
+	poolName,
+	role string,
+) (*baremetal.Server, error) {
+	if client == nil {
+		return nil, fmt.Errorf("scaleway client is required")
+	}
+	if server == nil || strings.TrimSpace(server.ID) == "" {
+		return nil, fmt.Errorf("server is required")
+	}
+
+	desired := managedServerTags(environment, poolName, role)
+	merged := mergeServerTags(server.Tags, desired)
+	if sameStringSet(normalizeNonEmptyStrings(server.Tags...), merged) {
+		return server, nil
+	}
+
+	updated, err := client.Baremetal.UpdateServer(&baremetal.UpdateServerRequest{
+		Zone:     zone,
+		ServerID: server.ID,
+		Tags:     &merged,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("update server tags: %w", err)
+	}
+
+	return updated, nil
 }
 
 func phaseWaitTalos(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
@@ -485,11 +646,11 @@ func phaseApplyConfig(ctx context.Context, op *operation.Operation, cfg *config.
 	endpoint := controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
 	op.SetContext("controlPlaneEndpoint", endpoint)
 
-	client, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	assets, err := ensureTalosAssets(ctx, cfg, endpoint, client)
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, store)
 	if err != nil {
 		return err
 	}
@@ -500,7 +661,7 @@ func phaseApplyConfig(ctx context.Context, op *operation.Operation, cfg *config.
 	}
 	netbirdSecretPath := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretPath))
 	netbirdSecretKey := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretKey))
-	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(ctx, cfg, client, netbirdSecretPath, netbirdSecretKey)
+	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromSecretStoreWithOverrides(ctx, cfg, store, netbirdSecretPath, netbirdSecretKey)
 	if err != nil {
 		return fmt.Errorf("load netbird setup key: %w", err)
 	}
@@ -535,11 +696,11 @@ func phaseBootstrap(ctx context.Context, op *operation.Operation, cfg *config.Co
 		endpoint = controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
 	}
 
-	client, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	assets, err := ensureTalosAssets(ctx, cfg, endpoint, client)
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, store)
 	if err != nil {
 		return err
 	}
@@ -821,11 +982,11 @@ func postBootstrapKubeconfigPath(ctx context.Context, op *operation.Operation, c
 		endpoint = controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return "", nil, err
 	}
-	assets, err := ensureTalosAssets(ctx, cfg, endpoint, infClient)
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, store)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1016,7 +1177,7 @@ func phaseRestrictTalosAPI(ctx context.Context, op *operation.Operation, cfg *co
 		endpoint = controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1024,13 +1185,13 @@ func phaseRestrictTalosAPI(ctx context.Context, op *operation.Operation, cfg *co
 	netbirdSecretPath := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretPath))
 	netbirdSecretKey := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretKey))
 	netbirdLookupPath, netbirdKeyCandidates := netbirdSetupKeyLookupTargets(cfg, netbirdSecretPath, netbirdSecretKey)
-	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(ctx, cfg, infClient, netbirdSecretPath, netbirdSecretKey)
+	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromSecretStoreWithOverrides(ctx, cfg, store, netbirdSecretPath, netbirdSecretKey)
 	if err != nil {
 		return fmt.Errorf("load netbird setup key: %w", err)
 	}
 	if netbirdSetupKey == "" {
 		slog.Info(
-			"phase restrict-talos-api: skipping (Netbird setup key not found in Infisical)",
+			"phase restrict-talos-api: skipping (Netbird setup key not found in secret backend)",
 			"secret_path",
 			netbirdLookupPath,
 			"secret_key_candidates",
@@ -1039,7 +1200,7 @@ func phaseRestrictTalosAPI(ctx context.Context, op *operation.Operation, cfg *co
 		return nil
 	}
 
-	assets, err := ensureTalosAssets(ctx, cfg, endpoint, infClient)
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, store)
 	if err != nil {
 		return err
 	}
@@ -1131,85 +1292,75 @@ func controlPlaneEndpoint(privateIP, publicIP string) string {
 	return strings.TrimSpace(publicIP)
 }
 
-func newInfisicalClient(ctx context.Context, cfg *config.Config) (*infisical.Client, error) {
-	client, err := getOrCreateInfisicalClient(ctx, cfg)
+func newSecretStore(ctx context.Context, cfg *config.Config) (secrets.Store, error) {
+	store, err := getOrCreateSecretStore(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	secretPath := infisicalSecretPathForCluster(cfg)
-	if err := client.EnsureSecretPath(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath); err != nil {
-		return nil, fmt.Errorf("ensure infisical secret path: %w", err)
+	secretPath := secretPathForCluster(cfg)
+	if err := store.EnsurePath(ctx, secretPath); err != nil {
+		return nil, fmt.Errorf("ensure secret path %q: %w", secretPath, err)
 	}
 
-	return client, nil
+	return store, nil
 }
 
-func getOrCreateInfisicalClient(ctx context.Context, cfg *config.Config) (*infisical.Client, error) {
-	if strings.TrimSpace(cfg.Infisical.SiteURL) == "" {
-		return nil, fmt.Errorf("infisical.siteUrl is required")
-	}
-	if strings.TrimSpace(cfg.Infisical.ProjectID) == "" {
-		return nil, fmt.Errorf("infisical.projectId is required")
-	}
-	if strings.TrimSpace(cfg.Infisical.Environment) == "" {
-		return nil, fmt.Errorf("infisical.environment is required")
-	}
-	if strings.TrimSpace(cfg.Infisical.SecretPath) == "" {
-		return nil, fmt.Errorf("infisical.secretPath is required")
-	}
-	if strings.TrimSpace(cfg.Infisical.ClientID) == "" || strings.TrimSpace(cfg.Infisical.ClientSecret) == "" {
-		return nil, fmt.Errorf("INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET are required")
-	}
-
-	cacheKey := strings.TrimSpace(cfg.Infisical.SiteURL) + "|" +
-		strings.TrimSpace(cfg.Infisical.ClientID) + "|" +
-		strings.TrimSpace(cfg.Infisical.ClientSecret)
-
-	infisicalClientCache.mu.Lock()
-	defer infisicalClientCache.mu.Unlock()
-
-	if infisicalClientCache.client != nil && infisicalClientCache.key == cacheKey {
-		return infisicalClientCache.client, nil
-	}
-
-	client, err := infisical.NewClient(ctx, cfg.Infisical.SiteURL, cfg.Infisical.ClientID, cfg.Infisical.ClientSecret)
+func getOrCreateSecretStore(ctx context.Context, cfg *config.Config) (secrets.Store, error) {
+	storeCfg, err := cfg.SecretStoreConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	infisicalClientCache.client = client
-	infisicalClientCache.key = cacheKey
-
-	return client, nil
-}
-
-func ensureTalosSecretsYAML(ctx context.Context, cfg *config.Config, client *infisical.Client) ([]byte, error) {
-	secretPath := infisicalSecretPathForCluster(cfg)
-	all, err := client.GetSecrets(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath)
+	cacheKey, err := secretsCacheKeyFn(storeCfg)
 	if err != nil {
-		return nil, fmt.Errorf("load infisical secrets: %w", err)
+		return nil, err
 	}
 
-	if existing := strings.TrimSpace(all[infisicalTalosSecretsKey]); existing != "" {
+	secretStoreCache.mu.Lock()
+	defer secretStoreCache.mu.Unlock()
+
+	if secretStoreCache.store != nil && secretStoreCache.key == cacheKey {
+		return secretStoreCache.store, nil
+	}
+
+	store, err := secretsNewStoreFn(ctx, storeCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create %s secret store: %w", strings.TrimSpace(storeCfg.Provider), err)
+	}
+
+	secretStoreCache.store = store
+	secretStoreCache.key = cacheKey
+
+	return store, nil
+}
+
+func ensureTalosSecretsYAML(ctx context.Context, cfg *config.Config, store secrets.Store) ([]byte, error) {
+	secretPath := secretPathForCluster(cfg)
+	all, err := store.GetSecrets(ctx, secretPath)
+	if err != nil {
+		return nil, fmt.Errorf("load Talos secrets from secret backend: %w", err)
+	}
+
+	if existing := strings.TrimSpace(all[talosSecretsSecretKey]); existing != "" {
 		return []byte(existing), nil
 	}
 
-	slog.Info("no Talos secrets found in Infisical; generating new secrets")
+	slog.Info("no Talos secrets found in secret backend; generating new secrets")
 	secretsYAML, err := talos.GenerateSecretsYAML(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("generate talos secrets: %w", err)
 	}
 
-	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosSecretsKey, string(secretsYAML)); err != nil {
-		return nil, fmt.Errorf("store talos secrets in infisical: %w", err)
+	if err := store.SetSecret(ctx, secretPath, talosSecretsSecretKey, string(secretsYAML)); err != nil {
+		return nil, fmt.Errorf("store talos secrets in secret backend: %w", err)
 	}
 
 	return secretsYAML, nil
 }
 
-func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string, client *infisical.Client) (*talos.GenConfigResult, error) {
-	secretsYAML, err := ensureTalosSecretsYAML(ctx, cfg, client)
+func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string, store secrets.Store) (*talos.GenConfigResult, error) {
+	secretsYAML, err := ensureTalosSecretsYAML(ctx, cfg, store)
 	if err != nil {
 		return nil, err
 	}
@@ -1233,15 +1384,15 @@ func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string,
 		return nil, fmt.Errorf("generate talos assets: %w", err)
 	}
 
-	secretPath := infisicalSecretPathForCluster(cfg)
-	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosControlPlaneKey, string(assets.ControlPlane)); err != nil {
-		return nil, fmt.Errorf("store control-plane config in infisical: %w", err)
+	secretPath := secretPathForCluster(cfg)
+	if err := store.SetSecret(ctx, secretPath, talosControlPlaneSecretKey, string(assets.ControlPlane)); err != nil {
+		return nil, fmt.Errorf("store control-plane config in secret backend: %w", err)
 	}
-	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosWorkerKey, string(assets.Worker)); err != nil {
-		return nil, fmt.Errorf("store worker config in infisical: %w", err)
+	if err := store.SetSecret(ctx, secretPath, talosWorkerSecretKey, string(assets.Worker)); err != nil {
+		return nil, fmt.Errorf("store worker config in secret backend: %w", err)
 	}
-	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosConfigKey, string(assets.Talosconfig)); err != nil {
-		return nil, fmt.Errorf("store talosconfig in infisical: %w", err)
+	if err := store.SetSecret(ctx, secretPath, talosConfigSecretKey, string(assets.Talosconfig)); err != nil {
+		return nil, fmt.Errorf("store talosconfig in secret backend: %w", err)
 	}
 
 	return assets, nil

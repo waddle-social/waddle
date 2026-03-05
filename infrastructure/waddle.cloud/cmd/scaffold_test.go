@@ -21,7 +21,7 @@ func TestRunClusterScaffoldDefaultsFluxOCIRepo(t *testing.T) {
 
 	if !strings.Contains(
 		string(content),
-		`ociRepo: "oci://ghcr.io/rawkode-academy/rawkode-academy/gitops"`,
+		`ociRepo: "oci://ghcr.io/waddle-social/waddle/gitops"`,
 	) {
 		t.Fatalf("scaffolded config missing default flux ociRepo:\n%s", string(content))
 	}

@@ -8,25 +8,25 @@ import (
 	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
 )
 
-func TestInfisicalSecretPathForCluster(t *testing.T) {
+func TestSecretPathForCluster(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
-		Infisical: config.InfisicalConfig{
+		Secrets: config.SecretsConfig{
 			SecretPath: "/projects/rawkode-cloud",
 		},
 	}
 
-	got := infisicalSecretPathForCluster(cfg)
+	got := secretPathForCluster(cfg)
 	want := "/projects/rawkode-cloud/production"
 	if got != want {
-		t.Fatalf("infisicalSecretPathForCluster() = %q, want %q", got, want)
+		t.Fatalf("secretPathForCluster() = %q, want %q", got, want)
 	}
 }
 
 func TestNetbirdSetupKeyLookupTargetsDefaults(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
-		Infisical: config.InfisicalConfig{
+		Secrets: config.SecretsConfig{
 			SecretPath: "/projects/rawkode-cloud",
 		},
 	}
@@ -38,15 +38,15 @@ func TestNetbirdSetupKeyLookupTargetsDefaults(t *testing.T) {
 	if len(candidates) != 2 {
 		t.Fatalf("netbirdSetupKeyLookupTargets() candidates length = %d, want 2", len(candidates))
 	}
-	if candidates[0] != infisicalNBSetupKeyPrimary || candidates[1] != infisicalNBSetupKeyCompatibility {
-		t.Fatalf("netbirdSetupKeyLookupTargets() candidates = %v, want [%q %q]", candidates, infisicalNBSetupKeyPrimary, infisicalNBSetupKeyCompatibility)
+	if candidates[0] != netbirdSetupKeyPrimary || candidates[1] != netbirdSetupKeyCompatibility {
+		t.Fatalf("netbirdSetupKeyLookupTargets() candidates = %v, want [%q %q]", candidates, netbirdSetupKeyPrimary, netbirdSetupKeyCompatibility)
 	}
 }
 
 func TestNetbirdSetupKeyLookupTargetsOverrides(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
-		Infisical: config.InfisicalConfig{
+		Secrets: config.SecretsConfig{
 			SecretPath: "/projects/rawkode-cloud",
 		},
 	}
@@ -63,7 +63,7 @@ func TestNetbirdSetupKeyLookupTargetsOverrides(t *testing.T) {
 func TestNetbirdSetupKeyLookupTargetsConfigDefaults(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
-		Infisical: config.InfisicalConfig{
+		Secrets: config.SecretsConfig{
 			SecretPath:       "/projects/rawkode-cloud",
 			NetbirdSecretKey: "NETBIRD_SETUP_KEY",
 		},
@@ -249,5 +249,117 @@ func TestTalosAPIAllowedSubnetsEnv(t *testing.T) {
 	}
 	if got[0] != "100.64.0.0/10" || got[1] != "fd00::/8" {
 		t.Fatalf("talosAPIAllowedSubnets() = %v, want [100.64.0.0/10 fd00::/8]", got)
+	}
+}
+
+func TestValidateReinstallFlags(t *testing.T) {
+	tests := []struct {
+		name             string
+		serverID         string
+		confirmReinstall bool
+		wantErrContains  string
+	}{
+		{
+			name:             "no reinstall flags",
+			serverID:         "",
+			confirmReinstall: false,
+		},
+		{
+			name:             "server id with confirmation",
+			serverID:         "srv-123",
+			confirmReinstall: true,
+		},
+		{
+			name:             "server id without confirmation",
+			serverID:         "srv-123",
+			confirmReinstall: false,
+			wantErrContains:  "--server-id requires --confirm-reinstall",
+		},
+		{
+			name:             "confirmation without server id",
+			serverID:         "",
+			confirmReinstall: true,
+			wantErrContains:  "--confirm-reinstall requires --server-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateReinstallFlags(tt.serverID, tt.confirmReinstall)
+			if tt.wantErrContains == "" {
+				if err != nil {
+					t.Fatalf("validateReinstallFlags() returned unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateReinstallFlags() expected error containing %q, got nil", tt.wantErrContains)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Fatalf("validateReinstallFlags() error = %q, want contains %q", err, tt.wantErrContains)
+			}
+		})
+	}
+}
+
+func TestServerBelongsToPoolManagedTags(t *testing.T) {
+	pool := &config.NodePoolConfig{
+		Name: "workers",
+		Type: config.NodeTypeWorker,
+	}
+
+	managedTags := managedServerTags("production", "workers", config.NodeTypeWorker)
+	if !serverBelongsToPool("production", pool, "non-matching-node-name", managedTags) {
+		t.Fatal("expected serverBelongsToPool to match managed tags even with non-matching name")
+	}
+}
+
+func TestServerBelongsToPoolFallsBackToNameMatching(t *testing.T) {
+	pool := &config.NodePoolConfig{
+		Name: "workers",
+		Type: config.NodeTypeWorker,
+	}
+
+	if !serverBelongsToPool("production", pool, "production-workers-01", nil) {
+		t.Fatal("expected serverBelongsToPool to match node name when managed tags are absent")
+	}
+}
+
+func TestNodeRoleForServerPrefersManagedRoleTag(t *testing.T) {
+	pool := &config.NodePoolConfig{
+		Name: "workers",
+		Type: config.NodeTypeControlPlane,
+	}
+
+	tags := managedServerTags("production", "workers", config.NodeTypeWorker)
+	got := nodeRoleForServer(pool, tags)
+	if got != config.NodeTypeWorker {
+		t.Fatalf("nodeRoleForServer() = %q, want %q", got, config.NodeTypeWorker)
+	}
+}
+
+func TestSameStringSet(t *testing.T) {
+	if !sameStringSet([]string{"a", "b"}, []string{"b", "a"}) {
+		t.Fatal("expected sameStringSet to ignore ordering")
+	}
+	if sameStringSet([]string{"a"}, []string{"a", "b"}) {
+		t.Fatal("expected sameStringSet to detect different lengths")
+	}
+}
+
+func TestManagedServerRoleTagValueRequiresManagedTag(t *testing.T) {
+	_, ok := managedServerRoleTagValue([]string{managedServerTagRolePrefix + config.NodeTypeWorker})
+	if ok {
+		t.Fatal("expected managedServerRoleTagValue to require managed tag")
+	}
+}
+
+func TestValidateReinstallFlagsTrimsWhitespaceServerID(t *testing.T) {
+	err := validateReinstallFlags("   ", true)
+	if err == nil {
+		t.Fatal("expected validation error for whitespace-only server ID")
+	}
+	if !strings.Contains(err.Error(), "--confirm-reinstall requires --server-id") {
+		t.Fatalf("unexpected validation error: %v", err)
 	}
 }

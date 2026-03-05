@@ -1,6 +1,7 @@
 package scaleway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -25,6 +26,26 @@ var privateNetworkIPIDLookup = findPrivateNetworkIPIDByAddress
 var addServerPrivateNetworkWithIPAMIDs = func(ctx context.Context, client *Client, req *baremetalv3.PrivateNetworkAPIAddServerPrivateNetworkRequest) (*baremetalv3.ServerPrivateNetwork, error) {
 	return baremetalv3.NewPrivateNetworkAPI(client.Core).AddServerPrivateNetwork(req, scw.WithContext(ctx))
 }
+var listServerPrivateNetworkAttachments = func(ctx context.Context, client *Client, zone scw.Zone, serverID string) ([]*baremetalv3.ServerPrivateNetwork, error) {
+	serverIDFilter := strings.TrimSpace(serverID)
+	resp, err := client.BaremetalPrivateNetworkV3.ListServerPrivateNetworks(&baremetalv3.PrivateNetworkAPIListServerPrivateNetworksRequest{
+		Zone:     zone,
+		ServerID: &serverIDFilter,
+	}, scw.WithAllPages(), scw.WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.ServerPrivateNetworks, nil
+}
+var addServerPrivateNetworkWithoutReservedIP = func(ctx context.Context, client *Client, zone scw.Zone, serverID, privateNetworkID string) error {
+	_, err := client.BaremetalPrivateNetwork.AddServerPrivateNetwork(&baremetal.PrivateNetworkAPIAddServerPrivateNetworkRequest{
+		Zone:             zone,
+		ServerID:         serverID,
+		PrivateNetworkID: privateNetworkID,
+	}, scw.WithContext(ctx))
+	return err
+}
 
 // ProvisionParams holds all parameters for creating a server with OS install.
 type ProvisionParams struct {
@@ -39,6 +60,18 @@ type ProvisionParams struct {
 	PivotOSDisk              string
 	PivotDataDisk            string
 	PrivateNetworkReservedIP string
+}
+
+// ReinstallParams holds all parameters for reinstalling an existing server with OS install.
+type ReinstallParams struct {
+	ServerID         string
+	Zone             scw.Zone
+	OSID             string
+	CloudInitScript  string // Talos pivot cloud-init script
+	PivotOSDisk      string
+	PivotDataDisk    string
+	Hostname         string
+	SSHKeyGitHubUser string
 }
 
 // OrderServer creates a new bare metal server with Scaleway and triggers OS
@@ -128,15 +161,7 @@ func OrderServer(ctx context.Context, client *Client, params ProvisionParams) (*
 	)
 
 	if privateNetworkID != "" {
-		if strings.TrimSpace(params.PrivateNetworkReservedIP) != "" {
-			err = addServerPrivateNetworkWithReservedIP(ctx, client, params.Zone, server.ID, privateNetworkID, params.PrivateNetworkReservedIP)
-		} else {
-			_, err = client.BaremetalPrivateNetwork.AddServerPrivateNetwork(&baremetal.PrivateNetworkAPIAddServerPrivateNetworkRequest{
-				Zone:             params.Zone,
-				ServerID:         server.ID,
-				PrivateNetworkID: privateNetworkID,
-			}, scw.WithContext(ctx))
-		}
+		err = EnsureServerPrivateNetworkAttachment(ctx, client, params.Zone, server.ID, privateNetworkID, params.PrivateNetworkReservedIP)
 		if err != nil {
 			return nil, fmt.Errorf("attach server to private network: %w", err)
 		}
@@ -144,6 +169,115 @@ func OrderServer(ctx context.Context, client *Client, params ProvisionParams) (*
 	}
 
 	return server, nil
+}
+
+// ReinstallServer reinstalls a bare metal server with a Talos pivot cloud-init script.
+func ReinstallServer(ctx context.Context, client *Client, params ReinstallParams) (*baremetal.Server, error) {
+	serverID := strings.TrimSpace(params.ServerID)
+	if serverID == "" {
+		return nil, fmt.Errorf("server ID is required")
+	}
+
+	sshKeyIDs, err := listSSHKeyIDs(client.IAM)
+	if err != nil {
+		return nil, fmt.Errorf("list SSH keys: %w", err)
+	}
+
+	osInfo, err := client.Baremetal.GetOS(&baremetal.GetOSRequest{
+		Zone: params.Zone,
+		OsID: params.OSID,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("get OS %s: %w", params.OSID, err)
+	}
+	if !osInfo.CustomPartitioningSupported {
+		return nil, fmt.Errorf("OS %s (%s) does not support custom partitioning", osInfo.Name, osInfo.ID)
+	}
+
+	partitioningSchema, err := buildInstallPartitioningSchema(ProvisionParams{
+		PivotOSDisk:   params.PivotOSDisk,
+		PivotDataDisk: params.PivotDataDisk,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build install partitioning schema: %w", err)
+	}
+
+	hostname := strings.TrimSpace(params.Hostname)
+	if hostname == "" {
+		hostname = "talos-pivot"
+	}
+
+	cloudInitBytes := []byte(params.CloudInitScript)
+	cloudInitFile := &scw.File{
+		Name:        "user-data",
+		ContentType: "text/plain",
+		Content:     bytes.NewReader(cloudInitBytes),
+	}
+	server, err := client.Baremetal.InstallServer(&baremetal.InstallServerRequest{
+		Zone:               params.Zone,
+		ServerID:           serverID,
+		OsID:               params.OSID,
+		Hostname:           hostname,
+		SSHKeyIDs:          sshKeyIDs,
+		UserData:           cloudInitFile,
+		PartitioningSchema: partitioningSchema,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("install server %s: %w", serverID, err)
+	}
+
+	slog.Info("server reinstall triggered with OS install",
+		"server_id", serverID,
+		"os", params.OSID,
+		"zone", params.Zone,
+	)
+
+	return server, nil
+}
+
+// EnsureServerPrivateNetworkAttachment attaches a server to the target private network if needed.
+func EnsureServerPrivateNetworkAttachment(
+	ctx context.Context,
+	client *Client,
+	zone scw.Zone,
+	serverID,
+	privateNetworkID,
+	reservedPrivateIP string,
+) error {
+	serverID = strings.TrimSpace(serverID)
+	privateNetworkID = strings.TrimSpace(privateNetworkID)
+	if serverID == "" {
+		return fmt.Errorf("server ID is required")
+	}
+	if privateNetworkID == "" {
+		return fmt.Errorf("private network ID is required")
+	}
+
+	attachments, err := listServerPrivateNetworkAttachments(ctx, client, zone, serverID)
+	if err != nil {
+		return fmt.Errorf("list private network attachments for server %s: %w", serverID, err)
+	}
+	for _, attachment := range attachments {
+		if attachment == nil {
+			continue
+		}
+		if strings.TrimSpace(attachment.PrivateNetworkID) == privateNetworkID {
+			return nil
+		}
+	}
+
+	if strings.TrimSpace(reservedPrivateIP) != "" {
+		if err := addServerPrivateNetworkWithReservedIP(ctx, client, zone, serverID, privateNetworkID, reservedPrivateIP); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := addServerPrivateNetworkWithoutReservedIP(ctx, client, zone, serverID, privateNetworkID); err != nil {
+		return fmt.Errorf("attach server %s to private network %s: %w", serverID, privateNetworkID, err)
+	}
+
+	return nil
 }
 
 // WaitForReady polls Scaleway until the server reaches a terminal state.

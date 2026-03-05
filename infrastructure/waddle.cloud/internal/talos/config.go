@@ -25,7 +25,7 @@ type MachineConfigParams struct {
 }
 
 // SecretsBundle holds the Talos secrets needed to generate machine configs.
-// This is stored in Infisical.
+// This is stored in the configured secret backend.
 type SecretsBundle struct {
 	ClusterSecret  string `yaml:"clusterSecret" json:"clusterSecret"`
 	ClusterCA      string `yaml:"clusterCA" json:"clusterCA"`

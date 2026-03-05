@@ -12,8 +12,8 @@ import (
 
 	clusterstate "github.com/rawkode-academy/rawkode-cloud3/internal/cluster"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/infisical"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/secrets"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
 	baremetal "github.com/scaleway/scaleway-sdk-go/api/baremetal/v1"
 	scw "github.com/scaleway/scaleway-sdk-go/scw"
@@ -21,11 +21,15 @@ import (
 )
 
 const (
-	defaultTalosNodeFQDNSuffix       = "rka.internal"
-	defaultTalosAPINetbirdSubnet     = "100.64.0.0/10"
-	envTalosAllowedSubnets           = "TALOS_API_ALLOWED_SUBNETS"
-	infisicalNBSetupKeyPrimary       = "NB_SETUP_KEY"
-	infisicalNBSetupKeyCompatibility = "NETBIRD_SETUP_KEY"
+	defaultTalosNodeFQDNSuffix   = "rka.internal"
+	defaultTalosAPINetbirdSubnet = "100.64.0.0/10"
+	envTalosAllowedSubnets       = "TALOS_API_ALLOWED_SUBNETS"
+	netbirdSetupKeyPrimary       = "NB_SETUP_KEY"
+	netbirdSetupKeyCompatibility = "NETBIRD_SETUP_KEY"
+	managedServerTagManaged      = "rawkode-cloud3:managed"
+	managedServerTagEnvPrefix    = "rawkode-cloud3:env="
+	managedServerTagPoolPrefix   = "rawkode-cloud3:pool="
+	managedServerTagRolePrefix   = "rawkode-cloud3:role="
 )
 
 func loadConfigForClusterOrFile(clusterName, filePath string) (*config.Config, string, error) {
@@ -39,11 +43,11 @@ func loadConfigForClusterOrFile(clusterName, filePath string) (*config.Config, s
 		return nil, "", fmt.Errorf("load config %s: %w", resolved, err)
 	}
 
-	infClient, err := getOrCreateInfisicalClient(context.Background(), cfg)
+	secretStore, err := getOrCreateSecretStore(context.Background(), cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("create infisical client: %w", err)
+		return nil, "", fmt.Errorf("create secret store: %w", err)
 	}
-	if err := cfg.LoadRuntimeSecretsWithClient(context.Background(), infClient); err != nil {
+	if err := cfg.LoadRuntimeSecretsWithStore(context.Background(), secretStore); err != nil {
 		return nil, "", fmt.Errorf("load runtime secrets: %w", err)
 	}
 
@@ -114,7 +118,7 @@ func loadNodeState(ctx context.Context, cfg *config.Config) (*clusterstate.Nodes
 			if server == nil {
 				continue
 			}
-			if !serverBelongsToPool(cfg.Environment, pool, server.Name) {
+			if !serverBelongsToPool(cfg.Environment, pool, strings.TrimSpace(server.Name), server.Tags) {
 				continue
 			}
 			if strings.TrimSpace(server.ID) == "" {
@@ -126,10 +130,11 @@ func loadNodeState(ctx context.Context, cfg *config.Config) (*clusterstate.Nodes
 			seen[server.ID] = struct{}{}
 
 			publicIP, privateIP := extractServerIPs(server)
+			role := nodeRoleForServer(pool, server.Tags)
 			status := nodeStatusFromServerStatus(server.Status)
 			nodes = append(nodes, clusterstate.NodeState{
 				Name:      strings.TrimSpace(server.Name),
-				Role:      pool.EffectiveType(),
+				Role:      role,
 				Pool:      pool.Name,
 				PublicIP:  publicIP,
 				PrivateIP: privateIP,
@@ -148,7 +153,19 @@ func loadNodeState(ctx context.Context, cfg *config.Config) (*clusterstate.Nodes
 	}, nil
 }
 
-func serverBelongsToPool(environment string, pool *config.NodePoolConfig, nodeName string) bool {
+func serverBelongsToPool(environment string, pool *config.NodePoolConfig, nodeName string, serverTags []string) bool {
+	if pool == nil {
+		return false
+	}
+
+	if serverMatchesManagedPoolTags(serverTags, environment, pool.Name) {
+		return true
+	}
+
+	return serverNameBelongsToPool(environment, pool, nodeName)
+}
+
+func serverNameBelongsToPool(environment string, pool *config.NodePoolConfig, nodeName string) bool {
 	if pool == nil {
 		return false
 	}
@@ -180,6 +197,111 @@ func serverBelongsToPool(environment string, pool *config.NodePoolConfig, nodeNa
 	}
 
 	return false
+}
+
+func nodeRoleForServer(pool *config.NodePoolConfig, serverTags []string) string {
+	if role, ok := managedServerRoleTagValue(serverTags); ok {
+		return role
+	}
+	if pool != nil {
+		return pool.EffectiveType()
+	}
+	return ""
+}
+
+func managedServerTags(environment, poolName, role string) []string {
+	tags := []string{
+		managedServerTagManaged,
+		managedServerTagEnvPrefix + strings.TrimSpace(environment),
+		managedServerTagPoolPrefix + strings.TrimSpace(poolName),
+	}
+	if normalizedRole := config.NormalizeNodePoolType(role); normalizedRole != "" {
+		tags = append(tags, managedServerTagRolePrefix+normalizedRole)
+	}
+
+	return normalizeNonEmptyStrings(tags...)
+}
+
+func serverMatchesManagedPoolTags(serverTags []string, environment, poolName string) bool {
+	managed, env, pool, _ := parseManagedServerTags(serverTags)
+	if !managed {
+		return false
+	}
+	if strings.TrimSpace(environment) == "" || strings.TrimSpace(poolName) == "" {
+		return false
+	}
+	return env == strings.TrimSpace(environment) && pool == strings.TrimSpace(poolName)
+}
+
+func managedServerRoleTagValue(serverTags []string) (string, bool) {
+	managed, _, _, role := parseManagedServerTags(serverTags)
+	if !managed {
+		return "", false
+	}
+	normalizedRole := config.NormalizeNodePoolType(role)
+	if normalizedRole == "" {
+		return "", false
+	}
+	return normalizedRole, true
+}
+
+func parseManagedServerTags(serverTags []string) (managed bool, environment, pool, role string) {
+	for _, tag := range serverTags {
+		trimmed := strings.TrimSpace(tag)
+		if trimmed == managedServerTagManaged {
+			managed = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, managedServerTagEnvPrefix) {
+			environment = strings.TrimSpace(strings.TrimPrefix(trimmed, managedServerTagEnvPrefix))
+			continue
+		}
+		if strings.HasPrefix(trimmed, managedServerTagPoolPrefix) {
+			pool = strings.TrimSpace(strings.TrimPrefix(trimmed, managedServerTagPoolPrefix))
+			continue
+		}
+		if strings.HasPrefix(trimmed, managedServerTagRolePrefix) {
+			role = strings.TrimSpace(strings.TrimPrefix(trimmed, managedServerTagRolePrefix))
+			continue
+		}
+	}
+
+	return managed, environment, pool, role
+}
+
+func mergeServerTags(existing, desired []string) []string {
+	return normalizeNonEmptyStrings(append(existing, desired...)...)
+}
+
+func sameStringSet(valuesA, valuesB []string) bool {
+	if len(valuesA) != len(valuesB) {
+		return false
+	}
+
+	seen := make(map[string]struct{}, len(valuesA))
+	for _, value := range valuesA {
+		seen[value] = struct{}{}
+	}
+	for _, value := range valuesB {
+		if _, ok := seen[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func validateReinstallFlags(serverID string, confirmReinstall bool) error {
+	serverID = strings.TrimSpace(serverID)
+	switch {
+	case serverID == "" && !confirmReinstall:
+		return nil
+	case serverID == "":
+		return fmt.Errorf("--confirm-reinstall requires --server-id")
+	case !confirmReinstall:
+		return fmt.Errorf("--server-id requires --confirm-reinstall")
+	default:
+		return nil
+	}
 }
 
 func nodeStatusFromServerStatus(status baremetal.ServerStatus) clusterstate.NodeStatus {
@@ -222,14 +344,14 @@ func firstActiveNodeByRole(state *clusterstate.NodesState, role string) (*cluste
 	return nil, fmt.Errorf("no active %s node with reachable IP found in Scaleway inventory", role)
 }
 
-func loadTalosconfigFromInfisical(ctx context.Context, cfg *config.Config, client *infisical.Client) ([]byte, error) {
-	secretPath := infisicalSecretPathForCluster(cfg)
-	value, err := client.GetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosConfigKey)
+func loadTalosconfigFromSecretStore(ctx context.Context, cfg *config.Config, store secrets.Store) ([]byte, error) {
+	secretPath := secretPathForCluster(cfg)
+	value, err := store.GetSecret(ctx, secretPath, talosConfigSecretKey)
 	if err != nil {
-		return nil, fmt.Errorf("load %s from infisical: %w", infisicalTalosConfigKey, err)
+		return nil, fmt.Errorf("load %s from secret backend: %w", talosConfigSecretKey, err)
 	}
 	if strings.TrimSpace(value) == "" {
-		return nil, fmt.Errorf("%s is empty in infisical path %s", infisicalTalosConfigKey, secretPath)
+		return nil, fmt.Errorf("%s is empty in secret path %s", talosConfigSecretKey, secretPath)
 	}
 
 	return []byte(value), nil
@@ -246,8 +368,12 @@ func controlPlaneEndpointFromState(state *clusterstate.NodesState) (string, erro
 	return node.PublicIP, nil
 }
 
-func infisicalSecretPathForCluster(cfg *config.Config) string {
-	base := strings.TrimSpace(cfg.Infisical.SecretPath)
+func secretPathForCluster(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+
+	base := strings.TrimSpace(cfg.Secrets.SecretPath)
 	cluster := strings.TrimSpace(cfg.Environment)
 
 	if cluster == "" {
@@ -301,37 +427,37 @@ func nodeTalosCertSANs(nodeName string) []string {
 func netbirdSetupKeyLookupTargets(cfg *config.Config, secretPathOverride, secretKeyOverride string) (string, []string) {
 	secretPath := strings.TrimSpace(secretPathOverride)
 	if secretPath == "" && cfg != nil {
-		secretPath = strings.TrimSpace(cfg.Infisical.NetbirdSecretPath)
+		secretPath = strings.TrimSpace(cfg.Secrets.NetbirdSecretPath)
 	}
 	if secretPath == "" && cfg != nil {
-		secretPath = strings.TrimSpace(cfg.Infisical.SecretPath)
+		secretPath = strings.TrimSpace(cfg.Secrets.SecretPath)
 	}
 	if secretPath == "" {
-		secretPath = infisicalSecretPathForCluster(cfg)
+		secretPath = secretPathForCluster(cfg)
 	}
 
 	secretKey := strings.TrimSpace(secretKeyOverride)
 	if secretKey == "" && cfg != nil {
-		secretKey = strings.TrimSpace(cfg.Infisical.NetbirdSecretKey)
+		secretKey = strings.TrimSpace(cfg.Secrets.NetbirdSecretKey)
 	}
 	if secretKey != "" {
 		return secretPath, []string{secretKey}
 	}
 
-	return secretPath, []string{infisicalNBSetupKeyPrimary, infisicalNBSetupKeyCompatibility}
+	return secretPath, []string{netbirdSetupKeyPrimary, netbirdSetupKeyCompatibility}
 }
 
-func loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(
+func loadOptionalNetbirdSetupKeyFromSecretStoreWithOverrides(
 	ctx context.Context,
 	cfg *config.Config,
-	client *infisical.Client,
+	store secrets.Store,
 	secretPathOverride,
 	secretKeyOverride string,
 ) (string, error) {
 	secretPath, keyCandidates := netbirdSetupKeyLookupTargets(cfg, secretPathOverride, secretKeyOverride)
-	all, err := client.GetSecrets(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath)
+	all, err := store.GetSecrets(ctx, secretPath)
 	if err != nil {
-		return "", fmt.Errorf("load infisical secrets: %w", err)
+		return "", fmt.Errorf("load secrets from backend: %w", err)
 	}
 
 	for _, key := range keyCandidates {
@@ -343,8 +469,8 @@ func loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(
 	return "", nil
 }
 
-func loadOptionalNetbirdSetupKeyFromInfisical(ctx context.Context, cfg *config.Config, client *infisical.Client) (string, error) {
-	return loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(ctx, cfg, client, "", "")
+func loadOptionalNetbirdSetupKeyFromSecretStore(ctx context.Context, cfg *config.Config, store secrets.Store) (string, error) {
+	return loadOptionalNetbirdSetupKeyFromSecretStoreWithOverrides(ctx, cfg, store, "", "")
 }
 
 func appendNetbirdExtensionServiceConfig(machineConfig []byte, setupKey string) ([]byte, error) {

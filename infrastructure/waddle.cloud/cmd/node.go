@@ -11,6 +11,7 @@ import (
 	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
 	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
+	baremetal "github.com/scaleway/scaleway-sdk-go/api/baremetal/v1"
 	scw "github.com/scaleway/scaleway-sdk-go/scw"
 	"github.com/spf13/cobra"
 )
@@ -40,6 +41,13 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")
 	poolName, _ := cmd.Flags().GetString("pool")
+	serverIDFlag, _ := cmd.Flags().GetString("server-id")
+	confirmReinstall, _ := cmd.Flags().GetBool("confirm-reinstall")
+
+	if err := validateReinstallFlags(serverIDFlag, confirmReinstall); err != nil {
+		return err
+	}
+	reinstallServerID := strings.TrimSpace(serverIDFlag)
 
 	role := config.NormalizeNodePoolType(roleRaw)
 	if role == "" {
@@ -83,78 +91,26 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if existing, ok := findNodeByName(state, name); ok && existing.Status != clusterstate.NodeStatusDeleted {
-		return fmt.Errorf("node %q already exists in Scaleway inventory with status=%s", name, existing.Status)
+	if reinstallServerID == "" {
+		if existing, ok := findNodeByName(state, name); ok && existing.Status != clusterstate.NodeStatusDeleted {
+			return fmt.Errorf("node %q already exists in Scaleway inventory with status=%s", name, existing.Status)
+		}
 	}
 
-	accessKey, secretKey := cfg.ScalewayCredentials()
-	scwClient, err := scaleway.NewClient(accessKey, secretKey, cfg.Scaleway.ProjectID, cfg.Scaleway.OrganizationID)
-	if err != nil {
-		return fmt.Errorf("create scaleway client: %w", err)
-	}
-
-	zoneValue := pool.EffectiveZone()
-	if zoneValue == "" {
-		return fmt.Errorf("node pool %q must define zone", pool.Name)
-	}
-	zone := scw.Zone(zoneValue)
-	offerID, _, err := scaleway.ResolveOfferForBillingCycle(ctx, scwClient, zone, pool.Offer, pool.BillingCycle)
-	if err != nil {
-		return fmt.Errorf("resolve offer: %w", err)
-	}
-
-	osID, err := scaleway.ResolveUbuntuOSID(ctx, scwClient, zone, offerID)
-	if err != nil {
-		return fmt.Errorf("resolve ubuntu OS: %w", err)
-	}
-
-	region, _ := zone.Region()
-	vpcName, err := cfg.ScalewayVPCName()
+	serverReady, nodeName, err := provisionNodeServer(
+		ctx,
+		cfg,
+		pool,
+		role,
+		name,
+		reinstallServerID,
+		privateIP,
+	)
 	if err != nil {
 		return err
 	}
-	privateNetworkName, err := cfg.ScalewayPrivateNetworkName()
-	if err != nil {
-		return err
-	}
-	network, err := scaleway.EnsureNetworkFoundation(ctx, scwClient, scaleway.NetworkFoundationParams{
-		Region:             region,
-		VPCName:            vpcName,
-		PrivateNetworkName: privateNetworkName,
-	})
-	if err != nil {
-		return fmt.Errorf("ensure network: %w", err)
-	}
 
-	cloudInit := talos.BuildCloudInit(talos.PivotParams{
-		TalosVersion:   cfg.Cluster.TalosVersion,
-		TalosSchematic: cfg.Cluster.TalosSchematic,
-		OSDisk:         pool.Disks.OS,
-		DataDisk:       pool.Disks.Data,
-	})
-
-	server, err := scaleway.OrderServer(ctx, scwClient, scaleway.ProvisionParams{
-		OfferID:                  offerID,
-		Zone:                     zone,
-		OSID:                     osID,
-		Name:                     name,
-		PrivateNetworkID:         network.PrivateNetworkID,
-		PrivateNetworkReservedIP: privateIP,
-		BillingCycle:             pool.BillingCycle,
-		CloudInitScript:          cloudInit,
-		PivotOSDisk:              pool.Disks.OS,
-		PivotDataDisk:            pool.Disks.Data,
-	})
-	if err != nil {
-		return fmt.Errorf("order server: %w", err)
-	}
-
-	serverReady, err := scaleway.WaitForReady(ctx, scwClient, server.ID, zone)
-	if err != nil {
-		return fmt.Errorf("wait for server ready: %w", err)
-	}
-
-	var publicIP string
+	publicIP := ""
 	for _, ip := range serverReady.IPs {
 		address := ip.Address.String()
 		parsed := net.ParseIP(address)
@@ -167,14 +123,14 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if strings.TrimSpace(publicIP) == "" {
-		return fmt.Errorf("server %s has no public IPv4", server.ID)
+		return fmt.Errorf("server %s has no public IPv4", serverReady.ID)
 	}
 
 	if err := talos.WaitForMaintenance(ctx, publicIP, 30*time.Minute); err != nil {
 		return fmt.Errorf("wait for talos maintenance: %w", err)
 	}
 
-	infClient, err := newInfisicalClient(ctx, cfg)
+	store, err := newSecretStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -183,7 +139,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve control-plane endpoint for join: %w", err)
 	}
-	assets, err := ensureTalosAssets(ctx, cfg, endpoint, infClient)
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, store)
 	if err != nil {
 		return err
 	}
@@ -192,11 +148,11 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	if role == config.NodeTypeControlPlane {
 		nodeConfig = assets.ControlPlane
 	}
-	nodeConfig, err = renderNodeTalosConfig(nodeConfig, name)
+	nodeConfig, err = renderNodeTalosConfig(nodeConfig, nodeName)
 	if err != nil {
-		return fmt.Errorf("render node-specific Talos config for %q: %w", name, err)
+		return fmt.Errorf("render node-specific Talos config for %q: %w", nodeName, err)
 	}
-	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromInfisical(ctx, cfg, infClient)
+	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromSecretStore(ctx, cfg, store)
 	if err != nil {
 		return fmt.Errorf("load netbird setup key: %w", err)
 	}
@@ -215,8 +171,145 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("apply node config: %w", err)
 	}
 
-	fmt.Printf("Added %s node %q to cluster %q (config=%s, server=%s, public_ip=%s, private_ip=%s)\n", role, name, cfg.Environment, cfgPath, server.ID, publicIP, privateIP)
+	fmt.Printf("Added %s node %q to cluster %q (config=%s, server=%s, public_ip=%s, private_ip=%s)\n", role, nodeName, cfg.Environment, cfgPath, serverReady.ID, publicIP, privateIP)
 	return nil
+}
+
+func provisionNodeServer(
+	ctx context.Context,
+	cfg *config.Config,
+	pool *config.NodePoolConfig,
+	role, desiredName, reinstallServerID, privateIP string,
+) (*baremetal.Server, string, error) {
+	accessKey, secretKey := cfg.ScalewayCredentials()
+	scwClient, err := scalewayNewClientFn(accessKey, secretKey, cfg.Scaleway.ProjectID, cfg.Scaleway.OrganizationID)
+	if err != nil {
+		return nil, "", fmt.Errorf("create scaleway client: %w", err)
+	}
+
+	zoneValue := pool.EffectiveZone()
+	if zoneValue == "" {
+		return nil, "", fmt.Errorf("node pool %q must define zone", pool.Name)
+	}
+	zone := scw.Zone(zoneValue)
+
+	nodeName := strings.TrimSpace(desiredName)
+	offerID := ""
+	if reinstallServerID != "" {
+		existingServer, err := scalewayGetServerFn(ctx, scwClient, zone, reinstallServerID)
+		if err != nil {
+			return nil, "", fmt.Errorf("load existing server %s for reinstall: %w", reinstallServerID, err)
+		}
+		if existingServer == nil || strings.TrimSpace(existingServer.ID) == "" {
+			return nil, "", fmt.Errorf("existing server %s was not found in zone %s", reinstallServerID, zone)
+		}
+		nodeName = strings.TrimSpace(existingServer.Name)
+		if nodeName == "" {
+			return nil, "", fmt.Errorf("existing server %s has empty name", reinstallServerID)
+		}
+		offerID = strings.TrimSpace(existingServer.OfferID)
+		if offerID == "" {
+			return nil, "", fmt.Errorf("existing server %s has empty offer ID", reinstallServerID)
+		}
+	} else {
+		resolvedOfferID, _, err := scalewayResolveOfferForBillingCycleFn(ctx, scwClient, zone, pool.Offer, pool.BillingCycle)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve offer: %w", err)
+		}
+		offerID = resolvedOfferID
+	}
+
+	osID, err := scalewayResolveUbuntuOSIDFn(ctx, scwClient, zone, offerID)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve ubuntu OS: %w", err)
+	}
+
+	region, _ := zone.Region()
+	vpcName, err := cfg.ScalewayVPCName()
+	if err != nil {
+		return nil, "", err
+	}
+	privateNetworkName, err := cfg.ScalewayPrivateNetworkName()
+	if err != nil {
+		return nil, "", err
+	}
+	network, err := scalewayEnsureNetworkFoundationFn(ctx, scwClient, scaleway.NetworkFoundationParams{
+		Region:             region,
+		VPCName:            vpcName,
+		PrivateNetworkName: privateNetworkName,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("ensure network: %w", err)
+	}
+
+	cloudInit := talos.BuildCloudInit(talos.PivotParams{
+		TalosVersion:   cfg.Cluster.TalosVersion,
+		TalosSchematic: cfg.Cluster.TalosSchematic,
+		OSDisk:         pool.Disks.OS,
+		DataDisk:       pool.Disks.Data,
+	})
+
+	var server *baremetal.Server
+	if reinstallServerID != "" {
+		if err := scalewayEnsureServerPrivateNetworkFn(
+			ctx,
+			scwClient,
+			zone,
+			reinstallServerID,
+			network.PrivateNetworkID,
+			privateIP,
+		); err != nil {
+			return nil, "", fmt.Errorf("ensure private network attachment for existing server %s: %w", reinstallServerID, err)
+		}
+
+		server, err = scalewayReinstallServerFn(ctx, scwClient, scaleway.ReinstallParams{
+			ServerID:        reinstallServerID,
+			Zone:            zone,
+			OSID:            osID,
+			CloudInitScript: cloudInit,
+			PivotOSDisk:     pool.Disks.OS,
+			PivotDataDisk:   pool.Disks.Data,
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("reinstall server: %w", err)
+		}
+	} else {
+		server, err = scalewayOrderServerFn(ctx, scwClient, scaleway.ProvisionParams{
+			OfferID:                  offerID,
+			Zone:                     zone,
+			OSID:                     osID,
+			Name:                     nodeName,
+			PrivateNetworkID:         network.PrivateNetworkID,
+			PrivateNetworkReservedIP: privateIP,
+			BillingCycle:             pool.BillingCycle,
+			CloudInitScript:          cloudInit,
+			PivotOSDisk:              pool.Disks.OS,
+			PivotDataDisk:            pool.Disks.Data,
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("order server: %w", err)
+		}
+	}
+
+	server, err = scalewayEnsureManagedServerTagsFn(
+		ctx,
+		scwClient,
+		zone,
+		server,
+		cfg.Environment,
+		pool.Name,
+		role,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("apply managed server tags: %w", err)
+	}
+
+	serverReady, err := scalewayWaitForReadyFn(ctx, scwClient, server.ID, zone)
+	if err != nil {
+		return nil, "", fmt.Errorf("wait for server ready: %w", err)
+	}
+
+	return serverReady, nodeName, nil
 }
 
 func runNodeRemove(cmd *cobra.Command, args []string) error {
@@ -298,6 +391,8 @@ func init() {
 	nodeAddCmd.Flags().String("name", "", "Node name (unsupported; names are auto-generated from pool slots)")
 	nodeAddCmd.Flags().String("pool", "", "Node pool name (optional)")
 	nodeAddCmd.Flags().String("role", "worker", "Node role (control-plane or worker)")
+	nodeAddCmd.Flags().String("server-id", "", "Existing Scaleway server ID to reinstall and reuse")
+	nodeAddCmd.Flags().Bool("confirm-reinstall", false, "Confirm destructive reinstall when --server-id is provided")
 
 	nodeRemoveCmd.Flags().String("cluster", "", "Cluster/environment name")
 	nodeRemoveCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")
