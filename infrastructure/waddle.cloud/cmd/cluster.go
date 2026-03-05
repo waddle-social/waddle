@@ -1,0 +1,1248 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/rawkode-academy/rawkode-cloud3/internal/cilium"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/flux"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/infisical"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/operation"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
+	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
+	"github.com/scaleway/scaleway-sdk-go/api/baremetal/v1"
+	scw "github.com/scaleway/scaleway-sdk-go/scw"
+	"github.com/spf13/cobra"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"time"
+)
+
+var clusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Cluster lifecycle management",
+}
+
+const (
+	infisicalTalosSecretsKey      = "TALOS_SECRETS_YAML"
+	infisicalTalosControlPlaneKey = "TALOS_CONTROL_PLANE_CONFIG_YAML"
+	infisicalTalosWorkerKey       = "TALOS_WORKER_CONFIG_YAML"
+	infisicalTalosConfigKey       = "TALOSCONFIG_YAML"
+	opContextNetbirdSecretPath    = "netbirdSecretPath"
+	opContextNetbirdSecretKey     = "netbirdSecretKey"
+)
+
+var infisicalClientCache struct {
+	mu     sync.Mutex
+	key    string
+	client *infisical.Client
+}
+
+var clusterCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a new Talos Kubernetes cluster",
+	RunE:  runClusterCreate,
+}
+
+var clusterStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show cluster health and drift detection",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfgPath, _ := cmd.Flags().GetString("config")
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		fmt.Printf("Cluster: %s\n", cfg.Environment)
+		fmt.Printf("Talos:   %s\n", cfg.Cluster.TalosVersion)
+		fmt.Printf("K8s:     %s\n", cfg.Cluster.KubernetesVersion)
+		fmt.Printf("Cilium:  %s\n", cfg.Cluster.EffectiveCiliumVersion())
+		fmt.Printf("Flux:    %s\n", cfg.Cluster.EffectiveFluxVersion())
+		fmt.Printf("Pools:   %d\n", len(cfg.NodePools))
+
+		for _, pool := range cfg.NodePools {
+			fmt.Printf("  - %s (offer=%s, billing=%s)\n", pool.Name, pool.Offer, pool.BillingCycle)
+		}
+
+		return nil
+	},
+}
+
+func init() {
+	clusterCmd.AddCommand(clusterCreateCmd)
+	clusterCmd.AddCommand(clusterDeleteCmd)
+	clusterCmd.AddCommand(clusterStatusCmd)
+	clusterCmd.AddCommand(clusterScaffoldCmd)
+
+	clusterCreateCmd.Flags().StringP("environment", "e", "", "Cluster/environment name")
+	clusterCreateCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")
+	clusterCreateCmd.Flags().String("node-name", "", "Deprecated: control-plane names are now auto-generated from the pool")
+	clusterCreateCmd.Flags().String("pool", "", "Node pool name (defaults to first control-plane pool)")
+	clusterCreateCmd.Flags().String("netbird-secret-path", "", "Infisical secret path for Netbird setup key lookup (overrides infisical.netbirdSecretPath; defaults to infisical.secretPath)")
+	clusterCreateCmd.Flags().String("netbird-secret-key", "", "Infisical secret key for Netbird setup key lookup (overrides infisical.netbirdSecretKey)")
+
+	clusterDeleteCmd.Flags().StringP("environment", "e", "", "Cluster/environment name")
+	clusterDeleteCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")
+
+	clusterStatusCmd.Flags().String("config", "", "Path to cluster config YAML")
+}
+
+// createClusterPhases defines the phase order for creating a cluster.
+var createClusterPhases = []string{
+	"init",
+	"generate-config",
+	"order-server",
+	"wait-server",
+	"wait-talos",
+	"apply-config",
+	"bootstrap",
+	"post-bootstrap",
+	"verify",
+	"restrict-talos-api",
+}
+
+var (
+	ciliumInstallFn                         = cilium.Install
+	fluxBootstrapFn                         = flux.Bootstrap
+	postBootstrapKubeconfigPathFn           = postBootstrapKubeconfigPath
+	postBootstrapKubeconfigRetryInterval    = 15 * time.Second
+	postBootstrapKubeconfigRetryTimeout     = 30 * time.Minute
+	postBootstrapKubernetesAPIProbeFn       = postBootstrapKubernetesAPIReachable
+	postBootstrapKubernetesAPIWaitFn        = waitForKubernetesAPIWithRetry
+	postBootstrapKubernetesAPIRetryInterval = 5 * time.Second
+	postBootstrapKubernetesAPIRetryTimeout  = 10 * time.Minute
+	scalewayNewClientFn                     = scaleway.NewClient
+	scalewayGetServerFn                     = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
+		return client.Baremetal.GetServer(&baremetal.GetServerRequest{
+			Zone:     zone,
+			ServerID: serverID,
+		}, scw.WithContext(ctx))
+	}
+	scalewayEnsureNetworkFoundationFn       = scaleway.EnsureNetworkFoundation
+	scalewayResolvePrivateNetworkIPv4CIDRFn = scaleway.ResolvePrivateNetworkIPv4CIDR
+)
+
+func runClusterCreate(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	clusterName, _ := cmd.Flags().GetString("environment")
+	cfgPathFlag, _ := cmd.Flags().GetString("file")
+	nodeNameFlag, _ := cmd.Flags().GetString("node-name")
+	poolName, _ := cmd.Flags().GetString("pool")
+	netbirdSecretPathFlag, _ := cmd.Flags().GetString("netbird-secret-path")
+	netbirdSecretKeyFlag, _ := cmd.Flags().GetString("netbird-secret-key")
+
+	cfg, cfgPath, err := loadConfigForClusterOrFile(clusterName, cfgPathFlag)
+	if err != nil {
+		return err
+	}
+
+	pool, err := selectCreatePool(cfg, poolName)
+	if err != nil {
+		return err
+	}
+
+	if pool.EffectiveType() != config.NodeTypeControlPlane {
+		return fmt.Errorf("cluster create currently supports control-plane pools only (pool %q is %q)", pool.Name, pool.EffectiveType())
+	}
+	if strings.TrimSpace(nodeNameFlag) != "" {
+		return fmt.Errorf(
+			"--node-name is no longer supported; first control-plane node will be %q",
+			controlPlaneNodeName(cfg.Environment, pool.Name, 1),
+		)
+	}
+
+	nodeName := controlPlaneNodeName(cfg.Environment, pool.Name, 1)
+	privateIP, err := controlPlaneReservedIPForSlot(pool, 1)
+	if err != nil {
+		return err
+	}
+	netbirdSecretPath := strings.TrimSpace(netbirdSecretPathFlag)
+	if netbirdSecretPath == "" {
+		netbirdSecretPath = strings.TrimSpace(cfg.Infisical.NetbirdSecretPath)
+	}
+	if netbirdSecretPath == "" {
+		netbirdSecretPath = strings.TrimSpace(cfg.Infisical.SecretPath)
+	}
+	if netbirdSecretPath == "" {
+		netbirdSecretPath = infisicalSecretPathForCluster(cfg)
+	}
+	netbirdSecretKey := strings.TrimSpace(netbirdSecretKeyFlag)
+	if netbirdSecretKey == "" {
+		netbirdSecretKey = strings.TrimSpace(cfg.Infisical.NetbirdSecretKey)
+	}
+
+	op := operation.New(operation.GenerateID(), operation.TypeCreateCluster, cfg.Environment, createClusterPhases)
+	op.SetContext("nodeName", nodeName)
+	op.SetContext("role", pool.EffectiveType())
+	op.SetContext("poolName", pool.Name)
+	op.SetContext("controlPlaneSlot", "1")
+	if privateIP != "" {
+		op.SetContext("privateIP", privateIP)
+	}
+	op.SetContext(opContextNetbirdSecretPath, netbirdSecretPath)
+	op.SetContext(opContextNetbirdSecretKey, netbirdSecretKey)
+
+	resumePhase := op.ResumePhase()
+	if resumePhase == "" {
+		fmt.Println("Operation already complete.")
+		return nil
+	}
+
+	slog.Info("starting create-cluster operation",
+		"operation", op.ID,
+		"cluster", cfg.Environment,
+		"config", cfgPath,
+		"pool", op.GetContextString("poolName"),
+		"resume_from", resumePhase,
+	)
+
+	return executeCreateCluster(ctx, op, cfg)
+}
+
+func executeCreateCluster(
+	ctx context.Context,
+	op *operation.Operation,
+	cfg *config.Config,
+) error {
+	for {
+		phase := op.ResumePhase()
+		if phase == "" {
+			fmt.Println("Cluster creation complete!")
+			return nil
+		}
+
+		slog.Info("executing phase", "phase", phase, "operation", op.ID)
+
+		if err := op.StartPhase(phase); err != nil {
+			return fmt.Errorf("start phase %s: %w", phase, err)
+		}
+
+		var phaseErr error
+		switch phase {
+		case "init":
+			phaseErr = phaseInit(ctx, op, cfg)
+		case "generate-config":
+			phaseErr = phaseGenerateConfig(ctx, op, cfg)
+		case "order-server":
+			phaseErr = phaseOrderServer(ctx, op, cfg)
+		case "wait-server":
+			phaseErr = phaseWaitServer(ctx, op, cfg)
+		case "wait-talos":
+			phaseErr = phaseWaitTalos(ctx, op, cfg)
+		case "apply-config":
+			phaseErr = phaseApplyConfig(ctx, op, cfg)
+		case "bootstrap":
+			phaseErr = phaseBootstrap(ctx, op, cfg)
+		case "post-bootstrap":
+			phaseErr = phasePostBootstrap(ctx, op, cfg)
+		case "verify":
+			phaseErr = phaseVerify(ctx, op, cfg)
+		case "restrict-talos-api":
+			phaseErr = phaseRestrictTalosAPI(ctx, op, cfg)
+		default:
+			phaseErr = fmt.Errorf("unknown phase %q", phase)
+		}
+
+		if phaseErr != nil {
+			_ = op.FailPhase(phase, phaseErr)
+			return fmt.Errorf("phase %s failed: %w", phase, phaseErr)
+		}
+
+		if err := op.CompletePhase(phase, nil); err != nil {
+			return fmt.Errorf("complete phase %s: %w", phase, err)
+		}
+	}
+}
+
+// Phase implementations
+
+func phaseInit(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	slog.Info("phase init: ensuring Talos secrets are available in Infisical")
+
+	client, err := newInfisicalClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := ensureTalosSecretsYAML(ctx, cfg, client); err != nil {
+		return err
+	}
+
+	op.SetContext("secretsPath", infisicalSecretPathForCluster(cfg))
+	return nil
+}
+
+func phaseGenerateConfig(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	slog.Info("phase generate-config: validating Talos generation prerequisites")
+
+	client, err := newInfisicalClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := ensureTalosSecretsYAML(ctx, cfg, client); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func phaseOrderServer(
+	ctx context.Context,
+	op *operation.Operation,
+	cfg *config.Config,
+) error {
+	pool, err := poolForOperation(cfg, op)
+	if err != nil {
+		return fmt.Errorf("resolve node pool: %w", err)
+	}
+
+	nodeName := nodeNameForOperation(op, cfg.Environment)
+	role := op.GetContextString("role")
+	if role == "" {
+		role = pool.EffectiveType()
+	}
+	privateIP := strings.TrimSpace(op.GetContextString("privateIP"))
+	if privateIP == "" && role == config.NodeTypeControlPlane {
+		if slot, ok := parseControlPlaneSlot(cfg.Environment, pool.Name, nodeName); ok {
+			reserved, err := controlPlaneReservedIPForSlot(pool, slot)
+			if err != nil {
+				return err
+			}
+			privateIP = strings.TrimSpace(reserved)
+			if privateIP != "" {
+				op.SetContext("privateIP", privateIP)
+			}
+		}
+	}
+
+	// Check if server already exists from a previous run
+	if serverID := op.GetContextString("serverId"); serverID != "" {
+		slog.Info("server already ordered", "server_id", serverID)
+		return nil
+	}
+
+	slog.Info("phase order-server: ordering Scaleway bare metal")
+
+	scwAccessKey, scwSecretKey := cfg.ScalewayCredentials()
+	scwClient, err := scalewayNewClientFn(
+		scwAccessKey,
+		scwSecretKey,
+		cfg.Scaleway.ProjectID,
+		cfg.Scaleway.OrganizationID,
+	)
+	if err != nil {
+		return fmt.Errorf("create scaleway client: %w", err)
+	}
+
+	zoneValue := pool.EffectiveZone()
+	if zoneValue == "" {
+		return fmt.Errorf("node pool %q must define zone", pool.Name)
+	}
+	op.SetContext("zone", zoneValue)
+	zone := scw.Zone(zoneValue)
+
+	// Resolve offer and OS
+	offerID, _, err := scaleway.ResolveOfferForBillingCycle(ctx, scwClient, zone, pool.Offer, pool.BillingCycle)
+	if err != nil {
+		return fmt.Errorf("resolve offer: %w", err)
+	}
+
+	osID, err := scaleway.ResolveUbuntuOSID(ctx, scwClient, zone, offerID)
+	if err != nil {
+		return fmt.Errorf("resolve ubuntu OS: %w", err)
+	}
+
+	// Ensure network foundation
+	region, _ := zone.Region()
+	vpcName, err := cfg.ScalewayVPCName()
+	if err != nil {
+		return err
+	}
+	privateNetworkName, err := cfg.ScalewayPrivateNetworkName()
+	if err != nil {
+		return err
+	}
+	network, err := scaleway.EnsureNetworkFoundation(ctx, scwClient, scaleway.NetworkFoundationParams{
+		Region:             region,
+		VPCName:            vpcName,
+		PrivateNetworkName: privateNetworkName,
+	})
+	if err != nil {
+		return fmt.Errorf("ensure network: %w", err)
+	}
+	op.SetContext("privateNetworkID", network.PrivateNetworkID)
+
+	// Build Talos pivot cloud-init
+	cloudInit := talos.BuildCloudInit(talos.PivotParams{
+		TalosVersion:   cfg.Cluster.TalosVersion,
+		TalosSchematic: cfg.Cluster.TalosSchematic,
+		OSDisk:         pool.Disks.OS,
+		DataDisk:       pool.Disks.Data,
+	})
+
+	// Order the server
+	server, err := scaleway.OrderServer(ctx, scwClient, scaleway.ProvisionParams{
+		OfferID:                  offerID,
+		Zone:                     zone,
+		OSID:                     osID,
+		Name:                     nodeName,
+		PrivateNetworkID:         network.PrivateNetworkID,
+		PrivateNetworkReservedIP: privateIP,
+		BillingCycle:             pool.BillingCycle,
+		CloudInitScript:          cloudInit,
+		SSHKeyGitHubUser:         "", // uses Scaleway API keys, falls back to default
+		PivotOSDisk:              pool.Disks.OS,
+		PivotDataDisk:            pool.Disks.Data,
+	})
+	if err != nil {
+		return fmt.Errorf("order server: %w", err)
+	}
+
+	op.SetContext("serverId", server.ID)
+
+	slog.Info("server ordered", "server_id", server.ID)
+	return nil
+}
+
+func phaseWaitServer(
+	ctx context.Context,
+	op *operation.Operation,
+	cfg *config.Config,
+) error {
+	serverID := op.GetContextString("serverId")
+	if serverID == "" {
+		return fmt.Errorf("no server ID in operation context")
+	}
+
+	slog.Info("phase wait-server: waiting for bare metal provisioning", "server_id", serverID)
+
+	pool, err := poolForOperation(cfg, op)
+	if err != nil {
+		return fmt.Errorf("resolve node pool: %w", err)
+	}
+
+	scwAccessKey, scwSecretKey := cfg.ScalewayCredentials()
+	scwClient, err := scaleway.NewClient(
+		scwAccessKey,
+		scwSecretKey,
+		cfg.Scaleway.ProjectID,
+		cfg.Scaleway.OrganizationID,
+	)
+	if err != nil {
+		return fmt.Errorf("create scaleway client: %w", err)
+	}
+
+	zoneValue := strings.TrimSpace(op.GetContextString("zone"))
+	if zoneValue == "" {
+		zoneValue = pool.EffectiveZone()
+	}
+	if zoneValue == "" {
+		return fmt.Errorf("node pool %q must define zone", pool.Name)
+	}
+	zone := scw.Zone(zoneValue)
+	server, err := scaleway.WaitForReady(ctx, scwClient, serverID, zone)
+	if err != nil {
+		return fmt.Errorf("wait for server ready: %w", err)
+	}
+
+	publicIP, discoveredPrivateIP := extractServerIPs(server)
+	if strings.TrimSpace(op.GetContextString("privateIP")) == "" && discoveredPrivateIP != "" {
+		op.SetContext("privateIP", discoveredPrivateIP)
+		slog.Info("server ready", "private_ip", discoveredPrivateIP)
+	}
+	if publicIP != "" {
+		op.SetContext("publicIP", publicIP)
+		slog.Info("server ready", "public_ip", publicIP)
+	}
+
+	return nil
+}
+
+func phaseWaitTalos(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	publicIP := op.GetContextString("publicIP")
+	if publicIP == "" {
+		return fmt.Errorf("no public IP in operation context")
+	}
+
+	slog.Info("phase wait-talos: waiting for Talos maintenance mode", "ip", publicIP)
+	return talos.WaitForMaintenance(ctx, publicIP, 30*time.Minute)
+}
+
+func phaseApplyConfig(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	publicIP := op.GetContextString("publicIP")
+	if publicIP == "" {
+		return fmt.Errorf("no public IP in operation context")
+	}
+
+	endpoint := controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
+	op.SetContext("controlPlaneEndpoint", endpoint)
+
+	client, err := newInfisicalClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, client)
+	if err != nil {
+		return err
+	}
+	nodeName := nodeNameForOperation(op, cfg.Environment)
+	nodeConfig, err := renderNodeTalosConfig(assets.ControlPlane, nodeName)
+	if err != nil {
+		return fmt.Errorf("render node-specific Talos config for %q: %w", nodeName, err)
+	}
+	netbirdSecretPath := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretPath))
+	netbirdSecretKey := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretKey))
+	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(ctx, cfg, client, netbirdSecretPath, netbirdSecretKey)
+	if err != nil {
+		return fmt.Errorf("load netbird setup key: %w", err)
+	}
+	nodeConfig, err = appendNetbirdExtensionServiceConfig(nodeConfig, netbirdSetupKey)
+	if err != nil {
+		return fmt.Errorf("append netbird extension service config: %w", err)
+	}
+
+	talosClient, err := talos.NewInsecureClient(publicIP)
+	if err != nil {
+		return fmt.Errorf("create talos client: %w", err)
+	}
+	defer talosClient.Close()
+
+	slog.Info("phase apply-config: applying Talos control-plane config", "ip", publicIP, "endpoint", endpoint, "node", nodeName)
+	if err := talosClient.ApplyConfig(ctx, nodeConfig); err != nil {
+		return err
+	}
+	op.SetContext("talosActivated", true)
+
+	return nil
+}
+
+func phaseBootstrap(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	publicIP := op.GetContextString("publicIP")
+	if publicIP == "" {
+		return fmt.Errorf("no public IP in operation context")
+	}
+
+	endpoint := op.GetContextString("controlPlaneEndpoint")
+	if endpoint == "" {
+		endpoint = controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
+	}
+
+	client, err := newInfisicalClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, client)
+	if err != nil {
+		return err
+	}
+
+	talosClient, err := talos.NewClient(publicIP, assets.Talosconfig)
+	if err != nil {
+		return fmt.Errorf("create talos mTLS client: %w", err)
+	}
+	defer talosClient.Close()
+
+	// apply-config reboots into configured mode; bootstrap can race the API coming up.
+	var lastErr error
+	for attempt := 1; attempt <= 40; attempt++ {
+		lastErr = talosClient.Bootstrap(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		slog.Info("waiting to retry bootstrap", "attempt", attempt, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(15 * time.Second):
+		}
+	}
+
+	return fmt.Errorf("bootstrap did not succeed after retries: %w", lastErr)
+}
+
+func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	if op == nil {
+		return fmt.Errorf("operation context is required for post-bootstrap")
+	}
+
+	zoneValue := strings.TrimSpace(op.GetContextString("zone"))
+	if zoneValue == "" {
+		return fmt.Errorf("missing zone in operation context")
+	}
+
+	zone := scw.Zone(zoneValue)
+	region, err := zone.Region()
+	if err != nil {
+		return fmt.Errorf("derive region from zone %q: %w", zoneValue, err)
+	}
+
+	preferredPrivateIP := strings.TrimSpace(op.GetContextString("privateIP"))
+
+	scwAccessKey, scwSecretKey := cfg.ScalewayCredentials()
+	scwClient, err := scalewayNewClientFn(
+		scwAccessKey,
+		scwSecretKey,
+		cfg.Scaleway.ProjectID,
+		cfg.Scaleway.OrganizationID,
+	)
+	if err != nil {
+		return fmt.Errorf("create scaleway client: %w", err)
+	}
+
+	privateNetworkID := strings.TrimSpace(op.GetContextString("privateNetworkID"))
+	if privateNetworkID == "" {
+		vpcName, err := cfg.ScalewayVPCName()
+		if err != nil {
+			return fmt.Errorf("resolve missing privateNetworkID context: %w", err)
+		}
+		privateNetworkName, err := cfg.ScalewayPrivateNetworkName()
+		if err != nil {
+			return fmt.Errorf("resolve missing privateNetworkID context: %w", err)
+		}
+
+		network, err := scalewayEnsureNetworkFoundationFn(ctx, scwClient, scaleway.NetworkFoundationParams{
+			Region:             region,
+			VPCName:            vpcName,
+			PrivateNetworkName: privateNetworkName,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve missing privateNetworkID context: %w", err)
+		}
+
+		privateNetworkID = strings.TrimSpace(network.PrivateNetworkID)
+		if privateNetworkID == "" {
+			return fmt.Errorf("resolve missing privateNetworkID context: resolved empty private network ID")
+		}
+		op.SetContext("privateNetworkID", privateNetworkID)
+		slog.Info("resolved missing private network id from scaleway network foundation",
+			"private_network_id", privateNetworkID,
+			"vpc", vpcName,
+			"private_network", privateNetworkName,
+		)
+	}
+
+	ipv4NativeRoutingCIDR, err := scalewayResolvePrivateNetworkIPv4CIDRFn(
+		ctx,
+		scwClient,
+		region,
+		privateNetworkID,
+		preferredPrivateIP,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve cilium ipv4 native routing cidr: %w", err)
+	}
+	op.SetContext("ipv4NativeRoutingCIDR", ipv4NativeRoutingCIDR)
+
+	slog.Info("phase post-bootstrap: installing Cilium and FluxCD")
+	slog.Info("resolved cilium native routing cidr",
+		"private_network_id", privateNetworkID,
+		"preferred_private_ip", preferredPrivateIP,
+		"cidr", ipv4NativeRoutingCIDR,
+	)
+
+	kubeconfigPath, cleanupKubeconfig, err := prepareBootstrapKubeconfigWithRetry(ctx, op, cfg)
+	if err != nil {
+		return fmt.Errorf("prepare bootstrap kubeconfig: %w", err)
+	}
+	if cleanupKubeconfig != nil {
+		defer cleanupKubeconfig()
+	}
+
+	if err := postBootstrapKubernetesAPIWaitFn(ctx, kubeconfigPath); err != nil {
+		return fmt.Errorf("wait for kubernetes API readiness: %w", err)
+	}
+
+	var bootstrapErrors []error
+
+	// Install Cilium CNI
+	if err := ciliumInstallFn(ctx, cilium.InstallParams{
+		Kubeconfig:            kubeconfigPath,
+		Version:               cfg.Cluster.EffectiveCiliumVersion(),
+		Hubble:                true,
+		IPv4NativeRoutingCIDR: ipv4NativeRoutingCIDR,
+	}); err != nil {
+		slog.Warn("cilium install failed", "error", err)
+		bootstrapErrors = append(bootstrapErrors, fmt.Errorf("install cilium: %w", err))
+	}
+
+	ociRepo := strings.TrimSpace(cfg.Flux.OCIRepo)
+	if ociRepo == "" {
+		slog.Warn("flux.ociRepo is empty; skipping GitOps OCI source configuration during bootstrap (can be configured manually later)")
+	}
+
+	// Install FluxCD (and optionally configure OCI source).
+	if err := fluxBootstrapFn(ctx, flux.BootstrapParams{
+		Kubeconfig: kubeconfigPath,
+		OCIRepo:    ociRepo,
+		Version:    cfg.Cluster.EffectiveFluxVersion(),
+	}); err != nil {
+		slog.Warn("flux bootstrap failed", "error", err)
+		bootstrapErrors = append(bootstrapErrors, fmt.Errorf("bootstrap flux: %w", err))
+	}
+
+	if len(bootstrapErrors) > 0 {
+		return fmt.Errorf("post-bootstrap component installation failed: %w", errors.Join(bootstrapErrors...))
+	}
+
+	return nil
+}
+
+func waitForKubernetesAPIWithRetry(ctx context.Context, kubeconfigPath string) error {
+	timeout := postBootstrapKubernetesAPIRetryTimeout
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+
+	interval := postBootstrapKubernetesAPIRetryInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	attempt := 0
+	var lastErr error
+	for {
+		attempt++
+
+		err := postBootstrapKubernetesAPIProbeFn(ctx, kubeconfigPath)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("kubernetes API server became reachable", "attempt", attempt)
+			}
+			return nil
+		}
+
+		lastErr = err
+		slog.Info("waiting for kubernetes API server readiness",
+			"attempt", attempt,
+			"interval", interval,
+			"error", err,
+		)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			if lastErr == nil {
+				lastErr = fmt.Errorf("unknown kubernetes API connectivity error")
+			}
+			return fmt.Errorf("kubernetes API not ready after %s: %w", timeout, lastErr)
+		case <-time.After(interval):
+		}
+	}
+}
+
+func postBootstrapKubernetesAPIReachable(ctx context.Context, kubeconfigPath string) error {
+	cfg, err := clientcmd.BuildConfigFromFlags("", strings.TrimSpace(kubeconfigPath))
+	if err != nil {
+		return fmt.Errorf("load kube config: %w", err)
+	}
+	cfg.Timeout = 10 * time.Second
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("create kubernetes discovery client: %w", err)
+	}
+
+	if _, err := discoveryClient.RESTClient().Get().AbsPath("/version").DoRaw(ctx); err != nil {
+		return fmt.Errorf("query kubernetes API server version: %w", err)
+	}
+
+	return nil
+}
+
+func prepareBootstrapKubeconfigWithRetry(
+	ctx context.Context,
+	op *operation.Operation,
+	cfg *config.Config,
+) (string, func(), error) {
+	timeout := postBootstrapKubeconfigRetryTimeout
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+
+	interval := postBootstrapKubeconfigRetryInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	attempt := 0
+	var lastErr error
+	for {
+		attempt++
+		maybeRefreshOperationServerIPs(ctx, op, cfg)
+
+		kubeconfigPath, cleanup, err := postBootstrapKubeconfigPathFn(ctx, op, cfg)
+		if err == nil {
+			return kubeconfigPath, cleanup, nil
+		}
+
+		lastErr = err
+		slog.Info("waiting to retry bootstrap kubeconfig preparation",
+			"attempt", attempt,
+			"interval", interval,
+			"error", err,
+		)
+
+		select {
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		case <-deadline.C:
+			if lastErr == nil {
+				lastErr = fmt.Errorf("unknown talos connectivity error")
+			}
+			return "", nil, fmt.Errorf("bootstrap kubeconfig not ready after %s: %w", timeout, lastErr)
+		case <-time.After(interval):
+		}
+	}
+}
+
+func postBootstrapKubeconfigPath(ctx context.Context, op *operation.Operation, cfg *config.Config) (string, func(), error) {
+	publicIP := strings.TrimSpace(op.GetContextString("publicIP"))
+	if publicIP == "" {
+		return "", nil, fmt.Errorf("no public IP in operation context")
+	}
+
+	endpoint := strings.TrimSpace(op.GetContextString("controlPlaneEndpoint"))
+	if endpoint == "" {
+		endpoint = controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
+	}
+
+	infClient, err := newInfisicalClient(ctx, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, infClient)
+	if err != nil {
+		return "", nil, err
+	}
+
+	candidates := []string{publicIP, strings.TrimSpace(op.GetContextString("privateIP"))}
+	seen := map[string]struct{}{}
+	var (
+		kubeconfig       []byte
+		selectedEndpoint string
+		lastErr          error
+	)
+
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+
+		talosClient, err := talos.NewClient(candidate, assets.Talosconfig)
+		if err != nil {
+			lastErr = fmt.Errorf("create talos client via %s: %w", candidate, err)
+			continue
+		}
+
+		kubeconfig, err = talosClient.Kubeconfig(ctx)
+		closeErr := talosClient.Close()
+		if err == nil && closeErr == nil {
+			selectedEndpoint = candidate
+			break
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("fetch kubeconfig via %s: %w", candidate, err)
+		} else {
+			lastErr = fmt.Errorf("close talos client via %s: %w", candidate, closeErr)
+		}
+	}
+
+	if selectedEndpoint == "" {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("unknown talos connectivity error")
+		}
+		return "", nil, lastErr
+	}
+
+	rewrittenKubeconfig, err := rewriteKubeconfigServerIfNeeded(kubeconfig, selectedEndpoint)
+	if err != nil {
+		return "", nil, fmt.Errorf("rewrite kubeconfig server: %w", err)
+	}
+
+	tempFile, err := os.CreateTemp("", "rawkode-cloud3-kubeconfig-*.yaml")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary kubeconfig: %w", err)
+	}
+
+	cleanup := func() {
+		if removeErr := os.Remove(tempFile.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			slog.Warn("failed to remove temporary bootstrap kubeconfig", "path", tempFile.Name(), "error", removeErr)
+		}
+	}
+
+	if _, err := tempFile.Write(rewrittenKubeconfig); err != nil {
+		_ = tempFile.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("write temporary kubeconfig: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close temporary kubeconfig: %w", err)
+	}
+	if err := os.Chmod(tempFile.Name(), 0o600); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("chmod temporary kubeconfig: %w", err)
+	}
+
+	return tempFile.Name(), cleanup, nil
+}
+
+func maybeRefreshOperationServerIPs(ctx context.Context, op *operation.Operation, cfg *config.Config) {
+	if op == nil || cfg == nil {
+		return
+	}
+
+	serverID := strings.TrimSpace(op.GetContextString("serverId"))
+	zoneValue := strings.TrimSpace(op.GetContextString("zone"))
+	if serverID == "" || zoneValue == "" {
+		return
+	}
+
+	zone := scw.Zone(zoneValue)
+	scwAccessKey, scwSecretKey := cfg.ScalewayCredentials()
+	scwClient, err := scalewayNewClientFn(
+		scwAccessKey,
+		scwSecretKey,
+		cfg.Scaleway.ProjectID,
+		cfg.Scaleway.OrganizationID,
+	)
+	if err != nil {
+		slog.Debug("skipping server IP refresh (create scaleway client failed)", "error", err)
+		return
+	}
+
+	server, err := scalewayGetServerFn(ctx, scwClient, zone, serverID)
+	if err != nil {
+		slog.Debug("skipping server IP refresh (load server failed)", "server_id", serverID, "zone", zoneValue, "error", err)
+		return
+	}
+
+	publicIP, privateIP := extractServerIPs(server)
+	currentPublic := strings.TrimSpace(op.GetContextString("publicIP"))
+	currentPrivate := strings.TrimSpace(op.GetContextString("privateIP"))
+
+	updated := false
+	if publicIP != "" && publicIP != currentPublic {
+		op.SetContext("publicIP", publicIP)
+		updated = true
+	}
+	if privateIP != "" && privateIP != currentPrivate {
+		op.SetContext("privateIP", privateIP)
+		updated = true
+	}
+	if !updated {
+		return
+	}
+
+	slog.Info("refreshed control-plane IPs from scaleway",
+		"server_id", serverID,
+		"public_ip", op.GetContextString("publicIP"),
+		"private_ip", op.GetContextString("privateIP"),
+	)
+}
+
+func extractServerIPs(server *baremetal.Server) (publicIP, privateIP string) {
+	if server == nil {
+		return "", ""
+	}
+
+	for _, ip := range server.IPs {
+		addr := ip.Address.String()
+		parsed := net.ParseIP(addr)
+		if parsed != nil && parsed.IsPrivate() {
+			if privateIP == "" {
+				privateIP = addr
+			}
+			continue
+		}
+
+		if ip.Version == "IPv4" && publicIP == "" {
+			publicIP = addr
+		}
+	}
+
+	return publicIP, privateIP
+}
+
+func phaseVerify(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	_ = ctx
+	slog.Info("phase verify: running health checks")
+
+	nodeName := op.GetContextString("nodeName")
+	if nodeName == "" {
+		poolName := strings.TrimSpace(op.GetContextString("poolName"))
+		if poolName == "" {
+			poolName = "control-plane"
+		}
+		nodeName = controlPlaneNodeName(cfg.Environment, poolName, 1)
+	}
+
+	fmt.Printf("\nCluster %q created successfully!\n", cfg.Environment)
+	fmt.Printf("  Node:       %s\n", nodeName)
+	fmt.Printf("  Public IP:  %s\n", op.GetContextString("publicIP"))
+	fmt.Printf("  Server ID:  %s\n", op.GetContextString("serverId"))
+
+	return nil
+}
+
+func phaseRestrictTalosAPI(ctx context.Context, op *operation.Operation, cfg *config.Config) error {
+	publicIP := strings.TrimSpace(op.GetContextString("publicIP"))
+	if publicIP == "" {
+		return fmt.Errorf("no public IP in operation context")
+	}
+
+	endpoint := strings.TrimSpace(op.GetContextString("controlPlaneEndpoint"))
+	if endpoint == "" {
+		endpoint = controlPlaneEndpoint(op.GetContextString("privateIP"), publicIP)
+	}
+
+	infClient, err := newInfisicalClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	netbirdSecretPath := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretPath))
+	netbirdSecretKey := strings.TrimSpace(op.GetContextString(opContextNetbirdSecretKey))
+	netbirdLookupPath, netbirdKeyCandidates := netbirdSetupKeyLookupTargets(cfg, netbirdSecretPath, netbirdSecretKey)
+	netbirdSetupKey, err := loadOptionalNetbirdSetupKeyFromInfisicalWithOverrides(ctx, cfg, infClient, netbirdSecretPath, netbirdSecretKey)
+	if err != nil {
+		return fmt.Errorf("load netbird setup key: %w", err)
+	}
+	if netbirdSetupKey == "" {
+		slog.Info(
+			"phase restrict-talos-api: skipping (Netbird setup key not found in Infisical)",
+			"secret_path",
+			netbirdLookupPath,
+			"secret_key_candidates",
+			netbirdKeyCandidates,
+		)
+		return nil
+	}
+
+	assets, err := ensureTalosAssets(ctx, cfg, endpoint, infClient)
+	if err != nil {
+		return err
+	}
+
+	nodeName := nodeNameForOperation(op, cfg.Environment)
+	nodeConfig, err := renderNodeTalosConfig(assets.ControlPlane, nodeName)
+	if err != nil {
+		return fmt.Errorf("render node-specific Talos config for %q: %w", nodeName, err)
+	}
+	nodeConfig, err = appendNetbirdExtensionServiceConfig(nodeConfig, netbirdSetupKey)
+	if err != nil {
+		return fmt.Errorf("append netbird extension service config: %w", err)
+	}
+
+	allowedSubnets := talosAPIAllowedSubnets()
+	nodeConfig, err = appendTalosAPIIngressRestriction(nodeConfig, allowedSubnets)
+	if err != nil {
+		return fmt.Errorf("append Talos API ingress restriction: %w", err)
+	}
+
+	talosClient, err := talos.NewClient(publicIP, assets.Talosconfig)
+	if err != nil {
+		return fmt.Errorf("create talos client: %w", err)
+	}
+	defer talosClient.Close()
+
+	if err := talosClient.WaitForServiceRunning(ctx, "ext-netbird", 10*time.Minute); err != nil {
+		return fmt.Errorf("wait for netbird service: %w", err)
+	}
+
+	if err := talosClient.ApplyConfig(ctx, nodeConfig); err != nil {
+		return fmt.Errorf("apply Talos API ingress restriction: %w", err)
+	}
+
+	op.SetContext("talosAPIRestricted", true)
+	slog.Info("phase restrict-talos-api: applied ingress restriction for Talos API", "allowed_subnets", allowedSubnets)
+
+	return nil
+}
+
+func selectCreatePool(cfg *config.Config, poolName string) (*config.NodePoolConfig, error) {
+	if strings.TrimSpace(poolName) != "" {
+		pool, err := cfg.FindNodePool(poolName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve --pool %q: %w", poolName, err)
+		}
+		if pool.EffectiveType() == "" {
+			return nil, fmt.Errorf("pool %q has invalid type %q", pool.Name, pool.Type)
+		}
+		return pool, nil
+	}
+
+	pool, err := cfg.FirstNodePoolByType(config.NodeTypeControlPlane)
+	if err != nil {
+		return nil, fmt.Errorf("select default control-plane pool: %w", err)
+	}
+	return pool, nil
+}
+
+func poolForOperation(cfg *config.Config, op *operation.Operation) (*config.NodePoolConfig, error) {
+	poolName := op.GetContextString("poolName")
+	if strings.TrimSpace(poolName) != "" {
+		return cfg.FindNodePool(poolName)
+	}
+
+	pool, err := cfg.FirstNodePoolByType(config.NodeTypeControlPlane)
+	if err != nil {
+		return nil, err
+	}
+	op.SetContext("poolName", pool.Name)
+	return pool, nil
+}
+
+func nodeNameForOperation(op *operation.Operation, environment string) string {
+	if nodeName := op.GetContextString("nodeName"); strings.TrimSpace(nodeName) != "" {
+		return nodeName
+	}
+	poolName := strings.TrimSpace(op.GetContextString("poolName"))
+	if poolName == "" {
+		poolName = "control-plane"
+	}
+	return controlPlaneNodeName(environment, poolName, 1)
+}
+
+func controlPlaneEndpoint(privateIP, publicIP string) string {
+	if ip := strings.TrimSpace(privateIP); ip != "" {
+		return ip
+	}
+	return strings.TrimSpace(publicIP)
+}
+
+func newInfisicalClient(ctx context.Context, cfg *config.Config) (*infisical.Client, error) {
+	client, err := getOrCreateInfisicalClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	secretPath := infisicalSecretPathForCluster(cfg)
+	if err := client.EnsureSecretPath(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath); err != nil {
+		return nil, fmt.Errorf("ensure infisical secret path: %w", err)
+	}
+
+	return client, nil
+}
+
+func getOrCreateInfisicalClient(ctx context.Context, cfg *config.Config) (*infisical.Client, error) {
+	if strings.TrimSpace(cfg.Infisical.SiteURL) == "" {
+		return nil, fmt.Errorf("infisical.siteUrl is required")
+	}
+	if strings.TrimSpace(cfg.Infisical.ProjectID) == "" {
+		return nil, fmt.Errorf("infisical.projectId is required")
+	}
+	if strings.TrimSpace(cfg.Infisical.Environment) == "" {
+		return nil, fmt.Errorf("infisical.environment is required")
+	}
+	if strings.TrimSpace(cfg.Infisical.SecretPath) == "" {
+		return nil, fmt.Errorf("infisical.secretPath is required")
+	}
+	if strings.TrimSpace(cfg.Infisical.ClientID) == "" || strings.TrimSpace(cfg.Infisical.ClientSecret) == "" {
+		return nil, fmt.Errorf("INFISICAL_CLIENT_ID and INFISICAL_CLIENT_SECRET are required")
+	}
+
+	cacheKey := strings.TrimSpace(cfg.Infisical.SiteURL) + "|" +
+		strings.TrimSpace(cfg.Infisical.ClientID) + "|" +
+		strings.TrimSpace(cfg.Infisical.ClientSecret)
+
+	infisicalClientCache.mu.Lock()
+	defer infisicalClientCache.mu.Unlock()
+
+	if infisicalClientCache.client != nil && infisicalClientCache.key == cacheKey {
+		return infisicalClientCache.client, nil
+	}
+
+	client, err := infisical.NewClient(ctx, cfg.Infisical.SiteURL, cfg.Infisical.ClientID, cfg.Infisical.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	infisicalClientCache.client = client
+	infisicalClientCache.key = cacheKey
+
+	return client, nil
+}
+
+func ensureTalosSecretsYAML(ctx context.Context, cfg *config.Config, client *infisical.Client) ([]byte, error) {
+	secretPath := infisicalSecretPathForCluster(cfg)
+	all, err := client.GetSecrets(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath)
+	if err != nil {
+		return nil, fmt.Errorf("load infisical secrets: %w", err)
+	}
+
+	if existing := strings.TrimSpace(all[infisicalTalosSecretsKey]); existing != "" {
+		return []byte(existing), nil
+	}
+
+	slog.Info("no Talos secrets found in Infisical; generating new secrets")
+	secretsYAML, err := talos.GenerateSecretsYAML(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("generate talos secrets: %w", err)
+	}
+
+	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosSecretsKey, string(secretsYAML)); err != nil {
+		return nil, fmt.Errorf("store talos secrets in infisical: %w", err)
+	}
+
+	return secretsYAML, nil
+}
+
+func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string, client *infisical.Client) (*talos.GenConfigResult, error) {
+	secretsYAML, err := ensureTalosSecretsYAML(ctx, cfg, client)
+	if err != nil {
+		return nil, err
+	}
+
+	installDisk := ""
+	if controlPlanePool, err := cfg.FirstNodePoolByType(config.NodeTypeControlPlane); err == nil {
+		installDisk = strings.TrimSpace(controlPlanePool.Disks.OS)
+	}
+
+	assets, err := talos.GenerateConfig(ctx, talos.GenConfigParams{
+		ClusterName:        cfg.Environment,
+		Endpoint:           endpoint,
+		TalosVersion:       cfg.Cluster.TalosVersion,
+		TalosSchematic:     cfg.Cluster.TalosSchematic,
+		KubernetesVersion:  cfg.Cluster.KubernetesVersion,
+		InstallDisk:        installDisk,
+		ControlPlaneTaints: cfg.Cluster.EffectiveControlPlaneTaints(),
+		SecretsYAML:        secretsYAML,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate talos assets: %w", err)
+	}
+
+	secretPath := infisicalSecretPathForCluster(cfg)
+	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosControlPlaneKey, string(assets.ControlPlane)); err != nil {
+		return nil, fmt.Errorf("store control-plane config in infisical: %w", err)
+	}
+	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosWorkerKey, string(assets.Worker)); err != nil {
+		return nil, fmt.Errorf("store worker config in infisical: %w", err)
+	}
+	if err := client.SetSecret(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, secretPath, infisicalTalosConfigKey, string(assets.Talosconfig)); err != nil {
+		return nil, fmt.Errorf("store talosconfig in infisical: %w", err)
+	}
+
+	return assets, nil
+}

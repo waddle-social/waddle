@@ -1,0 +1,41 @@
+environment: production
+
+cluster:
+  talosVersion: v1.12.0
+  kubernetesVersion: v1.35.0
+  talosSchematic: 81efb800f02421130d6f701caaae6f1cb182ef0e7631da1c801dfcb3699c86cd
+  ciliumVersion: v1.19.0
+  fluxVersion: latest
+  controlPlaneTaints: false
+
+scaleway:
+  organizationId: b07462e9-1a00-43b4-a6a8-6e3004a31984
+  projectId: 6f6da5bd-f7a3-45ac-b0f1-3aae5bd0f436
+
+nodePools:
+  - name: control-plane
+    type: control-plane
+    zone: fr-par-1
+    offer: EM-A610R-NVMe
+    billingCycle: hourly
+    disks:
+      os: /dev/nvme0n1
+      data: /dev/nvme1n1
+  - name: worker
+    type: worker
+    zone: fr-par-1
+    offer: EM-A610R-NVMe
+    billingCycle: hourly
+    disks:
+      os: /dev/nvme0n1
+      data: /dev/nvme1n1
+
+infisical:
+  siteUrl: https://app.infisical.com
+  projectId: 6575a392d7a5ef0555ade86b
+  environment: production
+  secretPath: /projects/rawkode-cloud
+  netbirdSecretKey: NETBIRD_SETUP_KEY
+
+flux:
+  ociRepo: oci://ghcr.io/rawkode-academy/rawkode-academy/gitops
