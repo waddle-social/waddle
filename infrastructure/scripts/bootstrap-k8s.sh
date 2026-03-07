@@ -4,10 +4,9 @@ set -euo pipefail
 CILIUM_VERSION="1.19.0"
 DEMOCRATIC_CSI_VERSION="0.15.1"
 FLUX_OPERATOR_VERSION="0.40.0"
-GATEWAY_API_VERSION="v1.3.0"
+GATEWAY_API_VERSION="v1.4.1"
 
 TALOS_VIP="10.10.0.20"
-CILIUM_GW_VIP="10.10.0.30"
 
 echo "=========================================="
 echo "  Kubernetes Bootstrap (Phase 5)"
@@ -27,14 +26,13 @@ helm upgrade --install cilium cilium/cilium \
   --version "${CILIUM_VERSION}" \
   --namespace kube-system \
   --set ipam.mode=kubernetes \
-  --set l2announcements.enabled=true \
-  --set externalIPs.enabled=true \
   --set gatewayAPI.enabled=true \
-  --set gatewayAPI.hostNetwork.enabled=false \
+  --set gatewayAPI.hostNetwork.enabled=true \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost="${TALOS_VIP}" \
   --set k8sServicePort=6443 \
-  --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}" \
+  --set envoy.securityContext.capabilities.keepCapNetBindService=true \
+  --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID,NET_BIND_SERVICE}" \
   --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}" \
   --set cgroup.autoMount.enabled=false \
   --set cgroup.hostRoot=/sys/fs/cgroup \
@@ -50,26 +48,6 @@ metadata:
   name: cilium
 spec:
   controllerName: io.cilium/gateway-controller
-EOF
-
-echo "==> Applying Cilium L2 announcement policy and IP pool..."
-kubectl apply -f - <<EOF
-apiVersion: cilium.io/v2alpha1
-kind: CiliumL2AnnouncementPolicy
-metadata:
-  name: default-l2-policy
-spec:
-  loadBalancerIPs: true
-  interfaces:
-    - ^eth[0-9]+
----
-apiVersion: cilium.io/v2alpha1
-kind: CiliumLoadBalancerIPPool
-metadata:
-  name: gateway-pool
-spec:
-  blocks:
-    - cidr: ${CILIUM_GW_VIP}/32
 EOF
 
 echo "==> Waiting for nodes to become Ready..."

@@ -20,6 +20,9 @@ import (
 func restorePostBootstrapFns() {
 	ciliumInstallFn = cilium.Install
 	fluxBootstrapFn = flux.Bootstrap
+	postBootstrapIngressGatewaySyncFn = syncIngressGatewayTarget
+	postBootstrapIngressGatewaySyncInterval = 5 * time.Second
+	postBootstrapIngressGatewaySyncTimeout = 10 * time.Minute
 	postBootstrapKubeconfigPathFn = func(context.Context, *operation.Operation, *config.Config) (string, func(), error) {
 		return "", func() {}, nil
 	}
@@ -46,6 +49,7 @@ func newPostBootstrapOperation() *operation.Operation {
 	op := operation.New("op-test", operation.TypeCreateCluster, "production", []string{"post-bootstrap"})
 	op.SetContext("zone", string(scw.ZoneFrPar1))
 	op.SetContext("privateNetworkID", "pn-123")
+	op.SetContext("publicIP", "51.159.1.2")
 	op.SetContext("privateIP", "172.16.16.16")
 	return op
 }
@@ -96,6 +100,9 @@ func TestPhasePostBootstrapFailureDoesNotMaskOtherFailures(t *testing.T) {
 	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
 		return nil
 	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		return nil
+	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
 	}
@@ -124,6 +131,9 @@ func TestPhasePostBootstrapSucceedsWhenAllComponentsSucceed(t *testing.T) {
 	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
 		return nil
 	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		return nil
+	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
 	}
@@ -148,6 +158,9 @@ func TestPhasePostBootstrapPassesDiscoveredCIDRToCilium(t *testing.T) {
 		return nil
 	}
 	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
 		return nil
 	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
@@ -193,6 +206,14 @@ func TestPhasePostBootstrapPassesPreparedKubeconfigToComponents(t *testing.T) {
 		gotFluxParams = params
 		return nil
 	}
+	var gotIngressTarget string
+	postBootstrapIngressGatewaySyncFn = func(_ context.Context, kubeconfigPath, targetIPv4 string) error {
+		if kubeconfigPath != "/tmp/bootstrap-kubeconfig" {
+			t.Fatalf("ingress gateway sync kubeconfig = %q, want %q", kubeconfigPath, "/tmp/bootstrap-kubeconfig")
+		}
+		gotIngressTarget = targetIPv4
+		return nil
+	}
 
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
@@ -220,6 +241,9 @@ func TestPhasePostBootstrapPassesPreparedKubeconfigToComponents(t *testing.T) {
 	if gotFluxParams.OCIRepo != ociRepo {
 		t.Fatalf("flux bootstrap OCI repo = %q, want %q", gotFluxParams.OCIRepo, ociRepo)
 	}
+	if gotIngressTarget != "51.159.1.2" {
+		t.Fatalf("ingress gateway sync target = %q, want %q", gotIngressTarget, "51.159.1.2")
+	}
 }
 
 func TestPhasePostBootstrapContinuesWhenFluxOCIRepoIsEmpty(t *testing.T) {
@@ -232,6 +256,9 @@ func TestPhasePostBootstrapContinuesWhenFluxOCIRepoIsEmpty(t *testing.T) {
 		if params.OCIRepo != "" {
 			t.Fatalf("flux bootstrap OCI repo = %q, want empty", params.OCIRepo)
 		}
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
 		return nil
 	}
 	ciliumInstallFn = func(context.Context, cilium.InstallParams) error {
@@ -377,6 +404,10 @@ func TestPhasePostBootstrapFailsWhenKubernetesAPINotReachable(t *testing.T) {
 		t.Fatal("flux bootstrap should not run when kubernetes API is not reachable")
 		return nil
 	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		t.Fatal("ingress gateway sync should not run when kubernetes API is not reachable")
+		return nil
+	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
 	}
@@ -407,6 +438,10 @@ func TestPhasePostBootstrapFailsWhenCIDRDiscoveryFails(t *testing.T) {
 		return nil
 	}
 	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		t.Fatal("ingress gateway sync should not run when CIDR discovery fails")
 		return nil
 	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
@@ -441,6 +476,9 @@ func TestPhasePostBootstrapRecoversMissingPrivateNetworkIDFromScaleway(t *testin
 	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
 		return nil
 	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		return nil
+	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
 	}
@@ -466,6 +504,97 @@ func TestPhasePostBootstrapRecoversMissingPrivateNetworkIDFromScaleway(t *testin
 	}
 	if got := op.GetContextString("privateNetworkID"); got != "pn-recovered" {
 		t.Fatalf("operation privateNetworkID context = %q, want %q", got, "pn-recovered")
+	}
+}
+
+func TestPhasePostBootstrapUsesIngressPublicIPv4Override(t *testing.T) {
+	restorePostBootstrapFns()
+	t.Cleanup(restorePostBootstrapFns)
+
+	var gotIngressTarget string
+	ciliumInstallFn = func(context.Context, cilium.InstallParams) error {
+		return nil
+	}
+	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(_ context.Context, _ string, targetIPv4 string) error {
+		gotIngressTarget = targetIPv4
+		return nil
+	}
+	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
+		return &scaleway.Client{}, nil
+	}
+	scalewayResolvePrivateNetworkIPv4CIDRFn = func(context.Context, *scaleway.Client, scw.Region, string, string) (string, error) {
+		return "172.16.16.0/22", nil
+	}
+
+	cfg := &config.Config{
+		Ingress: config.IngressConfig{
+			PublicIPv4: "203.0.113.10",
+		},
+	}
+
+	if err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), cfg); err != nil {
+		t.Fatalf("phasePostBootstrap returned error: %v", err)
+	}
+	if gotIngressTarget != "203.0.113.10" {
+		t.Fatalf("ingress gateway sync target = %q, want %q", gotIngressTarget, "203.0.113.10")
+	}
+}
+
+func TestPhasePostBootstrapAggregatesIngressGatewaySyncFailure(t *testing.T) {
+	restorePostBootstrapFns()
+	t.Cleanup(restorePostBootstrapFns)
+
+	errSync := errors.New("gateway sync failed")
+	ciliumInstallFn = func(context.Context, cilium.InstallParams) error {
+		return nil
+	}
+	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		return errSync
+	}
+	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
+		return &scaleway.Client{}, nil
+	}
+	scalewayResolvePrivateNetworkIPv4CIDRFn = func(context.Context, *scaleway.Client, scw.Region, string, string) (string, error) {
+		return "172.16.16.0/22", nil
+	}
+
+	err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), &config.Config{})
+	if err == nil {
+		t.Fatal("expected ingress gateway sync failure, got nil")
+	}
+	if !errors.Is(err, errSync) {
+		t.Fatalf("expected wrapped ingress gateway sync error, got %v", err)
+	}
+}
+
+func TestPhasePostBootstrapSkipsMissingIngressGateway(t *testing.T) {
+	restorePostBootstrapFns()
+	t.Cleanup(restorePostBootstrapFns)
+
+	ciliumInstallFn = func(context.Context, cilium.InstallParams) error {
+		return nil
+	}
+	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error {
+		return errIngressGatewayNotFound
+	}
+	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
+		return &scaleway.Client{}, nil
+	}
+	scalewayResolvePrivateNetworkIPv4CIDRFn = func(context.Context, *scaleway.Client, scw.Region, string, string) (string, error) {
+		return "172.16.16.0/22", nil
+	}
+
+	if err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), &config.Config{}); err != nil {
+		t.Fatalf("expected missing ingress gateway to be non-fatal, got %v", err)
 	}
 }
 

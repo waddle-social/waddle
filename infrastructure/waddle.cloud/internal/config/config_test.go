@@ -173,3 +173,32 @@ func TestValidateSecretsConfigurationOnePasswordRequiresVault(t *testing.T) {
 		t.Fatalf("validateSecretsConfiguration returned error: %v", err)
 	}
 }
+
+func TestValidateIngressConfiguration(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.validateIngressConfiguration(); err != nil {
+		t.Fatalf("validateIngressConfiguration returned error for empty config: %v", err)
+	}
+
+	cfg.Ingress.PublicIPv4 = "not-an-ip"
+	if err := cfg.validateIngressConfiguration(); err == nil {
+		t.Fatal("expected ingress.publicIPv4 validation error")
+	}
+
+	cfg.Ingress.PublicIPv4 = "51.159.1.2"
+	if err := cfg.validateIngressConfiguration(); err != nil {
+		t.Fatalf("validateIngressConfiguration returned error: %v", err)
+	}
+}
+
+func TestEffectiveIngressPublicIPv4(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.EffectiveIngressPublicIPv4("51.159.1.2"); got != "51.159.1.2" {
+		t.Fatalf("EffectiveIngressPublicIPv4(discovered) = %q, want %q", got, "51.159.1.2")
+	}
+
+	cfg.Ingress.PublicIPv4 = "203.0.113.10"
+	if got := cfg.EffectiveIngressPublicIPv4("51.159.1.2"); got != "203.0.113.10" {
+		t.Fatalf("EffectiveIngressPublicIPv4(override) = %q, want %q", got, "203.0.113.10")
+	}
+}

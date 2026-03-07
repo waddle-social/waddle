@@ -1,5 +1,8 @@
 # waddle.social Infrastructure
 
+> Legacy Proxmox document: this README describes the older Proxmox/Teleport/HAProxy platform.
+> For `infrastructure/waddle.cloud`, the active ingress model is a single-node Scaleway control plane with Cilium Gateway API exposed directly on the node host network. There is no dedicated HAProxy/SNI tier and no `10.10.0.30` Gateway VIP in the `waddle.cloud` flow.
+
 OpenTofu IaC for the waddle.social platform. Provisions a 3-node Talos Linux Kubernetes cluster on a single Proxmox VE host (Scaleway Elastic Metal), with Teleport for zero-trust access and HAProxy for public ingress.
 
 ## Architecture Overview

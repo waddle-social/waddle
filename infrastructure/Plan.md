@@ -1,5 +1,8 @@
 # waddle.social Platform Architecture Plan
 
+> Legacy Proxmox plan: this document captures the older Proxmox/Teleport/HAProxy design.
+> The active `waddle.cloud` ingress model is direct Cilium Gateway API on the single Scaleway node host network, with DNS target injection driven by `waddle.cloud` from the discovered node public IP.
+
 ## Overview
 
 Single Proxmox host on Scaleway Elastic Metal running a 3-node Talos Linux Kubernetes cluster, with Teleport as the sole internet-facing entry point. All cluster services are managed via GitOps using Flux Operator.

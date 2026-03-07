@@ -56,6 +56,10 @@ onepassword:
   vault: ""
   account: ""
 
+ingress:
+  # Optional override for the public IPv4 advertised through the shared Gateway.
+  publicIPv4: ""
+
 flux:
   ociRepo: "oci://ghcr.io/waddle-social/waddle/gitops"
 `

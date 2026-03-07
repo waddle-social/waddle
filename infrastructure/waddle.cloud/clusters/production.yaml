@@ -34,5 +34,8 @@ onepassword:
   vault: waddle-infra
   account: "waddle-social.1password.eu"
 
+ingress:
+  publicIPv4: ""
+
 flux:
   ociRepo: oci://ghcr.io/waddle-social/waddle/gitops

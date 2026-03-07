@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -19,6 +20,7 @@ type Config struct {
 	Secrets     SecretsConfig     `yaml:"secrets"`
 	Infisical   InfisicalConfig   `yaml:"infisical"`
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
+	Ingress     IngressConfig     `yaml:"ingress"`
 	Flux        FluxConfig        `yaml:"flux"`
 
 	// Runtime credentials loaded from secret providers, never serialized.
@@ -97,6 +99,11 @@ type SecretsConfig struct {
 	NetbirdSecretKey  string `yaml:"netbirdSecretKey"`
 }
 
+// IngressConfig holds cluster ingress settings.
+type IngressConfig struct {
+	PublicIPv4 string `yaml:"publicIPv4"`
+}
+
 // FluxConfig holds FluxCD configuration.
 type FluxConfig struct {
 	OCIRepo string `yaml:"ociRepo"`
@@ -140,8 +147,29 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validateSecretsConfiguration(); err != nil {
 		return nil, err
 	}
+	if err := cfg.validateIngressConfiguration(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+func (c *Config) validateIngressConfiguration() error {
+	if c == nil {
+		return fmt.Errorf("config is required")
+	}
+
+	override := strings.TrimSpace(c.Ingress.PublicIPv4)
+	if override == "" {
+		return nil
+	}
+
+	parsed := net.ParseIP(override)
+	if parsed == nil || parsed.To4() == nil {
+		return fmt.Errorf("ingress.publicIPv4 must be a valid IPv4 address")
+	}
+
+	return nil
 }
 
 func (c *Config) validateSecretsConfiguration() error {
@@ -263,6 +291,17 @@ func requiredSecret(
 	}
 
 	return trimmed, nil
+}
+
+// EffectiveIngressPublicIPv4 returns the configured ingress public IPv4, or the discovered value when unset.
+func (c *Config) EffectiveIngressPublicIPv4(discovered string) string {
+	if c == nil {
+		return strings.TrimSpace(discovered)
+	}
+	if override := strings.TrimSpace(c.Ingress.PublicIPv4); override != "" {
+		return override
+	}
+	return strings.TrimSpace(discovered)
 }
 
 // Save writes the configuration back to a YAML file.

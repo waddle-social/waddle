@@ -734,6 +734,8 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 		return fmt.Errorf("operation context is required for post-bootstrap")
 	}
 
+	maybeRefreshOperationServerIPs(ctx, op, cfg)
+
 	zoneValue := strings.TrimSpace(op.GetContextString("zone"))
 	if zoneValue == "" {
 		return fmt.Errorf("missing zone in operation context")
@@ -847,6 +849,24 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 	}); err != nil {
 		slog.Warn("flux bootstrap failed", "error", err)
 		bootstrapErrors = append(bootstrapErrors, fmt.Errorf("bootstrap flux: %w", err))
+	}
+
+	if len(bootstrapErrors) == 0 {
+		ingressPublicIPv4, err := ingressPublicIPv4ForOperation(cfg, op)
+		if err != nil {
+			slog.Warn("ingress gateway target configuration skipped", "error", err)
+			bootstrapErrors = append(bootstrapErrors, fmt.Errorf("resolve ingress public IPv4: %w", err))
+		} else {
+			op.SetContext(opContextIngressPublicIPv4, ingressPublicIPv4)
+			if err := postBootstrapIngressGatewaySyncFn(ctx, kubeconfigPath, ingressPublicIPv4); err != nil {
+				if errors.Is(err, errIngressGatewayNotFound) {
+					slog.Warn("ingress gateway target configuration deferred; gateway not present yet", "error", err, "target_ipv4", ingressPublicIPv4)
+				} else {
+					slog.Warn("ingress gateway target configuration failed", "error", err, "target_ipv4", ingressPublicIPv4)
+					bootstrapErrors = append(bootstrapErrors, fmt.Errorf("configure ingress gateway target: %w", err))
+				}
+			}
+		}
 	}
 
 	if len(bootstrapErrors) > 0 {
@@ -1161,6 +1181,7 @@ func phaseVerify(ctx context.Context, op *operation.Operation, cfg *config.Confi
 	fmt.Printf("\nCluster %q created successfully!\n", cfg.Environment)
 	fmt.Printf("  Node:       %s\n", nodeName)
 	fmt.Printf("  Public IP:  %s\n", op.GetContextString("publicIP"))
+	fmt.Printf("  Ingress IP: %s\n", op.GetContextString(opContextIngressPublicIPv4))
 	fmt.Printf("  Server ID:  %s\n", op.GetContextString("serverId"))
 
 	return nil

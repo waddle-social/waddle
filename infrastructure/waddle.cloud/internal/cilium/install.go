@@ -36,6 +36,10 @@ func Install(ctx context.Context, params InstallParams) error {
 
 	slog.Info("installing cilium CNI", "version", params.Version, "hubble", params.Hubble)
 
+	if err := ensureGatewayAPICRDs(ctx, params.Kubeconfig); err != nil {
+		return fmt.Errorf("ensure gateway API CRDs: %w", err)
+	}
+
 	client, err := ciliumk8s.NewClient("", strings.TrimSpace(params.Kubeconfig), ciliumNamespace, "", nil)
 	if err != nil {
 		return fmt.Errorf("create cilium kubernetes client: %w", err)
@@ -117,12 +121,15 @@ func Status(ctx context.Context, kubeconfig string) error {
 func installValues(hubble bool, ipv4NativeRoutingCIDR string) []string {
 	values := []string{
 		"kubeProxyReplacement=true",
+		"gatewayAPI.enabled=true",
+		"gatewayAPI.hostNetwork.enabled=true",
 		"ipam.mode=kubernetes",
 		"k8sServiceHost=localhost",
 		"k8sServicePort=7445",
 		"cgroup.autoMount.enabled=false",
 		"cgroup.hostRoot=/sys/fs/cgroup",
-		"securityContext.capabilities.ciliumAgent={CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}",
+		"envoy.securityContext.capabilities.keepCapNetBindService=true",
+		"securityContext.capabilities.ciliumAgent={CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID,NET_BIND_SERVICE}",
 		"securityContext.capabilities.cleanCiliumState={NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}",
 	}
 
