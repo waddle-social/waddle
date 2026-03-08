@@ -129,7 +129,7 @@ func loadNodeState(ctx context.Context, cfg *config.Config) (*clusterstate.Nodes
 			}
 			seen[server.ID] = struct{}{}
 
-			publicIP, privateIP := extractServerIPs(server)
+			publicIP, privateIP := scaleway.ExtractServerIPs(server)
 			role := nodeRoleForServer(pool, server.Tags)
 			status := nodeStatusFromServerStatus(server.Status)
 			nodes = append(nodes, clusterstate.NodeState{

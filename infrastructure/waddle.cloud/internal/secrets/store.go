@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -121,7 +120,6 @@ func CacheKey(cfg StoreConfig) (string, error) {
 			Provider1Password,
 			strings.TrimSpace(cfg.OnePassword.Vault),
 			strings.TrimSpace(cfg.OnePassword.Account),
-			strings.TrimSpace(os.Getenv("OP_SERVICE_ACCOUNT_TOKEN")),
 		}, "|"), nil
 	default:
 		return "", fmt.Errorf("unsupported secrets.provider %q", cfg.Provider)

@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -34,21 +35,100 @@ func (r *scriptedRunner) Run(_ context.Context, name string, args []string, stdi
 	return []byte(resp.stdout), []byte(resp.stderr), resp.err
 }
 
-func TestNewOnePasswordStoreRequiresAuthContext(t *testing.T) {
-	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "")
-
-	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, &scriptedRunner{t: t})
-	if err == nil {
-		t.Fatal("expected OP_SERVICE_ACCOUNT_TOKEN validation error")
+func TestNewOnePasswordStoreUsesLocalAuthContext(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				assert: func(t *testing.T, name string, args []string, _ []byte) {
+					if name != "op" || len(args) < 2 || args[0] != "whoami" {
+						t.Fatalf("unexpected whoami call: %s %v", name, args)
+					}
+				},
+				stdout: "{}",
+			},
+		},
 	}
-	if !strings.Contains(err.Error(), "OP_SERVICE_ACCOUNT_TOKEN") {
+
+	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner)
+	if err != nil {
+		t.Fatalf("newOnePasswordStoreWithRunner returned error: %v", err)
+	}
+}
+
+func TestNewOnePasswordStoreReportsMissingOPBinary(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				err: exec.ErrNotFound,
+			},
+		},
+	}
+
+	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner)
+	if err == nil {
+		t.Fatal("expected missing op binary error")
+	}
+	if !strings.Contains(err.Error(), "\"op\" was not found in PATH") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestEnsurePathCreatesMissingItem(t *testing.T) {
-	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "token")
+func TestNewOnePasswordStoreReportsLocalSigninRequirement(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				stderr: "[ERROR] You are not currently signed in. Use `op signin` to sign in.",
+				err:    errors.New("exit status 1"),
+			},
+		},
+	}
 
+	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner)
+	if err == nil {
+		t.Fatal("expected local sign-in error")
+	}
+	if !strings.Contains(err.Error(), "sign in locally with `op`") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewOnePasswordStorePassesAccountToWhoami(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				assert: func(t *testing.T, name string, args []string, _ []byte) {
+					if name != "op" {
+						t.Fatalf("unexpected command: %s", name)
+					}
+					expected := []string{"whoami", "--format", "json", "--account", "waddle-social.1password.eu"}
+					if len(args) != len(expected) {
+						t.Fatalf("unexpected args length: got %v, want %v", args, expected)
+					}
+					for i := range expected {
+						if args[i] != expected[i] {
+							t.Fatalf("args[%d] = %q, want %q (full args=%v)", i, args[i], expected[i], args)
+						}
+					}
+				},
+				stdout: "{}",
+			},
+		},
+	}
+
+	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{
+		Vault:   "Employee",
+		Account: "waddle-social.1password.eu",
+	}, runner)
+	if err != nil {
+		t.Fatalf("newOnePasswordStoreWithRunner returned error: %v", err)
+	}
+}
+
+func TestEnsurePathCreatesMissingItem(t *testing.T) {
 	runner := &scriptedRunner{
 		t: t,
 		responses: []scriptedResponse{
@@ -95,8 +175,6 @@ func TestEnsurePathCreatesMissingItem(t *testing.T) {
 }
 
 func TestSetSecretUpsertsMultilineValue(t *testing.T) {
-	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "token")
-
 	runner := &scriptedRunner{
 		t: t,
 		responses: []scriptedResponse{
@@ -138,8 +216,6 @@ func TestSetSecretUpsertsMultilineValue(t *testing.T) {
 }
 
 func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
-	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "token")
-
 	runner := &scriptedRunner{
 		t: t,
 		responses: []scriptedResponse{
@@ -173,8 +249,6 @@ func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
 }
 
 func TestGetSecretReturnsErrSecretNotFoundWhenKeyMissing(t *testing.T) {
-	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "token")
-
 	runner := &scriptedRunner{
 		t: t,
 		responses: []scriptedResponse{

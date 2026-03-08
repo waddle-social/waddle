@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"strings"
 	"sync"
@@ -560,7 +559,7 @@ func phaseWaitServer(
 		return fmt.Errorf("wait for server ready: %w", err)
 	}
 
-	publicIP, discoveredPrivateIP := extractServerIPs(server)
+	publicIP, discoveredPrivateIP := scaleway.ExtractServerIPs(server)
 	if strings.TrimSpace(op.GetContextString("privateIP")) == "" && discoveredPrivateIP != "" {
 		op.SetContext("privateIP", discoveredPrivateIP)
 		slog.Info("server ready", "private_ip", discoveredPrivateIP)
@@ -1118,7 +1117,7 @@ func maybeRefreshOperationServerIPs(ctx context.Context, op *operation.Operation
 		return
 	}
 
-	publicIP, privateIP := extractServerIPs(server)
+	publicIP, privateIP := scaleway.ExtractServerIPs(server)
 	currentPublic := strings.TrimSpace(op.GetContextString("publicIP"))
 	currentPrivate := strings.TrimSpace(op.GetContextString("privateIP"))
 
@@ -1140,29 +1139,6 @@ func maybeRefreshOperationServerIPs(ctx context.Context, op *operation.Operation
 		"public_ip", op.GetContextString("publicIP"),
 		"private_ip", op.GetContextString("privateIP"),
 	)
-}
-
-func extractServerIPs(server *baremetal.Server) (publicIP, privateIP string) {
-	if server == nil {
-		return "", ""
-	}
-
-	for _, ip := range server.IPs {
-		addr := ip.Address.String()
-		parsed := net.ParseIP(addr)
-		if parsed != nil && parsed.IsPrivate() {
-			if privateIP == "" {
-				privateIP = addr
-			}
-			continue
-		}
-
-		if ip.Version == "IPv4" && publicIP == "" {
-			publicIP = addr
-		}
-	}
-
-	return publicIP, privateIP
 }
 
 func phaseVerify(ctx context.Context, op *operation.Operation, cfg *config.Config) error {

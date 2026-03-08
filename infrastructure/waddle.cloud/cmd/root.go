@@ -17,6 +17,7 @@ func Execute() error {
 func init() {
 	rootCmd.AddCommand(clusterCmd)
 	rootCmd.AddCommand(nodeCmd)
+	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(etcdCmd)
 }

@@ -72,6 +72,30 @@ func TestCacheKeyDiffersByProvider(t *testing.T) {
 	}
 }
 
+func TestCacheKeyOnePasswordIgnoresServiceAccountToken(t *testing.T) {
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "token-a")
+	first, err := CacheKey(StoreConfig{
+		Provider:    Provider1Password,
+		OnePassword: OnePasswordConfig{Vault: "Employee", Account: "waddle-social.1password.eu"},
+	})
+	if err != nil {
+		t.Fatalf("CacheKey first returned error: %v", err)
+	}
+
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "token-b")
+	second, err := CacheKey(StoreConfig{
+		Provider:    Provider1Password,
+		OnePassword: OnePasswordConfig{Vault: "Employee", Account: "waddle-social.1password.eu"},
+	})
+	if err != nil {
+		t.Fatalf("CacheKey second returned error: %v", err)
+	}
+
+	if first != second {
+		t.Fatalf("expected identical cache keys, got %q and %q", first, second)
+	}
+}
+
 func TestNewStoreUsesInfisicalFactory(t *testing.T) {
 	oldInfisicalFactory := infisicalStoreFactoryFn
 	oldOnePasswordFactory := onePasswordFactoryFn
