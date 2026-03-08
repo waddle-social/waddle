@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	opManagedSectionID    = "waddle-cloud"
 	opManagedSectionLabel = "waddle-cloud"
 	opManagedTag          = "waddle-cloud:managed"
 	opItemTitlePrefix     = "waddle-cloud:path:"
@@ -183,8 +182,10 @@ func (s *onePasswordStore) SetSecret(ctx context.Context, path, key, value strin
 		return err
 	}
 
-	upsertManagedField(item, key, value)
-	if err := s.editItem(ctx, itemID, item); err != nil {
+	if err := s.setManagedSecret(ctx, itemID, key, value); err != nil {
+		return err
+	}
+	if err := s.verifyStoredSecret(ctx, path, key, value); err != nil {
 		return err
 	}
 
@@ -261,28 +262,55 @@ func (s *onePasswordStore) ensureItem(ctx context.Context, path string) (map[str
 	return created, nil
 }
 
-func (s *onePasswordStore) editItem(ctx context.Context, itemID string, item map[string]any) error {
-	payload, err := json.Marshal(item)
+func (s *onePasswordStore) setManagedSecret(ctx context.Context, itemID, key, value string) error {
+	assignment := managedFieldAssignment(key, value)
+	_, stderr, err := s.runOP(ctx, nil, "item", "edit", itemID, "--vault", s.vault, assignment)
 	if err != nil {
-		return fmt.Errorf("encode 1password item %s JSON: %w", itemID, err)
-	}
-
-	_, stderr, err := s.runOP(ctx, payload, "item", "edit", itemID, "--vault", s.vault)
-	if err != nil {
-		return fmt.Errorf("edit 1password item %s: %w (%s)", itemID, err, strings.TrimSpace(string(stderr)))
+		return fmt.Errorf("edit 1password item %s field %q: %w (%s)", itemID, key, err, strings.TrimSpace(string(stderr)))
 	}
 
 	return nil
 }
 
-func (s *onePasswordStore) runOP(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
+func (s *onePasswordStore) verifyStoredSecret(ctx context.Context, path, key, want string) error {
+	item, err := s.getItemByPath(ctx, path)
+	if err != nil {
+		return fmt.Errorf("verify persisted secret %q in path %q: %w", key, normalizeSecretPath(path), err)
+	}
+
+	got, ok := managedFieldsFromItem(item)[key]
+	if !ok {
+		return fmt.Errorf("verify persisted secret %q in path %q: secret field is missing after write", key, normalizeSecretPath(path))
+	}
+	if got != want {
+		return fmt.Errorf("verify persisted secret %q in path %q: stored value did not match written value", key, normalizeSecretPath(path))
+	}
+
+	return nil
+}
+
+func (s *onePasswordStore) runOPRaw(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
 	finalArgs := s.finalArgs(args...)
 	stdout, stderr, err := s.runner.Run(ctx, "op", finalArgs, stdin)
 	return stdout, stderr, err
 }
 
+func (s *onePasswordStore) runOP(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
+	stdout, stderr, err := s.runOPRaw(ctx, stdin, args...)
+	if err == nil {
+		return stdout, stderr, nil
+	}
+	if !isOnePasswordRetryableAuthFailure(err, stderr) || !s.isInteractiveShell() {
+		return stdout, stderr, err
+	}
+	if signInErr := s.signIn(ctx); signInErr != nil {
+		return nil, nil, signInErr
+	}
+	return s.runOPRaw(ctx, stdin, args...)
+}
+
 func (s *onePasswordStore) checkAuth(ctx context.Context) onePasswordAuthResult {
-	_, stderr, err := s.runOP(ctx, nil, "whoami", "--format", "json")
+	_, stderr, err := s.runOPRaw(ctx, nil, "whoami", "--format", "json")
 	if err == nil {
 		return onePasswordAuthResult{status: onePasswordAuthStatusOK}
 	}
@@ -361,10 +389,28 @@ func classifyOnePasswordAuthStatus(runErr error, stderr []byte) onePasswordAuthS
 	if runErr == nil {
 		return onePasswordAuthStatusOK
 	}
-	if isOnePasswordSigninRequired(runErr, stderr) {
+	if isOnePasswordRetryableAuthFailure(runErr, stderr) {
 		return onePasswordAuthStatusSigninRequired
 	}
 	return onePasswordAuthStatusOther
+}
+
+func isOnePasswordRetryableAuthFailure(runErr error, stderr []byte) bool {
+	if runErr == nil {
+		return false
+	}
+
+	combined := strings.ToLower(strings.TrimSpace(runErr.Error() + " " + string(stderr)))
+	return containsAny(combined,
+		"not currently signed in",
+		"not signed in",
+		"sign in",
+		"signin",
+		"no accounts configured",
+		"authorization timeout",
+		"error initializing client",
+		"session expired",
+	)
 }
 
 func isOnePasswordSigninRequired(runErr error, stderr []byte) bool {
@@ -395,6 +441,11 @@ func formatOnePasswordAuthError(runErr error, stderr []byte, account string) err
 			return fmt.Errorf("1password authentication failed for account %q; sign in locally with `op` and verify onepassword.account (%s)", account, strings.TrimSpace(string(stderr)))
 		}
 		return fmt.Errorf("1password authentication failed; sign in locally with `op` (%s)", strings.TrimSpace(string(stderr)))
+	case containsAny(combined, "authorization timeout", "error initializing client", "session expired"):
+		if account != "" {
+			return fmt.Errorf("1password local session for account %q is not usable; unlock/sign in locally with `op` and retry (%s)", account, strings.TrimSpace(string(stderr)))
+		}
+		return fmt.Errorf("1password local session is not usable; unlock/sign in locally with `op` and retry (%s)", strings.TrimSpace(string(stderr)))
 	case account != "" && containsAny(combined,
 		"unknown account",
 		"account not found",
@@ -463,43 +514,6 @@ func managedFieldsFromItem(item map[string]any) map[string]string {
 	return out
 }
 
-func upsertManagedField(item map[string]any, key, value string) {
-	fields := itemFields(item)
-	updated := false
-
-	for i, rawField := range fields {
-		field, ok := rawField.(map[string]any)
-		if !ok {
-			continue
-		}
-
-		if !strings.EqualFold(strings.TrimSpace(anyToString(field["label"])), key) {
-			continue
-		}
-		if !isManagedSection(field["section"]) {
-			continue
-		}
-
-		field["value"] = value
-		field["type"] = "CONCEALED"
-		field["section"] = map[string]any{"id": opManagedSectionID, "label": opManagedSectionLabel}
-		fields[i] = field
-		updated = true
-		break
-	}
-
-	if !updated {
-		fields = append(fields, map[string]any{
-			"label":   key,
-			"type":    "CONCEALED",
-			"value":   value,
-			"section": map[string]any{"id": opManagedSectionID, "label": opManagedSectionLabel},
-		})
-	}
-
-	item["fields"] = fields
-}
-
 func itemFields(item map[string]any) []any {
 	rawFields, ok := item["fields"]
 	if !ok {
@@ -520,10 +534,21 @@ func isManagedSection(section any) bool {
 		return false
 	}
 
-	id := strings.TrimSpace(anyToString(sectionMap["id"]))
 	label := strings.TrimSpace(anyToString(sectionMap["label"]))
+	return label == opManagedSectionLabel
+}
 
-	return id == opManagedSectionID || label == opManagedSectionLabel
+func managedFieldAssignment(key, value string) string {
+	return fmt.Sprintf("%s.%s[concealed]=%s", escapeAssignmentComponent(opManagedSectionLabel), escapeAssignmentComponent(strings.TrimSpace(key)), value)
+}
+
+func escapeAssignmentComponent(value string) string {
+	replacer := strings.NewReplacer(
+		`\\`, `\\\\`,
+		`.`, `\.`,
+		`=`, `\=`,
+	)
+	return replacer.Replace(value)
 }
 
 func anyToString(value any) string {

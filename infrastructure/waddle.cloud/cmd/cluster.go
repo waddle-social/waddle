@@ -138,6 +138,7 @@ var (
 	}
 	scalewayEnsureNetworkFoundationFn       = scaleway.EnsureNetworkFoundation
 	scalewayResolvePrivateNetworkIPv4CIDRFn = scaleway.ResolvePrivateNetworkIPv4CIDR
+	scalewayEnsureServerNameFn              = ensureServerName
 	scalewayEnsureManagedServerTagsFn       = ensureManagedServerTags
 	secretsNewStoreFn                       = secrets.NewStore
 	secretsCacheKeyFn                       = secrets.CacheKey
@@ -327,6 +328,7 @@ func phaseOrderServer(
 	}
 
 	nodeName := nodeNameForOperation(op, cfg.Environment)
+	op.SetContext("nodeName", nodeName)
 	role := op.GetContextString("role")
 	if role == "" {
 		role = pool.EffectiveType()
@@ -420,12 +422,6 @@ func phaseOrderServer(
 			return fmt.Errorf("existing server %s was not found in zone %s", serverID, zone)
 		}
 
-		existingNodeName := strings.TrimSpace(existingServer.Name)
-		if existingNodeName == "" {
-			return fmt.Errorf("existing server %s has empty name", serverID)
-		}
-		op.SetContext("nodeName", existingNodeName)
-
 		offerID := strings.TrimSpace(existingServer.OfferID)
 		if offerID == "" {
 			return fmt.Errorf("existing server %s has empty offer ID", serverID)
@@ -474,6 +470,11 @@ func phaseOrderServer(
 			return fmt.Errorf("reinstall server %s: %w", serverID, err)
 		}
 
+		reinstalledServer, err = scalewayEnsureServerNameFn(ctx, scwClient, zone, reinstalledServer, nodeName)
+		if err != nil {
+			return fmt.Errorf("align reinstalled server %s name with node %q: %w", serverID, nodeName, err)
+		}
+
 		reinstalledServer, err = scalewayEnsureManagedServerTagsFn(
 			ctx,
 			scwClient,
@@ -488,7 +489,7 @@ func phaseOrderServer(
 		}
 
 		op.SetContext("serverId", reinstalledServer.ID)
-		slog.Info("server reinstall triggered", "server_id", reinstalledServer.ID, "node", existingNodeName)
+		slog.Info("server reinstall triggered", "server_id", reinstalledServer.ID, "node", nodeName)
 		return nil
 	}
 
@@ -642,6 +643,40 @@ func ensureManagedServerTags(
 	}, scw.WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("update server tags: %w", err)
+	}
+
+	return updated, nil
+}
+
+func ensureServerName(
+	ctx context.Context,
+	client *scaleway.Client,
+	zone scw.Zone,
+	server *baremetal.Server,
+	desiredName string,
+) (*baremetal.Server, error) {
+	if client == nil {
+		return nil, fmt.Errorf("scaleway client is required")
+	}
+	if server == nil || strings.TrimSpace(server.ID) == "" {
+		return nil, fmt.Errorf("server is required")
+	}
+
+	trimmedName := strings.TrimSpace(desiredName)
+	if trimmedName == "" {
+		return nil, fmt.Errorf("desired server name is required")
+	}
+	if strings.TrimSpace(server.Name) == trimmedName {
+		return server, nil
+	}
+
+	updated, err := client.Baremetal.UpdateServer(&baremetal.UpdateServerRequest{
+		Zone:     zone,
+		ServerID: server.ID,
+		Name:     &trimmedName,
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("update server name: %w", err)
 	}
 
 	return updated, nil

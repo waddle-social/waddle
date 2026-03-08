@@ -30,6 +30,7 @@ func restoreProvisioningFns() {
 		}, scw.WithContext(ctx))
 	}
 	scalewayEnsureNetworkFoundationFn = scaleway.EnsureNetworkFoundation
+	scalewayEnsureServerNameFn = ensureServerName
 	scalewayEnsureManagedServerTagsFn = ensureManagedServerTags
 }
 
@@ -191,6 +192,7 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 
 	var gotAttachReservedIP string
 	var gotEnsuredReservedIP string
+	var gotRenamedServerName string
 	scalewayEnsureReservedPrivateNetworkIPFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, serverID, privateNetworkID, reservedPrivateIP string) error {
 		if serverID != "srv-existing" {
 			t.Fatalf("ensure reserved IP server id = %q, want %q", serverID, "srv-existing")
@@ -210,6 +212,14 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 		}
 		gotAttachReservedIP = reservedPrivateIP
 		return nil
+	}
+	scalewayEnsureServerNameFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, server *baremetal.Server, desiredName string) (*baremetal.Server, error) {
+		if server == nil || server.ID != "srv-existing" {
+			t.Fatalf("rename server = %#v, want server ID %q", server, "srv-existing")
+		}
+		gotRenamedServerName = desiredName
+		server.Name = desiredName
+		return server, nil
 	}
 
 	var reinstallCalled bool
@@ -251,8 +261,11 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 	if gotEnsuredReservedIP != "172.16.16.16" {
 		t.Fatalf("ensured reserved private ip = %q, want %q", gotEnsuredReservedIP, "172.16.16.16")
 	}
-	if got := op.GetContextString("nodeName"); got != "legacy-control-plane-name" {
-		t.Fatalf("operation nodeName = %q, want %q", got, "legacy-control-plane-name")
+	if gotRenamedServerName != "production-control-plane-01" {
+		t.Fatalf("renamed server name = %q, want %q", gotRenamedServerName, "production-control-plane-01")
+	}
+	if got := op.GetContextString("nodeName"); got != "production-control-plane-01" {
+		t.Fatalf("operation nodeName = %q, want %q", got, "production-control-plane-01")
 	}
 	if gotTagsRole != config.NodeTypeControlPlane {
 		t.Fatalf("managed tags role = %q, want %q", gotTagsRole, config.NodeTypeControlPlane)
@@ -339,6 +352,7 @@ func TestProvisionNodeServerReinstallWorker(t *testing.T) {
 	}
 
 	var gotAttachReservedIP string
+	var gotRenamedServerName string
 	scalewayEnsureReservedPrivateNetworkIPFn = func(context.Context, *scaleway.Client, scw.Zone, string, string, string) error {
 		t.Fatal("reserved IP ensure should not run for worker reinstall without private IP")
 		return nil
@@ -346,6 +360,11 @@ func TestProvisionNodeServerReinstallWorker(t *testing.T) {
 	scalewayEnsureServerPrivateNetworkFn = func(context.Context, *scaleway.Client, scw.Zone, string, string, string) error {
 		gotAttachReservedIP = ""
 		return nil
+	}
+	scalewayEnsureServerNameFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, server *baremetal.Server, desiredName string) (*baremetal.Server, error) {
+		gotRenamedServerName = desiredName
+		server.Name = desiredName
+		return server, nil
 	}
 	scalewayReinstallServerFn = func(context.Context, *scaleway.Client, scaleway.ReinstallParams) (*baremetal.Server, error) {
 		return &baremetal.Server{ID: "srv-worker"}, nil
@@ -373,8 +392,11 @@ func TestProvisionNodeServerReinstallWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provisionNodeServer returned error: %v", err)
 	}
-	if nodeName != "legacy-worker-node" {
-		t.Fatalf("node name = %q, want %q", nodeName, "legacy-worker-node")
+	if nodeName != "production-workers-01" {
+		t.Fatalf("node name = %q, want %q", nodeName, "production-workers-01")
+	}
+	if gotRenamedServerName != "production-workers-01" {
+		t.Fatalf("renamed server name = %q, want %q", gotRenamedServerName, "production-workers-01")
 	}
 	if gotAttachReservedIP != "" {
 		t.Fatalf("worker reserved private ip = %q, want empty", gotAttachReservedIP)
@@ -408,6 +430,7 @@ func TestProvisionNodeServerReinstallControlPlaneUsesReservedIP(t *testing.T) {
 
 	var gotAttachReservedIP string
 	var gotEnsuredReservedIP string
+	var gotRenamedServerName string
 	scalewayEnsureReservedPrivateNetworkIPFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, serverID, privateNetworkID, reservedPrivateIP string) error {
 		if serverID != "srv-cp" {
 			t.Fatalf("ensure reserved IP server id = %q, want %q", serverID, "srv-cp")
@@ -421,6 +444,11 @@ func TestProvisionNodeServerReinstallControlPlaneUsesReservedIP(t *testing.T) {
 	scalewayEnsureServerPrivateNetworkFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, _ string, _ string, reservedPrivateIP string) error {
 		gotAttachReservedIP = reservedPrivateIP
 		return nil
+	}
+	scalewayEnsureServerNameFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, server *baremetal.Server, desiredName string) (*baremetal.Server, error) {
+		gotRenamedServerName = desiredName
+		server.Name = desiredName
+		return server, nil
 	}
 	scalewayReinstallServerFn = func(context.Context, *scaleway.Client, scaleway.ReinstallParams) (*baremetal.Server, error) {
 		return &baremetal.Server{ID: "srv-cp"}, nil
@@ -449,6 +477,9 @@ func TestProvisionNodeServerReinstallControlPlaneUsesReservedIP(t *testing.T) {
 	}
 	if gotEnsuredReservedIP != "172.16.16.17" {
 		t.Fatalf("ensured reserved private ip = %q, want %q", gotEnsuredReservedIP, "172.16.16.17")
+	}
+	if gotRenamedServerName != "production-control-plane-02" {
+		t.Fatalf("renamed server name = %q, want %q", gotRenamedServerName, "production-control-plane-02")
 	}
 }
 

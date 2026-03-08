@@ -358,17 +358,21 @@ func TestSetSecretUpsertsMultilineValue(t *testing.T) {
 					if name != "op" || args[0] != "item" || args[1] != "edit" {
 						t.Fatalf("unexpected edit call: %s %v", name, args)
 					}
-					body := string(stdin)
-					if !strings.Contains(body, `"label":"TALOSCONFIG_YAML"`) {
-						t.Fatalf("expected TALOSCONFIG_YAML label in payload: %s", body)
+					if len(stdin) != 0 {
+						t.Fatalf("expected no stdin for assignment edit, got %q", string(stdin))
 					}
-					if !strings.Contains(body, `line1\nline2`) {
-						t.Fatalf("expected multiline value in payload: %s", body)
-					}
-					if !strings.Contains(body, `"section":{"id":"waddle-cloud","label":"waddle-cloud"}`) {
-						t.Fatalf("expected managed section in payload: %s", body)
+					if got := args[len(args)-1]; got != "waddle-cloud.TALOSCONFIG_YAML[concealed]=line1\nline2" {
+						t.Fatalf("assignment arg = %q, want %q", got, "waddle-cloud.TALOSCONFIG_YAML[concealed]=line1\nline2")
 					}
 				},
+			},
+			{
+				stdout: `{
+					"id":"item-123",
+					"fields":[
+						{"label":"TALOSCONFIG_YAML","value":"line1\nline2","section":{"id":"Section_abc","label":"waddle-cloud"}}
+					]
+				}`,
 			},
 		},
 	}
@@ -388,6 +392,32 @@ func TestSetSecretUpsertsMultilineValue(t *testing.T) {
 	}
 }
 
+func TestSetSecretFailsWhenReadbackDoesNotPersistValue(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{stdout: "{}"},
+			{stdout: `{"id":"item-123","title":"waddle-cloud:path:/projects/waddle-cloud","fields":[]}`},
+			{},
+			{stdout: `{"id":"item-123","fields":[]}`},
+		},
+	}
+
+	storeAny, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner)
+	if err != nil {
+		t.Fatalf("newOnePasswordStoreWithRunner returned error: %v", err)
+	}
+
+	store := storeAny.(*onePasswordStore)
+	err = store.SetSecret(context.Background(), "/projects/waddle-cloud", "TALOSCONFIG_YAML", "line1\nline2")
+	if err == nil {
+		t.Fatal("expected persistence verification error")
+	}
+	if !strings.Contains(err.Error(), "secret field is missing after write") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
 	runner := &scriptedRunner{
 		t: t,
@@ -396,7 +426,8 @@ func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
 			{stdout: `{
 				"id":"item-123",
 				"fields":[
-					{"label":"TALOSCONFIG_YAML","value":"abc","section":{"id":"waddle-cloud","label":"waddle-cloud"}},
+					{"label":"TALOSCONFIG_YAML","value":"abc","section":{"id":"Section_random","label":"waddle-cloud"}},
+					{"label":"legacy","value":"ignored","section":{"id":"waddle-cloud"}},
 					{"label":"username","value":"admin","section":{"id":"credentials","label":"credentials"}}
 				]
 			}`},
@@ -418,6 +449,102 @@ func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
 	}
 	if got := secrets["TALOSCONFIG_YAML"]; got != "abc" {
 		t.Fatalf("managed secret value = %q, want %q", got, "abc")
+	}
+}
+
+func TestGetSecretsRetriesAuthorizationTimeoutInteractively(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{stdout: "{}"},
+			{
+				stderr: "[ERROR] error initializing client: authorization timeout",
+				err:    errors.New("exit status 1"),
+			},
+			{
+				stdout: `{
+					"id":"item-123",
+					"fields":[
+						{"label":"TALOSCONFIG_YAML","value":"abc","section":{"id":"Section_random","label":"waddle-cloud"}}
+					]
+				}`,
+			},
+		},
+	}
+	interactiveRunner := &scriptedInteractiveRunner{
+		t: t,
+		responses: []scriptedInteractiveResponse{
+			{
+				assert: func(t *testing.T, name string, args []string) {
+					expected := []string{"signin", "--account", "waddle-social.1password.eu"}
+					if name != "op" {
+						t.Fatalf("unexpected command: %s", name)
+					}
+					if len(args) != len(expected) {
+						t.Fatalf("unexpected args length: got %v, want %v", args, expected)
+					}
+					for i := range expected {
+						if args[i] != expected[i] {
+							t.Fatalf("args[%d] = %q, want %q (full args=%v)", i, args[i], expected[i], args)
+						}
+					}
+				},
+			},
+		},
+	}
+
+	storeAny, err := newOnePasswordStoreWithDeps(context.Background(), OnePasswordConfig{
+		Vault:   "Employee",
+		Account: "waddle-social.1password.eu",
+	}, runner, interactiveRunner, staticTTYChecker(true))
+	if err != nil {
+		t.Fatalf("newOnePasswordStoreWithDeps returned error: %v", err)
+	}
+
+	store := storeAny.(*onePasswordStore)
+	secrets, err := store.GetSecrets(context.Background(), "/projects/waddle-cloud")
+	if err != nil {
+		t.Fatalf("GetSecrets returned error: %v", err)
+	}
+	if got := secrets["TALOSCONFIG_YAML"]; got != "abc" {
+		t.Fatalf("managed secret value = %q, want %q", got, "abc")
+	}
+	if len(runner.responses) != 0 {
+		t.Fatalf("unused scripted responses: %d", len(runner.responses))
+	}
+	if len(interactiveRunner.responses) != 0 {
+		t.Fatalf("unused interactive responses: %d", len(interactiveRunner.responses))
+	}
+}
+
+func TestGetSecretsDoesNotPromptWhenAuthorizationTimesOutNonInteractive(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{stdout: "{}"},
+			{
+				stderr: "[ERROR] error initializing client: authorization timeout",
+				err:    errors.New("exit status 1"),
+			},
+		},
+	}
+	interactiveRunner := &scriptedInteractiveRunner{t: t}
+
+	storeAny, err := newOnePasswordStoreWithDeps(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner, interactiveRunner, staticTTYChecker(false))
+	if err != nil {
+		t.Fatalf("newOnePasswordStoreWithDeps returned error: %v", err)
+	}
+
+	store := storeAny.(*onePasswordStore)
+	_, err = store.GetSecrets(context.Background(), "/projects/waddle-cloud")
+	if err == nil {
+		t.Fatal("expected authorization timeout error")
+	}
+	if !strings.Contains(err.Error(), "authorization timeout") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(interactiveRunner.responses) != 0 {
+		t.Fatalf("unexpected interactive responses: %d", len(interactiveRunner.responses))
 	}
 }
 

@@ -203,10 +203,6 @@ func provisionNodeServer(
 		if existingServer == nil || strings.TrimSpace(existingServer.ID) == "" {
 			return nil, "", fmt.Errorf("existing server %s was not found in zone %s", reinstallServerID, zone)
 		}
-		nodeName = strings.TrimSpace(existingServer.Name)
-		if nodeName == "" {
-			return nil, "", fmt.Errorf("existing server %s has empty name", reinstallServerID)
-		}
 		offerID = strings.TrimSpace(existingServer.OfferID)
 		if offerID == "" {
 			return nil, "", fmt.Errorf("existing server %s has empty offer ID", reinstallServerID)
@@ -292,6 +288,11 @@ func provisionNodeServer(
 		})
 		if err != nil {
 			return nil, "", fmt.Errorf("reinstall server: %w", err)
+		}
+
+		server, err = scalewayEnsureServerNameFn(ctx, scwClient, zone, server, nodeName)
+		if err != nil {
+			return nil, "", fmt.Errorf("align reinstalled server %s name with node %q: %w", reinstallServerID, nodeName, err)
 		}
 	} else {
 		server, err = scalewayOrderServerFn(ctx, scwClient, scaleway.ProvisionParams{
