@@ -1,4 +1,4 @@
-module github.com/rawkode-academy/rawkode-cloud3
+module github.com/waddle-social/waddle/infrastructure/waddle.cloud
 
 go 1.26.0
 

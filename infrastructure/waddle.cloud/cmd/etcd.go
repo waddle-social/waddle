@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
 	"github.com/spf13/cobra"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/talos"
 )
 
 var etcdCmd = &cobra.Command{

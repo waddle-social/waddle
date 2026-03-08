@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	clusterstate "github.com/rawkode-academy/rawkode-cloud3/internal/cluster"
+	clusterstate "github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/cluster"
 )
 
 func TestTalosAccessEndpointsPrefersNodeFQDN(t *testing.T) {

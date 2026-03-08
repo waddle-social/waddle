@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
 	"github.com/spf13/cobra"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/scaleway"
 )
 
 func restoreServerListFns() {

@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/secrets"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/secrets"
 	"gopkg.in/yaml.v3"
 )
 

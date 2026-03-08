@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/cilium"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/flux"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/operation"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
 	"github.com/scaleway/scaleway-sdk-go/api/baremetal/v1"
 	scw "github.com/scaleway/scaleway-sdk-go/scw"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/cilium"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/flux"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/operation"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/scaleway"
 )
 
 func restorePostBootstrapFns() {

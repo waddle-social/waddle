@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	clusterstate "github.com/rawkode-academy/rawkode-cloud3/internal/cluster"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
 	baremetal "github.com/scaleway/scaleway-sdk-go/api/baremetal/v1"
 	scw "github.com/scaleway/scaleway-sdk-go/scw"
 	"github.com/spf13/cobra"
+	clusterstate "github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/cluster"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/scaleway"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/talos"
 )
 
 var nodeCmd = &cobra.Command{

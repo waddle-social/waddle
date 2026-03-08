@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/talos"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/talos"
 )
 
 const secretsBundleKey = "TALOS_SECRETS_BUNDLE"

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/operation"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/operation"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

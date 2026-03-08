@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	clusterstate "github.com/rawkode-academy/rawkode-cloud3/internal/cluster"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
+	clusterstate "github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/cluster"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
 )
 
 func TestSecretPathForCluster(t *testing.T) {

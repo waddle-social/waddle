@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/secrets"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/secrets"
 )
 
 type fakeSecretStore struct {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rawkode-academy/rawkode-cloud3/cmd"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/cmd"
 )
 
 func main() {

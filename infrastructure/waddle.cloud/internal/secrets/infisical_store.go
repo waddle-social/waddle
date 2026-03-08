@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/infisical"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/infisical"
 )
 
 type infisicalStore struct {

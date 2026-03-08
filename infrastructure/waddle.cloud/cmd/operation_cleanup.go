@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/scaleway"
 	scw "github.com/scaleway/scaleway-sdk-go/scw"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/scaleway"
 )
 
 type cleanupDeleteServer struct {

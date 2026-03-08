@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rawkode-academy/rawkode-cloud3/internal/config"
-	"github.com/rawkode-academy/rawkode-cloud3/internal/operation"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/config"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/operation"
 )
 
 func TestIngressPublicIPv4ForOperationUsesDiscoveredPublicIP(t *testing.T) {
