@@ -35,6 +35,37 @@ func (r *scriptedRunner) Run(_ context.Context, name string, args []string, stdi
 	return []byte(resp.stdout), []byte(resp.stderr), resp.err
 }
 
+type scriptedInteractiveResponse struct {
+	assert func(t *testing.T, name string, args []string)
+	err    error
+}
+
+type scriptedInteractiveRunner struct {
+	t         *testing.T
+	responses []scriptedInteractiveResponse
+}
+
+func (r *scriptedInteractiveRunner) RunInteractive(_ context.Context, name string, args []string) error {
+	r.t.Helper()
+	if len(r.responses) == 0 {
+		r.t.Fatalf("unexpected interactive command: %s %v", name, args)
+	}
+
+	resp := r.responses[0]
+	r.responses = r.responses[1:]
+	if resp.assert != nil {
+		resp.assert(r.t, name, args)
+	}
+
+	return resp.err
+}
+
+type staticTTYChecker bool
+
+func (s staticTTYChecker) IsTerminal(uintptr) bool {
+	return bool(s)
+}
+
 func TestNewOnePasswordStoreUsesLocalAuthContext(t *testing.T) {
 	runner := &scriptedRunner{
 		t: t,
@@ -53,6 +84,84 @@ func TestNewOnePasswordStoreUsesLocalAuthContext(t *testing.T) {
 	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner)
 	if err != nil {
 		t.Fatalf("newOnePasswordStoreWithRunner returned error: %v", err)
+	}
+}
+
+func TestNewOnePasswordStorePromptsForSigninWhenInteractive(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				assert: func(t *testing.T, name string, args []string, _ []byte) {
+					expected := []string{"whoami", "--format", "json", "--account", "waddle-social.1password.eu"}
+					if name != "op" {
+						t.Fatalf("unexpected command: %s", name)
+					}
+					if len(args) != len(expected) {
+						t.Fatalf("unexpected args length: got %v, want %v", args, expected)
+					}
+					for i := range expected {
+						if args[i] != expected[i] {
+							t.Fatalf("args[%d] = %q, want %q (full args=%v)", i, args[i], expected[i], args)
+						}
+					}
+				},
+				stderr: "[ERROR] You are not currently signed in. Use `op signin` to sign in.",
+				err:    errors.New("exit status 1"),
+			},
+			{
+				assert: func(t *testing.T, name string, args []string, _ []byte) {
+					expected := []string{"whoami", "--format", "json", "--account", "waddle-social.1password.eu"}
+					if name != "op" {
+						t.Fatalf("unexpected command: %s", name)
+					}
+					if len(args) != len(expected) {
+						t.Fatalf("unexpected args length: got %v, want %v", args, expected)
+					}
+					for i := range expected {
+						if args[i] != expected[i] {
+							t.Fatalf("args[%d] = %q, want %q (full args=%v)", i, args[i], expected[i], args)
+						}
+					}
+				},
+				stdout: "{}",
+			},
+		},
+	}
+	interactiveRunner := &scriptedInteractiveRunner{
+		t: t,
+		responses: []scriptedInteractiveResponse{
+			{
+				assert: func(t *testing.T, name string, args []string) {
+					expected := []string{"signin", "--account", "waddle-social.1password.eu"}
+					if name != "op" {
+						t.Fatalf("unexpected command: %s", name)
+					}
+					if len(args) != len(expected) {
+						t.Fatalf("unexpected args length: got %v, want %v", args, expected)
+					}
+					for i := range expected {
+						if args[i] != expected[i] {
+							t.Fatalf("args[%d] = %q, want %q (full args=%v)", i, args[i], expected[i], args)
+						}
+					}
+				},
+			},
+		},
+	}
+
+	_, err := newOnePasswordStoreWithDeps(context.Background(), OnePasswordConfig{
+		Vault:   "Employee",
+		Account: "waddle-social.1password.eu",
+	}, runner, interactiveRunner, staticTTYChecker(true))
+	if err != nil {
+		t.Fatalf("newOnePasswordStoreWithDeps returned error: %v", err)
+	}
+	if len(runner.responses) != 0 {
+		t.Fatalf("unused scripted responses: %d", len(runner.responses))
+	}
+	if len(interactiveRunner.responses) != 0 {
+		t.Fatalf("unused interactive responses: %d", len(interactiveRunner.responses))
 	}
 }
 
@@ -75,7 +184,7 @@ func TestNewOnePasswordStoreReportsMissingOPBinary(t *testing.T) {
 	}
 }
 
-func TestNewOnePasswordStoreReportsLocalSigninRequirement(t *testing.T) {
+func TestNewOnePasswordStoreReportsLocalSigninRequirementWhenNonInteractive(t *testing.T) {
 	runner := &scriptedRunner{
 		t: t,
 		responses: []scriptedResponse{
@@ -85,13 +194,17 @@ func TestNewOnePasswordStoreReportsLocalSigninRequirement(t *testing.T) {
 			},
 		},
 	}
+	interactiveRunner := &scriptedInteractiveRunner{t: t}
 
-	_, err := newOnePasswordStoreWithRunner(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner)
+	_, err := newOnePasswordStoreWithDeps(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner, interactiveRunner, staticTTYChecker(false))
 	if err == nil {
 		t.Fatal("expected local sign-in error")
 	}
 	if !strings.Contains(err.Error(), "sign in locally with `op`") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(interactiveRunner.responses) != 0 {
+		t.Fatalf("unexpected interactive responses: %d", len(interactiveRunner.responses))
 	}
 }
 
@@ -125,6 +238,66 @@ func TestNewOnePasswordStorePassesAccountToWhoami(t *testing.T) {
 	}, runner)
 	if err != nil {
 		t.Fatalf("newOnePasswordStoreWithRunner returned error: %v", err)
+	}
+}
+
+func TestNewOnePasswordStoreReturnsInteractiveSigninFailure(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				stderr: "[ERROR] You are not currently signed in. Use `op signin` to sign in.",
+				err:    errors.New("exit status 1"),
+			},
+		},
+	}
+	interactiveRunner := &scriptedInteractiveRunner{
+		t: t,
+		responses: []scriptedInteractiveResponse{
+			{
+				assert: func(t *testing.T, name string, args []string) {
+					if name != "op" || len(args) == 0 || args[0] != "signin" {
+						t.Fatalf("unexpected interactive command: %s %v", name, args)
+					}
+				},
+				err: errors.New("exit status 1"),
+			},
+		},
+	}
+
+	_, err := newOnePasswordStoreWithDeps(context.Background(), OnePasswordConfig{Vault: "Employee"}, runner, interactiveRunner, staticTTYChecker(true))
+	if err == nil {
+		t.Fatal("expected interactive sign-in failure")
+	}
+	if !strings.Contains(err.Error(), "interactive sign-in failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewOnePasswordStoreReportsInvalidAccountWithoutPrompting(t *testing.T) {
+	runner := &scriptedRunner{
+		t: t,
+		responses: []scriptedResponse{
+			{
+				stderr: "[ERROR] unknown account",
+				err:    errors.New("exit status 1"),
+			},
+		},
+	}
+	interactiveRunner := &scriptedInteractiveRunner{t: t}
+
+	_, err := newOnePasswordStoreWithDeps(context.Background(), OnePasswordConfig{
+		Vault:   "Employee",
+		Account: "waddle-social.1password.eu",
+	}, runner, interactiveRunner, staticTTYChecker(true))
+	if err == nil {
+		t.Fatal("expected invalid account error")
+	}
+	if !strings.Contains(err.Error(), "is not available in the current local `op` session") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(interactiveRunner.responses) != 0 {
+		t.Fatalf("unexpected interactive responses: %d", len(interactiveRunner.responses))
 	}
 }
 

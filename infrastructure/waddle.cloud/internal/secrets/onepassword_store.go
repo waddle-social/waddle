@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	pathpkg "path"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -20,6 +23,14 @@ const (
 
 type opCommandRunner interface {
 	Run(ctx context.Context, name string, args []string, stdin []byte) (stdout []byte, stderr []byte, err error)
+}
+
+type opInteractiveRunner interface {
+	RunInteractive(ctx context.Context, name string, args []string) error
+}
+
+type terminalChecker interface {
+	IsTerminal(fd uintptr) bool
 }
 
 type execOPRunner struct{}
@@ -39,17 +50,59 @@ func (execOPRunner) Run(ctx context.Context, name string, args []string, stdin [
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
+type execOPInteractiveRunner struct{}
+
+func (execOPInteractiveRunner) RunInteractive(ctx context.Context, name string, args []string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+type execTerminalChecker struct{}
+
+func (execTerminalChecker) IsTerminal(fd uintptr) bool {
+	return term.IsTerminal(int(fd))
+}
+
+type onePasswordAuthStatus int
+
+const (
+	onePasswordAuthStatusOK onePasswordAuthStatus = iota
+	onePasswordAuthStatusSigninRequired
+	onePasswordAuthStatusOther
+)
+
+type onePasswordAuthResult struct {
+	stderr []byte
+	err    error
+	status onePasswordAuthStatus
+}
+
 type onePasswordStore struct {
-	vault   string
-	account string
-	runner  opCommandRunner
+	vault             string
+	account           string
+	runner            opCommandRunner
+	interactiveRunner opInteractiveRunner
+	ttyChecker        terminalChecker
 }
 
 func NewOnePasswordStore(ctx context.Context, cfg OnePasswordConfig) (Store, error) {
-	return newOnePasswordStoreWithRunner(ctx, cfg, execOPRunner{})
+	return newOnePasswordStoreWithDeps(ctx, cfg, execOPRunner{}, execOPInteractiveRunner{}, execTerminalChecker{})
 }
 
 func newOnePasswordStoreWithRunner(ctx context.Context, cfg OnePasswordConfig, runner opCommandRunner) (Store, error) {
+	return newOnePasswordStoreWithDeps(ctx, cfg, runner, execOPInteractiveRunner{}, execTerminalChecker{})
+}
+
+func newOnePasswordStoreWithDeps(
+	ctx context.Context,
+	cfg OnePasswordConfig,
+	runner opCommandRunner,
+	interactiveRunner opInteractiveRunner,
+	ttyChecker terminalChecker,
+) (Store, error) {
 	vault := strings.TrimSpace(cfg.Vault)
 	if vault == "" {
 		return nil, fmt.Errorf("onepassword.vault is required")
@@ -57,11 +110,19 @@ func newOnePasswordStoreWithRunner(ctx context.Context, cfg OnePasswordConfig, r
 	if runner == nil {
 		return nil, fmt.Errorf("1password command runner is required")
 	}
+	if interactiveRunner == nil {
+		return nil, fmt.Errorf("1password interactive command runner is required")
+	}
+	if ttyChecker == nil {
+		return nil, fmt.Errorf("1password terminal checker is required")
+	}
 
 	store := &onePasswordStore{
-		vault:   vault,
-		account: strings.TrimSpace(cfg.Account),
-		runner:  runner,
+		vault:             vault,
+		account:           strings.TrimSpace(cfg.Account),
+		runner:            runner,
+		interactiveRunner: interactiveRunner,
+		ttyChecker:        ttyChecker,
 	}
 
 	if err := store.verifyAuth(ctx); err != nil {
@@ -131,10 +192,24 @@ func (s *onePasswordStore) SetSecret(ctx context.Context, path, key, value strin
 }
 
 func (s *onePasswordStore) verifyAuth(ctx context.Context) error {
-	_, stderr, err := s.runOP(ctx, nil, "whoami", "--format", "json")
-	if err != nil {
-		return formatOnePasswordAuthError(err, stderr, s.account)
+	authResult := s.checkAuth(ctx)
+	if authResult.err == nil {
+		return nil
 	}
+
+	if authResult.status != onePasswordAuthStatusSigninRequired || !s.isInteractiveShell() {
+		return formatOnePasswordAuthError(authResult.err, authResult.stderr, s.account)
+	}
+
+	if err := s.signIn(ctx); err != nil {
+		return err
+	}
+
+	authResult = s.checkAuth(ctx)
+	if authResult.err != nil {
+		return formatOnePasswordAuthError(authResult.err, authResult.stderr, s.account)
+	}
+
 	return nil
 }
 
@@ -201,13 +276,47 @@ func (s *onePasswordStore) editItem(ctx context.Context, itemID string, item map
 }
 
 func (s *onePasswordStore) runOP(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
+	finalArgs := s.finalArgs(args...)
+	stdout, stderr, err := s.runner.Run(ctx, "op", finalArgs, stdin)
+	return stdout, stderr, err
+}
+
+func (s *onePasswordStore) checkAuth(ctx context.Context) onePasswordAuthResult {
+	_, stderr, err := s.runOP(ctx, nil, "whoami", "--format", "json")
+	if err == nil {
+		return onePasswordAuthResult{status: onePasswordAuthStatusOK}
+	}
+
+	return onePasswordAuthResult{
+		stderr: stderr,
+		err:    err,
+		status: classifyOnePasswordAuthStatus(err, stderr),
+	}
+}
+
+func (s *onePasswordStore) signIn(ctx context.Context) error {
+	if err := s.runInteractiveOP(ctx, "signin"); err != nil {
+		return formatOnePasswordSigninError(err, s.account)
+	}
+	return nil
+}
+
+func (s *onePasswordStore) runInteractiveOP(ctx context.Context, args ...string) error {
+	return s.interactiveRunner.RunInteractive(ctx, "op", s.finalArgs(args...))
+}
+
+func (s *onePasswordStore) finalArgs(args ...string) []string {
 	finalArgs := append([]string(nil), args...)
 	if s.account != "" && !containsArg(finalArgs, "--account") {
 		finalArgs = append(finalArgs, "--account", s.account)
 	}
+	return finalArgs
+}
 
-	stdout, stderr, err := s.runner.Run(ctx, "op", finalArgs, stdin)
-	return stdout, stderr, err
+func (s *onePasswordStore) isInteractiveShell() bool {
+	return s.ttyChecker.IsTerminal(os.Stdin.Fd()) &&
+		s.ttyChecker.IsTerminal(os.Stdout.Fd()) &&
+		s.ttyChecker.IsTerminal(os.Stderr.Fd())
 }
 
 func containsArg(args []string, target string) bool {
@@ -248,6 +357,31 @@ func isOnePasswordItemNotFound(runErr error, stderr []byte) bool {
 		strings.Contains(combined, "could not find")
 }
 
+func classifyOnePasswordAuthStatus(runErr error, stderr []byte) onePasswordAuthStatus {
+	if runErr == nil {
+		return onePasswordAuthStatusOK
+	}
+	if isOnePasswordSigninRequired(runErr, stderr) {
+		return onePasswordAuthStatusSigninRequired
+	}
+	return onePasswordAuthStatusOther
+}
+
+func isOnePasswordSigninRequired(runErr error, stderr []byte) bool {
+	if runErr == nil {
+		return false
+	}
+
+	combined := strings.ToLower(strings.TrimSpace(runErr.Error() + " " + string(stderr)))
+	return containsAny(combined,
+		"not currently signed in",
+		"not signed in",
+		"sign in",
+		"signin",
+		"no accounts configured",
+	)
+}
+
 func formatOnePasswordAuthError(runErr error, stderr []byte, account string) error {
 	if errors.Is(runErr, exec.ErrNotFound) {
 		return fmt.Errorf("1password CLI \"op\" was not found in PATH; install 1Password CLI and sign in locally")
@@ -256,13 +390,7 @@ func formatOnePasswordAuthError(runErr error, stderr []byte, account string) err
 	account = strings.TrimSpace(account)
 	combined := strings.ToLower(strings.TrimSpace(runErr.Error() + " " + string(stderr)))
 	switch {
-	case containsAny(combined,
-		"not currently signed in",
-		"not signed in",
-		"sign in",
-		"signin",
-		"no accounts configured",
-	):
+	case isOnePasswordSigninRequired(runErr, stderr):
 		if account != "" {
 			return fmt.Errorf("1password authentication failed for account %q; sign in locally with `op` and verify onepassword.account (%s)", account, strings.TrimSpace(string(stderr)))
 		}
@@ -280,6 +408,18 @@ func formatOnePasswordAuthError(runErr error, stderr []byte, account string) err
 		}
 		return fmt.Errorf("verify 1password authentication context: %w (%s)", runErr, strings.TrimSpace(string(stderr)))
 	}
+}
+
+func formatOnePasswordSigninError(runErr error, account string) error {
+	if errors.Is(runErr, exec.ErrNotFound) {
+		return fmt.Errorf("1password CLI \"op\" was not found in PATH; install 1Password CLI and sign in locally")
+	}
+
+	account = strings.TrimSpace(account)
+	if account != "" {
+		return fmt.Errorf("1password interactive sign-in failed for account %q; sign in with `op signin --account %s` and retry: %w", account, account, runErr)
+	}
+	return fmt.Errorf("1password interactive sign-in failed; sign in with `op signin` and retry: %w", runErr)
 }
 
 func containsAny(value string, patterns ...string) bool {
