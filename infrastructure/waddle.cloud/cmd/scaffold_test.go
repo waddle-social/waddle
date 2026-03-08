@@ -25,6 +25,9 @@ func TestRunClusterScaffoldDefaultsFluxOCIRepo(t *testing.T) {
 	) {
 		t.Fatalf("scaffolded config missing default flux ociRepo:\n%s", string(content))
 	}
+	if !strings.Contains(string(content), `privateNetworkIPv4CIDR: "172.16.16.0/24"`) {
+		t.Fatalf("scaffolded config missing default scaleway private network cidr:\n%s", string(content))
+	}
 	if !strings.Contains(string(content), "ingress:\n") || !strings.Contains(string(content), `publicIPv4: ""`) {
 		t.Fatalf("scaffolded config missing ingress publicIPv4 override:\n%s", string(content))
 	}

@@ -11,6 +11,7 @@ cluster:
 scaleway:
   projectId: da8a176b-80b5-46af-9401-44147a989863
   organizationId: da8a176b-80b5-46af-9401-44147a989863
+  privateNetworkIPv4CIDR: 172.16.16.0/24
 
 nodePools:
   - name: control-plane

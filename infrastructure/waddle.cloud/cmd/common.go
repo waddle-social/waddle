@@ -640,6 +640,42 @@ func controlPlaneReservedIPForSlot(pool *config.NodePoolConfig, slot int) (strin
 	return strings.TrimSpace(pool.ReservedPrivateIPs[slot-1]), nil
 }
 
+func reinstallReservedPrivateIPs(pool *config.NodePoolConfig, requestedPrivateIP string) []string {
+	values := make([]string, 0, 1)
+	if pool != nil {
+		values = append(values, pool.ReservedPrivateIPs...)
+	}
+	if trimmed := strings.TrimSpace(requestedPrivateIP); trimmed != "" {
+		values = append(values, trimmed)
+	}
+	return normalizeNonEmptyStrings(values...)
+}
+
+func ensureReservedPrivateIPsForReinstall(
+	ctx context.Context,
+	client *scaleway.Client,
+	zone scw.Zone,
+	pool *config.NodePoolConfig,
+	serverID,
+	privateNetworkID,
+	requestedPrivateIP string,
+) error {
+	for _, reservedIP := range reinstallReservedPrivateIPs(pool, requestedPrivateIP) {
+		if err := scalewayEnsureReservedPrivateNetworkIPFn(
+			ctx,
+			client,
+			zone,
+			serverID,
+			privateNetworkID,
+			reservedIP,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func nextNodePoolSlot(state *clusterstate.NodesState, environment, poolName, role string) int {
 	occupied := make(map[int]struct{})
 	unknownNamedNodes := 0

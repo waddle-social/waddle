@@ -21,6 +21,7 @@ func restoreProvisioningFns() {
 	scalewayOrderServerFn = scaleway.OrderServer
 	scalewayReinstallServerFn = scaleway.ReinstallServer
 	scalewayWaitForReadyFn = scaleway.WaitForReady
+	scalewayEnsureReservedPrivateNetworkIPFn = scaleway.EnsureReservedPrivateNetworkIP
 	scalewayEnsureServerPrivateNetworkFn = scaleway.EnsureServerPrivateNetworkAttachment
 	scalewayGetServerFn = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
 		return client.Baremetal.GetServer(&baremetal.GetServerRequest{
@@ -55,8 +56,9 @@ func newProvisionConfig(pool config.NodePoolConfig) *config.Config {
 			TalosSchematic:    "schematic-id",
 		},
 		Scaleway: config.ScalewayConfig{
-			ProjectID:      "project-id",
-			OrganizationID: "org-id",
+			ProjectID:              "project-id",
+			OrganizationID:         "org-id",
+			PrivateNetworkIPv4CIDR: "172.16.16.0/24",
 		},
 		NodePools: []config.NodePoolConfig{pool},
 	}
@@ -154,7 +156,16 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
 	}
-	scalewayEnsureNetworkFoundationFn = func(context.Context, *scaleway.Client, scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+	scalewayEnsureNetworkFoundationFn = func(_ context.Context, _ *scaleway.Client, params scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+		if !params.AllowCIDRReplacement {
+			t.Fatal("expected CIDR replacement to be enabled for reinstall path")
+		}
+		if params.PrivateNetworkIPv4CIDR != "172.16.16.0/24" {
+			t.Fatalf("private network cidr = %q, want %q", params.PrivateNetworkIPv4CIDR, "172.16.16.0/24")
+		}
+		if params.ReplacementServerID != "srv-existing" {
+			t.Fatalf("replacement server id = %q, want %q", params.ReplacementServerID, "srv-existing")
+		}
 		return &scaleway.NetworkFoundation{PrivateNetworkID: "pn-123"}, nil
 	}
 
@@ -179,6 +190,17 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 	}
 
 	var gotAttachReservedIP string
+	var gotEnsuredReservedIP string
+	scalewayEnsureReservedPrivateNetworkIPFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, serverID, privateNetworkID, reservedPrivateIP string) error {
+		if serverID != "srv-existing" {
+			t.Fatalf("ensure reserved IP server id = %q, want %q", serverID, "srv-existing")
+		}
+		if privateNetworkID != "pn-123" {
+			t.Fatalf("ensure reserved IP private network id = %q, want %q", privateNetworkID, "pn-123")
+		}
+		gotEnsuredReservedIP = reservedPrivateIP
+		return nil
+	}
 	scalewayEnsureServerPrivateNetworkFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, serverID, privateNetworkID, reservedPrivateIP string) error {
 		if serverID != "srv-existing" {
 			t.Fatalf("attach server id = %q, want %q", serverID, "srv-existing")
@@ -226,6 +248,9 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 	if gotAttachReservedIP != "172.16.16.16" {
 		t.Fatalf("reserved private ip = %q, want %q", gotAttachReservedIP, "172.16.16.16")
 	}
+	if gotEnsuredReservedIP != "172.16.16.16" {
+		t.Fatalf("ensured reserved private ip = %q, want %q", gotEnsuredReservedIP, "172.16.16.16")
+	}
 	if got := op.GetContextString("nodeName"); got != "legacy-control-plane-name" {
 		t.Fatalf("operation nodeName = %q, want %q", got, "legacy-control-plane-name")
 	}
@@ -247,7 +272,10 @@ func TestPhaseOrderServerOrderPathUnaffected(t *testing.T) {
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
 	}
-	scalewayEnsureNetworkFoundationFn = func(context.Context, *scaleway.Client, scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+	scalewayEnsureNetworkFoundationFn = func(_ context.Context, _ *scaleway.Client, params scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+		if params.AllowCIDRReplacement {
+			t.Fatal("did not expect CIDR replacement for order path")
+		}
 		return &scaleway.NetworkFoundation{PrivateNetworkID: "pn-123"}, nil
 	}
 	scalewayResolveOfferForBillingCycleFn = func(context.Context, *scaleway.Client, scw.Zone, string, string) (string, baremetal.OfferSubscriptionPeriod, error) {
@@ -255,6 +283,10 @@ func TestPhaseOrderServerOrderPathUnaffected(t *testing.T) {
 	}
 	scalewayResolveUbuntuOSIDFn = func(context.Context, *scaleway.Client, scw.Zone, string) (string, error) {
 		return "ubuntu-os", nil
+	}
+	scalewayEnsureReservedPrivateNetworkIPFn = func(context.Context, *scaleway.Client, scw.Zone, string, string, string) error {
+		t.Fatal("reserved IP ensure should not run for order path")
+		return nil
 	}
 
 	var orderCalled bool
@@ -296,11 +328,21 @@ func TestProvisionNodeServerReinstallWorker(t *testing.T) {
 	scalewayResolveUbuntuOSIDFn = func(context.Context, *scaleway.Client, scw.Zone, string) (string, error) {
 		return "ubuntu-os", nil
 	}
-	scalewayEnsureNetworkFoundationFn = func(context.Context, *scaleway.Client, scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+	scalewayEnsureNetworkFoundationFn = func(_ context.Context, _ *scaleway.Client, params scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+		if !params.AllowCIDRReplacement {
+			t.Fatal("expected CIDR replacement for worker reinstall path")
+		}
+		if params.ReplacementServerID != "srv-worker" {
+			t.Fatalf("replacement server id = %q, want %q", params.ReplacementServerID, "srv-worker")
+		}
 		return &scaleway.NetworkFoundation{PrivateNetworkID: "pn-123"}, nil
 	}
 
 	var gotAttachReservedIP string
+	scalewayEnsureReservedPrivateNetworkIPFn = func(context.Context, *scaleway.Client, scw.Zone, string, string, string) error {
+		t.Fatal("reserved IP ensure should not run for worker reinstall without private IP")
+		return nil
+	}
 	scalewayEnsureServerPrivateNetworkFn = func(context.Context, *scaleway.Client, scw.Zone, string, string, string) error {
 		gotAttachReservedIP = ""
 		return nil
@@ -354,11 +396,28 @@ func TestProvisionNodeServerReinstallControlPlaneUsesReservedIP(t *testing.T) {
 	scalewayResolveUbuntuOSIDFn = func(context.Context, *scaleway.Client, scw.Zone, string) (string, error) {
 		return "ubuntu-os", nil
 	}
-	scalewayEnsureNetworkFoundationFn = func(context.Context, *scaleway.Client, scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+	scalewayEnsureNetworkFoundationFn = func(_ context.Context, _ *scaleway.Client, params scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
+		if !params.AllowCIDRReplacement {
+			t.Fatal("expected CIDR replacement for control-plane reinstall path")
+		}
+		if params.ReplacementServerID != "srv-cp" {
+			t.Fatalf("replacement server id = %q, want %q", params.ReplacementServerID, "srv-cp")
+		}
 		return &scaleway.NetworkFoundation{PrivateNetworkID: "pn-123"}, nil
 	}
 
 	var gotAttachReservedIP string
+	var gotEnsuredReservedIP string
+	scalewayEnsureReservedPrivateNetworkIPFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, serverID, privateNetworkID, reservedPrivateIP string) error {
+		if serverID != "srv-cp" {
+			t.Fatalf("ensure reserved IP server id = %q, want %q", serverID, "srv-cp")
+		}
+		if privateNetworkID != "pn-123" {
+			t.Fatalf("ensure reserved IP private network id = %q, want %q", privateNetworkID, "pn-123")
+		}
+		gotEnsuredReservedIP = reservedPrivateIP
+		return nil
+	}
 	scalewayEnsureServerPrivateNetworkFn = func(_ context.Context, _ *scaleway.Client, _ scw.Zone, _ string, _ string, reservedPrivateIP string) error {
 		gotAttachReservedIP = reservedPrivateIP
 		return nil
@@ -388,6 +447,9 @@ func TestProvisionNodeServerReinstallControlPlaneUsesReservedIP(t *testing.T) {
 	if gotAttachReservedIP != "172.16.16.17" {
 		t.Fatalf("reserved private ip = %q, want %q", gotAttachReservedIP, "172.16.16.17")
 	}
+	if gotEnsuredReservedIP != "172.16.16.17" {
+		t.Fatalf("ensured reserved private ip = %q, want %q", gotEnsuredReservedIP, "172.16.16.17")
+	}
 }
 
 func TestProvisionNodeServerKeepsOrderPathBehavior(t *testing.T) {
@@ -407,6 +469,10 @@ func TestProvisionNodeServerKeepsOrderPathBehavior(t *testing.T) {
 	}
 	scalewayEnsureNetworkFoundationFn = func(context.Context, *scaleway.Client, scaleway.NetworkFoundationParams) (*scaleway.NetworkFoundation, error) {
 		return &scaleway.NetworkFoundation{PrivateNetworkID: "pn-123"}, nil
+	}
+	scalewayEnsureReservedPrivateNetworkIPFn = func(context.Context, *scaleway.Client, scw.Zone, string, string, string) error {
+		t.Fatal("reserved IP ensure should not run for order path")
+		return nil
 	}
 	scalewayReinstallServerFn = func(context.Context, *scaleway.Client, scaleway.ReinstallParams) (*baremetal.Server, error) {
 		t.Fatal("reinstall should not run for order path")

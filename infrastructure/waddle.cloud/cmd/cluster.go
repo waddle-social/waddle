@@ -113,23 +113,24 @@ var createClusterPhases = []string{
 }
 
 var (
-	ciliumInstallFn                         = cilium.Install
-	fluxBootstrapFn                         = flux.Bootstrap
-	postBootstrapKubeconfigPathFn           = postBootstrapKubeconfigPath
-	postBootstrapKubeconfigRetryInterval    = 15 * time.Second
-	postBootstrapKubeconfigRetryTimeout     = 30 * time.Minute
-	postBootstrapKubernetesAPIProbeFn       = postBootstrapKubernetesAPIReachable
-	postBootstrapKubernetesAPIWaitFn        = waitForKubernetesAPIWithRetry
-	postBootstrapKubernetesAPIRetryInterval = 5 * time.Second
-	postBootstrapKubernetesAPIRetryTimeout  = 10 * time.Minute
-	scalewayNewClientFn                     = scaleway.NewClient
-	scalewayResolveOfferForBillingCycleFn   = scaleway.ResolveOfferForBillingCycle
-	scalewayResolveUbuntuOSIDFn             = scaleway.ResolveUbuntuOSID
-	scalewayOrderServerFn                   = scaleway.OrderServer
-	scalewayReinstallServerFn               = scaleway.ReinstallServer
-	scalewayWaitForReadyFn                  = scaleway.WaitForReady
-	scalewayEnsureServerPrivateNetworkFn    = scaleway.EnsureServerPrivateNetworkAttachment
-	scalewayGetServerFn                     = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
+	ciliumInstallFn                          = cilium.Install
+	fluxBootstrapFn                          = flux.Bootstrap
+	postBootstrapKubeconfigPathFn            = postBootstrapKubeconfigPath
+	postBootstrapKubeconfigRetryInterval     = 15 * time.Second
+	postBootstrapKubeconfigRetryTimeout      = 30 * time.Minute
+	postBootstrapKubernetesAPIProbeFn        = postBootstrapKubernetesAPIReachable
+	postBootstrapKubernetesAPIWaitFn         = waitForKubernetesAPIWithRetry
+	postBootstrapKubernetesAPIRetryInterval  = 5 * time.Second
+	postBootstrapKubernetesAPIRetryTimeout   = 10 * time.Minute
+	scalewayNewClientFn                      = scaleway.NewClient
+	scalewayResolveOfferForBillingCycleFn    = scaleway.ResolveOfferForBillingCycle
+	scalewayResolveUbuntuOSIDFn              = scaleway.ResolveUbuntuOSID
+	scalewayOrderServerFn                    = scaleway.OrderServer
+	scalewayReinstallServerFn                = scaleway.ReinstallServer
+	scalewayWaitForReadyFn                   = scaleway.WaitForReady
+	scalewayEnsureReservedPrivateNetworkIPFn = scaleway.EnsureReservedPrivateNetworkIP
+	scalewayEnsureServerPrivateNetworkFn     = scaleway.EnsureServerPrivateNetworkAttachment
+	scalewayGetServerFn                      = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
 		return client.Baremetal.GetServer(&baremetal.GetServerRequest{
 			Zone:     zone,
 			ServerID: serverID,
@@ -387,9 +388,14 @@ func phaseOrderServer(
 		return err
 	}
 	network, err := scalewayEnsureNetworkFoundationFn(ctx, scwClient, scaleway.NetworkFoundationParams{
-		Region:             region,
-		VPCName:            vpcName,
-		PrivateNetworkName: privateNetworkName,
+		Region:                 region,
+		ProjectID:              cfg.Scaleway.ProjectID,
+		VPCName:                vpcName,
+		PrivateNetworkName:     privateNetworkName,
+		PrivateNetworkIPv4CIDR: cfg.Scaleway.PrivateNetworkIPv4CIDR,
+		AllowCIDRReplacement:   reinstall,
+		ReplacementServerID:    reinstallServerID,
+		ReplacementServerZone:  zone,
 	})
 	if err != nil {
 		return fmt.Errorf("ensure network: %w", err)
@@ -428,6 +434,21 @@ func phaseOrderServer(
 		osID, err := scalewayResolveUbuntuOSIDFn(ctx, scwClient, zone, offerID)
 		if err != nil {
 			return fmt.Errorf("resolve ubuntu OS for existing server offer %s: %w", offerID, err)
+		}
+
+		if err := ensureReservedPrivateIPsForReinstall(
+			ctx,
+			scwClient,
+			zone,
+			pool,
+			serverID,
+			network.PrivateNetworkID,
+			privateIP,
+		); err != nil {
+			if reservedIPs := reinstallReservedPrivateIPs(pool, privateIP); len(reservedIPs) > 0 {
+				return fmt.Errorf("ensure reserved private ips %s for existing server %s: %w", strings.Join(reservedIPs, ", "), serverID, err)
+			}
+			return fmt.Errorf("ensure reserved private ip prerequisites for existing server %s: %w", serverID, err)
 		}
 
 		if err := scalewayEnsureServerPrivateNetworkFn(
@@ -771,9 +792,11 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 		}
 
 		network, err := scalewayEnsureNetworkFoundationFn(ctx, scwClient, scaleway.NetworkFoundationParams{
-			Region:             region,
-			VPCName:            vpcName,
-			PrivateNetworkName: privateNetworkName,
+			Region:                 region,
+			ProjectID:              cfg.Scaleway.ProjectID,
+			VPCName:                vpcName,
+			PrivateNetworkName:     privateNetworkName,
+			PrivateNetworkIPv4CIDR: cfg.Scaleway.PrivateNetworkIPv4CIDR,
 		})
 		if err != nil {
 			return fmt.Errorf("resolve missing privateNetworkID context: %w", err)

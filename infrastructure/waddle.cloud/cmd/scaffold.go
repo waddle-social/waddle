@@ -22,6 +22,7 @@ cluster:
 scaleway:
   projectId: ""
   organizationId: ""
+  privateNetworkIPv4CIDR: "172.16.16.0/24"
 
 nodePools:
   - name: main

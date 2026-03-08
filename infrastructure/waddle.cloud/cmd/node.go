@@ -234,9 +234,14 @@ func provisionNodeServer(
 		return nil, "", err
 	}
 	network, err := scalewayEnsureNetworkFoundationFn(ctx, scwClient, scaleway.NetworkFoundationParams{
-		Region:             region,
-		VPCName:            vpcName,
-		PrivateNetworkName: privateNetworkName,
+		Region:                 region,
+		ProjectID:              cfg.Scaleway.ProjectID,
+		VPCName:                vpcName,
+		PrivateNetworkName:     privateNetworkName,
+		PrivateNetworkIPv4CIDR: cfg.Scaleway.PrivateNetworkIPv4CIDR,
+		AllowCIDRReplacement:   strings.TrimSpace(reinstallServerID) != "",
+		ReplacementServerID:    reinstallServerID,
+		ReplacementServerZone:  zone,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("ensure network: %w", err)
@@ -251,6 +256,21 @@ func provisionNodeServer(
 
 	var server *baremetal.Server
 	if reinstallServerID != "" {
+		if err := ensureReservedPrivateIPsForReinstall(
+			ctx,
+			scwClient,
+			zone,
+			pool,
+			reinstallServerID,
+			network.PrivateNetworkID,
+			privateIP,
+		); err != nil {
+			if reservedIPs := reinstallReservedPrivateIPs(pool, privateIP); len(reservedIPs) > 0 {
+				return nil, "", fmt.Errorf("ensure reserved private ips %s for existing server %s: %w", strings.Join(reservedIPs, ", "), reinstallServerID, err)
+			}
+			return nil, "", fmt.Errorf("ensure reserved private ip prerequisites for existing server %s: %w", reinstallServerID, err)
+		}
+
 		if err := scalewayEnsureServerPrivateNetworkFn(
 			ctx,
 			scwClient,

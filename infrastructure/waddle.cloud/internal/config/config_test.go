@@ -68,6 +68,74 @@ func TestScalewayNetworkNameDerivation(t *testing.T) {
 	}
 }
 
+func TestValidateScalewayConfigurationRequiresPrivateNetworkCIDR(t *testing.T) {
+	cfg := &Config{}
+
+	err := cfg.validateScalewayConfiguration()
+	if err == nil {
+		t.Fatal("expected scaleway.privateNetworkIPv4CIDR validation error")
+	}
+}
+
+func TestValidateScalewayConfigurationRejectsInvalidCIDR(t *testing.T) {
+	cfg := &Config{
+		Scaleway: ScalewayConfig{
+			PrivateNetworkIPv4CIDR: "not-a-cidr",
+		},
+	}
+
+	err := cfg.validateScalewayConfiguration()
+	if err == nil {
+		t.Fatal("expected invalid private network cidr validation error")
+	}
+}
+
+func TestValidateScalewayConfigurationRejectsReservedPrivateIPOutsideCIDR(t *testing.T) {
+	cfg := &Config{
+		Scaleway: ScalewayConfig{
+			PrivateNetworkIPv4CIDR: "172.16.16.0/24",
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				ReservedPrivateIPs: []string{
+					"172.16.17.16",
+				},
+			},
+		},
+	}
+
+	err := cfg.validateScalewayConfiguration()
+	if err == nil {
+		t.Fatal("expected reserved private IP outside CIDR validation error")
+	}
+}
+
+func TestValidateScalewayConfigurationAcceptsReservedPrivateIPsInsideCIDR(t *testing.T) {
+	cfg := &Config{
+		Scaleway: ScalewayConfig{
+			PrivateNetworkIPv4CIDR: "172.16.16.7/24",
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				ReservedPrivateIPs: []string{
+					"172.16.16.16",
+					"172.16.16.17",
+				},
+			},
+		},
+	}
+
+	err := cfg.validateScalewayConfiguration()
+	if err != nil {
+		t.Fatalf("validateScalewayConfiguration returned error: %v", err)
+	}
+	if cfg.Scaleway.PrivateNetworkIPv4CIDR != "172.16.16.0/24" {
+		t.Fatalf("normalized private network cidr = %q, want %q", cfg.Scaleway.PrivateNetworkIPv4CIDR, "172.16.16.0/24")
+	}
+}
+
 func TestNodePoolEffectiveZone(t *testing.T) {
 	pool := NodePoolConfig{Zone: " fr-par-1 "}
 	if got := pool.EffectiveZone(); got != "fr-par-1" {

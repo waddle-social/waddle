@@ -44,8 +44,9 @@ type ClusterConfig struct {
 
 // ScalewayConfig holds Scaleway infrastructure settings (no credentials).
 type ScalewayConfig struct {
-	ProjectID      string `yaml:"projectId"`
-	OrganizationID string `yaml:"organizationId"`
+	ProjectID              string `yaml:"projectId"`
+	OrganizationID         string `yaml:"organizationId"`
+	PrivateNetworkIPv4CIDR string `yaml:"privateNetworkIPv4CIDR"`
 }
 
 // NodePoolConfig describes a group of nodes sharing the same hardware/disk layout.
@@ -144,6 +145,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("INFISICAL_CLIENT_SECRET"); v != "" && cfg.Infisical.ClientSecret == "" {
 		cfg.Infisical.ClientSecret = v
 	}
+	if err := cfg.validateScalewayConfiguration(); err != nil {
+		return nil, err
+	}
 	if err := cfg.validateSecretsConfiguration(); err != nil {
 		return nil, err
 	}
@@ -167,6 +171,50 @@ func (c *Config) validateIngressConfiguration() error {
 	parsed := net.ParseIP(override)
 	if parsed == nil || parsed.To4() == nil {
 		return fmt.Errorf("ingress.publicIPv4 must be a valid IPv4 address")
+	}
+
+	return nil
+}
+
+func (c *Config) validateScalewayConfiguration() error {
+	if c == nil {
+		return fmt.Errorf("config is required")
+	}
+
+	cidrValue := strings.TrimSpace(c.Scaleway.PrivateNetworkIPv4CIDR)
+	if cidrValue == "" {
+		return fmt.Errorf("scaleway.privateNetworkIPv4CIDR is required")
+	}
+
+	parsedIP, network, err := net.ParseCIDR(cidrValue)
+	if err != nil || parsedIP == nil || parsedIP.To4() == nil {
+		return fmt.Errorf("scaleway.privateNetworkIPv4CIDR must be a valid IPv4 CIDR")
+	}
+
+	normalizedCIDR := network.String()
+	c.Scaleway.PrivateNetworkIPv4CIDR = normalizedCIDR
+
+	for _, pool := range c.NodePools {
+		for _, reservedIP := range pool.ReservedPrivateIPs {
+			trimmedIP := strings.TrimSpace(reservedIP)
+			if trimmedIP == "" {
+				continue
+			}
+
+			parsedReservedIP := net.ParseIP(trimmedIP)
+			if parsedReservedIP == nil || parsedReservedIP.To4() == nil {
+				return fmt.Errorf("nodePools[%s].reservedPrivateIPs contains invalid IPv4 address %q", strings.TrimSpace(pool.Name), trimmedIP)
+			}
+
+			if !network.Contains(parsedReservedIP.To4()) {
+				return fmt.Errorf(
+					"nodePools[%s].reservedPrivateIPs contains %s, which is outside scaleway.privateNetworkIPv4CIDR %s",
+					strings.TrimSpace(pool.Name),
+					trimmedIP,
+					normalizedCIDR,
+				)
+			}
+		}
 	}
 
 	return nil
