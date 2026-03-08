@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	opManagedSectionID    = "rawkode-cloud3"
-	opManagedSectionLabel = "rawkode-cloud3"
-	opManagedTag          = "rawkode-cloud3:managed"
-	opItemTitlePrefix     = "rawkode-cloud3:path:"
+	opManagedSectionID    = "waddle-cloud"
+	opManagedSectionLabel = "waddle-cloud"
+	opManagedTag          = "waddle-cloud:managed"
+	opItemTitlePrefix     = "waddle-cloud:path:"
 )
 
 type opCommandRunner interface {

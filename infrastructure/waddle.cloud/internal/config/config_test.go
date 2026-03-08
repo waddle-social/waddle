@@ -49,22 +49,22 @@ func TestFirstNodePoolByType(t *testing.T) {
 }
 
 func TestScalewayNetworkNameDerivation(t *testing.T) {
-	cfg := &Config{Environment: "rawkode-cloud"}
+	cfg := &Config{Environment: "waddle-cloud"}
 
 	vpcName, err := cfg.ScalewayVPCName()
 	if err != nil {
 		t.Fatalf("ScalewayVPCName returned error: %v", err)
 	}
-	if vpcName != "rawkode-cloud" {
-		t.Fatalf("ScalewayVPCName() = %q, want %q", vpcName, "rawkode-cloud")
+	if vpcName != "waddle-cloud" {
+		t.Fatalf("ScalewayVPCName() = %q, want %q", vpcName, "waddle-cloud")
 	}
 
 	privateName, err := cfg.ScalewayPrivateNetworkName()
 	if err != nil {
 		t.Fatalf("ScalewayPrivateNetworkName returned error: %v", err)
 	}
-	if privateName != "rawkode-cloud-private" {
-		t.Fatalf("ScalewayPrivateNetworkName() = %q, want %q", privateName, "rawkode-cloud-private")
+	if privateName != "waddle-cloud-private" {
+		t.Fatalf("ScalewayPrivateNetworkName() = %q, want %q", privateName, "waddle-cloud-private")
 	}
 }
 
@@ -118,7 +118,7 @@ func TestClusterEffectiveControlPlaneTaints(t *testing.T) {
 func TestValidateSecretsConfigurationRequiresProvider(t *testing.T) {
 	cfg := &Config{
 		Secrets: SecretsConfig{
-			SecretPath: "/projects/rawkode-cloud",
+			SecretPath: "/projects/waddle-cloud",
 		},
 	}
 
@@ -132,7 +132,7 @@ func TestValidateSecretsConfigurationInfisical(t *testing.T) {
 	cfg := &Config{
 		Secrets: SecretsConfig{
 			Provider:   "infisical",
-			SecretPath: "/projects/rawkode-cloud",
+			SecretPath: "/projects/waddle-cloud",
 		},
 		Infisical: InfisicalConfig{
 			SiteURL:     "https://app.infisical.com",
@@ -158,7 +158,7 @@ func TestValidateSecretsConfigurationOnePasswordRequiresVault(t *testing.T) {
 	cfg := &Config{
 		Secrets: SecretsConfig{
 			Provider:   "1password",
-			SecretPath: "/projects/rawkode-cloud",
+			SecretPath: "/projects/waddle-cloud",
 		},
 	}
 

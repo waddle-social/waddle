@@ -12,12 +12,12 @@ func TestSecretPathForCluster(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
 		Secrets: config.SecretsConfig{
-			SecretPath: "/projects/rawkode-cloud",
+			SecretPath: "/projects/waddle-cloud",
 		},
 	}
 
 	got := secretPathForCluster(cfg)
-	want := "/projects/rawkode-cloud/production"
+	want := "/projects/waddle-cloud/production"
 	if got != want {
 		t.Fatalf("secretPathForCluster() = %q, want %q", got, want)
 	}
@@ -27,13 +27,13 @@ func TestNetbirdSetupKeyLookupTargetsDefaults(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
 		Secrets: config.SecretsConfig{
-			SecretPath: "/projects/rawkode-cloud",
+			SecretPath: "/projects/waddle-cloud",
 		},
 	}
 
 	path, candidates := netbirdSetupKeyLookupTargets(cfg, "", "")
-	if path != "/projects/rawkode-cloud" {
-		t.Fatalf("netbirdSetupKeyLookupTargets() path = %q, want %q", path, "/projects/rawkode-cloud")
+	if path != "/projects/waddle-cloud" {
+		t.Fatalf("netbirdSetupKeyLookupTargets() path = %q, want %q", path, "/projects/waddle-cloud")
 	}
 	if len(candidates) != 2 {
 		t.Fatalf("netbirdSetupKeyLookupTargets() candidates length = %d, want 2", len(candidates))
@@ -47,7 +47,7 @@ func TestNetbirdSetupKeyLookupTargetsOverrides(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
 		Secrets: config.SecretsConfig{
-			SecretPath: "/projects/rawkode-cloud",
+			SecretPath: "/projects/waddle-cloud",
 		},
 	}
 
@@ -64,14 +64,14 @@ func TestNetbirdSetupKeyLookupTargetsConfigDefaults(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "production",
 		Secrets: config.SecretsConfig{
-			SecretPath:       "/projects/rawkode-cloud",
+			SecretPath:       "/projects/waddle-cloud",
 			NetbirdSecretKey: "NETBIRD_SETUP_KEY",
 		},
 	}
 
 	path, candidates := netbirdSetupKeyLookupTargets(cfg, "", "")
-	if path != "/projects/rawkode-cloud" {
-		t.Fatalf("netbirdSetupKeyLookupTargets() path = %q, want %q", path, "/projects/rawkode-cloud")
+	if path != "/projects/waddle-cloud" {
+		t.Fatalf("netbirdSetupKeyLookupTargets() path = %q, want %q", path, "/projects/waddle-cloud")
 	}
 	if len(candidates) != 1 || candidates[0] != "NETBIRD_SETUP_KEY" {
 		t.Fatalf("netbirdSetupKeyLookupTargets() candidates = %v, want [%q]", candidates, "NETBIRD_SETUP_KEY")

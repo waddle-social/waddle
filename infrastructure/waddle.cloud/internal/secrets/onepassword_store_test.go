@@ -146,7 +146,7 @@ func TestEnsurePathCreatesMissingItem(t *testing.T) {
 						t.Fatalf("unexpected get call: %s %v", name, args)
 					}
 				},
-				stderr: "[ERROR] \"rawkode-cloud3:path:/projects/rawkode-cloud\" isn't an item",
+				stderr: "[ERROR] \"waddle-cloud:path:/projects/waddle-cloud\" isn't an item",
 				err:    errors.New("exit status 1"),
 			},
 			{
@@ -155,7 +155,7 @@ func TestEnsurePathCreatesMissingItem(t *testing.T) {
 						t.Fatalf("unexpected create call: %s %v", name, args)
 					}
 				},
-				stdout: `{"id":"item-1","title":"rawkode-cloud3:path:/projects/rawkode-cloud","fields":[]}`,
+				stdout: `{"id":"item-1","title":"waddle-cloud:path:/projects/waddle-cloud","fields":[]}`,
 			},
 		},
 	}
@@ -166,7 +166,7 @@ func TestEnsurePathCreatesMissingItem(t *testing.T) {
 	}
 
 	store := storeAny.(*onePasswordStore)
-	if err := store.EnsurePath(context.Background(), "/projects/rawkode-cloud"); err != nil {
+	if err := store.EnsurePath(context.Background(), "/projects/waddle-cloud"); err != nil {
 		t.Fatalf("EnsurePath returned error: %v", err)
 	}
 	if len(runner.responses) != 0 {
@@ -179,7 +179,7 @@ func TestSetSecretUpsertsMultilineValue(t *testing.T) {
 		t: t,
 		responses: []scriptedResponse{
 			{stdout: "{}"},
-			{stdout: `{"id":"item-123","title":"rawkode-cloud3:path:/projects/rawkode-cloud","fields":[]}`},
+			{stdout: `{"id":"item-123","title":"waddle-cloud:path:/projects/waddle-cloud","fields":[]}`},
 			{
 				assert: func(t *testing.T, name string, args []string, stdin []byte) {
 					if name != "op" || args[0] != "item" || args[1] != "edit" {
@@ -192,7 +192,7 @@ func TestSetSecretUpsertsMultilineValue(t *testing.T) {
 					if !strings.Contains(body, `line1\nline2`) {
 						t.Fatalf("expected multiline value in payload: %s", body)
 					}
-					if !strings.Contains(body, `"section":{"id":"rawkode-cloud3","label":"rawkode-cloud3"}`) {
+					if !strings.Contains(body, `"section":{"id":"waddle-cloud","label":"waddle-cloud"}`) {
 						t.Fatalf("expected managed section in payload: %s", body)
 					}
 				},
@@ -206,7 +206,7 @@ func TestSetSecretUpsertsMultilineValue(t *testing.T) {
 	}
 
 	store := storeAny.(*onePasswordStore)
-	err = store.SetSecret(context.Background(), "/projects/rawkode-cloud", "TALOSCONFIG_YAML", "line1\nline2")
+	err = store.SetSecret(context.Background(), "/projects/waddle-cloud", "TALOSCONFIG_YAML", "line1\nline2")
 	if err != nil {
 		t.Fatalf("SetSecret returned error: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
 			{stdout: `{
 				"id":"item-123",
 				"fields":[
-					{"label":"TALOSCONFIG_YAML","value":"abc","section":{"id":"rawkode-cloud3","label":"rawkode-cloud3"}},
+					{"label":"TALOSCONFIG_YAML","value":"abc","section":{"id":"waddle-cloud","label":"waddle-cloud"}},
 					{"label":"username","value":"admin","section":{"id":"credentials","label":"credentials"}}
 				]
 			}`},
@@ -236,7 +236,7 @@ func TestGetSecretsReturnsManagedSectionOnly(t *testing.T) {
 	}
 
 	store := storeAny.(*onePasswordStore)
-	secrets, err := store.GetSecrets(context.Background(), "/projects/rawkode-cloud")
+	secrets, err := store.GetSecrets(context.Background(), "/projects/waddle-cloud")
 	if err != nil {
 		t.Fatalf("GetSecrets returned error: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestGetSecretReturnsErrSecretNotFoundWhenKeyMissing(t *testing.T) {
 	}
 
 	store := storeAny.(*onePasswordStore)
-	_, err = store.GetSecret(context.Background(), "/projects/rawkode-cloud", "TALOSCONFIG_YAML")
+	_, err = store.GetSecret(context.Background(), "/projects/waddle-cloud", "TALOSCONFIG_YAML")
 	if err == nil {
 		t.Fatal("expected missing key error")
 	}

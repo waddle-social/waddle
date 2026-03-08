@@ -5,7 +5,7 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "rawkode-cloud3",
+	Use:   "waddle-cloud",
 	Short: "Talos bare metal Kubernetes platform",
 	Long:  "Provision and manage Talos Linux Kubernetes clusters on Scaleway bare metal.",
 }

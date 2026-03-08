@@ -24,7 +24,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const gatewayAPICRDFieldManager = "rawkode-cloud3-gateway-api"
+const gatewayAPICRDFieldManager = "waddle-cloud-gateway-api"
 
 var gatewayAPIRequiredGVKs = []schema.GroupVersionKind{
 	{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "GatewayClass"},

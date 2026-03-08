@@ -43,7 +43,7 @@ type BootstrapParams struct {
 const (
 	fluxNamespace      = "flux-system"
 	clusterConfigName  = "bootstrap"
-	fluxFieldManager   = "rawkode-cloud3"
+	fluxFieldManager   = "waddle-cloud"
 	readyConditionType = "Ready"
 )
 

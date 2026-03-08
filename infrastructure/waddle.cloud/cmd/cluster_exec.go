@@ -53,7 +53,7 @@ func runClusterExec(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	tempDir, err := clusterExecMkdirTempFn(clusterExecTempRoot(), "rawkode-cloud3-cluster-exec-*")
+	tempDir, err := clusterExecMkdirTempFn(clusterExecTempRoot(), "waddle-cloud-cluster-exec-*")
 	if err != nil {
 		return fmt.Errorf("create temporary cluster exec directory: %w", err)
 	}

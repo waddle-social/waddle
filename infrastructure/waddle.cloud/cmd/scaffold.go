@@ -42,7 +42,7 @@ secrets:
   provider: infisical # valid values: infisical, 1password
   secretPath: /%s # shared secrets live here; cluster secrets use <secretPath>/<environment>
   # Optional NetBird setup key lookup overrides:
-  # netbirdSecretPath: /projects/rawkode-cloud
+  # netbirdSecretPath: /projects/waddle-cloud
   # netbirdSecretKey: NETBIRD_SETUP_KEY
 
 infisical:

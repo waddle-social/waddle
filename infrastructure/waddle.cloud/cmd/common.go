@@ -26,10 +26,10 @@ const (
 	envTalosAllowedSubnets       = "TALOS_API_ALLOWED_SUBNETS"
 	netbirdSetupKeyPrimary       = "NB_SETUP_KEY"
 	netbirdSetupKeyCompatibility = "NETBIRD_SETUP_KEY"
-	managedServerTagManaged      = "rawkode-cloud3:managed"
-	managedServerTagEnvPrefix    = "rawkode-cloud3:env="
-	managedServerTagPoolPrefix   = "rawkode-cloud3:pool="
-	managedServerTagRolePrefix   = "rawkode-cloud3:role="
+	managedServerTagManaged      = "waddle-cloud:managed"
+	managedServerTagEnvPrefix    = "waddle-cloud:env="
+	managedServerTagPoolPrefix   = "waddle-cloud:pool="
+	managedServerTagRolePrefix   = "waddle-cloud:role="
 )
 
 func loadConfigForClusterOrFile(clusterName, filePath string) (*config.Config, string, error) {

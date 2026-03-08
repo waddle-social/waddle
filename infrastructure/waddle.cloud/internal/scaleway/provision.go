@@ -131,14 +131,14 @@ func OrderServer(ctx context.Context, client *Client, params ProvisionParams) (*
 	serverName := strings.TrimSpace(params.Name)
 	if serverName == "" {
 		suffix := rand.Intn(99999) //nolint:gosec
-		serverName = fmt.Sprintf("rawkode-%s-%05d", time.Now().Format("20060102-150405"), suffix)
+		serverName = fmt.Sprintf("waddle-cloud-%s-%05d", time.Now().Format("20060102-150405"), suffix)
 	}
 
 	server, err := client.Baremetal.CreateServer(&baremetal.CreateServerRequest{
 		Zone:        params.Zone,
 		OfferID:     effectiveOfferID,
 		Name:        serverName,
-		Description: "Provisioned by rawkode-cloud3 CLI (Talos)",
+		Description: "Provisioned by waddle-cloud CLI (Talos)",
 		Install: &baremetal.CreateServerRequestInstall{
 			OsID:               params.OSID,
 			Hostname:           "talos-pivot",

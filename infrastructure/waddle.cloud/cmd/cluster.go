@@ -1059,7 +1059,7 @@ func postBootstrapKubeconfigPath(ctx context.Context, op *operation.Operation, c
 		return "", nil, fmt.Errorf("rewrite kubeconfig server: %w", err)
 	}
 
-	tempFile, err := os.CreateTemp("", "rawkode-cloud3-kubeconfig-*.yaml")
+	tempFile, err := os.CreateTemp("", "waddle-cloud-kubeconfig-*.yaml")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temporary kubeconfig: %w", err)
 	}

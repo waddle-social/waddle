@@ -17,7 +17,7 @@ type PivotParams struct {
 }
 
 // BuildPivotScript generates a cloud-init compatible script that pivots
-// a running Ubuntu system to Talos Linux. Translated from rawkode.cloud2/talos.sh.
+// a running Ubuntu system to Talos Linux.
 func BuildPivotScript(params PivotParams) string {
 	osDisk := params.OSDisk
 	if osDisk == "" {
