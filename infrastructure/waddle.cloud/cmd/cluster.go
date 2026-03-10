@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -33,18 +32,16 @@ var clusterCmd = &cobra.Command{
 }
 
 const (
-	talosSecretsSecretKey        = "TALOS_SECRETS_YAML"
-	talosControlPlaneSecretKey   = "TALOS_CONTROL_PLANE_CONFIG_YAML"
-	talosWorkerSecretKey         = "TALOS_WORKER_CONFIG_YAML"
-	talosConfigSecretKey         = "TALOSCONFIG_YAML"
-	opContextNetbirdSecretPath   = "netbirdSecretPath"
-	opContextNetbirdSecretKey    = "netbirdSecretKey"
-	opContextReinstall           = "reinstall"
-	fluxSubstituteStorageClass   = "WADDLE_STORAGE_CLASS_NAME"
-	fluxSubstituteStorageNode    = "WADDLE_STORAGE_NODE_NAME"
-	fluxSubstituteStorageDefault = "WADDLE_STORAGE_CLASS_DEFAULT"
-	fluxSubstituteDiskPoolDisk   = "WADDLE_STORAGE_DISKPOOL_DISK_BY_ID"
-	fluxSubstituteReplicaCount   = "WADDLE_STORAGE_REPLICA_COUNT"
+	talosSecretsSecretKey      = "TALOS_SECRETS_YAML"
+	talosControlPlaneSecretKey = "TALOS_CONTROL_PLANE_CONFIG_YAML"
+	talosWorkerSecretKey       = "TALOS_WORKER_CONFIG_YAML"
+	talosConfigSecretKey       = "TALOSCONFIG_YAML"
+	opContextNetbirdSecretPath = "netbirdSecretPath"
+	opContextNetbirdSecretKey  = "netbirdSecretKey"
+	opContextReinstall         = "reinstall"
+	fluxSubstituteStorageClass = "WADDLE_STORAGE_CLASS_NAME"
+	fluxSubstituteStorageNode  = "WADDLE_STORAGE_NODE_NAME"
+	fluxSubstituteDiskPoolDisk = "WADDLE_STORAGE_DISKPOOL_DISK_BY_ID"
 )
 
 var secretStoreCache struct {
@@ -996,11 +993,9 @@ func fluxBootstrapSubstitute(op *operation.Operation, cfg *config.Config) map[st
 	}
 
 	return map[string]string{
-		fluxSubstituteStorageClass:   strings.TrimSpace(cfg.Storage.StorageClassName),
-		fluxSubstituteStorageNode:    strings.TrimSpace(nodeName),
-		fluxSubstituteStorageDefault: strconv.FormatBool(cfg.Storage.DefaultStorageClass),
-		fluxSubstituteDiskPoolDisk:   strings.TrimSpace(cfg.Storage.DiskPoolDiskByID),
-		fluxSubstituteReplicaCount:   strconv.Itoa(cfg.Storage.ReplicaCount),
+		fluxSubstituteStorageClass: strings.TrimSpace(cfg.Storage.StorageClassName),
+		fluxSubstituteStorageNode:  strings.TrimSpace(nodeName),
+		fluxSubstituteDiskPoolDisk: strings.TrimSpace(cfg.Storage.DiskPoolDiskByID),
 	}
 }
 

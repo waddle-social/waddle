@@ -266,10 +266,11 @@ func TestValidateStorageConfigurationRequiresSingleNodeControlPlane(t *testing.T
 			ControlPlaneTaints: &noTaints,
 		},
 		Storage: StorageConfig{
-			Provider:         StorageProviderOpenEBSMayastorLab,
-			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     1,
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
 		},
 		NodePools: []NodePoolConfig{
 			{
@@ -297,10 +298,11 @@ func TestValidateStorageConfigurationRejectsMissingDataDisk(t *testing.T) {
 			ControlPlaneTaints: &noTaints,
 		},
 		Storage: StorageConfig{
-			Provider:         StorageProviderOpenEBSMayastorLab,
-			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     1,
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
 		},
 		NodePools: []NodePoolConfig{
 			{
@@ -327,9 +329,10 @@ func TestValidateStorageConfigurationRejectsMissingDiskPoolDiskByID(t *testing.T
 			ControlPlaneTaints: &noTaints,
 		},
 		Storage: StorageConfig{
-			Provider:         StorageProviderOpenEBSMayastorLab,
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     1,
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
 		},
 		NodePools: []NodePoolConfig{
 			{
@@ -356,10 +359,11 @@ func TestValidateStorageConfigurationRejectsSharedOSAndDataDisk(t *testing.T) {
 			ControlPlaneTaints: &noTaints,
 		},
 		Storage: StorageConfig{
-			Provider:         StorageProviderOpenEBSMayastorLab,
-			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     1,
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
 		},
 		NodePools: []NodePoolConfig{
 			{
@@ -387,10 +391,11 @@ func TestValidateStorageConfigurationRejectsControlPlaneTaintsForMayastor(t *tes
 			ControlPlaneTaints: &withTaints,
 		},
 		Storage: StorageConfig{
-			Provider:         StorageProviderOpenEBSMayastorLab,
-			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     1,
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
 		},
 		NodePools: []NodePoolConfig{
 			{
@@ -417,10 +422,11 @@ func TestValidateStorageConfigurationRejectsReplicaCountMismatch(t *testing.T) {
 			ControlPlaneTaints: &noTaints,
 		},
 		Storage: StorageConfig{
-			Provider:         StorageProviderOpenEBSMayastorLab,
-			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     2,
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        2,
 		},
 		NodePools: []NodePoolConfig{
 			{
@@ -471,6 +477,36 @@ func TestValidateStorageConfigurationAcceptsSingleNodeMayastorLab(t *testing.T) 
 	}
 	if !cfg.StorageEnabled() {
 		t.Fatal("expected storage to be enabled")
+	}
+}
+
+func TestValidateStorageConfigurationRejectsNonDefaultStorageClassForMayastor(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	if err := cfg.validateStorageConfiguration(); err == nil {
+		t.Fatal("expected default storage class validation error")
 	}
 }
 

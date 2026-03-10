@@ -319,10 +319,11 @@ func TestPhasePostBootstrapPreparesOpenEBSMayastorBeforeFlux(t *testing.T) {
 
 	cfg := &config.Config{
 		Storage: config.StorageConfig{
-			Provider:         config.StorageProviderOpenEBSMayastorLab,
-			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
-			StorageClassName: "openebs-mayastor",
-			ReplicaCount:     1,
+			Provider:            config.StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
 		},
 		NodePools: []config.NodePoolConfig{
 			{
@@ -361,14 +362,14 @@ func TestPhasePostBootstrapPreparesOpenEBSMayastorBeforeFlux(t *testing.T) {
 	if gotFluxParams.Substitute[fluxSubstituteStorageNode] != "production-control-plane-01" {
 		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteStorageNode, gotFluxParams.Substitute[fluxSubstituteStorageNode], "production-control-plane-01")
 	}
-	if gotFluxParams.Substitute[fluxSubstituteStorageDefault] != "false" {
-		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteStorageDefault, gotFluxParams.Substitute[fluxSubstituteStorageDefault], "false")
-	}
 	if gotFluxParams.Substitute[fluxSubstituteDiskPoolDisk] != "/dev/disk/by-id/nvme-eui.1234" {
 		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteDiskPoolDisk, gotFluxParams.Substitute[fluxSubstituteDiskPoolDisk], "/dev/disk/by-id/nvme-eui.1234")
 	}
-	if gotFluxParams.Substitute[fluxSubstituteReplicaCount] != "1" {
-		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteReplicaCount, gotFluxParams.Substitute[fluxSubstituteReplicaCount], "1")
+	if _, ok := gotFluxParams.Substitute["WADDLE_STORAGE_CLASS_DEFAULT"]; ok {
+		t.Fatal("did not expect default storage class substitution for mayastor bootstrap")
+	}
+	if _, ok := gotFluxParams.Substitute["WADDLE_STORAGE_REPLICA_COUNT"]; ok {
+		t.Fatal("did not expect replica count substitution for mayastor bootstrap")
 	}
 }
 

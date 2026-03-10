@@ -293,6 +293,9 @@ func (c *Config) validateStorageConfiguration() error {
 	if strings.TrimSpace(c.Storage.StorageClassName) == "" {
 		return fmt.Errorf("storage.storageClassName is required when storage.provider=%q", provider)
 	}
+	if !c.Storage.DefaultStorageClass {
+		return fmt.Errorf("storage.defaultStorageClass must be true when storage.provider=%q", provider)
+	}
 	if c.Storage.ReplicaCount != 1 {
 		return fmt.Errorf("storage.replicaCount must be 1 when storage.provider=%q", provider)
 	}

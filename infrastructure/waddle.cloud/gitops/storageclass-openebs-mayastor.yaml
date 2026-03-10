@@ -3,13 +3,13 @@ kind: StorageClass
 metadata:
   name: ${WADDLE_STORAGE_CLASS_NAME}
   annotations:
-    storageclass.kubernetes.io/is-default-class: "${WADDLE_STORAGE_CLASS_DEFAULT}"
+    storageclass.kubernetes.io/is-default-class: "true"
 provisioner: io.openebs.csi-mayastor
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
 parameters:
   protocol: nvmf
-  repl: "${WADDLE_STORAGE_REPLICA_COUNT}"
+  repl: "1"
   thin: "true"
   fsType: xfs
