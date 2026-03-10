@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: waddle-cloud-example
-  namespace: default
-data:
-  message: "Hello from waddle-cloud GitOps OCI source."

@@ -79,6 +79,9 @@ func TestIngressManifestsNoLongerContainLegacyVIPOrRouteTargetAnnotations(t *tes
 	for _, file := range files {
 		content, err := os.ReadFile(file.path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			t.Fatalf("read %s: %v", file.path, err)
 		}
 

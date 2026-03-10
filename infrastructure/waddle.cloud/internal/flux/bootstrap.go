@@ -36,7 +36,7 @@ import (
 type BootstrapParams struct {
 	Kubeconfig string
 	OCIRepo    string // OCI repository URL (e.g. oci://ghcr.io/waddle-social/waddle/gitops)
-	Branch     string
+	Substitute map[string]string
 	Version    string // Optional Flux version for install manifest generation.
 }
 
@@ -75,7 +75,7 @@ func Bootstrap(ctx context.Context, params BootstrapParams) error {
 		return nil
 	}
 
-	if err := upsertOCIResources(ctx, cfg, strings.TrimSpace(params.OCIRepo)); err != nil {
+	if err := upsertOCIResources(ctx, cfg, strings.TrimSpace(params.OCIRepo), params.Substitute); err != nil {
 		return err
 	}
 
@@ -114,7 +114,7 @@ func installComponents(ctx context.Context, cfg *rest.Config, version string) er
 	return nil
 }
 
-func upsertOCIResources(ctx context.Context, cfg *rest.Config, ociRepo string) error {
+func upsertOCIResources(ctx context.Context, cfg *rest.Config, ociRepo string, substitute map[string]string) error {
 	kubeClient, err := newFluxClient(cfg)
 	if err != nil {
 		return fmt.Errorf("create kubernetes client: %w", err)
@@ -124,7 +124,7 @@ func upsertOCIResources(ctx context.Context, cfg *rest.Config, ociRepo string) e
 		return err
 	}
 
-	if err := upsertKustomization(ctx, kubeClient); err != nil {
+	if err := upsertKustomization(ctx, kubeClient, substitute); err != nil {
 		return err
 	}
 
@@ -179,7 +179,7 @@ func upsertOCIRepository(ctx context.Context, kubeClient ctrlclient.Client, ociR
 	return nil
 }
 
-func upsertKustomization(ctx context.Context, kubeClient ctrlclient.Client) error {
+func upsertKustomization(ctx context.Context, kubeClient ctrlclient.Client, substitute map[string]string) error {
 	desired := &kustomizev1.Kustomization{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      clusterConfigName,
@@ -197,6 +197,11 @@ func upsertKustomization(ctx context.Context, kubeClient ctrlclient.Client) erro
 				Name: clusterConfigName,
 			},
 		},
+	}
+	if len(substitute) > 0 {
+		desired.Spec.PostBuild = &kustomizev1.PostBuild{
+			Substitute: copySubstituteMap(substitute),
+		}
 	}
 
 	var existing kustomizev1.Kustomization
@@ -220,6 +225,19 @@ func upsertKustomization(ctx context.Context, kubeClient ctrlclient.Client) erro
 
 	slog.Info("updated flux kustomization")
 	return nil
+}
+
+func copySubstituteMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+
+	return out
 }
 
 func waitForOCIRepositoryReady(ctx context.Context, kubeClient ctrlclient.Client, timeout time.Duration) error {

@@ -14,10 +14,11 @@ const scaffoldTemplate = `environment: %s
 cluster:
   talosVersion: v1.12.4
   kubernetesVersion: v1.35.0
+  # Required for Mayastor: use a Talos schematic that includes nvme_tcp.
   talosSchematic: ""
   ciliumVersion: v1.19.0
   fluxVersion: latest
-  controlPlaneTaints: true
+  controlPlaneTaints: false
 
 scaleway:
   projectId: ""
@@ -38,6 +39,13 @@ nodePools:
     disks:
       os: /dev/nvme0n1
       data: /dev/nvme1n1
+
+storage:
+  provider: openebs-mayastor-lab
+  diskPoolDiskByID: /dev/disk/by-id/nvme-eui.REPLACE_ME
+  storageClassName: openebs-mayastor
+  defaultStorageClass: true
+  replicaCount: 1
 
 secrets:
   provider: infisical # valid values: infisical, 1password

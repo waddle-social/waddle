@@ -15,6 +15,7 @@ import (
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/flux"
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/operation"
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/scaleway"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/storage"
 )
 
 func restorePostBootstrapFns() {
@@ -34,6 +35,7 @@ func restorePostBootstrapFns() {
 	}
 	postBootstrapKubernetesAPIRetryInterval = 5 * time.Second
 	postBootstrapKubernetesAPIRetryTimeout = 10 * time.Minute
+	storagePrepareOpenEBSMayastorFn = storage.PrepareOpenEBSMayastorRawDisk
 	scalewayNewClientFn = scaleway.NewClient
 	scalewayGetServerFn = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
 		return client.Baremetal.GetServer(&baremetal.GetServerRequest{
@@ -51,6 +53,7 @@ func newPostBootstrapOperation() *operation.Operation {
 	op.SetContext("privateNetworkID", "pn-123")
 	op.SetContext("publicIP", "51.159.1.2")
 	op.SetContext("privateIP", "172.16.16.16")
+	op.SetContext("nodeName", "production-control-plane-01")
 	return op
 }
 
@@ -282,6 +285,159 @@ func TestPhasePostBootstrapContinuesWhenFluxOCIRepoIsEmpty(t *testing.T) {
 	}
 	if !fluxCalled {
 		t.Fatal("expected flux bootstrap to run")
+	}
+}
+
+func TestPhasePostBootstrapPreparesOpenEBSMayastorBeforeFlux(t *testing.T) {
+	restorePostBootstrapFns()
+	t.Cleanup(restorePostBootstrapFns)
+
+	var gotStorageParams storage.PrepareOpenEBSMayastorParams
+	var storageCalled bool
+	storagePrepareOpenEBSMayastorFn = func(_ context.Context, params storage.PrepareOpenEBSMayastorParams) error {
+		storageCalled = true
+		gotStorageParams = params
+		return nil
+	}
+
+	var gotFluxParams flux.BootstrapParams
+	var fluxCalled bool
+	fluxBootstrapFn = func(_ context.Context, params flux.BootstrapParams) error {
+		if !storageCalled {
+			t.Fatal("expected storage prep to run before flux bootstrap")
+		}
+		gotFluxParams = params
+		fluxCalled = true
+		return nil
+	}
+	ciliumInstallFn = func(context.Context, cilium.InstallParams) error { return nil }
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error { return nil }
+	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) { return &scaleway.Client{}, nil }
+	scalewayResolvePrivateNetworkIPv4CIDRFn = func(context.Context, *scaleway.Client, scw.Region, string, string) (string, error) {
+		return "172.16.16.0/24", nil
+	}
+
+	cfg := &config.Config{
+		Storage: config.StorageConfig{
+			Provider:         config.StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []config.NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: config.NodeTypeControlPlane,
+				Size: 1,
+				Disks: config.DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+		Flux: config.FluxConfig{
+			OCIRepo: "oci://ghcr.io/waddle-social/waddle/gitops",
+		},
+	}
+
+	if err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), cfg); err != nil {
+		t.Fatalf("phasePostBootstrap returned error: %v", err)
+	}
+	if !storageCalled {
+		t.Fatal("expected storage prep to run")
+	}
+	if !fluxCalled {
+		t.Fatal("expected flux bootstrap to run")
+	}
+	if gotStorageParams.NodeName != "production-control-plane-01" {
+		t.Fatalf("storage prep node name = %q, want %q", gotStorageParams.NodeName, "production-control-plane-01")
+	}
+	if gotStorageParams.Device != "/dev/nvme1n1" {
+		t.Fatalf("storage prep device = %q, want %q", gotStorageParams.Device, "/dev/nvme1n1")
+	}
+	if gotFluxParams.Substitute[fluxSubstituteStorageClass] != "openebs-mayastor" {
+		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteStorageClass, gotFluxParams.Substitute[fluxSubstituteStorageClass], "openebs-mayastor")
+	}
+	if gotFluxParams.Substitute[fluxSubstituteStorageNode] != "production-control-plane-01" {
+		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteStorageNode, gotFluxParams.Substitute[fluxSubstituteStorageNode], "production-control-plane-01")
+	}
+	if gotFluxParams.Substitute[fluxSubstituteStorageDefault] != "false" {
+		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteStorageDefault, gotFluxParams.Substitute[fluxSubstituteStorageDefault], "false")
+	}
+	if gotFluxParams.Substitute[fluxSubstituteDiskPoolDisk] != "/dev/disk/by-id/nvme-eui.1234" {
+		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteDiskPoolDisk, gotFluxParams.Substitute[fluxSubstituteDiskPoolDisk], "/dev/disk/by-id/nvme-eui.1234")
+	}
+	if gotFluxParams.Substitute[fluxSubstituteReplicaCount] != "1" {
+		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteReplicaCount, gotFluxParams.Substitute[fluxSubstituteReplicaCount], "1")
+	}
+}
+
+func TestPhasePostBootstrapSkipsStoragePrepWhenStorageDisabled(t *testing.T) {
+	restorePostBootstrapFns()
+	t.Cleanup(restorePostBootstrapFns)
+
+	storagePrepareOpenEBSMayastorFn = func(context.Context, storage.PrepareOpenEBSMayastorParams) error {
+		t.Fatal("did not expect storage prep to run")
+		return nil
+	}
+	ciliumInstallFn = func(context.Context, cilium.InstallParams) error { return nil }
+	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error { return nil }
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error { return nil }
+	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) { return &scaleway.Client{}, nil }
+	scalewayResolvePrivateNetworkIPv4CIDRFn = func(context.Context, *scaleway.Client, scw.Region, string, string) (string, error) {
+		return "172.16.16.0/24", nil
+	}
+
+	if err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), &config.Config{}); err != nil {
+		t.Fatalf("phasePostBootstrap returned error: %v", err)
+	}
+}
+
+func TestPhasePostBootstrapStopsBeforeFluxWhenStoragePrepFails(t *testing.T) {
+	restorePostBootstrapFns()
+	t.Cleanup(restorePostBootstrapFns)
+
+	errStorage := errors.New("storage prep failed")
+	storagePrepareOpenEBSMayastorFn = func(context.Context, storage.PrepareOpenEBSMayastorParams) error {
+		return errStorage
+	}
+	ciliumInstallFn = func(context.Context, cilium.InstallParams) error { return nil }
+	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
+		t.Fatal("did not expect flux bootstrap to run after storage prep failure")
+		return nil
+	}
+	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error { return nil }
+	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) { return &scaleway.Client{}, nil }
+	scalewayResolvePrivateNetworkIPv4CIDRFn = func(context.Context, *scaleway.Client, scw.Region, string, string) (string, error) {
+		return "172.16.16.0/24", nil
+	}
+
+	cfg := &config.Config{
+		Storage: config.StorageConfig{
+			Provider:         config.StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []config.NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: config.NodeTypeControlPlane,
+				Size: 1,
+				Disks: config.DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), cfg)
+	if err == nil {
+		t.Fatal("expected post-bootstrap failure")
+	}
+	if !errors.Is(err, errStorage) {
+		t.Fatalf("expected storage prep error, got %v", err)
 	}
 }
 

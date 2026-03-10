@@ -31,4 +31,10 @@ func TestRunClusterScaffoldDefaultsFluxOCIRepo(t *testing.T) {
 	if !strings.Contains(string(content), "ingress:\n") || !strings.Contains(string(content), `publicIPv4: ""`) {
 		t.Fatalf("scaffolded config missing ingress publicIPv4 override:\n%s", string(content))
 	}
+	if !strings.Contains(string(content), "storage:\n") || !strings.Contains(string(content), `provider: openebs-mayastor-lab`) {
+		t.Fatalf("scaffolded config missing storage config:\n%s", string(content))
+	}
+	if !strings.Contains(string(content), `diskPoolDiskByID: /dev/disk/by-id/nvme-eui.REPLACE_ME`) {
+		t.Fatalf("scaffolded config missing mayastor diskPoolDiskByID placeholder:\n%s", string(content))
+	}
 }

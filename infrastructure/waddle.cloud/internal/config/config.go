@@ -17,6 +17,7 @@ type Config struct {
 	Cluster     ClusterConfig     `yaml:"cluster"`
 	Scaleway    ScalewayConfig    `yaml:"scaleway"`
 	NodePools   []NodePoolConfig  `yaml:"nodePools"`
+	Storage     StorageConfig     `yaml:"storage"`
 	Secrets     SecretsConfig     `yaml:"secrets"`
 	Infisical   InfisicalConfig   `yaml:"infisical"`
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
@@ -61,10 +62,21 @@ type NodePoolConfig struct {
 	ReservedPrivateIPs []string   `yaml:"reservedPrivateIPs"`
 }
 
+// StorageConfig holds cluster storage provisioning settings.
+type StorageConfig struct {
+	Provider            string `yaml:"provider"`
+	DiskPoolDiskByID    string `yaml:"diskPoolDiskByID"`
+	StorageClassName    string `yaml:"storageClassName"`
+	DefaultStorageClass bool   `yaml:"defaultStorageClass"`
+	ReplicaCount        int    `yaml:"replicaCount"`
+}
+
 const (
 	NodeTypeControlPlane = "control-plane"
 	NodeTypeWorker       = "worker"
 )
+
+const StorageProviderOpenEBSMayastorLab = "openebs-mayastor-lab"
 
 const (
 	defaultCiliumVersion = "v1.19.0"
@@ -146,6 +158,9 @@ func Load(path string) (*Config, error) {
 		cfg.Infisical.ClientSecret = v
 	}
 	if err := cfg.validateScalewayConfiguration(); err != nil {
+		return nil, err
+	}
+	if err := cfg.validateStorageConfiguration(); err != nil {
 		return nil, err
 	}
 	if err := cfg.validateSecretsConfiguration(); err != nil {
@@ -234,6 +249,55 @@ func (c *Config) validateSecretsConfiguration() error {
 	}
 
 	return secrets.ValidateStoreConfig(cfg)
+}
+
+func (c *Config) validateStorageConfiguration() error {
+	if c == nil {
+		return fmt.Errorf("config is required")
+	}
+
+	provider := strings.TrimSpace(c.Storage.Provider)
+	if provider == "" {
+		return nil
+	}
+
+	if provider != StorageProviderOpenEBSMayastorLab {
+		return fmt.Errorf("unsupported storage.provider %q", provider)
+	}
+
+	if len(c.NodePools) != 1 {
+		return fmt.Errorf("storage.provider %q requires exactly one node pool", provider)
+	}
+
+	pool := c.NodePools[0]
+	if pool.EffectiveType() != NodeTypeControlPlane {
+		return fmt.Errorf("storage.provider %q requires the single node pool to be control-plane", provider)
+	}
+	if pool.DesiredSize() != 1 {
+		return fmt.Errorf("storage.provider %q requires single-node topology", provider)
+	}
+	if c.Cluster.EffectiveControlPlaneTaints() {
+		return fmt.Errorf("storage.provider %q requires cluster.controlPlaneTaints=false", provider)
+	}
+
+	dataDisk := strings.TrimSpace(pool.Disks.Data)
+	if dataDisk == "" {
+		return fmt.Errorf("storage.provider %q requires nodePools[0].disks.data", provider)
+	}
+	if dataDisk == strings.TrimSpace(pool.Disks.OS) {
+		return fmt.Errorf("storage.provider %q requires nodePools[0].disks.data to differ from disks.os", provider)
+	}
+	if strings.TrimSpace(c.Storage.DiskPoolDiskByID) == "" {
+		return fmt.Errorf("storage.diskPoolDiskByID is required when storage.provider=%q", provider)
+	}
+	if strings.TrimSpace(c.Storage.StorageClassName) == "" {
+		return fmt.Errorf("storage.storageClassName is required when storage.provider=%q", provider)
+	}
+	if c.Storage.ReplicaCount != 1 {
+		return fmt.Errorf("storage.replicaCount must be 1 when storage.provider=%q", provider)
+	}
+
+	return nil
 }
 
 func (c *Config) secretStoreConfig() (secrets.StoreConfig, error) {
@@ -487,6 +551,15 @@ func (c *Config) ScalewayPrivateNetworkName() (string, error) {
 	}
 
 	return vpcName + "-private", nil
+}
+
+// StorageEnabled returns true when a storage provider has been configured.
+func (c *Config) StorageEnabled() bool {
+	if c == nil {
+		return false
+	}
+
+	return strings.TrimSpace(c.Storage.Provider) != ""
 }
 
 // NormalizeNodePoolType normalizes user-facing type variants.

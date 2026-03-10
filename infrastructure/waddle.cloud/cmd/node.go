@@ -249,6 +249,7 @@ func provisionNodeServer(
 		OSDisk:         pool.Disks.OS,
 		DataDisk:       pool.Disks.Data,
 	})
+	skipDataDiskPartitioning := strings.TrimSpace(cfg.Storage.Provider) == config.StorageProviderOpenEBSMayastorLab
 
 	var server *baremetal.Server
 	if reinstallServerID != "" {
@@ -279,12 +280,13 @@ func provisionNodeServer(
 		}
 
 		server, err = scalewayReinstallServerFn(ctx, scwClient, scaleway.ReinstallParams{
-			ServerID:        reinstallServerID,
-			Zone:            zone,
-			OSID:            osID,
-			CloudInitScript: cloudInit,
-			PivotOSDisk:     pool.Disks.OS,
-			PivotDataDisk:   pool.Disks.Data,
+			ServerID:                 reinstallServerID,
+			Zone:                     zone,
+			OSID:                     osID,
+			CloudInitScript:          cloudInit,
+			PivotOSDisk:              pool.Disks.OS,
+			PivotDataDisk:            pool.Disks.Data,
+			SkipDataDiskPartitioning: skipDataDiskPartitioning,
 		})
 		if err != nil {
 			return nil, "", fmt.Errorf("reinstall server: %w", err)
@@ -306,6 +308,7 @@ func provisionNodeServer(
 			CloudInitScript:          cloudInit,
 			PivotOSDisk:              pool.Disks.OS,
 			PivotDataDisk:            pool.Disks.Data,
+			SkipDataDiskPartitioning: skipDataDiskPartitioning,
 		})
 		if err != nil {
 			return nil, "", fmt.Errorf("order server: %w", err)

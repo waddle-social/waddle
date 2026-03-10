@@ -147,6 +147,7 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 	t.Cleanup(restoreProvisioningFns)
 
 	cfg := newProvisionConfig(newNodePool("control-plane", config.NodeTypeControlPlane))
+	cfg.Storage.Provider = config.StorageProviderOpenEBSMayastorLab
 	op := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
 	op.SetContext("poolName", "control-plane")
 	op.SetContext("role", config.NodeTypeControlPlane)
@@ -228,6 +229,9 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 		if params.ServerID != "srv-existing" {
 			t.Fatalf("reinstall server id = %q, want %q", params.ServerID, "srv-existing")
 		}
+		if !params.SkipDataDiskPartitioning {
+			t.Fatal("expected reinstall to skip data disk partitioning for openebs localpv lvm")
+		}
 		return &baremetal.Server{
 			ID:   "srv-existing",
 			Name: "legacy-control-plane-name",
@@ -303,8 +307,11 @@ func TestPhaseOrderServerOrderPathUnaffected(t *testing.T) {
 	}
 
 	var orderCalled bool
-	scalewayOrderServerFn = func(_ context.Context, _ *scaleway.Client, _ scaleway.ProvisionParams) (*baremetal.Server, error) {
+	scalewayOrderServerFn = func(_ context.Context, _ *scaleway.Client, params scaleway.ProvisionParams) (*baremetal.Server, error) {
 		orderCalled = true
+		if params.SkipDataDiskPartitioning {
+			t.Fatal("did not expect order path to skip data disk partitioning without openebs localpv lvm")
+		}
 		return &baremetal.Server{ID: "srv-ordered", Name: "production-control-plane-01"}, nil
 	}
 	scalewayReinstallServerFn = func(context.Context, *scaleway.Client, scaleway.ReinstallParams) (*baremetal.Server, error) {

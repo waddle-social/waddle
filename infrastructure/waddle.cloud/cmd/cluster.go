@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/operation"
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/scaleway"
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/secrets"
+	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/storage"
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/talos"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/tools/clientcmd"
@@ -31,13 +33,18 @@ var clusterCmd = &cobra.Command{
 }
 
 const (
-	talosSecretsSecretKey      = "TALOS_SECRETS_YAML"
-	talosControlPlaneSecretKey = "TALOS_CONTROL_PLANE_CONFIG_YAML"
-	talosWorkerSecretKey       = "TALOS_WORKER_CONFIG_YAML"
-	talosConfigSecretKey       = "TALOSCONFIG_YAML"
-	opContextNetbirdSecretPath = "netbirdSecretPath"
-	opContextNetbirdSecretKey  = "netbirdSecretKey"
-	opContextReinstall         = "reinstall"
+	talosSecretsSecretKey        = "TALOS_SECRETS_YAML"
+	talosControlPlaneSecretKey   = "TALOS_CONTROL_PLANE_CONFIG_YAML"
+	talosWorkerSecretKey         = "TALOS_WORKER_CONFIG_YAML"
+	talosConfigSecretKey         = "TALOSCONFIG_YAML"
+	opContextNetbirdSecretPath   = "netbirdSecretPath"
+	opContextNetbirdSecretKey    = "netbirdSecretKey"
+	opContextReinstall           = "reinstall"
+	fluxSubstituteStorageClass   = "WADDLE_STORAGE_CLASS_NAME"
+	fluxSubstituteStorageNode    = "WADDLE_STORAGE_NODE_NAME"
+	fluxSubstituteStorageDefault = "WADDLE_STORAGE_CLASS_DEFAULT"
+	fluxSubstituteDiskPoolDisk   = "WADDLE_STORAGE_DISKPOOL_DISK_BY_ID"
+	fluxSubstituteReplicaCount   = "WADDLE_STORAGE_REPLICA_COUNT"
 )
 
 var secretStoreCache struct {
@@ -122,6 +129,7 @@ var (
 	postBootstrapKubernetesAPIWaitFn         = waitForKubernetesAPIWithRetry
 	postBootstrapKubernetesAPIRetryInterval  = 5 * time.Second
 	postBootstrapKubernetesAPIRetryTimeout   = 10 * time.Minute
+	storagePrepareOpenEBSMayastorFn          = storage.PrepareOpenEBSMayastorRawDisk
 	scalewayNewClientFn                      = scaleway.NewClient
 	scalewayResolveOfferForBillingCycleFn    = scaleway.ResolveOfferForBillingCycle
 	scalewayResolveUbuntuOSIDFn              = scaleway.ResolveUbuntuOSID
@@ -411,6 +419,7 @@ func phaseOrderServer(
 		OSDisk:         pool.Disks.OS,
 		DataDisk:       pool.Disks.Data,
 	})
+	skipDataDiskPartitioning := strings.TrimSpace(cfg.Storage.Provider) == config.StorageProviderOpenEBSMayastorLab
 	if reinstall {
 		serverID := reinstallServerID
 
@@ -459,12 +468,13 @@ func phaseOrderServer(
 		}
 
 		reinstalledServer, err := scalewayReinstallServerFn(ctx, scwClient, scaleway.ReinstallParams{
-			ServerID:        serverID,
-			Zone:            zone,
-			OSID:            osID,
-			CloudInitScript: cloudInit,
-			PivotOSDisk:     pool.Disks.OS,
-			PivotDataDisk:   pool.Disks.Data,
+			ServerID:                 serverID,
+			Zone:                     zone,
+			OSID:                     osID,
+			CloudInitScript:          cloudInit,
+			PivotOSDisk:              pool.Disks.OS,
+			PivotDataDisk:            pool.Disks.Data,
+			SkipDataDiskPartitioning: skipDataDiskPartitioning,
 		})
 		if err != nil {
 			return fmt.Errorf("reinstall server %s: %w", serverID, err)
@@ -517,6 +527,7 @@ func phaseOrderServer(
 		SSHKeyGitHubUser:         "", // uses Scaleway API keys, falls back to default
 		PivotOSDisk:              pool.Disks.OS,
 		PivotDataDisk:            pool.Disks.Data,
+		SkipDataDiskPartitioning: skipDataDiskPartitioning,
 	})
 	if err != nil {
 		return fmt.Errorf("order server: %w", err)
@@ -881,6 +892,7 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 	}
 
 	var bootstrapErrors []error
+	storagePrepBlockedFlux := false
 
 	// Install Cilium CNI
 	if err := ciliumInstallFn(ctx, cilium.InstallParams{
@@ -893,19 +905,55 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 		bootstrapErrors = append(bootstrapErrors, fmt.Errorf("install cilium: %w", err))
 	}
 
+	if len(bootstrapErrors) == 0 {
+		switch strings.TrimSpace(cfg.Storage.Provider) {
+		case "":
+			// No storage provider configured.
+		case config.StorageProviderOpenEBSMayastorLab:
+			pool, err := cfg.FirstNodePoolByType(config.NodeTypeControlPlane)
+			if err != nil {
+				slog.Warn("storage prep skipped", "error", err)
+				bootstrapErrors = append(bootstrapErrors, fmt.Errorf("resolve storage node pool: %w", err))
+				break
+			}
+
+			nodeName := nodeNameForOperation(op, cfg.Environment)
+			slog.Info("preparing raw disk prerequisites for OpenEBS Mayastor",
+				"node", nodeName,
+				"device", pool.Disks.Data,
+			)
+			if err := storagePrepareOpenEBSMayastorFn(ctx, storage.PrepareOpenEBSMayastorParams{
+				Kubeconfig: kubeconfigPath,
+				NodeName:   nodeName,
+				Device:     pool.Disks.Data,
+			}); err != nil {
+				slog.Warn("openebs mayastor raw disk preparation failed", "error", err)
+				bootstrapErrors = append(bootstrapErrors, fmt.Errorf("prepare openebs mayastor raw disk: %w", err))
+				storagePrepBlockedFlux = true
+			}
+		default:
+			bootstrapErrors = append(bootstrapErrors, fmt.Errorf("unsupported storage provider %q", strings.TrimSpace(cfg.Storage.Provider)))
+			storagePrepBlockedFlux = true
+		}
+	}
+
 	ociRepo := strings.TrimSpace(cfg.Flux.OCIRepo)
 	if ociRepo == "" {
 		slog.Warn("flux.ociRepo is empty; skipping GitOps OCI source configuration during bootstrap (can be configured manually later)")
 	}
 
 	// Install FluxCD (and optionally configure OCI source).
-	if err := fluxBootstrapFn(ctx, flux.BootstrapParams{
-		Kubeconfig: kubeconfigPath,
-		OCIRepo:    ociRepo,
-		Version:    cfg.Cluster.EffectiveFluxVersion(),
-	}); err != nil {
-		slog.Warn("flux bootstrap failed", "error", err)
-		bootstrapErrors = append(bootstrapErrors, fmt.Errorf("bootstrap flux: %w", err))
+	if !storagePrepBlockedFlux {
+		fluxSubstitute := fluxBootstrapSubstitute(op, cfg)
+		if err := fluxBootstrapFn(ctx, flux.BootstrapParams{
+			Kubeconfig: kubeconfigPath,
+			OCIRepo:    ociRepo,
+			Substitute: fluxSubstitute,
+			Version:    cfg.Cluster.EffectiveFluxVersion(),
+		}); err != nil {
+			slog.Warn("flux bootstrap failed", "error", err)
+			bootstrapErrors = append(bootstrapErrors, fmt.Errorf("bootstrap flux: %w", err))
+		}
 	}
 
 	if len(bootstrapErrors) == 0 {
@@ -931,6 +979,29 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 	}
 
 	return nil
+}
+
+func fluxBootstrapSubstitute(op *operation.Operation, cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+
+	if strings.TrimSpace(cfg.Storage.Provider) != config.StorageProviderOpenEBSMayastorLab {
+		return nil
+	}
+
+	nodeName := ""
+	if op != nil {
+		nodeName = nodeNameForOperation(op, cfg.Environment)
+	}
+
+	return map[string]string{
+		fluxSubstituteStorageClass:   strings.TrimSpace(cfg.Storage.StorageClassName),
+		fluxSubstituteStorageNode:    strings.TrimSpace(nodeName),
+		fluxSubstituteStorageDefault: strconv.FormatBool(cfg.Storage.DefaultStorageClass),
+		fluxSubstituteDiskPoolDisk:   strings.TrimSpace(cfg.Storage.DiskPoolDiskByID),
+		fluxSubstituteReplicaCount:   strconv.Itoa(cfg.Storage.ReplicaCount),
+	}
 }
 
 func waitForKubernetesAPIWithRetry(ctx context.Context, kubeconfigPath string) error {
@@ -1437,6 +1508,12 @@ func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("generate talos assets: %w", err)
+	}
+	if strings.TrimSpace(cfg.Storage.Provider) == config.StorageProviderOpenEBSMayastorLab {
+		assets.ControlPlane, err = talos.WithMayastorLabConfig(assets.ControlPlane)
+		if err != nil {
+			return nil, fmt.Errorf("apply mayastor Talos control-plane prerequisites: %w", err)
+		}
 	}
 
 	secretPath := secretPathForCluster(cfg)

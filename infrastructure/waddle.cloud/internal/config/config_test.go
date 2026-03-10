@@ -259,6 +259,221 @@ func TestValidateIngressConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateStorageConfigurationRequiresSingleNodeControlPlane(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "worker",
+				Type: NodeTypeWorker,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	err := cfg.validateStorageConfiguration()
+	if err == nil {
+		t.Fatal("expected single control-plane validation error")
+	}
+}
+
+func TestValidateStorageConfigurationRejectsMissingDataDisk(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS: "/dev/nvme0n1",
+				},
+			},
+		},
+	}
+
+	err := cfg.validateStorageConfiguration()
+	if err == nil {
+		t.Fatal("expected data disk validation error")
+	}
+}
+
+func TestValidateStorageConfigurationRejectsMissingDiskPoolDiskByID(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	if err := cfg.validateStorageConfiguration(); err == nil {
+		t.Fatal("expected diskPoolDiskByID validation error")
+	}
+}
+
+func TestValidateStorageConfigurationRejectsSharedOSAndDataDisk(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme0n1",
+				},
+			},
+		},
+	}
+
+	err := cfg.validateStorageConfiguration()
+	if err == nil {
+		t.Fatal("expected os/data disk validation error")
+	}
+}
+
+func TestValidateStorageConfigurationRejectsControlPlaneTaintsForMayastor(t *testing.T) {
+	withTaints := true
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &withTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	if err := cfg.validateStorageConfiguration(); err == nil {
+		t.Fatal("expected control-plane taint validation error")
+	}
+}
+
+func TestValidateStorageConfigurationRejectsReplicaCountMismatch(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:         StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID: "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName: "openebs-mayastor",
+			ReplicaCount:     2,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	if err := cfg.validateStorageConfiguration(); err == nil {
+		t.Fatal("expected replica count validation error")
+	}
+}
+
+func TestValidateStorageConfigurationAcceptsSingleNodeMayastorLab(t *testing.T) {
+	noTaints := false
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			ControlPlaneTaints: &noTaints,
+		},
+		Storage: StorageConfig{
+			Provider:            StorageProviderOpenEBSMayastorLab,
+			DiskPoolDiskByID:    "/dev/disk/by-id/nvme-eui.1234",
+			StorageClassName:    "openebs-mayastor",
+			DefaultStorageClass: true,
+			ReplicaCount:        1,
+		},
+		NodePools: []NodePoolConfig{
+			{
+				Name: "control-plane",
+				Type: NodeTypeControlPlane,
+				Size: 1,
+				Disks: DiskConfig{
+					OS:   "/dev/nvme0n1",
+					Data: "/dev/nvme1n1",
+				},
+			},
+		},
+	}
+
+	if err := cfg.validateStorageConfiguration(); err != nil {
+		t.Fatalf("validateStorageConfiguration returned error: %v", err)
+	}
+	if !cfg.StorageEnabled() {
+		t.Fatal("expected storage to be enabled")
+	}
+}
+
 func TestEffectiveIngressPublicIPv4(t *testing.T) {
 	cfg := &Config{}
 	if got := cfg.EffectiveIngressPublicIPv4("51.159.1.2"); got != "51.159.1.2" {

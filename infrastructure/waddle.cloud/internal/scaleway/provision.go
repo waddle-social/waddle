@@ -73,19 +73,21 @@ type ProvisionParams struct {
 	SSHKeyGitHubUser         string
 	PivotOSDisk              string
 	PivotDataDisk            string
+	SkipDataDiskPartitioning bool
 	PrivateNetworkReservedIP string
 }
 
 // ReinstallParams holds all parameters for reinstalling an existing server with OS install.
 type ReinstallParams struct {
-	ServerID         string
-	Zone             scw.Zone
-	OSID             string
-	CloudInitScript  string // Talos pivot cloud-init script
-	PivotOSDisk      string
-	PivotDataDisk    string
-	Hostname         string
-	SSHKeyGitHubUser string
+	ServerID                 string
+	Zone                     scw.Zone
+	OSID                     string
+	CloudInitScript          string // Talos pivot cloud-init script
+	PivotOSDisk              string
+	PivotDataDisk            string
+	SkipDataDiskPartitioning bool
+	Hostname                 string
+	SSHKeyGitHubUser         string
 }
 
 // OrderServer creates a new bare metal server with Scaleway and triggers OS
@@ -209,8 +211,9 @@ func ReinstallServer(ctx context.Context, client *Client, params ReinstallParams
 	}
 
 	partitioningSchema, err := buildInstallPartitioningSchema(ProvisionParams{
-		PivotOSDisk:   params.PivotOSDisk,
-		PivotDataDisk: params.PivotDataDisk,
+		PivotOSDisk:              params.PivotOSDisk,
+		PivotDataDisk:            params.PivotDataDisk,
+		SkipDataDiskPartitioning: params.SkipDataDiskPartitioning,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build install partitioning schema: %w", err)
@@ -503,7 +506,7 @@ func buildInstallPartitioningSchema(params ProvisionParams) (*baremetal.Schema, 
 		{Device: partitionDeviceForInstall(osDisk, 4), Format: baremetal.SchemaFilesystemFormatExt4, Mountpoint: "/"},
 	}
 
-	if dataDisk != "" {
+	if dataDisk != "" && !params.SkipDataDiskPartitioning {
 		disks = append(disks, &baremetal.SchemaDisk{
 			Device: dataDisk,
 			Partitions: []*baremetal.SchemaPartition{
