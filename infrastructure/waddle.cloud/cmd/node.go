@@ -43,6 +43,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 	poolName, _ := cmd.Flags().GetString("pool")
 	serverIDFlag, _ := cmd.Flags().GetString("server-id")
 	confirmReinstall, _ := cmd.Flags().GetBool("confirm-reinstall")
+	debugProvision, _ := cmd.Flags().GetBool("debug-provision")
 
 	if err := validateReinstallFlags(serverIDFlag, confirmReinstall); err != nil {
 		return err
@@ -105,6 +106,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		name,
 		reinstallServerID,
 		privateIP,
+		debugProvision,
 	)
 	if err != nil {
 		return err
@@ -126,7 +128,7 @@ func runNodeAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server %s has no public IPv4", serverReady.ID)
 	}
 
-	if err := talos.WaitForMaintenance(ctx, publicIP, 30*time.Minute); err != nil {
+	if err := enhanceTalosMaintenanceWaitError(talosWaitForMaintenanceFn(ctx, publicIP, 30*time.Minute), debugProvision); err != nil {
 		return fmt.Errorf("wait for talos maintenance: %w", err)
 	}
 
@@ -180,6 +182,7 @@ func provisionNodeServer(
 	cfg *config.Config,
 	pool *config.NodePoolConfig,
 	role, desiredName, reinstallServerID, privateIP string,
+	debugProvision bool,
 ) (*baremetal.Server, string, error) {
 	accessKey, secretKey := cfg.ScalewayCredentials()
 	scwClient, err := scalewayNewClientFn(accessKey, secretKey, cfg.Scaleway.ProjectID, cfg.Scaleway.OrganizationID)
@@ -248,6 +251,7 @@ func provisionNodeServer(
 		TalosSchematic: cfg.Cluster.TalosSchematic,
 		OSDisk:         pool.Disks.OS,
 		DataDisk:       pool.Disks.Data,
+		DebugProvision: debugProvision,
 	})
 	skipDataDiskPartitioning := strings.TrimSpace(cfg.Storage.Provider) == config.StorageProviderOpenEBSMayastorLab
 
@@ -417,6 +421,7 @@ func init() {
 	nodeAddCmd.Flags().String("role", "worker", "Node role (control-plane or worker)")
 	nodeAddCmd.Flags().String("server-id", "", "Existing Scaleway server ID to reinstall and reuse")
 	nodeAddCmd.Flags().Bool("confirm-reinstall", false, "Confirm destructive reinstall when --server-id is provided")
+	nodeAddCmd.Flags().Bool("debug-provision", false, "Emit verbose cloud-init and pivot logs to the machine console during provision/reinstall")
 
 	nodeRemoveCmd.Flags().String("cluster", "", "Cluster/environment name")
 	nodeRemoveCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")

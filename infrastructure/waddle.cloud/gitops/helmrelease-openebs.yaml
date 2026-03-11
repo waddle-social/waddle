@@ -22,7 +22,10 @@ spec:
     openebs-crds:
       csi:
         volumeSnapshots:
-          enabled: false
+          enabled: true
+    localpv-provisioner:
+      hostpathClass:
+        enabled: false
     engines:
       local:
         lvm:
@@ -40,9 +43,13 @@ spec:
       enabled: false
     mayastor:
       localpv-provisioner:
-        enabled: true
+        enabled: false
         hostpathClass:
           enabled: false
+      nats:
+        cluster:
+          enabled: false
+          replicas: 1
       storageClass:
         enabled: false
       etcd:

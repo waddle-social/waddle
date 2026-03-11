@@ -395,6 +395,7 @@ func TestProvisionNodeServerReinstallWorker(t *testing.T) {
 		"production-workers-01",
 		"srv-worker",
 		"",
+		false,
 	)
 	if err != nil {
 		t.Fatalf("provisionNodeServer returned error: %v", err)
@@ -475,6 +476,7 @@ func TestProvisionNodeServerReinstallControlPlaneUsesReservedIP(t *testing.T) {
 		"production-control-plane-02",
 		"srv-cp",
 		"172.16.16.17",
+		false,
 	)
 	if err != nil {
 		t.Fatalf("provisionNodeServer returned error: %v", err)
@@ -537,6 +539,7 @@ func TestProvisionNodeServerKeepsOrderPathBehavior(t *testing.T) {
 		"production-workers-01",
 		"",
 		"",
+		false,
 	)
 	if err != nil {
 		t.Fatalf("provisionNodeServer returned error: %v", err)
@@ -570,6 +573,7 @@ func TestProvisionNodeServerReinstallRequiresOfferID(t *testing.T) {
 		"production-workers-01",
 		"srv-worker",
 		"",
+		false,
 	)
 	if err == nil {
 		t.Fatal("expected missing offer ID error, got nil")
@@ -648,7 +652,7 @@ func TestProvisionNodeServerSurfaceReinstallError(t *testing.T) {
 		return nil, errors.New("reinstall failed")
 	}
 
-	_, _, err := provisionNodeServer(context.Background(), cfg, &cfg.NodePools[0], config.NodeTypeWorker, "production-workers-01", "srv-worker", "")
+	_, _, err := provisionNodeServer(context.Background(), cfg, &cfg.NodePools[0], config.NodeTypeWorker, "production-workers-01", "srv-worker", "", false)
 	if err == nil {
 		t.Fatal("expected reinstall error, got nil")
 	}

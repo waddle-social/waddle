@@ -33,6 +33,17 @@ var (
 	waitForMaintenanceProbeFn      = probeTalosMaintenance
 )
 
+// MaintenanceTimeoutError is returned when a node never reaches Talos
+// maintenance mode within the allotted timeout.
+type MaintenanceTimeoutError struct {
+	Target  string
+	Timeout time.Duration
+}
+
+func (e *MaintenanceTimeoutError) Error() string {
+	return fmt.Sprintf("talos maintenance mode not reachable at %s within %s", e.Target, e.Timeout)
+}
+
 // Client wraps Talos operations over the Talos gRPC API.
 type Client struct {
 	targetNode string
@@ -437,7 +448,10 @@ func WaitForMaintenance(ctx context.Context, ip string, timeout time.Duration) e
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("talos maintenance mode not reachable at %s within %s", target, timeout)
+			return &MaintenanceTimeoutError{
+				Target:  target,
+				Timeout: timeout,
+			}
 		case <-ticker.C:
 		}
 	}

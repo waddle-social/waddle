@@ -39,6 +39,7 @@ const (
 	opContextNetbirdSecretPath = "netbirdSecretPath"
 	opContextNetbirdSecretKey  = "netbirdSecretKey"
 	opContextReinstall         = "reinstall"
+	opContextDebugProvision    = "debugProvision"
 	fluxSubstituteStorageClass = "WADDLE_STORAGE_CLASS_NAME"
 	fluxSubstituteStorageNode  = "WADDLE_STORAGE_NODE_NAME"
 	fluxSubstituteDiskPoolDisk = "WADDLE_STORAGE_DISKPOOL_DISK_BY_ID"
@@ -95,6 +96,7 @@ func init() {
 	clusterCreateCmd.Flags().String("netbird-secret-key", "", "Secret backend key for Netbird setup key lookup (overrides secrets.netbirdSecretKey)")
 	clusterCreateCmd.Flags().String("server-id", "", "Existing Scaleway server ID to reinstall and reuse")
 	clusterCreateCmd.Flags().Bool("confirm-reinstall", false, "Confirm destructive reinstall when --server-id is provided")
+	clusterCreateCmd.Flags().Bool("debug-provision", false, "Emit verbose cloud-init and pivot logs to the machine console during provision/reinstall")
 
 	clusterDeleteCmd.Flags().StringP("environment", "e", "", "Cluster/environment name")
 	clusterDeleteCmd.Flags().StringP("file", "f", "", "Path to cluster config YAML")
@@ -147,6 +149,7 @@ var (
 	scalewayEnsureManagedServerTagsFn       = ensureManagedServerTags
 	secretsNewStoreFn                       = secrets.NewStore
 	secretsCacheKeyFn                       = secrets.CacheKey
+	talosWaitForMaintenanceFn               = talos.WaitForMaintenance
 )
 
 func runClusterCreate(cmd *cobra.Command, args []string) error {
@@ -159,6 +162,7 @@ func runClusterCreate(cmd *cobra.Command, args []string) error {
 	netbirdSecretKeyFlag, _ := cmd.Flags().GetString("netbird-secret-key")
 	serverIDFlag, _ := cmd.Flags().GetString("server-id")
 	confirmReinstall, _ := cmd.Flags().GetBool("confirm-reinstall")
+	debugProvision, _ := cmd.Flags().GetBool("debug-provision")
 
 	if err := validateReinstallFlags(serverIDFlag, confirmReinstall); err != nil {
 		return err
@@ -210,6 +214,7 @@ func runClusterCreate(cmd *cobra.Command, args []string) error {
 	op.SetContext("poolName", pool.Name)
 	op.SetContext("controlPlaneSlot", "1")
 	op.SetContext(opContextReinstall, confirmReinstall)
+	op.SetContext(opContextDebugProvision, debugProvision)
 	if privateIP != "" {
 		op.SetContext("privateIP", privateIP)
 	}
@@ -415,6 +420,7 @@ func phaseOrderServer(
 		TalosSchematic: cfg.Cluster.TalosSchematic,
 		OSDisk:         pool.Disks.OS,
 		DataDisk:       pool.Disks.Data,
+		DebugProvision: operationContextBool(op, opContextDebugProvision),
 	})
 	skipDataDiskPartitioning := strings.TrimSpace(cfg.Storage.Provider) == config.StorageProviderOpenEBSMayastorLab
 	if reinstall {
@@ -697,7 +703,24 @@ func phaseWaitTalos(ctx context.Context, op *operation.Operation, cfg *config.Co
 	}
 
 	slog.Info("phase wait-talos: waiting for Talos maintenance mode", "ip", publicIP)
-	return talos.WaitForMaintenance(ctx, publicIP, 30*time.Minute)
+	err := talosWaitForMaintenanceFn(ctx, publicIP, 30*time.Minute)
+	return enhanceTalosMaintenanceWaitError(err, operationContextBool(op, opContextDebugProvision))
+}
+
+func enhanceTalosMaintenanceWaitError(err error, debugProvision bool) error {
+	if err == nil || !debugProvision {
+		return err
+	}
+
+	var timeoutErr *talos.MaintenanceTimeoutError
+	if errors.As(err, &timeoutErr) {
+		return fmt.Errorf(
+			"%w; inspect the Scaleway remote console and the pivot Ubuntu logs /var/log/cloud-init-output.log and /var/log/waddle-cloud-pivot.log",
+			err,
+		)
+	}
+
+	return err
 }
 
 func phaseApplyConfig(ctx context.Context, op *operation.Operation, cfg *config.Config) error {

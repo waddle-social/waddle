@@ -67,8 +67,15 @@ func TestWaitForMaintenanceTimesOutWhenProbeNeverSucceeds(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
+	var timeoutErr *MaintenanceTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected MaintenanceTimeoutError, got %T (%v)", err, err)
+	}
 	if !strings.Contains(err.Error(), "talos maintenance mode not reachable") {
 		t.Fatalf("expected timeout error message, got %q", err)
+	}
+	if timeoutErr.Target != "203.0.113.11:50000" {
+		t.Fatalf("timeout target = %q, want %q", timeoutErr.Target, "203.0.113.11:50000")
 	}
 	if attempts == 0 {
 		t.Fatal("expected at least one probe attempt")
