@@ -1,14 +1,17 @@
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: openebs-core
+  name: infra-teleport-core
   namespace: flux-system
 spec:
-  force: true
-  interval: 5m
+  dependsOn:
+    - name: openebs-postinstall
+    - name: infra-cilium-gateway
+    - name: infra-external-dns
+  interval: 10m
   retryInterval: 1m
   timeout: 20m
-  path: ./core
+  path: ./teleport-core
   prune: true
   wait: true
   sourceRef:
@@ -16,9 +19,9 @@ spec:
     name: bootstrap
   postBuild:
     substitute:
-      WADDLE_STORAGE_CLASS_NAME: ${WADDLE_STORAGE_CLASS_NAME}
+      WADDLE_CLUSTER_ENVIRONMENT: ${WADDLE_CLUSTER_ENVIRONMENT}
   healthChecks:
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
-      name: openebs
-      namespace: openebs
+      name: teleport
+      namespace: teleport

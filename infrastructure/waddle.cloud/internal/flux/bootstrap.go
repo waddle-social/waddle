@@ -41,10 +41,11 @@ type BootstrapParams struct {
 }
 
 const (
-	fluxNamespace      = "flux-system"
-	clusterConfigName  = "bootstrap"
-	fluxFieldManager   = "waddle-cloud"
-	readyConditionType = "Ready"
+	fluxNamespace        = "flux-system"
+	clusterConfigName    = "bootstrap"
+	fluxFieldManager     = "waddle-cloud"
+	readyConditionType   = "Ready"
+	rootReconcileTimeout = 20 * time.Minute
 )
 
 var fluxControllers = []string{
@@ -132,7 +133,7 @@ func upsertOCIResources(ctx context.Context, cfg *rest.Config, ociRepo string, s
 		return err
 	}
 
-	if err := waitForKustomizationReady(ctx, kubeClient, 5*time.Minute); err != nil {
+	if err := waitForKustomizationReady(ctx, kubeClient, rootReconcileTimeout); err != nil {
 		return err
 	}
 
@@ -189,9 +190,10 @@ func upsertKustomization(ctx context.Context, kubeClient ctrlclient.Client, subs
 			Interval: metav1.Duration{
 				Duration: 5 * time.Minute,
 			},
-			Path:  "./",
-			Prune: true,
-			Wait:  true,
+			Timeout: &metav1.Duration{Duration: rootReconcileTimeout},
+			Path:    "./",
+			Prune:   true,
+			Wait:    true,
 			SourceRef: kustomizev1.CrossNamespaceSourceReference{
 				Kind: sourcev1.OCIRepositoryKind,
 				Name: clusterConfigName,

@@ -36,6 +36,7 @@ func restorePostBootstrapFns() {
 	postBootstrapKubernetesAPIRetryInterval = 5 * time.Second
 	postBootstrapKubernetesAPIRetryTimeout = 10 * time.Minute
 	storagePrepareOpenEBSMayastorFn = storage.PrepareOpenEBSMayastorRawDisk
+	postBootstrapBootstrapSecretsFn = prepareBootstrapSecrets
 	scalewayNewClientFn = scaleway.NewClient
 	scalewayGetServerFn = func(ctx context.Context, client *scaleway.Client, zone scw.Zone, serverID string) (*baremetal.Server, error) {
 		return client.Baremetal.GetServer(&baremetal.GetServerRequest{
@@ -57,18 +58,18 @@ func newPostBootstrapOperation() *operation.Operation {
 	return op
 }
 
-func TestPhasePostBootstrapAggregatesComponentErrors(t *testing.T) {
+func TestPhasePostBootstrapStopsBeforeFluxWhenCiliumFails(t *testing.T) {
 	restorePostBootstrapFns()
 	t.Cleanup(restorePostBootstrapFns)
 
 	errCilium := errors.New("cilium failed")
-	errFlux := errors.New("flux failed")
 
 	ciliumInstallFn = func(context.Context, cilium.InstallParams) error {
 		return errCilium
 	}
 	fluxBootstrapFn = func(context.Context, flux.BootstrapParams) error {
-		return errFlux
+		t.Fatal("did not expect flux bootstrap to run after cilium failure")
+		return nil
 	}
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) {
 		return &scaleway.Client{}, nil
@@ -77,7 +78,11 @@ func TestPhasePostBootstrapAggregatesComponentErrors(t *testing.T) {
 		return "172.16.16.0/22", nil
 	}
 
-	cfg := &config.Config{}
+	cfg := &config.Config{
+		Flux: config.FluxConfig{
+			OCIRepo: "oci://ghcr.io/waddle-social/waddle/gitops",
+		},
+	}
 
 	err := phasePostBootstrap(context.Background(), newPostBootstrapOperation(), cfg)
 	if err == nil {
@@ -85,9 +90,6 @@ func TestPhasePostBootstrapAggregatesComponentErrors(t *testing.T) {
 	}
 	if !errors.Is(err, errCilium) {
 		t.Fatalf("expected cilium error to be included: %v", err)
-	}
-	if !errors.Is(err, errFlux) {
-		t.Fatalf("expected flux error to be included: %v", err)
 	}
 }
 
@@ -209,6 +211,17 @@ func TestPhasePostBootstrapPassesPreparedKubeconfigToComponents(t *testing.T) {
 		gotFluxParams = params
 		return nil
 	}
+	postBootstrapBootstrapSecretsFn = func(_ context.Context, kubeconfigPath string, cfg *config.Config) (map[string]string, error) {
+		if kubeconfigPath != "/tmp/bootstrap-kubeconfig" {
+			t.Fatalf("bootstrap secret kubeconfig = %q, want %q", kubeconfigPath, "/tmp/bootstrap-kubeconfig")
+		}
+		if cfg == nil {
+			t.Fatal("expected config to be passed to bootstrap secret helper")
+		}
+		return map[string]string{
+			fluxSubstituteTeleportGitHubClientID: "client-id-123",
+		}, nil
+	}
 	var gotIngressTarget string
 	postBootstrapIngressGatewaySyncFn = func(_ context.Context, kubeconfigPath, targetIPv4 string) error {
 		if kubeconfigPath != "/tmp/bootstrap-kubeconfig" {
@@ -243,6 +256,9 @@ func TestPhasePostBootstrapPassesPreparedKubeconfigToComponents(t *testing.T) {
 	}
 	if gotFluxParams.OCIRepo != ociRepo {
 		t.Fatalf("flux bootstrap OCI repo = %q, want %q", gotFluxParams.OCIRepo, ociRepo)
+	}
+	if gotFluxParams.Substitute[fluxSubstituteTeleportGitHubClientID] != "client-id-123" {
+		t.Fatalf("flux bootstrap substitute %s = %q, want %q", fluxSubstituteTeleportGitHubClientID, gotFluxParams.Substitute[fluxSubstituteTeleportGitHubClientID], "client-id-123")
 	}
 	if gotIngressTarget != "51.159.1.2" {
 		t.Fatalf("ingress gateway sync target = %q, want %q", gotIngressTarget, "51.159.1.2")
@@ -310,6 +326,11 @@ func TestPhasePostBootstrapPreparesOpenEBSMayastorBeforeFlux(t *testing.T) {
 		fluxCalled = true
 		return nil
 	}
+	postBootstrapBootstrapSecretsFn = func(context.Context, string, *config.Config) (map[string]string, error) {
+		return map[string]string{
+			fluxSubstituteTeleportGitHubClientID: "teleport-client-id",
+		}, nil
+	}
 	ciliumInstallFn = func(context.Context, cilium.InstallParams) error { return nil }
 	postBootstrapIngressGatewaySyncFn = func(context.Context, string, string) error { return nil }
 	scalewayNewClientFn = func(string, string, string, string) (*scaleway.Client, error) { return &scaleway.Client{}, nil }
@@ -364,6 +385,9 @@ func TestPhasePostBootstrapPreparesOpenEBSMayastorBeforeFlux(t *testing.T) {
 	}
 	if gotFluxParams.Substitute[fluxSubstituteDiskPoolDisk] != "/dev/disk/by-id/nvme-eui.1234" {
 		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteDiskPoolDisk, gotFluxParams.Substitute[fluxSubstituteDiskPoolDisk], "/dev/disk/by-id/nvme-eui.1234")
+	}
+	if gotFluxParams.Substitute[fluxSubstituteTeleportGitHubClientID] != "teleport-client-id" {
+		t.Fatalf("flux substitute %s = %q, want %q", fluxSubstituteTeleportGitHubClientID, gotFluxParams.Substitute[fluxSubstituteTeleportGitHubClientID], "teleport-client-id")
 	}
 	if _, ok := gotFluxParams.Substitute["WADDLE_STORAGE_CLASS_DEFAULT"]; ok {
 		t.Fatal("did not expect default storage class substitution for mayastor bootstrap")

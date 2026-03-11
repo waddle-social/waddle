@@ -1,0 +1,21 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-cert-manager-issuer
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra-cert-manager
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./cert-manager-issuer
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: bootstrap
+  healthChecks:
+    - apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      name: letsencrypt-production
