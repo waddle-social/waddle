@@ -32,17 +32,19 @@ var clusterCmd = &cobra.Command{
 }
 
 const (
-	talosSecretsSecretKey      = "TALOS_SECRETS_YAML"
-	talosControlPlaneSecretKey = "TALOS_CONTROL_PLANE_CONFIG_YAML"
-	talosWorkerSecretKey       = "TALOS_WORKER_CONFIG_YAML"
-	talosConfigSecretKey       = "TALOSCONFIG_YAML"
-	opContextNetbirdSecretPath = "netbirdSecretPath"
-	opContextNetbirdSecretKey  = "netbirdSecretKey"
-	opContextReinstall         = "reinstall"
-	opContextDebugProvision    = "debugProvision"
-	fluxSubstituteStorageClass = "WADDLE_STORAGE_CLASS_NAME"
-	fluxSubstituteStorageNode  = "WADDLE_STORAGE_NODE_NAME"
-	fluxSubstituteDiskPoolDisk = "WADDLE_STORAGE_DISKPOOL_DISK_BY_ID"
+	talosSecretsSecretKey                = "TALOS_SECRETS_YAML"
+	talosControlPlaneSecretKey           = "TALOS_CONTROL_PLANE_CONFIG_YAML"
+	talosWorkerSecretKey                 = "TALOS_WORKER_CONFIG_YAML"
+	talosConfigSecretKey                 = "TALOSCONFIG_YAML"
+	opContextNetbirdSecretPath           = "netbirdSecretPath"
+	opContextNetbirdSecretKey            = "netbirdSecretKey"
+	opContextReinstall                   = "reinstall"
+	opContextDebugProvision              = "debugProvision"
+	fluxSubstituteStorageClass           = "WADDLE_STORAGE_CLASS_NAME"
+	fluxSubstituteStorageNode            = "WADDLE_STORAGE_NODE_NAME"
+	fluxSubstituteDiskPoolDisk           = "WADDLE_STORAGE_DISKPOOL_DISK_BY_ID"
+	fluxSubstituteEnvironment            = "WADDLE_CLUSTER_ENVIRONMENT"
+	fluxSubstituteTeleportGitHubClientID = "WADDLE_TELEPORT_GITHUB_CLIENT_ID"
 )
 
 var secretStoreCache struct {
@@ -129,6 +131,7 @@ var (
 	postBootstrapKubernetesAPIRetryInterval  = 5 * time.Second
 	postBootstrapKubernetesAPIRetryTimeout   = 10 * time.Minute
 	storagePrepareOpenEBSMayastorFn          = storage.PrepareOpenEBSMayastorRawDisk
+	postBootstrapBootstrapSecretsFn          = prepareBootstrapSecrets
 	scalewayNewClientFn                      = scaleway.NewClient
 	scalewayResolveOfferForBillingCycleFn    = scaleway.ResolveOfferForBillingCycle
 	scalewayResolveUbuntuOSIDFn              = scaleway.ResolveUbuntuOSID
@@ -962,9 +965,21 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 		slog.Warn("flux.ociRepo is empty; skipping GitOps OCI source configuration during bootstrap (can be configured manually later)")
 	}
 
+	var bootstrapSubstitute map[string]string
+	if !storagePrepBlockedFlux && ociRepo != "" {
+		bootstrapSubstitute, err = postBootstrapBootstrapSecretsFn(ctx, kubeconfigPath, cfg)
+		if err != nil {
+			slog.Warn("bootstrap secret preparation failed", "error", err)
+			bootstrapErrors = append(bootstrapErrors, fmt.Errorf("prepare bootstrap secrets: %w", err))
+		}
+	}
+
 	// Install FluxCD (and optionally configure OCI source).
-	if !storagePrepBlockedFlux {
-		fluxSubstitute := fluxBootstrapSubstitute(op, cfg)
+	if !storagePrepBlockedFlux && len(bootstrapErrors) == 0 {
+		fluxSubstitute := mergeBootstrapSubstituteMaps(
+			fluxBootstrapSubstitute(op, cfg),
+			bootstrapSubstitute,
+		)
 		if err := fluxBootstrapFn(ctx, flux.BootstrapParams{
 			Kubeconfig: kubeconfigPath,
 			OCIRepo:    ociRepo,
@@ -1001,25 +1016,50 @@ func phasePostBootstrap(ctx context.Context, op *operation.Operation, cfg *confi
 	return nil
 }
 
+func mergeBootstrapSubstituteMaps(values ...map[string]string) map[string]string {
+	var merged map[string]string
+
+	for _, value := range values {
+		if len(value) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = make(map[string]string)
+		}
+		for key, item := range value {
+			merged[key] = item
+		}
+	}
+
+	return merged
+}
+
 func fluxBootstrapSubstitute(op *operation.Operation, cfg *config.Config) map[string]string {
 	if cfg == nil {
 		return nil
 	}
 
-	if strings.TrimSpace(cfg.Storage.Provider) != config.StorageProviderOpenEBSMayastorLab {
+	substitute := map[string]string{}
+	if environment := strings.TrimSpace(cfg.Environment); environment != "" {
+		substitute[fluxSubstituteEnvironment] = environment
+	}
+
+	if strings.TrimSpace(cfg.Storage.Provider) == config.StorageProviderOpenEBSMayastorLab {
+		nodeName := ""
+		if op != nil {
+			nodeName = nodeNameForOperation(op, cfg.Environment)
+		}
+
+		substitute[fluxSubstituteStorageClass] = strings.TrimSpace(cfg.Storage.StorageClassName)
+		substitute[fluxSubstituteStorageNode] = strings.TrimSpace(nodeName)
+		substitute[fluxSubstituteDiskPoolDisk] = strings.TrimSpace(cfg.Storage.DiskPoolDiskByID)
+	}
+
+	if len(substitute) == 0 {
 		return nil
 	}
 
-	nodeName := ""
-	if op != nil {
-		nodeName = nodeNameForOperation(op, cfg.Environment)
-	}
-
-	return map[string]string{
-		fluxSubstituteStorageClass: strings.TrimSpace(cfg.Storage.StorageClassName),
-		fluxSubstituteStorageNode:  strings.TrimSpace(nodeName),
-		fluxSubstituteDiskPoolDisk: strings.TrimSpace(cfg.Storage.DiskPoolDiskByID),
-	}
+	return substitute
 }
 
 func waitForKubernetesAPIWithRetry(ctx context.Context, kubeconfigPath string) error {
