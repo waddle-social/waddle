@@ -87,6 +87,10 @@ func buildClusterAccessMaterials(ctx context.Context, clusterName, cfgFile strin
 	if err != nil {
 		return nil, err
 	}
+	kubernetesAPIEndpoint, err := canonicalKubernetesAPIEndpoint(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("derive kubernetes API endpoint: %w", err)
+	}
 
 	store, err := getOrCreateSecretStore(ctx, cfg)
 	if err != nil {
@@ -148,7 +152,7 @@ func buildClusterAccessMaterials(ctx context.Context, clusterName, cfgFile strin
 	if err != nil {
 		return nil, fmt.Errorf("rewrite talosconfig endpoint: %w", err)
 	}
-	rewrittenKubeconfig, err := rewriteKubeconfigServerIfNeeded(kubeconfig, selectedEndpoint)
+	rewrittenKubeconfig, err := rewriteKubeconfigServerIfNeeded(kubeconfig, kubernetesAPIEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("rewrite kubeconfig server: %w", err)
 	}
@@ -184,16 +188,8 @@ func talosAccessEndpoints(node *clusterstate.NodeState) []string {
 	// Prefer Netbird/DNS-based control-plane names first; those are the primary
 	// path for local operator access in this environment.
 	if nodeName := strings.TrimSpace(node.Name); nodeName != "" {
-		if strings.Contains(nodeName, ".") {
-			add(nodeName)
-		} else {
-			suffix := strings.Trim(strings.TrimSpace(os.Getenv("TALOS_NODE_FQDN_SUFFIX")), ".")
-			if suffix == "" {
-				suffix = defaultTalosNodeFQDNSuffix
-			}
-			if suffix != "" {
-				add(nodeName + "." + suffix)
-			}
+		add(nodeFQDN(nodeName))
+		if !strings.Contains(nodeName, ".") {
 			add(nodeName)
 		}
 	}

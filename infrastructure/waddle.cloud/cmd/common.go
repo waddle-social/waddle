@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	defaultTalosNodeFQDNSuffix   = "rka.internal"
+	defaultTalosNodeFQDNSuffix   = "infra.waddle.social"
 	defaultTalosAPINetbirdSubnet = "100.64.0.0/10"
 	envTalosAllowedSubnets       = "TALOS_API_ALLOWED_SUBNETS"
 	netbirdSetupKeyPrimary       = "NB_SETUP_KEY"
@@ -410,15 +410,9 @@ func nodeTalosCertSANs(nodeName string) []string {
 		return nil
 	}
 
-	suffix := strings.TrimSpace(os.Getenv("TALOS_NODE_FQDN_SUFFIX"))
-	if suffix == "" {
-		suffix = defaultTalosNodeFQDNSuffix
-	}
-	suffix = strings.Trim(strings.TrimSpace(suffix), ".")
-
 	sans := []string{nodeName}
-	if suffix != "" && !strings.Contains(nodeName, ".") {
-		sans = append(sans, nodeName+"."+suffix)
+	if fqdn := nodeFQDN(nodeName); fqdn != "" && fqdn != nodeName {
+		sans = append(sans, fqdn)
 	}
 
 	return sans
@@ -615,6 +609,50 @@ func parsePooledNodeSlot(environment, poolName, nodeName string) (int, bool) {
 
 func controlPlaneNodeName(environment, poolName string, slot int) string {
 	return pooledNodeName(environment, poolName, slot)
+}
+
+func talosNodeFQDNSuffix() string {
+	suffix := strings.Trim(strings.TrimSpace(os.Getenv("TALOS_NODE_FQDN_SUFFIX")), ".")
+	if suffix == "" {
+		suffix = defaultTalosNodeFQDNSuffix
+	}
+
+	return suffix
+}
+
+func nodeFQDN(nodeName string) string {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return ""
+	}
+	if strings.Contains(nodeName, ".") {
+		return nodeName
+	}
+
+	suffix := talosNodeFQDNSuffix()
+	if suffix == "" {
+		return nodeName
+	}
+
+	return nodeName + "." + suffix
+}
+
+func canonicalKubernetesAPIEndpoint(cfg *config.Config) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("config is required")
+	}
+
+	controlPlanePool, err := cfg.FirstNodePoolByType(config.NodeTypeControlPlane)
+	if err != nil {
+		return "", fmt.Errorf("select default control-plane pool: %w", err)
+	}
+
+	endpoint := nodeFQDN(controlPlaneNodeName(cfg.Environment, controlPlanePool.Name, 1))
+	if endpoint == "" {
+		return "", fmt.Errorf("canonical kubernetes API endpoint is empty")
+	}
+
+	return endpoint, nil
 }
 
 func parseControlPlaneSlot(environment, poolName, nodeName string) (int, bool) {

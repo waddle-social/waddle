@@ -104,6 +104,42 @@ func TestControlPlaneNodeName(t *testing.T) {
 	}
 }
 
+func TestCanonicalKubernetesAPIEndpoint(t *testing.T) {
+	cfg := &config.Config{
+		Environment: "production",
+		NodePools: []config.NodePoolConfig{
+			{Name: "control-plane", Type: config.NodeTypeControlPlane},
+		},
+	}
+
+	got, err := canonicalKubernetesAPIEndpoint(cfg)
+	if err != nil {
+		t.Fatalf("canonicalKubernetesAPIEndpoint returned error: %v", err)
+	}
+	if got != "production-control-plane-01.infra.waddle.social" {
+		t.Fatalf("canonicalKubernetesAPIEndpoint() = %q, want %q", got, "production-control-plane-01.infra.waddle.social")
+	}
+}
+
+func TestCanonicalKubernetesAPIEndpointHonorsSuffixOverride(t *testing.T) {
+	t.Setenv("TALOS_NODE_FQDN_SUFFIX", "rka.internal")
+
+	cfg := &config.Config{
+		Environment: "production",
+		NodePools: []config.NodePoolConfig{
+			{Name: "control-plane", Type: config.NodeTypeControlPlane},
+		},
+	}
+
+	got, err := canonicalKubernetesAPIEndpoint(cfg)
+	if err != nil {
+		t.Fatalf("canonicalKubernetesAPIEndpoint returned error: %v", err)
+	}
+	if got != "production-control-plane-01.rka.internal" {
+		t.Fatalf("canonicalKubernetesAPIEndpoint() = %q, want %q", got, "production-control-plane-01.rka.internal")
+	}
+}
+
 func TestPooledNodeName(t *testing.T) {
 	got := pooledNodeName("production", "worker", 4)
 	want := "production-worker-04"

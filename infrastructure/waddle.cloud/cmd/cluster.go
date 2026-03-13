@@ -1548,6 +1548,10 @@ func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string,
 	if err != nil {
 		return nil, err
 	}
+	kubernetesAPIEndpoint, err := canonicalKubernetesAPIEndpoint(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("derive kubernetes API endpoint: %w", err)
+	}
 
 	installDisk := ""
 	if controlPlanePool, err := cfg.FirstNodePoolByType(config.NodeTypeControlPlane); err == nil {
@@ -1555,14 +1559,15 @@ func ensureTalosAssets(ctx context.Context, cfg *config.Config, endpoint string,
 	}
 
 	assets, err := talos.GenerateConfig(ctx, talos.GenConfigParams{
-		ClusterName:        cfg.Environment,
-		Endpoint:           endpoint,
-		TalosVersion:       cfg.Cluster.TalosVersion,
-		TalosSchematic:     cfg.Cluster.TalosSchematic,
-		KubernetesVersion:  cfg.Cluster.KubernetesVersion,
-		InstallDisk:        installDisk,
-		ControlPlaneTaints: cfg.Cluster.EffectiveControlPlaneTaints(),
-		SecretsYAML:        secretsYAML,
+		ClusterName:                 cfg.Environment,
+		Endpoint:                    endpoint,
+		TalosVersion:                cfg.Cluster.TalosVersion,
+		TalosSchematic:              cfg.Cluster.TalosSchematic,
+		KubernetesVersion:           cfg.Cluster.KubernetesVersion,
+		InstallDisk:                 installDisk,
+		ControlPlaneTaints:          cfg.Cluster.EffectiveControlPlaneTaints(),
+		KubernetesAPIServerCertSANs: []string{kubernetesAPIEndpoint},
+		SecretsYAML:                 secretsYAML,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("generate talos assets: %w", err)

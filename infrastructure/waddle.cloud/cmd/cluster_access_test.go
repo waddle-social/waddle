@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	clusterstate "github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/cluster"
@@ -54,5 +55,32 @@ func TestTalosAccessEndpointsFQDNNodeName(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("talosAccessEndpoints()[%d] = %q, want %q (got %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestRewriteKubeconfigServerIfNeededUsesCanonicalAPIEndpoint(t *testing.T) {
+	input := []byte(`
+apiVersion: v1
+clusters:
+  - name: production
+    cluster:
+      server: https://172.16.16.16:6443
+contexts: []
+current-context: ""
+kind: Config
+users: []
+`)
+
+	out, err := rewriteKubeconfigServerIfNeeded(input, "production-control-plane-01.infra.waddle.social")
+	if err != nil {
+		t.Fatalf("rewriteKubeconfigServerIfNeeded returned error: %v", err)
+	}
+
+	encoded := string(out)
+	if !strings.Contains(encoded, "server: https://production-control-plane-01.infra.waddle.social:6443") {
+		t.Fatalf("expected rewritten kubeconfig server, got:\n%s", encoded)
+	}
+	if strings.Contains(encoded, "server: https://172.16.16.16:6443") {
+		t.Fatalf("expected private kubeconfig server to be replaced, got:\n%s", encoded)
 	}
 }
