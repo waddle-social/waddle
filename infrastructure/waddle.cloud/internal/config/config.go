@@ -79,7 +79,7 @@ const (
 const StorageProviderOpenEBSMayastorLab = "openebs-mayastor-lab"
 
 const (
-	defaultCiliumVersion = "v1.19.0"
+	defaultCiliumVersion = "v1.19.1"
 	defaultFluxVersion   = "latest"
 )
 

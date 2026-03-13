@@ -5,7 +5,7 @@ cluster:
   kubernetesVersion: v1.35.0
   # Must be updated to a schematic that includes nvme_tcp before using Mayastor.
   talosSchematic: 81efb800f02421130d6f701caaae6f1cb182ef0e7631da1c801dfcb3699c86cd
-  ciliumVersion: v1.19.0
+  ciliumVersion: v1.19.1
   fluxVersion: latest
   controlPlaneTaints: false
 
