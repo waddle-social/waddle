@@ -8,110 +8,26 @@ const session = Astro.locals.session;
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Colony</title>
-    <style>
-      :root {
-        color-scheme: light dark;
-        font-family: ui-sans-serif, system-ui, sans-serif;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: radial-gradient(circle at top, #15304d, #07131f 55%);
-        color: white;
-      }
-
-      main {
-        width: min(32rem, calc(100vw - 2rem));
-        padding: 2rem;
-        border-radius: 1.5rem;
-        background: rgba(8, 15, 24, 0.84);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
-      }
-
-      h1 {
-        margin: 0 0 0.5rem;
-        font-size: clamp(2rem, 4vw, 2.75rem);
-      }
-
-      p {
-        color: rgba(255, 255, 255, 0.78);
-        line-height: 1.6;
-      }
-
-      .card {
-        margin-top: 1.5rem;
-        padding: 1rem;
-        border-radius: 1rem;
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-      }
-
-      .row {
-        display: flex;
-        gap: 0.75rem;
-        align-items: center;
-        margin-top: 1rem;
-      }
-
-      .avatar {
-        inline-size: 3rem;
-        block-size: 3rem;
-        border-radius: 999px;
-        object-fit: cover;
-        background: rgba(255, 255, 255, 0.12);
-      }
-
-      button {
-        appearance: none;
-        border: 0;
-        border-radius: 999px;
-        padding: 0.8rem 1.1rem;
-        font: inherit;
-        font-weight: 700;
-        cursor: pointer;
-        background: white;
-        color: #07131f;
-      }
-
-      button.secondary {
-        background: transparent;
-        color: white;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-      }
-
-      code {
-        font-size: 0.95rem;
-      }
-    </style>
   </head>
   <body>
     <main>
-      <p>Astro 6 + Cloudflare + D1 + Better Auth</p>
       <h1>Colony</h1>
-      <p>GitHub authentication is wired through Better Auth and backed by Drizzle migrations for Cloudflare D1.</p>
+      <p>Astro 6. Cloudflare. D1. Better Auth.</p>
 
       {user && session ? (
-        <section class="card">
-          <p>Signed in as</p>
-          <div class="row">
-            <img class="avatar" src={user.image ?? ""} alt="" />
-            <div>
-              <strong>{user.name ?? user.email}</strong><br />
-              <span>{user.email}</span>
-            </div>
-          </div>
-          <p>Session ID: <code>{session.id}</code></p>
-          <button id="sign-out" class="secondary">Sign out</button>
-        </section>
+        <>
+          <p>Status: signed in.</p>
+          <p>Name: {user.name ?? user.email}</p>
+          <p>Email: {user.email}</p>
+          <p>Session ID: {session.id}</p>
+          <p><button id="sign-out" type="button">Sign out</button></p>
+        </>
       ) : (
-        <section class="card">
-          <p>Use GitHub OAuth to start a session. Configure the redirect URI to <code>https://colony.waddle.social/api/auth/callback/github</code> for production and <code>http://localhost:4321/api/auth/callback/github</code> for local development.</p>
-          <button id="sign-in">Continue with GitHub</button>
-        </section>
+        <>
+          <p>Status: signed out.</p>
+          <p>Use GitHub OAuth to sign in.</p>
+          <p><button id="sign-in" type="button">Sign in with GitHub</button></p>
+        </>
       )}
     </main>
 
