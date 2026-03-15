@@ -6,8 +6,6 @@
 - N/A (clickdummy; local mock state only) (001-waddle-chat-clickdummy)
 - TypeScript 5.8 (Bun toolchain) + Projen `WaddleDataService` generator, Drizzle ORM, Pothos GraphQL + federation plugins, GraphQL Yoga, Cloudflare D1 (001-setup-topics-service)
 
-- TypeScript 5.8.x; Bun 1.3.x + Astro 5, Vue 3, Tailwind, TypeScript, Biome; Cloudflare Workers toolchain for apps that deploy there (001-migrate-bun-workspaces)
-
 ## Project Structure
 
 ```text

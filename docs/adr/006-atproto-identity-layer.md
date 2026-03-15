@@ -148,9 +148,9 @@ interface AtProtoProfile {
 
 ## Implementation Details
 
-### Colony Service Architecture
+### Identity Service Architecture
 
-Colony is a dedicated Cloudflare Workers service that handles:
+The identity service is a dedicated Cloudflare Workers service that handles:
 
 1. **OAuth flow management**: PKCE, DPoP, state management
 2. **DID resolution**: Convert handles to DIDs, fetch DID documents
@@ -161,7 +161,7 @@ Colony is a dedicated Cloudflare Workers service that handles:
 ### DID Resolution
 
 ```typescript
-// colony/lib/auth/handle-resolver.ts
+// auth/handle-resolver.ts
 export async function resolveHandle(handle: string): Promise<string> {
   // Remove @ prefix if present
   const normalizedHandle = handle.startsWith('@') ? handle.slice(1) : handle;
@@ -199,7 +199,7 @@ export async function resolveHandle(handle: string): Promise<string> {
 ### DPoP OAuth Implementation
 
 ```typescript
-// colony/lib/auth/atproto-oauth-worker.ts
+// auth/atproto-oauth-worker.ts
 export class WorkerOAuthClient {
   private clientId: string;
   private redirectUri: string;
@@ -257,7 +257,7 @@ export class WorkerOAuthClient {
 ### Session Management with Better-auth
 
 ```typescript
-// colony/lib/auth/better-auth.ts
+// auth/better-auth.ts
 export async function createAuth(db: D1Database, env: any) {
   return betterAuth({
     database: drizzleAdapter(drizzle(db), {
@@ -298,14 +298,14 @@ export async function createAuth(db: D1Database, env: any) {
 ### Client Metadata Endpoint
 
 ```typescript
-// colony/website/public/client-metadata.json
+// identity-service/public/client-metadata.json
 {
-  "client_id": "https://colony.waddle.social/client-metadata.json",
+  "client_id": "https://identity.waddle.social/client-metadata.json",
   "client_name": "Waddle",
   "client_uri": "https://waddle.social",
   "logo_uri": "https://waddle.social/logo.png",
   "redirect_uris": [
-    "https://colony.waddle.social/api/auth/oauth2/callback/atproto"
+    "https://identity.waddle.social/api/auth/oauth2/callback/atproto"
   ],
   "scope": "atproto transition:email",
   "grant_types": ["authorization_code", "refresh_token"],
@@ -313,7 +313,7 @@ export async function createAuth(db: D1Database, env: any) {
   "token_endpoint_auth_method": "private_key_jwt",
   "token_endpoint_auth_signing_alg": "ES256",
   "dpop_bound_access_tokens": true,
-  "jwks_uri": "https://colony.waddle.social/.well-known/jwks.json"
+  "jwks_uri": "https://identity.waddle.social/.well-known/jwks.json"
 }
 ```
 
@@ -395,4 +395,3 @@ async function syncUserProfile(did: string, env: Env) {
 - [AT Protocol OAuth](https://atproto.com/specs/oauth)
 - [DPoP RFC 9449](https://datatracker.ietf.org/doc/html/rfc9449)
 - [Better-auth Documentation](https://better-auth.com/)
-- [Colony Implementation](@colony/website/src/lib/auth/)

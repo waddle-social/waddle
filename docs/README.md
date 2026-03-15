@@ -171,8 +171,6 @@ PRDs define product features from a user perspective.
 Federated workers are generated from a shared projen template—use these resources when delivering new services or iterating on existing ones:
 
 - **Generator Playbook**: [`generators/projen-data-service/README.md`](../generators/projen-data-service/README.md) — template options, generated layout, and synthesis commands.
-- **Reference Implementation**: [`waddle/services/waddle`](../waddle/services/waddle) — baseline service output; see its README for regenerate/migrate/test flows.
-- **Topics Service Quickstart**: [`docs/prd/topics-service-quickstart.md`](./prd/topics-service-quickstart.md) — end-to-end walkthrough (generate, bind D1, migrate, test, publish schema).
 
 When proposing or updating a data service, ensure specs capture generator inputs (`generate.ts`), schema snapshot expectations, and CI scripts (`bun run test:<service>`). Updates MUST refresh schema snapshots and quickstart instructions alongside code changes.
 

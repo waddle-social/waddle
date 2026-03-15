@@ -187,7 +187,6 @@ import { ApolloServer } from '@apollo/server';
 
 const gateway = new ApolloGateway({
   serviceList: [
-    { name: 'colony', url: env.COLONY_WORKER_URL },
     { name: 'chat', url: env.CHAT_WORKER_URL },
     { name: 'views', url: env.VIEWS_WORKER_URL },
     // ... registered on deployment

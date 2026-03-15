@@ -23,7 +23,7 @@ projen generates boilerplate files for services. Generated files are read-only.
 
 To regenerate files for a service:
 ```bash
-cd waddle/services/<service-name>
+cd <service-directory>
 bun run .projenrc.ts
 ```
 
