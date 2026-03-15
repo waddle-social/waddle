@@ -1,0 +1,31 @@
+{
+  "name": "@waddle/colony",
+  "type": "module",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro check && astro build",
+    "astro": "astro",
+    "deploy": "wrangler deploy",
+    "generate-types": "wrangler types",
+    "auth:generate": "bunx @better-auth/cli generate --config src/lib/auth.ts --output src/db/schema.ts --yes",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^13.1.1",
+    "@better-auth/drizzle-adapter": "^1.5.5",
+    "astro": "^6.0.4",
+    "better-auth": "^1.5.5",
+    "drizzle-orm": "^0.45.1",
+    "wrangler": "^4.73.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.7",
+    "@cloudflare/workers-types": "^4.20260313.1",
+    "drizzle-kit": "^0.31.9",
+    "typescript": "^5.9.3"
+  }
+}

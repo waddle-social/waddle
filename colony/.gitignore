@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+.astro/
+
+# local Cloudflare state
+.wrangler/
+.dev.vars
+
+# editor state
+.vscode/
