@@ -42,7 +42,7 @@ ci: pipelines: {
       defaultBranch: true
       manual:        true
     }
-    tasks: [_t.deployProduction]
+    tasks: [_t.deployMain]
   }
   pullRequest: {
     environment: "production"
@@ -118,5 +118,9 @@ tasks: {
     outputs: [
       ".wrangler/**",
     ]
+  }
+  deployMain: schema.#Task & {
+    command: "true"
+    dependsOn: [_t.deployProduction]
   }
 }
