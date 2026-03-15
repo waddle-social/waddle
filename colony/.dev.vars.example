@@ -1,3 +1,2 @@
+# Local Cloudflare-compatible vars used by Astro dev.
 BETTER_AUTH_URL=http://localhost:4321
-BETTER_AUTH_SECRET=replace-me
-GITHUB_CLIENT_SECRET=replace-me

@@ -11,7 +11,7 @@
     "astro": "astro",
     "deploy": "wrangler deploy",
     "generate-types": "wrangler types",
-    "auth:generate": "bunx @better-auth/cli generate --config src/lib/auth.ts --output src/db/schema.ts --yes",
+    "auth:generate": "sh -ac 'set -a; . ./.auth.env; set +a; bunx @better-auth/cli generate --config src/lib/auth.schema.ts --output src/db/schema.ts --yes'",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
