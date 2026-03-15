@@ -63,37 +63,33 @@ path = "bun-linux-x64/bun"
 version = "22.12.0"
 
 [tools.node.platforms.darwin-arm64]
-provider = "nix"
-digest = "sha256:0c0fcc249c64bf69a38aae942603a1d38f53b1b4f588669d36f4e75c2fb32dcd"
+provider = "url"
+digest = "sha256:12ef5ff7c44d627499c5e62ce93aba58c9dde20a14ac7f5e77da440b336823d8"
 
 [tools.node.platforms.darwin-arm64.source]
-flake = "github:NixOS/nixpkgs/nixos-25.05"
-package = "nodejs_22"
-type = "nix"
+type = "url"
+url = "https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-arm64.tar.gz"
 
 [tools.node.platforms.darwin-x86_64]
-provider = "nix"
-digest = "sha256:3fde672f35c12c4ecd575c69bd3463d3adcb249a58699e76b6ed40e332f55c62"
+provider = "url"
+digest = "sha256:17dca78dc51bdda3a126b6e445fe767c1aa7b30e236db42be58d9bab8f622b87"
 
 [tools.node.platforms.darwin-x86_64.source]
-flake = "github:NixOS/nixpkgs/nixos-25.05"
-package = "nodejs_22"
-type = "nix"
+type = "url"
+url = "https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-x64.tar.gz"
 
 [tools.node.platforms.linux-arm64]
-provider = "nix"
-digest = "sha256:26fc117069dbe8ab88d2f5b6a07055ef9304c4b8634feddafae85d4c4ac9b1ee"
+provider = "url"
+digest = "sha256:785c9c442278c48e98cb2b97b59e4bb47d0680fdd977fe942be14944018a98f3"
 
 [tools.node.platforms.linux-arm64.source]
-flake = "github:NixOS/nixpkgs/nixos-25.05"
-package = "nodejs_22"
-type = "nix"
+type = "url"
+url = "https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz"
 
 [tools.node.platforms.linux-x86_64]
-provider = "nix"
-digest = "sha256:b2860062b99ab6df829eaf6d192efb79c31f3bfbcda48ccaca209b4447d247cb"
+provider = "url"
+digest = "sha256:bf5939596733bccdbf8cda5074a78bc069361620e83007025d3fa0e0e5ce1281"
 
 [tools.node.platforms.linux-x86_64.source]
-flake = "github:NixOS/nixpkgs/nixos-25.05"
-package = "nodejs_22"
-type = "nix"
+type = "url"
+url = "https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz"

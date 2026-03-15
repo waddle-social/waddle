@@ -1,6 +1,9 @@
 package cuenv
 
-import "github.com/cuenv/cuenv/schema"
+import (
+  "github.com/cuenv/cuenv/schema"
+  xNode "github.com/cuenv/cuenv/contrib/node"
+)
 
 schema.#Project
 
@@ -9,18 +12,7 @@ name: "waddle-colony"
 let _t = tasks
 
 runtime: schema.#ToolsRuntime & {
-  flakes: {
-    nixpkgs: "github:NixOS/nixpkgs/nixos-25.05"
-  }
-  tools: {
-    node: {
-      version: "22.12.0"
-      source: schema.#Nix & {
-        flake:   "nixpkgs"
-        package: "nodejs_22"
-      }
-    }
-  }
+  tools: node: xNode.#Node & {version: "22.12.0"}
 }
 
 env: {

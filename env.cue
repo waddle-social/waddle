@@ -19,7 +19,6 @@ hooks: onEnter: tools: schema.#ToolsActivate
 
 ci: providers: ["github"]
 ci: contributors: [
-	c.#Nix,
 	c.#CuenvRelease,
 	c.#OnePassword,
 ]
