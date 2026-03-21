@@ -1225,7 +1225,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             .map(|n| n.to_string())
                             .unwrap_or_default()
                     ),
-                    jid: session.jid.to_bare().into(),
+                    jid: session.jid.to_bare(),
                     created_at: Utc::now(),
                     expires_at: Utc::now() + chrono::Duration::hours(24),
                 });
@@ -3220,22 +3220,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // If target is a local bare JID and the account does not exist,
         // respond with <presence type='unsubscribed'> per RFC 6121 §4.3.
-        if to.domain().as_str() == self.domain {
-            if !self.local_user_exists(&to).await? {
-                let mut unsubscribed =
-                    xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribed);
-                unsubscribed.from = Some(to.clone().into());
-                unsubscribed.to = Some(from.clone().into());
-                self.route_stanza_to_bare_jid(&from, Stanza::Presence(unsubscribed))
-                    .await?;
+        if to.domain().as_str() == self.domain && !self.local_user_exists(&to).await? {
+            let mut unsubscribed =
+                xmpp_parsers::presence::Presence::new(PresenceType::Unsubscribed);
+            unsubscribed.from = Some(to.clone().into());
+            unsubscribed.to = Some(from.clone().into());
+            self.route_stanza_to_bare_jid(&from, Stanza::Presence(unsubscribed))
+                .await?;
 
-                debug!(
-                    from = %from,
-                    to = %to,
-                    "Sent unsubscribed presence in response to probe (account does not exist)"
-                );
-                return Ok(());
-            }
+            debug!(
+                from = %from,
+                to = %to,
+                "Sent unsubscribed presence in response to probe (account does not exist)"
+            );
+            return Ok(());
         }
 
         // Get all connected resources for the target user

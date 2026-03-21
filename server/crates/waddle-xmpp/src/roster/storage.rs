@@ -158,7 +158,7 @@ pub mod test_storage {
             item: &RosterItem,
         ) -> Result<RosterSetResult, XmppError> {
             let mut rosters = self.rosters.write().unwrap();
-            let roster = rosters.entry(user_jid.clone()).or_insert_with(Vec::new);
+            let roster = rosters.entry(user_jid.clone()).or_default();
 
             // Check if item exists
             if let Some(existing) = roster.iter_mut().find(|i| i.jid == item.jid) {
@@ -213,7 +213,7 @@ pub mod test_storage {
             ask: Option<AskType>,
         ) -> Result<RosterItem, XmppError> {
             let mut rosters = self.rosters.write().unwrap();
-            let roster = rosters.entry(user_jid.clone()).or_insert_with(Vec::new);
+            let roster = rosters.entry(user_jid.clone()).or_default();
 
             // Find or create the roster item
             if let Some(existing) = roster.iter_mut().find(|i| &i.jid == contact_jid) {

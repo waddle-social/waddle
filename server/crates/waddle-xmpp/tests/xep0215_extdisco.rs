@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0215: External Service Discovery dedicated suite.
 
 mod common;

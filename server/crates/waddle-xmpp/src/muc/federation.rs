@@ -619,7 +619,7 @@ impl MucRoom {
         let mut result = FederatedMessageSet::new();
 
         // Verify sender is an occupant
-        if self.occupants.get(sender_nick).is_none() {
+        if !self.occupants.contains_key(sender_nick) {
             return result; // Sender not found, nothing to broadcast
         }
 

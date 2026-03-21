@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0479 (XMPP Compliance Suites 2023) orchestration via testcontainers-rs.
 //!
 //! This test:

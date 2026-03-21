@@ -489,7 +489,7 @@ impl S2sOutboundConnection {
         }
 
         // Take the TCP stream and upgrade to TLS
-        let tcp_stream = match std::mem::replace(&mut self.stream, None) {
+        let tcp_stream = match self.stream.take() {
             Some(OutboundStream::Tcp(s)) => s,
             _ => {
                 return Err(OutboundConnectionError::TlsHandshake(

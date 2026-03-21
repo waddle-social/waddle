@@ -14,40 +14,26 @@ pub struct WaddleResponse {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub owner_user_id: String,
-    pub icon_url: Option<String>,
     pub is_public: bool,
-    pub role: Option<String>,
-    pub created_at: String,
-    pub updated_at: Option<String>,
 }
 
 /// Response for list of waddles
 #[derive(Debug, Deserialize)]
 pub struct ListWaddlesResponse {
     pub waddles: Vec<WaddleResponse>,
-    pub total: usize,
 }
 
 /// Response for a single channel from the API
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChannelResponse {
     pub id: String,
-    pub waddle_id: String,
     pub name: String,
-    pub description: Option<String>,
-    pub channel_type: String,
-    pub position: i32,
-    pub is_default: bool,
-    pub created_at: String,
-    pub updated_at: Option<String>,
 }
 
 /// Response for list of channels
 #[derive(Debug, Deserialize)]
 pub struct ListChannelsResponse {
     pub channels: Vec<ChannelResponse>,
-    pub total: usize,
 }
 
 /// Request to create a new waddle

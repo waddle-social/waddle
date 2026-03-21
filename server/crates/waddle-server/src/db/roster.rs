@@ -359,9 +359,9 @@ impl DatabaseRosterStorage {
 
     /// Execute a query using the persistent connection for in-memory databases.
     /// This ensures data written by migrations is visible to queries.
-    async fn query_with_persistent<'a>(
+    async fn query_with_persistent(
         &self,
-        sql: &'a str,
+        sql: &str,
         params: impl IntoParams,
     ) -> Result<libsql::Rows, RosterStorageError> {
         if let Some(persistent) = self.db.persistent_connection() {

@@ -4,11 +4,8 @@
 //! Application state and business logic for the Waddle TUI.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-
 use xmpp_parsers::jid::BareJid;
 
-use crate::embed::{EmbedProcessor, NoopEmbedProcessor};
 use crate::stanza::RawEmbed;
 
 /// Maximum messages to retain per room/conversation.
@@ -175,8 +172,6 @@ pub struct App {
     pub mam_loading: bool,
     /// Unread message counts per view key.
     pub unread_counts: HashMap<String, usize>,
-    /// Embed processor (plugin pipeline).
-    embed_processor: Arc<dyn EmbedProcessor>,
 }
 
 impl std::fmt::Debug for App {
@@ -225,13 +220,7 @@ impl App {
             roster: HashMap::new(),
             mam_loading: false,
             unread_counts: HashMap::new(),
-            embed_processor: Arc::new(NoopEmbedProcessor),
         }
-    }
-
-    /// Set a custom embed processor (for plugin integration).
-    pub fn set_embed_processor(&mut self, processor: Arc<dyn EmbedProcessor>) {
-        self.embed_processor = processor;
     }
 
     /// Get messages for the current active view.
@@ -447,10 +436,6 @@ impl App {
         Some(item)
     }
 
-    pub fn selected_sidebar_item(&self) -> Option<&SidebarItem> {
-        self.sidebar_items.get(self.sidebar_selected)
-    }
-
     pub fn scroll_messages_up(&mut self) {
         let msg_count = self.messages().len();
         if self.message_scroll < msg_count.saturating_sub(1) {
@@ -593,14 +578,6 @@ impl App {
             })
             .map(|(_, count)| count)
             .sum()
-    }
-
-    pub fn clear_xmpp_state(&mut self) {
-        self.joined_rooms.clear();
-        self.current_room_jid = None;
-        self.current_dm_jid = None;
-        self.connection_state = ConnectionState::Disconnected;
-        self.presence_map.clear();
     }
 }
 

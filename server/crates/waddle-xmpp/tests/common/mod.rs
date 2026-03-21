@@ -3,7 +3,6 @@
 //! Provides helpers for starting test servers, generating TLS certificates,
 //! and simulating XMPP client connections.
 
-use std::future::Future;
 use std::io::{BufReader, Cursor};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use std::time::Duration;
 use base64::prelude::*;
 use jid::Jid;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -32,7 +31,51 @@ pub fn install_crypto_provider() {
         rustls::crypto::ring::default_provider()
             .install_default()
             .expect("Failed to install crypto provider");
+        touch_common_symbols();
     });
+}
+
+fn touch_common_symbols() {
+    let _ = DEFAULT_TIMEOUT;
+
+    let _ = MockAppState::new("localhost");
+    let _ = MockAppState::rejecting("localhost");
+
+    let _ = TestServer::start;
+    let _ = TestServer::start_with_state::<MockAppState>;
+    let _ = TestServer::tls_connector as fn(&TestServer) -> TlsConnector;
+    let _ = run_test_server::<MockAppState>;
+
+    let dummy_server = TestServer {
+        addr: "127.0.0.1:5222".parse().expect("valid socket address"),
+        domain: "localhost".to_string(),
+        tls_credentials: TestTlsCredentials {
+            cert_pem: Vec::new(),
+            key_pem: Vec::new(),
+        },
+        shutdown_tx: None,
+    };
+    let _ = dummy_server.addr;
+    let _ = dummy_server.domain.as_str();
+
+    let _ = RawXmppClient::connect;
+    let _ = RawXmppClient::send;
+    let _ = RawXmppClient::read;
+    let _ = RawXmppClient::read_until;
+    let _ = RawXmppClient::clear as fn(&mut RawXmppClient);
+    let _ = RawXmppClient::take_buffer as fn(&mut RawXmppClient) -> String;
+    let _ = RawXmppClient::upgrade_tls;
+    let _ = RawXmppClient::is_tls as fn(&RawXmppClient) -> bool;
+
+    let _ = validate_stream_header as fn(&str) -> Result<(), String>;
+    let _ = extract_bound_jid as fn(&str) -> Option<String>;
+    let _ = init_test_env as fn();
+    let _ = establish_bound_session;
+    let _ = disco_info_query;
+    let _ = extdisco_services_query;
+    let _ = extdisco_services_set_query;
+    let _ = join_muc_room;
+    let _ = ping_query;
 }
 
 /// Default timeout for test operations.
@@ -62,61 +105,50 @@ impl MockAppState {
 }
 
 impl AppState for MockAppState {
-    fn validate_session(
-        &self,
-        jid: &Jid,
-        _token: &str,
-    ) -> impl Future<Output = Result<Session, XmppError>> + Send {
+    async fn validate_session(&self, jid: &Jid, _token: &str) -> Result<Session, XmppError> {
         let accept = self.accept_auth;
         let jid = jid.clone();
-        async move {
-            if accept {
-                Ok(Session {
-                    user_id: format!(
-                        "user-test-{}",
-                        jid.node().map(|n| n.to_string()).unwrap_or_default()
-                    ),
-                    jid: jid.to_bare().into(),
-                    created_at: chrono::Utc::now(),
-                    expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
-                })
-            } else {
-                Err(XmppError::auth_failed("Mock auth rejection"))
-            }
+        if accept {
+            Ok(Session {
+                user_id: format!(
+                    "user-test-{}",
+                    jid.node().map(|n| n.to_string()).unwrap_or_default()
+                ),
+                jid: jid.to_bare(),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+            })
+        } else {
+            Err(XmppError::auth_failed("Mock auth rejection"))
         }
     }
 
-    fn check_permission(
+    async fn check_permission(
         &self,
         _resource: &str,
         _action: &str,
         _subject: &str,
-    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
-        async { Ok(true) }
+    ) -> Result<bool, XmppError> {
+        Ok(true)
     }
 
-    fn validate_session_token(
-        &self,
-        token: &str,
-    ) -> impl Future<Output = Result<Session, XmppError>> + Send {
+    async fn validate_session_token(&self, token: &str) -> Result<Session, XmppError> {
         let accept = self.accept_auth;
         let domain = self.domain.clone();
         let token = token.to_string();
-        async move {
-            if accept {
-                // Mock: derive a JID from the token
-                let mock_jid = format!("user_{}@{}", &token[..token.len().min(8)], domain);
-                Ok(Session {
-                    user_id: format!("user-mock-{}", &token[..token.len().min(8)]),
-                    jid: mock_jid
-                        .parse()
-                        .unwrap_or_else(|_| "fallback@test.local".parse().unwrap()),
-                    created_at: chrono::Utc::now(),
-                    expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
-                })
-            } else {
-                Err(XmppError::auth_failed("Mock auth rejection"))
-            }
+        if accept {
+            // Mock: derive a JID from the token
+            let mock_jid = format!("user_{}@{}", &token[..token.len().min(8)], domain);
+            Ok(Session {
+                user_id: format!("user-mock-{}", &token[..token.len().min(8)]),
+                jid: mock_jid
+                    .parse()
+                    .unwrap_or_else(|_| "fallback@test.local".parse().unwrap()),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+            })
+        } else {
+            Err(XmppError::auth_failed("Mock auth rejection"))
         }
     }
 
@@ -131,272 +163,251 @@ impl AppState for MockAppState {
         )
     }
 
-    fn list_relations(
+    async fn list_relations(
         &self,
         _resource: &str,
         _subject: &str,
-    ) -> impl Future<Output = Result<Vec<String>, XmppError>> + Send {
+    ) -> Result<Vec<String>, XmppError> {
         // Mock returns member relation by default
-        async { Ok(vec!["member".to_string()]) }
+        Ok(vec!["member".to_string()])
     }
 
-    fn list_subjects(
+    async fn list_subjects(
         &self,
         _resource: &str,
         _relation: &str,
-    ) -> impl Future<Output = Result<Vec<String>, XmppError>> + Send {
+    ) -> Result<Vec<String>, XmppError> {
         // Mock returns empty list by default
-        async { Ok(vec![]) }
+        Ok(vec![])
     }
 
-    fn lookup_scram_credentials(
+    async fn lookup_scram_credentials(
         &self,
         _username: &str,
-    ) -> impl Future<Output = Result<Option<ScramCredentials>, XmppError>> + Send {
+    ) -> Result<Option<ScramCredentials>, XmppError> {
         // Mock returns None - native JID auth not supported in mock
-        async { Ok(None) }
+        Ok(None)
     }
 
-    fn register_native_user(
+    async fn register_native_user(
         &self,
         _username: &str,
         _password: &str,
         _email: Option<&str>,
-    ) -> impl Future<Output = Result<(), XmppError>> + Send {
+    ) -> Result<(), XmppError> {
         // Mock registration always succeeds
-        async { Ok(()) }
+        Ok(())
     }
 
-    fn native_user_exists(
-        &self,
-        _username: &str,
-    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
+    async fn native_user_exists(&self, _username: &str) -> Result<bool, XmppError> {
         // Mock returns false - no users exist in mock by default
-        async { Ok(false) }
+        Ok(false)
     }
 
-    fn get_vcard(
-        &self,
-        _jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Option<String>, XmppError>> + Send {
+    async fn get_vcard(&self, _jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
         // Mock returns None - no vCards exist in mock by default
-        async { Ok(None) }
+        Ok(None)
     }
 
-    fn set_vcard(
-        &self,
-        _jid: &jid::BareJid,
-        _vcard_xml: &str,
-    ) -> impl Future<Output = Result<(), XmppError>> + Send {
+    async fn set_vcard(&self, _jid: &jid::BareJid, _vcard_xml: &str) -> Result<(), XmppError> {
         // Mock vCard storage always succeeds
-        async { Ok(()) }
+        Ok(())
     }
 
-    fn create_upload_slot(
+    async fn create_upload_slot(
         &self,
-        requester_jid: &jid::BareJid,
+        _requester_jid: &jid::BareJid,
         filename: &str,
         size: u64,
         content_type: Option<&str>,
-    ) -> impl Future<Output = Result<waddle_xmpp::UploadSlotInfo, XmppError>> + Send {
+    ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
         let domain = self.domain.clone();
         let filename = filename.to_string();
         let content_type = content_type.map(|s| s.to_string());
-        let _jid = requester_jid.clone();
-        async move {
-            // Check size limit (mock limit: 10 MB)
-            if size > 10 * 1024 * 1024 {
-                return Err(XmppError::not_acceptable(Some(
-                    "File too large. Maximum size is 10485760 bytes.".to_string(),
-                )));
-            }
-
-            // Generate mock URLs
-            let slot_id = format!("mock-slot-{}", uuid::Uuid::new_v4());
-            let put_url = format!("https://{}/api/upload/{}", domain, slot_id);
-            let get_url = format!("https://{}/api/files/{}/{}", domain, slot_id, filename);
-
-            Ok(waddle_xmpp::UploadSlotInfo {
-                put_url,
-                get_url,
-                put_headers: vec![(
-                    "Content-Type".to_string(),
-                    content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
-                )],
-            })
+        // Check size limit (mock limit: 10 MB)
+        if size > 10 * 1024 * 1024 {
+            return Err(XmppError::not_acceptable(Some(
+                "File too large. Maximum size is 10485760 bytes.".to_string(),
+            )));
         }
+
+        // Generate mock URLs
+        let slot_id = format!("mock-slot-{}", uuid::Uuid::new_v4());
+        let put_url = format!("https://{}/api/upload/{}", domain, slot_id);
+        let get_url = format!("https://{}/api/files/{}/{}", domain, slot_id, filename);
+
+        Ok(waddle_xmpp::UploadSlotInfo {
+            put_url,
+            get_url,
+            put_headers: vec![(
+                "Content-Type".to_string(),
+                content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+            )],
+        })
     }
 
     // =========================================================================
     // RFC 6121 Roster Storage Methods (Mock implementations)
     // =========================================================================
 
-    fn get_roster(
+    async fn get_roster(
         &self,
         _user_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Vec<roster::RosterItem>, XmppError>> + Send {
+    ) -> Result<Vec<roster::RosterItem>, XmppError> {
         // Mock returns empty roster
-        async { Ok(vec![]) }
+        Ok(vec![])
     }
 
-    fn get_roster_item(
+    async fn get_roster_item(
         &self,
         _user_jid: &jid::BareJid,
         _contact_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Option<roster::RosterItem>, XmppError>> + Send {
+    ) -> Result<Option<roster::RosterItem>, XmppError> {
         // Mock returns None - no roster items exist in mock
-        async { Ok(None) }
+        Ok(None)
     }
 
-    fn set_roster_item(
+    async fn set_roster_item(
         &self,
         _user_jid: &jid::BareJid,
         item: &roster::RosterItem,
-    ) -> impl Future<Output = Result<roster::RosterSetResult, XmppError>> + Send {
+    ) -> Result<roster::RosterSetResult, XmppError> {
         // Mock always reports item as added
         let item = item.clone();
-        async move { Ok(roster::RosterSetResult::Added(item)) }
+        Ok(roster::RosterSetResult::Added(item))
     }
 
-    fn remove_roster_item(
+    async fn remove_roster_item(
         &self,
         _user_jid: &jid::BareJid,
         _contact_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
+    ) -> Result<bool, XmppError> {
         // Mock returns false - no items to remove in mock
-        async { Ok(false) }
+        Ok(false)
     }
 
-    fn get_roster_version(
+    async fn get_roster_version(
         &self,
         _user_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Option<String>, XmppError>> + Send {
+    ) -> Result<Option<String>, XmppError> {
         // Mock returns None - no roster versioning in mock
-        async { Ok(None) }
+        Ok(None)
     }
 
-    fn update_roster_subscription(
+    async fn update_roster_subscription(
         &self,
         _user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
         subscription: roster::Subscription,
         ask: Option<roster::AskType>,
-    ) -> impl Future<Output = Result<roster::RosterItem, XmppError>> + Send {
+    ) -> Result<roster::RosterItem, XmppError> {
         // Mock returns a new roster item with the specified subscription
         let contact_jid = contact_jid.clone();
-        async move {
-            Ok(roster::RosterItem {
-                jid: contact_jid,
-                name: None,
-                subscription,
-                ask,
-                groups: vec![],
-            })
-        }
+        Ok(roster::RosterItem {
+            jid: contact_jid,
+            name: None,
+            subscription,
+            ask,
+            groups: vec![],
+        })
     }
 
-    fn get_presence_subscribers(
+    async fn get_presence_subscribers(
         &self,
         _user_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send {
+    ) -> Result<Vec<jid::BareJid>, XmppError> {
         // Mock returns empty list - no subscribers in mock
-        async { Ok(vec![]) }
+        Ok(vec![])
     }
 
-    fn get_presence_subscriptions(
+    async fn get_presence_subscriptions(
         &self,
         _user_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Vec<jid::BareJid>, XmppError>> + Send {
+    ) -> Result<Vec<jid::BareJid>, XmppError> {
         // Mock returns empty list - no subscriptions in mock
-        async { Ok(vec![]) }
+        Ok(vec![])
     }
 
     // =========================================================================
     // XEP-0191 Blocking Command Methods (Mock implementations)
     // =========================================================================
 
-    fn get_blocklist(
-        &self,
-        _user_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<Vec<String>, XmppError>> + Send {
+    async fn get_blocklist(&self, _user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
         // Mock returns empty blocklist
-        async { Ok(vec![]) }
+        Ok(vec![])
     }
 
-    fn is_blocked(
+    async fn is_blocked(
         &self,
         _user_jid: &jid::BareJid,
         _blocked_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<bool, XmppError>> + Send {
+    ) -> Result<bool, XmppError> {
         // Mock returns false - no one is blocked in mock
-        async { Ok(false) }
+        Ok(false)
     }
 
-    fn add_blocks(
+    async fn add_blocks(
         &self,
         _user_jid: &jid::BareJid,
         blocked_jids: &[String],
-    ) -> impl Future<Output = Result<usize, XmppError>> + Send {
+    ) -> Result<usize, XmppError> {
         // Mock returns the count of JIDs (simulating all were added)
         let count = blocked_jids.len();
-        async move { Ok(count) }
+        Ok(count)
     }
 
-    fn remove_blocks(
+    async fn remove_blocks(
         &self,
         _user_jid: &jid::BareJid,
         blocked_jids: &[String],
-    ) -> impl Future<Output = Result<usize, XmppError>> + Send {
+    ) -> Result<usize, XmppError> {
         // Mock returns the count (simulating all were removed)
         let count = blocked_jids.len();
-        async move { Ok(count) }
+        Ok(count)
     }
 
-    fn remove_all_blocks(
-        &self,
-        _user_jid: &jid::BareJid,
-    ) -> impl Future<Output = Result<usize, XmppError>> + Send {
+    async fn remove_all_blocks(&self, _user_jid: &jid::BareJid) -> Result<usize, XmppError> {
         // Mock returns 0 - nothing to remove in mock
-        async { Ok(0) }
+        Ok(0)
     }
 
     // =========================================================================
     // XEP-0049 Private XML Storage Methods (Mock implementations)
     // =========================================================================
 
-    fn get_private_xml(
+    async fn get_private_xml(
         &self,
         _jid: &jid::BareJid,
         _namespace: &str,
-    ) -> impl Future<Output = Result<Option<String>, XmppError>> + Send {
+    ) -> Result<Option<String>, XmppError> {
         // Mock returns None - no private data in mock
-        async { Ok(None) }
+        Ok(None)
     }
 
-    fn set_private_xml(
+    async fn set_private_xml(
         &self,
         _jid: &jid::BareJid,
         _namespace: &str,
         _xml_content: &str,
-    ) -> impl Future<Output = Result<(), XmppError>> + Send {
+    ) -> Result<(), XmppError> {
         // Mock private XML storage always succeeds
-        async { Ok(()) }
+        Ok(())
     }
 
-    fn list_user_waddles(
+    async fn list_user_waddles(
         &self,
         _user_id: &str,
-    ) -> impl Future<Output = Result<Vec<waddle_xmpp::WaddleInfo>, XmppError>> + Send {
+    ) -> Result<Vec<waddle_xmpp::WaddleInfo>, XmppError> {
         // Mock returns no waddles — auto-join is a no-op in tests by default
-        async { Ok(Vec::new()) }
+        Ok(Vec::new())
     }
 
-    fn list_waddle_channels(
+    async fn list_waddle_channels(
         &self,
         _waddle_id: &str,
-    ) -> impl Future<Output = Result<Vec<waddle_xmpp::ChannelInfo>, XmppError>> + Send {
+    ) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
         // Mock returns no channels
-        async { Ok(Vec::new()) }
+        Ok(Vec::new())
     }
 }
 
@@ -404,32 +415,26 @@ impl AppState for MockAppState {
 pub struct TestTlsCredentials {
     pub cert_pem: Vec<u8>,
     pub key_pem: Vec<u8>,
-    pub cert_der: CertificateDer<'static>,
 }
 
 impl TestTlsCredentials {
     /// Generate self-signed TLS credentials for testing.
     pub fn generate(domain: &str) -> Self {
+        install_crypto_provider();
         let subject_alt_names = vec![domain.to_string(), "localhost".to_string()];
         let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)
             .expect("Failed to generate test certificate");
 
         let cert_pem = cert.pem().into_bytes();
         let key_pem = key_pair.serialize_pem().into_bytes();
-        let cert_der = CertificateDer::from(cert.der().to_vec());
-
-        Self {
-            cert_pem,
-            key_pem,
-            cert_der,
-        }
+        Self { cert_pem, key_pem }
     }
 
     /// Create a TLS acceptor (server-side) from these credentials.
     pub fn tls_acceptor(&self) -> TlsAcceptor {
         use rustls_pemfile::{certs, pkcs8_private_keys};
 
-        let certs: Vec<CertificateDer> = certs(&mut BufReader::new(Cursor::new(&self.cert_pem)))
+        let certs: Vec<_> = certs(&mut BufReader::new(Cursor::new(&self.cert_pem)))
             .filter_map(|r| r.ok())
             .collect();
 
@@ -449,10 +454,14 @@ impl TestTlsCredentials {
 
     /// Create a TLS connector (client-side) that trusts this certificate.
     pub fn tls_connector(&self) -> TlsConnector {
+        use rustls_pemfile::certs;
+
         let mut root_store = RootCertStore::empty();
-        root_store
-            .add(self.cert_der.clone())
-            .expect("Failed to add cert");
+        let cert_der = certs(&mut BufReader::new(Cursor::new(&self.cert_pem)))
+            .filter_map(|r| r.ok())
+            .next()
+            .expect("No certificate");
+        root_store.add(cert_der).expect("Failed to add cert");
 
         let client_config = ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -478,6 +487,7 @@ impl TestServer {
 
     /// Start a test server with custom app state.
     pub async fn start_with_state<S: AppState>(app_state: Arc<S>) -> Self {
+        install_crypto_provider();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("Failed to bind test server");
@@ -504,13 +514,6 @@ impl TestServer {
             tls_credentials,
             shutdown_tx: Some(shutdown_tx),
         }
-    }
-
-    /// Get a TCP stream connected to this server.
-    pub async fn connect(&self) -> TcpStream {
-        TcpStream::connect(self.addr)
-            .await
-            .expect("Failed to connect to test server")
     }
 
     /// Get a TLS connector that trusts this server.
@@ -587,225 +590,6 @@ async fn run_test_server<S: AppState>(
                 break;
             }
         }
-    }
-}
-
-/// XMPP test client for interop testing.
-pub struct TestClient {
-    stream: TestClientStream,
-    domain: String,
-    buffer: Vec<u8>,
-}
-
-enum TestClientStream {
-    Tcp(TcpStream),
-    Tls(tokio_rustls::client::TlsStream<TcpStream>),
-}
-
-impl TestClient {
-    /// Create a new test client connected to the server.
-    pub async fn connect(server: &TestServer) -> Self {
-        let stream = server.connect().await;
-        Self {
-            stream: TestClientStream::Tcp(stream),
-            domain: server.domain.clone(),
-            buffer: Vec::new(),
-        }
-    }
-
-    /// Send raw XML data.
-    pub async fn send(&mut self, data: &str) -> Result<(), std::io::Error> {
-        match &mut self.stream {
-            TestClientStream::Tcp(s) => {
-                s.write_all(data.as_bytes()).await?;
-                s.flush().await?;
-            }
-            TestClientStream::Tls(s) => {
-                s.write_all(data.as_bytes()).await?;
-                s.flush().await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Read raw data with timeout.
-    pub async fn read_raw(&mut self, timeout_dur: Duration) -> Result<String, std::io::Error> {
-        let mut buf = [0u8; 8192];
-        let n = match timeout(timeout_dur, async {
-            match &mut self.stream {
-                TestClientStream::Tcp(s) => s.read(&mut buf).await,
-                TestClientStream::Tls(s) => s.read(&mut buf).await,
-            }
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Read timeout",
-                ))
-            }
-        };
-
-        self.buffer.extend_from_slice(&buf[..n]);
-        Ok(String::from_utf8_lossy(&self.buffer).to_string())
-    }
-
-    /// Read until we find a specific pattern.
-    pub async fn read_until(
-        &mut self,
-        pattern: &str,
-        timeout_dur: Duration,
-    ) -> Result<String, std::io::Error> {
-        let start = std::time::Instant::now();
-        loop {
-            let data = String::from_utf8_lossy(&self.buffer).to_string();
-            if data.contains(pattern) {
-                return Ok(data);
-            }
-
-            if start.elapsed() > timeout_dur {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("Timeout waiting for pattern: {}", pattern),
-                ));
-            }
-
-            let mut buf = [0u8; 4096];
-            let remaining = timeout_dur - start.elapsed();
-            let n = match timeout(remaining, async {
-                match &mut self.stream {
-                    TestClientStream::Tcp(s) => s.read(&mut buf).await,
-                    TestClientStream::Tls(s) => s.read(&mut buf).await,
-                }
-            })
-            .await
-            {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Read timeout",
-                    ))
-                }
-            };
-
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Connection closed",
-                ));
-            }
-
-            self.buffer.extend_from_slice(&buf[..n]);
-        }
-    }
-
-    /// Clear the read buffer.
-    pub fn clear_buffer(&mut self) {
-        self.buffer.clear();
-    }
-
-    /// Send XMPP stream header.
-    pub async fn send_stream_header(&mut self) -> Result<(), std::io::Error> {
-        let header = format!(
-            "<?xml version='1.0'?>\
-            <stream:stream \
-            xmlns='jabber:client' \
-            xmlns:stream='http://etherx.jabber.org/streams' \
-            to='{}' \
-            version='1.0'>",
-            self.domain
-        );
-        self.send(&header).await
-    }
-
-    /// Wait for stream header response from server.
-    pub async fn expect_stream_header(&mut self) -> Result<String, std::io::Error> {
-        self.read_until("<stream:stream", DEFAULT_TIMEOUT).await
-    }
-
-    /// Wait for stream features.
-    pub async fn expect_features(&mut self) -> Result<String, std::io::Error> {
-        self.read_until("</stream:features>", DEFAULT_TIMEOUT).await
-    }
-
-    /// Send STARTTLS request.
-    pub async fn send_starttls(&mut self) -> Result<(), std::io::Error> {
-        self.send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
-            .await
-    }
-
-    /// Wait for STARTTLS proceed response.
-    pub async fn expect_proceed(&mut self) -> Result<String, std::io::Error> {
-        self.read_until("<proceed", DEFAULT_TIMEOUT).await
-    }
-
-    /// Upgrade the connection to TLS.
-    /// Note: This method is not used - prefer RawXmppClient for TLS tests.
-    #[allow(dead_code)]
-    pub async fn upgrade_to_tls(
-        &mut self,
-        _connector: TlsConnector,
-        _domain: &str,
-    ) -> Result<(), std::io::Error> {
-        // Note: TestClient with proper TLS upgrade would require unsafe or interior mutability
-        // Use RawXmppClient instead for TLS upgrade tests
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Use RawXmppClient for TLS upgrade",
-        ))
-    }
-
-    /// Send SASL PLAIN auth.
-    pub async fn send_sasl_plain(&mut self, jid: &str, token: &str) -> Result<(), std::io::Error> {
-        // SASL PLAIN format: \0authcid\0password
-        let auth_data = format!("\0{}\0{}", jid, token);
-        let encoded = BASE64_STANDARD.encode(auth_data.as_bytes());
-
-        self.send(&format!(
-            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
-            encoded
-        ))
-        .await
-    }
-
-    /// Wait for SASL success.
-    pub async fn expect_sasl_success(&mut self) -> Result<String, std::io::Error> {
-        self.read_until("<success", DEFAULT_TIMEOUT).await
-    }
-
-    /// Wait for SASL failure.
-    pub async fn expect_sasl_failure(&mut self) -> Result<String, std::io::Error> {
-        self.read_until("<failure", DEFAULT_TIMEOUT).await
-    }
-
-    /// Send resource bind request.
-    pub async fn send_bind(&mut self, resource: Option<&str>) -> Result<(), std::io::Error> {
-        let bind_body = match resource {
-            Some(r) => format!("<resource>{}</resource>", r),
-            None => String::new(),
-        };
-
-        self.send(&format!(
-            "<iq type='set' id='bind_1' xmlns='jabber:client'>\
-                <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>{}</bind>\
-            </iq>",
-            bind_body
-        ))
-        .await
-    }
-
-    /// Wait for bind result.
-    pub async fn expect_bind_result(&mut self) -> Result<String, std::io::Error> {
-        self.read_until("</iq>", DEFAULT_TIMEOUT).await
-    }
-
-    /// Send stream close.
-    pub async fn send_stream_close(&mut self) -> Result<(), std::io::Error> {
-        self.send("</stream:stream>").await
     }
 }
 
@@ -887,7 +671,7 @@ impl RawXmppClient {
         self.buffer.clear();
     }
 
-    /// Take the buffer.
+    /// Take the buffered response data.
     pub fn take_buffer(&mut self) -> String {
         std::mem::take(&mut self.buffer)
     }
@@ -898,12 +682,10 @@ impl RawXmppClient {
         connector: TlsConnector,
         domain: &str,
     ) -> std::io::Result<()> {
-        let tcp = self.tcp.take().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No TCP connection or already TLS",
-            )
-        })?;
+        let tcp = self
+            .tcp
+            .take()
+            .ok_or_else(|| std::io::Error::other("No TCP connection or already TLS"))?;
 
         let server_name: rustls::pki_types::ServerName<'static> =
             domain.to_string().try_into().map_err(|_| {
@@ -916,7 +698,7 @@ impl RawXmppClient {
         Ok(())
     }
 
-    /// Check if using TLS.
+    /// Check if the connection has been upgraded to TLS.
     pub fn is_tls(&self) -> bool {
         self.tls.is_some()
     }
@@ -1076,11 +858,6 @@ pub async fn establish_bound_session(
     })
 }
 
-/// Convert a full JID string to bare JID.
-pub fn to_bare_jid(full_jid: &str) -> Option<String> {
-    full_jid.split('/').next().map(|s| s.to_string())
-}
-
 async fn read_iq_response(client: &mut RawXmppClient) -> std::io::Result<String> {
     let start = std::time::Instant::now();
     loop {
@@ -1115,23 +892,6 @@ pub async fn disco_info_query(
         .send(&format!(
             "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
                 <query xmlns='http://jabber.org/protocol/disco#info'/>\
-            </iq>",
-            id, to
-        ))
-        .await?;
-    read_iq_response(client).await
-}
-
-/// Send a disco#items query and read a single IQ response.
-pub async fn disco_items_query(
-    client: &mut RawXmppClient,
-    to: &str,
-    id: &str,
-) -> std::io::Result<String> {
-    client
-        .send(&format!(
-            "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
-                <query xmlns='http://jabber.org/protocol/disco#items'/>\
             </iq>",
             id, to
         ))
@@ -1205,4 +965,53 @@ pub async fn ping_query(client: &mut RawXmppClient, to: &str, id: &str) -> std::
         ))
         .await?;
     read_iq_response(client).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_surface_smoke_test() {
+        let accepting = MockAppState::new("localhost");
+        let rejecting = MockAppState::rejecting("localhost");
+        assert!(accepting.accept_auth);
+        assert!(!rejecting.accept_auth);
+
+        let creds = TestTlsCredentials::generate("localhost");
+        let _ = creds.tls_acceptor();
+        let _ = creds.tls_connector();
+
+        let dummy_server = TestServer {
+            addr: "127.0.0.1:5222".parse().expect("valid socket address"),
+            domain: "localhost".to_string(),
+            tls_credentials: TestTlsCredentials::generate("localhost"),
+            shutdown_tx: None,
+        };
+        let _ = dummy_server.tls_connector();
+
+        let mut client = RawXmppClient {
+            tcp: None,
+            tls: None,
+            buffer: "hello".to_string(),
+        };
+        assert!(!client.is_tls());
+        assert_eq!(client.take_buffer(), "hello");
+        client.clear();
+        assert!(client.buffer.is_empty());
+
+        assert_eq!(
+            encode_sasl_plain("alice@localhost", "token123"),
+            BASE64_STANDARD.encode("\0alice@localhost\0token123".as_bytes())
+        );
+        assert_eq!(
+            extract_bound_jid("<jid>alice@localhost/desktop</jid>").as_deref(),
+            Some("alice@localhost/desktop")
+        );
+        assert!(validate_stream_header(
+            "<stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' id='stream-id' from='localhost' version='1.0'>"
+        )
+        .is_ok());
+        assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(5));
+    }
 }

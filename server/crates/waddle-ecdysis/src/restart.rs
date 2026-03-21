@@ -5,7 +5,7 @@
 
 use std::os::unix::io::AsRawFd;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::info;
 
 /// Error returned when restart fails.
 /// Contains the listeners so the caller can resume serving.
@@ -177,7 +177,6 @@ fn exec_with_env(exe: &std::path::Path, args: &[String], extra_env: &[(&str, &st
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     /// CLOEXEC flag management works correctly.
     #[test]

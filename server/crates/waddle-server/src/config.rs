@@ -2,7 +2,7 @@
 
 use crate::auth::providers::AuthProviderConfig;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, str::FromStr};
 use tracing::info;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -25,27 +25,25 @@ impl fmt::Display for ServerMode {
 }
 
 impl ServerMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "standalone" | "xmpp" | "xmpp-only" => ServerMode::Standalone,
-            _ => ServerMode::HomeServer,
-        }
-    }
-
     pub fn auth_broker_allowed(&self) -> bool {
         matches!(self, ServerMode::HomeServer)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AuthConfig {
-    pub providers: Vec<AuthProviderConfig>,
+impl FromStr for ServerMode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "standalone" | "xmpp" | "xmpp-only" => ServerMode::Standalone,
+            _ => ServerMode::HomeServer,
+        })
+    }
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self { providers: vec![] }
-    }
+#[derive(Debug, Clone, Default)]
+pub struct AuthConfig {
+    pub providers: Vec<AuthProviderConfig>,
 }
 
 impl AuthConfig {
@@ -100,7 +98,7 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn from_env() -> Result<Self, String> {
         let mode_str = std::env::var("WADDLE_MODE").unwrap_or_else(|_| "homeserver".to_string());
-        let mode = ServerMode::from_str(&mode_str);
+        let mode = mode_str.parse().unwrap_or_default();
 
         let base_url = std::env::var("WADDLE_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:3000".to_string());

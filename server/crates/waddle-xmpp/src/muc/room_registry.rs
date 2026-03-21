@@ -187,10 +187,12 @@ impl MucRoomRegistry {
         let channel_id = room_local.clone();
 
         // Create default config for instant room (open, not members-only)
-        let mut config = RoomConfig::default();
-        config.name = room_local;
-        config.members_only = false; // Instant rooms are open by default
-        config.persistent = false; // Instant rooms are not persistent
+        let config = RoomConfig {
+            name: room_local,
+            members_only: false, // Instant rooms are open by default
+            persistent: false,   // Instant rooms are not persistent
+            ..RoomConfig::default()
+        };
 
         // Create new room
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);

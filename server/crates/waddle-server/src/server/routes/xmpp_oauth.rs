@@ -66,8 +66,6 @@ pub struct XmppAuthorizeQuery {
     pub code_challenge_method: Option<String>,
     #[serde(default)]
     pub state: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -158,8 +156,6 @@ pub struct XmppTokenRequest {
     pub grant_type: String,
     pub code: String,
     pub redirect_uri: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
     #[serde(default)]
     pub code_verifier: Option<String>,
 }

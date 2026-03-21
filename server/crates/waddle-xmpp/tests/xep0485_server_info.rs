@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0485: PubSub Server Information compatibility suite.
 
 mod common;

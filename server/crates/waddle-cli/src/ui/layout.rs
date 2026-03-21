@@ -73,11 +73,11 @@ pub fn render_layout(frame: &mut Frame, app: &App, config: &Config) {
     let areas = calculate_layout(frame.area(), config.ui.sidebar_width);
 
     // Render sidebar with connection status in title
-    let (status_indicator, status_color) = match &app.connection_state {
-        ConnectionState::Disconnected => ("○", Color::DarkGray),
-        ConnectionState::Connecting | ConnectionState::Reconnecting { .. } => ("◐", Color::Yellow),
-        ConnectionState::Connected => ("●", Color::Green),
-        ConnectionState::Error(_) => ("✕", Color::Red),
+    let status_color = match &app.connection_state {
+        ConnectionState::Disconnected => Color::DarkGray,
+        ConnectionState::Connecting | ConnectionState::Reconnecting { .. } => Color::Yellow,
+        ConnectionState::Connected => Color::Green,
+        ConnectionState::Error(_) => Color::Red,
     };
 
     let status_detail = match &app.connection_state {
@@ -86,12 +86,15 @@ pub fn render_layout(frame: &mut Frame, app: &App, config: &Config) {
             countdown_secs,
         } => format!(" retry #{} {:.0}s ", attempt, countdown_secs),
         ConnectionState::Error(msg) => format!(" {} ", &msg[..msg.len().min(20)]),
-        _ => String::new(),
+        _ => format!(" {} ", app.connection_state.display()),
     };
 
     let sidebar_title = Line::from(vec![
         Span::raw(" Waddle "),
-        Span::styled(status_indicator, Style::default().fg(status_color)),
+        Span::styled(
+            app.connection_state.indicator(),
+            Style::default().fg(status_color),
+        ),
         Span::styled(status_detail, Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
     ]);

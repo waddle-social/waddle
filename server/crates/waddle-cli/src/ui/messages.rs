@@ -153,7 +153,7 @@ fn format_github_embed(embed: &RawEmbed) -> String {
 }
 
 /// Quick attribute extraction from serialized XML (no full parse needed for display).
-fn extract_attr<'a>(xml: &'a str, attr_name: &str) -> Option<String> {
+fn extract_attr(xml: &str, attr_name: &str) -> Option<String> {
     let pattern = format!("{}='", attr_name);
     if let Some(start) = xml.find(&pattern) {
         let value_start = start + pattern.len();

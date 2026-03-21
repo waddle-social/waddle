@@ -39,7 +39,7 @@ fn muc_groupchat_message_with_body() {
     let body: Option<String> = elem
         .children()
         .find(|c| c.is("body", "jabber:client"))
-        .and_then(|c| Some(c.text()));
+        .map(|c| c.text());
     assert_eq!(body, Some("Hello everyone!".to_string()));
 }
 

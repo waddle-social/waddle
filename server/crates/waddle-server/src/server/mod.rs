@@ -58,16 +58,11 @@ struct AcmeRuntime {
 pub struct AppState {
     /// Database pool for global and per-waddle databases
     pub db_pool: Arc<DatabasePool>,
-    /// Server configuration (mode, etc.)
-    pub server_config: ServerConfig,
 }
 
 impl AppState {
-    pub fn new(db_pool: Arc<DatabasePool>, server_config: ServerConfig) -> Self {
-        Self {
-            db_pool,
-            server_config,
-        }
+    pub fn new(db_pool: Arc<DatabasePool>) -> Self {
+        Self { db_pool }
     }
 }
 
@@ -390,7 +385,7 @@ pub async fn start_with_config(
     };
 
     // Create HTTP state (shares db_pool via Arc)
-    let state = Arc::new(AppState::new(Arc::clone(&db_pool), server_config.clone()));
+    let state = Arc::new(AppState::new(Arc::clone(&db_pool)));
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
@@ -910,10 +905,7 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        Arc::new(AppState::new(
-            Arc::new(db_pool),
-            ServerConfig::test_homeserver(),
-        ))
+        Arc::new(AppState::new(Arc::new(db_pool)))
     }
 
     #[tokio::test]

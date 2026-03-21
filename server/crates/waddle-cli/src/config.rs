@@ -147,24 +147,6 @@ impl Config {
         }
     }
 
-    /// Save configuration to XDG config directory
-    pub fn save(&self) -> Result<()> {
-        let config_path = Self::config_file_path()?;
-
-        // Ensure directory exists
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
-        }
-
-        let content = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
-        std::fs::write(&config_path, content)
-            .with_context(|| format!("Failed to write config file: {:?}", config_path))?;
-
-        tracing::info!("Saved configuration to {:?}", config_path);
-        Ok(())
-    }
-
     /// Get the path to the config file
     pub fn config_file_path() -> Result<PathBuf> {
         let config_dir = Self::config_dir()?;
@@ -187,27 +169,6 @@ impl Config {
         std::fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create data directory: {:?}", path))?;
         Ok(path)
-    }
-
-    /// Get the cache directory path (~/.cache/waddle/)
-    pub fn cache_dir() -> Result<PathBuf> {
-        let base = dirs::cache_dir().context("Failed to determine cache directory")?;
-        let path = base.join("waddle");
-        std::fs::create_dir_all(&path)
-            .with_context(|| format!("Failed to create cache directory: {:?}", path))?;
-        Ok(path)
-    }
-
-    /// Create a default config file if it doesn't exist
-    pub fn create_default_if_missing() -> Result<bool> {
-        let config_path = Self::config_file_path()?;
-        if !config_path.exists() {
-            let config = Config::default();
-            config.save()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 }
 

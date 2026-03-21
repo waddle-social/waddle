@@ -122,7 +122,6 @@ pub async fn device_start_handler(
         device_code: generate_device_code(),
         user_code: generate_user_code(),
         provider_id: request.provider,
-        created_at: Utc::now(),
         expires_at: Utc::now() + Duration::minutes(15),
         status: DeviceAuthStatus::Pending,
         session_id: None,

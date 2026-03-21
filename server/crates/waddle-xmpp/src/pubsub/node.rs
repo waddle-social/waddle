@@ -2,7 +2,7 @@
 //!
 //! Defines node configuration options including access models and publish models.
 
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 /// Access model for a PubSub node.
 ///
@@ -23,20 +23,6 @@ pub enum AccessModel {
     Authorize,
 }
 
-impl AccessModel {
-    /// Parse an access model from a string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "open" => Some(AccessModel::Open),
-            "presence" => Some(AccessModel::Presence),
-            "roster" => Some(AccessModel::Roster),
-            "whitelist" => Some(AccessModel::Whitelist),
-            "authorize" => Some(AccessModel::Authorize),
-            _ => None,
-        }
-    }
-}
-
 impl fmt::Display for AccessModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -47,6 +33,21 @@ impl fmt::Display for AccessModel {
             AccessModel::Authorize => "authorize",
         };
         write!(f, "{}", s)
+    }
+}
+
+impl FromStr for AccessModel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "open" => Ok(AccessModel::Open),
+            "presence" => Ok(AccessModel::Presence),
+            "roster" => Ok(AccessModel::Roster),
+            "whitelist" => Ok(AccessModel::Whitelist),
+            "authorize" => Ok(AccessModel::Authorize),
+            _ => Err(()),
+        }
     }
 }
 
@@ -64,18 +65,6 @@ pub enum PublishModel {
     Open,
 }
 
-impl PublishModel {
-    /// Parse a publish model from a string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "publishers" => Some(PublishModel::Publishers),
-            "subscribers" => Some(PublishModel::Subscribers),
-            "open" => Some(PublishModel::Open),
-            _ => None,
-        }
-    }
-}
-
 impl fmt::Display for PublishModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -84,6 +73,19 @@ impl fmt::Display for PublishModel {
             PublishModel::Open => "open",
         };
         write!(f, "{}", s)
+    }
+}
+
+impl FromStr for PublishModel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "publishers" => Ok(PublishModel::Publishers),
+            "subscribers" => Ok(PublishModel::Subscribers),
+            "open" => Ok(PublishModel::Open),
+            _ => Err(()),
+        }
     }
 }
 
@@ -175,18 +177,6 @@ pub enum SendLastPublishedItem {
     OnSubAndPresence,
 }
 
-impl SendLastPublishedItem {
-    /// Parse from a string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "never" => Some(SendLastPublishedItem::Never),
-            "on_sub" => Some(SendLastPublishedItem::OnSub),
-            "on_sub_and_presence" => Some(SendLastPublishedItem::OnSubAndPresence),
-            _ => None,
-        }
-    }
-}
-
 impl fmt::Display for SendLastPublishedItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -198,23 +188,33 @@ impl fmt::Display for SendLastPublishedItem {
     }
 }
 
+impl FromStr for SendLastPublishedItem {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "never" => Ok(SendLastPublishedItem::Never),
+            "on_sub" => Ok(SendLastPublishedItem::OnSub),
+            "on_sub_and_presence" => Ok(SendLastPublishedItem::OnSubAndPresence),
+            _ => Err(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_access_model_parse() {
-        assert_eq!(AccessModel::from_str("open"), Some(AccessModel::Open));
+        assert_eq!("open".parse::<AccessModel>(), Ok(AccessModel::Open));
+        assert_eq!("presence".parse::<AccessModel>(), Ok(AccessModel::Presence));
+        assert_eq!("roster".parse::<AccessModel>(), Ok(AccessModel::Roster));
         assert_eq!(
-            AccessModel::from_str("presence"),
-            Some(AccessModel::Presence)
+            "whitelist".parse::<AccessModel>(),
+            Ok(AccessModel::Whitelist)
         );
-        assert_eq!(AccessModel::from_str("roster"), Some(AccessModel::Roster));
-        assert_eq!(
-            AccessModel::from_str("whitelist"),
-            Some(AccessModel::Whitelist)
-        );
-        assert_eq!(AccessModel::from_str("invalid"), None);
+        assert!("invalid".parse::<AccessModel>().is_err());
     }
 
     #[test]
@@ -226,11 +226,11 @@ mod tests {
     #[test]
     fn test_publish_model_parse() {
         assert_eq!(
-            PublishModel::from_str("publishers"),
-            Some(PublishModel::Publishers)
+            "publishers".parse::<PublishModel>(),
+            Ok(PublishModel::Publishers)
         );
-        assert_eq!(PublishModel::from_str("open"), Some(PublishModel::Open));
-        assert_eq!(PublishModel::from_str("invalid"), None);
+        assert_eq!("open".parse::<PublishModel>(), Ok(PublishModel::Open));
+        assert!("invalid".parse::<PublishModel>().is_err());
     }
 
     #[test]

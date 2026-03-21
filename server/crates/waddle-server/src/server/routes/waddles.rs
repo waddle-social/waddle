@@ -1772,10 +1772,7 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(
-            Arc::new(db_pool),
-            crate::config::ServerConfig::test_homeserver(),
-        ));
+        let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
         Arc::new(WaddleState::new(
             app_state,
             Some(b"test-encryption-key-32-bytes!!!"),

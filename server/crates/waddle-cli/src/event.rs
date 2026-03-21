@@ -18,9 +18,9 @@ pub enum Event {
     /// Key press event
     Key(KeyEvent),
     /// Mouse event (future use)
-    Mouse(crossterm::event::MouseEvent),
+    Mouse,
     /// Terminal resize
-    Resize(u16, u16),
+    Resize,
 }
 
 /// Event handler that runs in a background task
@@ -53,13 +53,13 @@ impl EventHandler {
                                 break;
                             }
                         }
-                        Ok(CrosstermEvent::Mouse(mouse)) => {
-                            if tx.send(Event::Mouse(mouse)).is_err() {
+                        Ok(CrosstermEvent::Mouse(_mouse)) => {
+                            if tx.send(Event::Mouse).is_err() {
                                 break;
                             }
                         }
-                        Ok(CrosstermEvent::Resize(width, height)) => {
-                            if tx.send(Event::Resize(width, height)).is_err() {
+                        Ok(CrosstermEvent::Resize(_width, _height)) => {
+                            if tx.send(Event::Resize).is_err() {
                                 break;
                             }
                         }

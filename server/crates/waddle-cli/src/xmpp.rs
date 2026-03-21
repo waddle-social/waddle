@@ -26,7 +26,6 @@ use crate::stanza::{self, RawEmbed, StanzaEvent};
 pub enum XmppClientEvent {
     Connected,
     Disconnected,
-    Error(String),
     RoomJoined {
         room_jid: BareJid,
     },
@@ -67,9 +66,7 @@ pub enum XmppClientEvent {
         embeds: Vec<RawEmbed>,
         timestamp: Option<String>,
     },
-    MamFinished {
-        complete: bool,
-    },
+    MamFinished,
     /// Connection retry state for status bar display.
     RetryScheduled {
         attempt: u32,
@@ -108,11 +105,6 @@ impl RetryState {
         let delay = Duration::from_secs_f64(delay_secs);
         self.next_retry_at = Some(Instant::now() + delay);
         delay
-    }
-
-    fn seconds_until_retry(&self) -> Option<f64> {
-        self.next_retry_at
-            .map(|t| t.saturating_duration_since(Instant::now()).as_secs_f64())
     }
 }
 
@@ -323,8 +315,8 @@ impl XmppClient {
                 embeds,
                 timestamp,
             },
-            StanzaEvent::MamFinished { complete } => XmppClientEvent::MamFinished { complete },
-            StanzaEvent::UnhandledIq(_) => return,
+            StanzaEvent::MamFinished => XmppClientEvent::MamFinished,
+            StanzaEvent::UnhandledIq => return,
         };
 
         let _ = self.event_tx.send(client_event);
@@ -337,16 +329,6 @@ impl XmppClient {
         let elem = stanza::build_muc_join(room_jid, nick);
         if let Err(e) = self.client.send_stanza(elem).await {
             error!("Failed to send MUC join: {e}");
-        }
-    }
-
-    /// Leave a MUC room.
-    pub async fn leave_room(&mut self, room_jid: &BareJid, nickname: Option<&str>) {
-        let nick = nickname.unwrap_or(&self.nickname);
-        info!("Leaving room {}", room_jid);
-        let elem = stanza::build_muc_leave(room_jid, nick);
-        if let Err(e) = self.client.send_stanza(elem).await {
-            error!("Failed to send MUC leave: {e}");
         }
     }
 
@@ -387,11 +369,6 @@ impl XmppClient {
     pub async fn disconnect(&mut self) {
         info!("Disconnecting XMPP client");
         let _ = self.client.send_end().await;
-    }
-
-    /// Get seconds until next retry (for status bar display).
-    pub fn retry_countdown(&self) -> Option<f64> {
-        self.retry.seconds_until_retry()
     }
 }
 

@@ -10,8 +10,6 @@
 //!
 //! Run with: `cargo test -p waddle-xmpp --test federated_muc`
 
-mod common;
-
 use jid::FullJid;
 use xmpp_parsers::message::{Message, MessageType};
 
@@ -27,7 +25,6 @@ fn init_test() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        common::install_crypto_provider();
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
             .with_test_writer()

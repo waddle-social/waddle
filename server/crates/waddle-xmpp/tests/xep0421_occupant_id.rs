@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0421: Anonymous unique occupant identifiers compatibility suite.
 
 mod common;

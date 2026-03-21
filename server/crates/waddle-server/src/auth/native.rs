@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2,
 };
 use base64::prelude::*;
@@ -28,33 +28,6 @@ use super::AuthError;
 /// Default PBKDF2 iteration count for SCRAM key derivation.
 /// 4096 is the minimum recommended by RFC 7677.
 pub const DEFAULT_SCRAM_ITERATIONS: u32 = 4096;
-
-/// Native user record from the database.
-#[derive(Debug, Clone)]
-pub struct NativeUser {
-    /// Database ID
-    pub id: i64,
-    /// Username (local part of JID)
-    pub username: String,
-    /// Domain (domain part of JID)
-    pub domain: String,
-    /// Argon2id password hash
-    pub password_hash: String,
-    /// SCRAM salt (base64 encoded)
-    pub salt: String,
-    /// PBKDF2 iterations for SCRAM
-    pub iterations: u32,
-    /// SCRAM StoredKey (raw bytes)
-    pub stored_key: Vec<u8>,
-    /// SCRAM ServerKey (raw bytes)
-    pub server_key: Vec<u8>,
-    /// Optional email for recovery
-    pub email: Option<String>,
-    /// Creation timestamp
-    pub created_at: String,
-    /// Last update timestamp
-    pub updated_at: String,
-}
 
 /// Request to register a new native user via XEP-0077.
 #[derive(Debug, Clone)]
@@ -222,12 +195,15 @@ impl NativeUserStore {
     }
 
     /// Verify a password for a native user using Argon2id.
+    #[cfg(test)]
     pub async fn verify_password(
         &self,
         username: &str,
         domain: &str,
         password: &str,
     ) -> Result<bool, AuthError> {
+        use argon2::password_hash::PasswordVerifier;
+
         let conn = self.get_connection().await?;
 
         let mut rows = conn
@@ -242,7 +218,7 @@ impl NativeUserStore {
         match rows.next().await.map_err(db_err)? {
             Some(row) => {
                 let hash_str: String = row.get(0).map_err(db_err)?;
-                let parsed_hash = PasswordHash::new(&hash_str)
+                let parsed_hash = argon2::password_hash::PasswordHash::new(&hash_str)
                     .map_err(|e| AuthError::CryptoError(format!("Invalid password hash: {}", e)))?;
                 Ok(Argon2::default()
                     .verify_password(password.as_bytes(), &parsed_hash)
@@ -252,51 +228,10 @@ impl NativeUserStore {
         }
     }
 
-    /// Get a native user by username and domain.
-    pub async fn get_user(
-        &self,
-        username: &str,
-        domain: &str,
-    ) -> Result<Option<NativeUser>, AuthError> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn.as_ref()
-            .query(
-                r#"
-                SELECT id, username, domain, password_hash, salt, iterations, stored_key, server_key, email, created_at, updated_at
-                FROM native_users
-                WHERE username = ? AND domain = ?
-                "#,
-                (username, domain),
-            )
-            .await
-            .map_err(db_err)?;
-
-        match rows.next().await.map_err(db_err)? {
-            Some(row) => {
-                let iterations: i64 = row.get(5).map_err(db_err)?;
-                let user = NativeUser {
-                    id: row.get(0).map_err(db_err)?,
-                    username: row.get(1).map_err(db_err)?,
-                    domain: row.get(2).map_err(db_err)?,
-                    password_hash: row.get(3).map_err(db_err)?,
-                    salt: row.get(4).map_err(db_err)?,
-                    iterations: iterations as u32,
-                    stored_key: row.get(6).map_err(db_err)?,
-                    server_key: row.get(7).map_err(db_err)?,
-                    email: row.get(8).ok(),
-                    created_at: row.get(9).map_err(db_err)?,
-                    updated_at: row.get(10).map_err(db_err)?,
-                };
-                Ok(Some(user))
-            }
-            None => Ok(None),
-        }
-    }
-
     /// Update a user's password.
     ///
     /// This regenerates both the Argon2id hash and SCRAM keys.
+    #[cfg(test)]
     pub async fn update_password(
         &self,
         username: &str,
@@ -350,6 +285,7 @@ impl NativeUserStore {
     }
 
     /// Delete a native user.
+    #[cfg(test)]
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let conn = self.get_connection().await?;
 

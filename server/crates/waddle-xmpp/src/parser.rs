@@ -507,11 +507,9 @@ fn parse_stream_error(data: &str) -> Result<ParsedStanza, XmppError> {
     let text = if let Some(start) = data.find("<text") {
         if let Some(content_start) = data[start..].find('>') {
             let actual_start = start + content_start + 1;
-            if let Some(end) = data[actual_start..].find("</text>") {
-                Some(data[actual_start..actual_start + end].trim().to_string())
-            } else {
-                None
-            }
+            data[actual_start..]
+                .find("</text>")
+                .map(|end| data[actual_start..actual_start + end].trim().to_string())
         } else {
             None
         }

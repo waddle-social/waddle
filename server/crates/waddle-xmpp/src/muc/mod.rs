@@ -509,7 +509,7 @@ impl MucRoom {
     ///
     /// # Arguments
     /// * `domain` - The domain to filter by. Use "local" for local occupants,
-    ///              or a specific domain name for remote occupants.
+    ///   or a specific domain name for remote occupants.
     pub fn get_occupants_for_domain(&self, domain: &str) -> Vec<&Occupant> {
         if domain == "local" {
             // Return occupants without a home_server (local users)

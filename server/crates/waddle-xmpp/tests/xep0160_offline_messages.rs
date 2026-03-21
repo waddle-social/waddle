@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0160: Best Practices for Handling Offline Messages dedicated suite.
 
 mod common;

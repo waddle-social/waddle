@@ -11,8 +11,6 @@
 //!
 //! Run with: `cargo test -p waddle-xmpp --test s2s_integration`
 
-mod common;
-
 use std::time::Duration;
 
 use waddle_xmpp::s2s::{
@@ -24,19 +22,6 @@ use waddle_xmpp::s2s::{
     pool::{PooledConnectionState, RetryConfig, S2sPoolConfig, S2sPoolMetrics},
     S2sDirection, S2sMetrics, S2sState,
 };
-
-/// Initialize test environment.
-fn init_test() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        common::install_crypto_provider();
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("debug")
-            .with_test_writer()
-            .try_init();
-    });
-}
 
 // =============================================================================
 // Test: Dialback Key Generation and Verification

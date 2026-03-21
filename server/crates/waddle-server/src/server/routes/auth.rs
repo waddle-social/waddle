@@ -34,7 +34,6 @@ use uuid::Uuid;
 
 /// Shared auth state.
 pub struct AuthState {
-    pub app_state: Arc<AppState>,
     pub session_manager: SessionManager,
     pub identity_service: IdentityService,
     pub providers: ProviderRegistry,
@@ -58,7 +57,6 @@ impl AuthState {
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
         Self {
-            app_state,
             session_manager,
             identity_service,
             providers,
@@ -204,7 +202,6 @@ pub struct DeviceAuthorization {
     pub device_code: String,
     pub user_code: String,
     pub provider_id: String,
-    pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub status: DeviceAuthStatus,
     pub session_id: Option<String>,
@@ -225,7 +222,6 @@ pub enum DeviceAuthStatus {
 
 #[derive(Debug, Clone)]
 pub struct XmppAuthCode {
-    pub code: String,
     pub session_id: String,
     pub redirect_uri: String,
     pub code_challenge: Option<String>,
@@ -588,7 +584,6 @@ pub async fn callback_handler(
             state.xmpp_auth_codes.insert(
                 auth_code.clone(),
                 XmppAuthCode {
-                    code: auth_code.clone(),
                     session_id: session.id,
                     redirect_uri: client_redirect_uri.clone(),
                     code_challenge: client_code_challenge,

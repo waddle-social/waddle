@@ -6,7 +6,7 @@
 //! A decentralized social platform built on XMPP federation.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -24,7 +24,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod api;
 mod app;
 mod config;
-mod embed;
 mod event;
 mod login;
 mod sanitize;
@@ -71,36 +70,39 @@ enum Commands {
         private: bool,
     },
     /// Run XMPP compliance suite via the managed testcontainers harness
-    Compliance {
-        #[arg(long, default_value = "best_effort_full")]
-        profile: String,
-        #[arg(short = 'd', long, default_value = "localhost")]
-        domain: String,
-        #[arg(short = 'H', long, default_value = "host.docker.internal")]
-        host: String,
-        #[arg(short = 't', long, default_value_t = 10_000)]
-        timeout_ms: u32,
-        #[arg(short = 'u', long, default_value = "")]
-        admin_username: String,
-        #[arg(short = 'P', long, default_value = "")]
-        admin_password: String,
-        #[arg(short = 'e', long)]
-        enabled_specs: Option<String>,
-        #[arg(short = 'D', long)]
-        disabled_specs: Option<String>,
-        #[arg(long)]
-        enabled_tests: Option<String>,
-        #[arg(long)]
-        disabled_tests: Option<String>,
-        #[arg(short = 'l', long, default_value = "./test-logs")]
-        artifact_dir: String,
-        #[arg(long)]
-        keep_containers: bool,
-        #[arg(long)]
-        server_bin: Option<String>,
-        #[arg(long)]
-        skip_server_build: bool,
-    },
+    Compliance(Box<ComplianceArgs>),
+}
+
+#[derive(Args)]
+struct ComplianceArgs {
+    #[arg(long, default_value = "best_effort_full")]
+    profile: String,
+    #[arg(short = 'd', long, default_value = "localhost")]
+    domain: String,
+    #[arg(short = 'H', long, default_value = "host.docker.internal")]
+    host: String,
+    #[arg(short = 't', long, default_value_t = 10_000)]
+    timeout_ms: u32,
+    #[arg(short = 'u', long, default_value = "")]
+    admin_username: String,
+    #[arg(short = 'P', long, default_value = "")]
+    admin_password: String,
+    #[arg(short = 'e', long)]
+    enabled_specs: Option<String>,
+    #[arg(short = 'D', long)]
+    disabled_specs: Option<String>,
+    #[arg(long)]
+    enabled_tests: Option<String>,
+    #[arg(long)]
+    disabled_tests: Option<String>,
+    #[arg(short = 'l', long, default_value = "./test-logs")]
+    artifact_dir: String,
+    #[arg(long)]
+    keep_containers: bool,
+    #[arg(long)]
+    server_bin: Option<String>,
+    #[arg(long)]
+    skip_server_build: bool,
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -300,9 +302,9 @@ async fn handle_terminal_event(
                 KeyAction::None => {}
             }
         }
-        Event::Resize(_, _) => {}
+        Event::Resize => {}
         Event::Tick => {}
-        Event::Mouse(_) => {}
+        Event::Mouse => {}
     }
 }
 
@@ -317,9 +319,6 @@ async fn handle_xmpp_event(
         }
         XmppClientEvent::Disconnected => {
             app.set_connection_state(ConnectionState::Disconnected);
-        }
-        XmppClientEvent::Error(err) => {
-            app.set_connection_state(ConnectionState::Error(err));
         }
         XmppClientEvent::RetryScheduled {
             attempt,
@@ -410,7 +409,7 @@ async fn handle_xmpp_event(
                 app.prepend_message(&view_key, id, author, body, embeds, ts);
             }
         }
-        XmppClientEvent::MamFinished { .. } => {
+        XmppClientEvent::MamFinished => {
             app.mam_loading = false;
         }
     }
@@ -489,39 +488,7 @@ async fn main() -> Result<()> {
             description,
             private,
         }) => return run_create(&name, description.as_deref(), !private).await,
-        Some(Commands::Compliance {
-            profile,
-            domain,
-            host,
-            timeout_ms,
-            admin_username,
-            admin_password,
-            enabled_specs,
-            disabled_specs,
-            enabled_tests,
-            disabled_tests,
-            artifact_dir,
-            keep_containers,
-            server_bin,
-            skip_server_build,
-        }) => {
-            return run_compliance(
-                &profile,
-                &domain,
-                &host,
-                timeout_ms,
-                &admin_username,
-                &admin_password,
-                enabled_specs.as_deref(),
-                disabled_specs.as_deref(),
-                enabled_tests.as_deref(),
-                disabled_tests.as_deref(),
-                &artifact_dir,
-                keep_containers,
-                server_bin.as_deref(),
-                skip_server_build,
-            );
-        }
+        Some(Commands::Compliance(args)) => return run_compliance(&args),
         None => {}
     }
 
@@ -593,32 +560,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_compliance(
-    profile: &str,
-    domain: &str,
-    host: &str,
-    timeout_ms: u32,
-    admin_username: &str,
-    admin_password: &str,
-    enabled_specs: Option<&str>,
-    disabled_specs: Option<&str>,
-    enabled_tests: Option<&str>,
-    disabled_tests: Option<&str>,
-    artifact_dir: &str,
-    keep_containers: bool,
-    server_bin: Option<&str>,
-    skip_server_build: bool,
-) -> Result<()> {
+fn run_compliance(args: &ComplianceArgs) -> Result<()> {
     let workspace = workspace_root();
-    let resolved_artifact_dir = resolve_artifact_dir(artifact_dir)?;
+    let resolved_artifact_dir = resolve_artifact_dir(&args.artifact_dir)?;
     let container_timeout_secs = std::env::var("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS")
         .unwrap_or_else(|_| "0".to_string());
 
     println!("Running XMPP compliance harness...");
-    println!("  Profile:      {}", profile);
-    println!("  Domain:       {}", domain);
-    println!("  Host:         {}", host);
-    println!("  Timeout (ms): {}", timeout_ms);
+    println!("  Profile:      {}", args.profile);
+    println!("  Domain:       {}", args.domain);
+    println!("  Host:         {}", args.host);
+    println!("  Timeout (ms): {}", args.timeout_ms);
     println!("  Artifacts:    {}", resolved_artifact_dir.display());
 
     let mut command = std::process::Command::new("cargo");
@@ -632,10 +584,10 @@ fn run_compliance(
         .arg("--")
         .arg("--ignored")
         .arg("--nocapture")
-        .env("WADDLE_COMPLIANCE_PROFILE", profile)
-        .env("WADDLE_COMPLIANCE_DOMAIN", domain)
-        .env("WADDLE_COMPLIANCE_HOST", host)
-        .env("WADDLE_COMPLIANCE_TIMEOUT_MS", timeout_ms.to_string())
+        .env("WADDLE_COMPLIANCE_PROFILE", &args.profile)
+        .env("WADDLE_COMPLIANCE_DOMAIN", &args.domain)
+        .env("WADDLE_COMPLIANCE_HOST", &args.host)
+        .env("WADDLE_COMPLIANCE_TIMEOUT_MS", args.timeout_ms.to_string())
         .env(
             "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS",
             container_timeout_secs.trim(),
@@ -646,32 +598,40 @@ fn run_compliance(
         )
         .env(
             "WADDLE_COMPLIANCE_KEEP_CONTAINERS",
-            if keep_containers { "true" } else { "false" },
+            if args.keep_containers {
+                "true"
+            } else {
+                "false"
+            },
         )
         .env(
             "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD",
-            if skip_server_build { "true" } else { "false" },
+            if args.skip_server_build {
+                "true"
+            } else {
+                "false"
+            },
         );
 
-    if !admin_username.trim().is_empty() {
-        command.env("WADDLE_COMPLIANCE_ADMIN_USERNAME", admin_username);
+    if !args.admin_username.trim().is_empty() {
+        command.env("WADDLE_COMPLIANCE_ADMIN_USERNAME", &args.admin_username);
     }
-    if !admin_password.trim().is_empty() {
-        command.env("WADDLE_COMPLIANCE_ADMIN_PASSWORD", admin_password);
+    if !args.admin_password.trim().is_empty() {
+        command.env("WADDLE_COMPLIANCE_ADMIN_PASSWORD", &args.admin_password);
     }
-    if let Some(v) = enabled_specs {
+    if let Some(v) = args.enabled_specs.as_deref() {
         command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", v);
     }
-    if let Some(v) = disabled_specs {
+    if let Some(v) = args.disabled_specs.as_deref() {
         command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", v);
     }
-    if let Some(v) = enabled_tests {
+    if let Some(v) = args.enabled_tests.as_deref() {
         command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", v);
     }
-    if let Some(v) = disabled_tests {
+    if let Some(v) = args.disabled_tests.as_deref() {
         command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", v);
     }
-    if let Some(v) = server_bin {
+    if let Some(v) = args.server_bin.as_deref() {
         command.env("WADDLE_SERVER_BIN", v);
     }
 

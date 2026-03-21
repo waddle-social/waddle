@@ -268,7 +268,7 @@ impl PubSubStorage for InMemoryPubSubStorage {
         // Create stored item
         let stored_item = StoredItem {
             id: item_id.clone(),
-            payload_xml: item.payload.as_ref().map(|e| String::from(e)),
+            payload_xml: item.payload.as_ref().map(String::from),
             publisher: publisher.cloned(),
             published_at: chrono::Utc::now(),
         };

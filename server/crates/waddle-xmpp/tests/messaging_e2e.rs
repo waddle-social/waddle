@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! End-to-End Messaging Tests
 //!
 //! These tests verify that the XMPP messaging implementation works correctly:
@@ -507,8 +509,8 @@ async fn test_real_time_delivery_ordering() {
         if let Some(body_start) = msg.find("<body>") {
             if let Some(body_end) = msg.find("</body>") {
                 let body = &msg[body_start + 6..body_end];
-                if body.starts_with("Message ") {
-                    if let Ok(num) = body[8..].parse::<i32>() {
+                if let Some(message_num) = body.strip_prefix("Message ") {
+                    if let Ok(num) = message_num.parse::<i32>() {
                         received_order.push(num);
                     }
                 }
@@ -528,11 +530,11 @@ async fn test_real_time_delivery_ordering() {
         received_order.len()
     );
 
-    for i in 0..message_count {
+    for (i, received) in received_order.iter().enumerate().take(message_count) {
         assert_eq!(
-            received_order[i] as usize, i,
+            *received as usize, i,
             "Message {} should be in position {}, but position {} has {}",
-            i, i, i, received_order[i]
+            i, i, i, received
         );
     }
 

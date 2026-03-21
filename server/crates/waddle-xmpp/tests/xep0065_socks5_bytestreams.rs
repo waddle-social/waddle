@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0065: SOCKS5 Bytestreams compatibility suite.
 
 mod common;

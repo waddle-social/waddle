@@ -47,9 +47,8 @@ impl ListenerSet {
 
         let mut listeners = Vec::with_capacity(listen_fds);
 
-        for i in 0..listen_fds {
+        for (i, name) in names.iter().enumerate().take(listen_fds) {
             let fd = 3 + i as i32;
-            let name = names[i];
 
             assert!(
                 validate_fd(fd),
@@ -69,7 +68,7 @@ impl ListenerSet {
 
             let addr = listener.local_addr().ok();
             info!(fd, name, addr = ?addr, "Inherited listener from parent process");
-            listeners.push((name.to_string(), listener));
+            listeners.push(((*name).to_string(), listener));
         }
 
         // Clear the env vars so child processes don't re-inherit stale values

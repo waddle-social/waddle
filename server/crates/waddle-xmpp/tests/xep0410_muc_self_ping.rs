@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0410: MUC Self-Ping Optimization dedicated suite.
 
 mod common;

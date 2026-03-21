@@ -1114,12 +1114,14 @@ fn row_to_roster_item(
         .parse()
         .map_err(|e| format!("Invalid JID '{}': {:?}", row.contact_jid, e))?;
 
-    let subscription = waddle_xmpp::roster::Subscription::from_str(&row.subscription)
+    let subscription = row
+        .subscription
+        .parse::<waddle_xmpp::roster::Subscription>()
         .map_err(|e| format!("Invalid subscription '{}': {}", row.subscription, e))?;
 
     let ask = match &row.ask {
         Some(a) => Some(
-            waddle_xmpp::roster::AskType::from_str(a)
+            a.parse::<waddle_xmpp::roster::AskType>()
                 .map_err(|e| format!("Invalid ask '{}': {}", a, e))?,
         ),
         None => None,

@@ -53,7 +53,7 @@ use jid::BareJid;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fmt;
+use std::{fmt, str::FromStr};
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 
@@ -135,12 +135,12 @@ impl RosterItem {
         // Subscription is optional, defaults to None
         let subscription = elem
             .attr("subscription")
-            .map(Subscription::from_str)
+            .map(str::parse::<Subscription>)
             .transpose()?
             .unwrap_or(Subscription::None);
 
         // Ask is optional
-        let ask = elem.attr("ask").map(AskType::from_str).transpose()?;
+        let ask = elem.attr("ask").map(str::parse::<AskType>).transpose()?;
 
         // Groups are child elements. RFC 6121 does not allow empty or duplicate
         // group names within a roster item.
@@ -235,8 +235,22 @@ impl Subscription {
         }
     }
 
-    /// Parse a subscription state from a string.
-    pub fn from_str(s: &str) -> Result<Self, XmppError> {
+    /// Check if this is a removal request.
+    pub fn is_remove(&self) -> bool {
+        matches!(self, Subscription::Remove)
+    }
+}
+
+impl fmt::Display for Subscription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for Subscription {
+    type Err = XmppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Subscription::None),
             "to" => Ok(Subscription::To),
@@ -248,17 +262,6 @@ impl Subscription {
                 s
             )))),
         }
-    }
-
-    /// Check if this is a removal request.
-    pub fn is_remove(&self) -> bool {
-        matches!(self, Subscription::Remove)
-    }
-}
-
-impl fmt::Display for Subscription {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
     }
 }
 
@@ -280,9 +283,18 @@ impl AskType {
             AskType::Subscribe => "subscribe",
         }
     }
+}
 
-    /// Parse an ask type from a string.
-    pub fn from_str(s: &str) -> Result<Self, XmppError> {
+impl fmt::Display for AskType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for AskType {
+    type Err = XmppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "subscribe" => Ok(AskType::Subscribe),
             _ => Err(XmppError::bad_request(Some(format!(
@@ -290,12 +302,6 @@ impl AskType {
                 s
             )))),
         }
-    }
-}
-
-impl fmt::Display for AskType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
     }
 }
 
@@ -645,15 +651,15 @@ mod tests {
 
     #[test]
     fn test_subscription_from_str() {
-        assert_eq!(Subscription::from_str("none").unwrap(), Subscription::None);
-        assert_eq!(Subscription::from_str("to").unwrap(), Subscription::To);
-        assert_eq!(Subscription::from_str("from").unwrap(), Subscription::From);
-        assert_eq!(Subscription::from_str("both").unwrap(), Subscription::Both);
+        assert_eq!("none".parse::<Subscription>().unwrap(), Subscription::None);
+        assert_eq!("to".parse::<Subscription>().unwrap(), Subscription::To);
+        assert_eq!("from".parse::<Subscription>().unwrap(), Subscription::From);
+        assert_eq!("both".parse::<Subscription>().unwrap(), Subscription::Both);
         assert_eq!(
-            Subscription::from_str("remove").unwrap(),
+            "remove".parse::<Subscription>().unwrap(),
             Subscription::Remove
         );
-        assert!(Subscription::from_str("invalid").is_err());
+        assert!("invalid".parse::<Subscription>().is_err());
     }
 
     #[test]
@@ -667,8 +673,8 @@ mod tests {
 
     #[test]
     fn test_ask_type_from_str() {
-        assert_eq!(AskType::from_str("subscribe").unwrap(), AskType::Subscribe);
-        assert!(AskType::from_str("invalid").is_err());
+        assert_eq!("subscribe".parse::<AskType>().unwrap(), AskType::Subscribe);
+        assert!("invalid".parse::<AskType>().is_err());
     }
 
     #[test]

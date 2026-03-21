@@ -152,9 +152,9 @@ impl DatabaseBlockingStorage {
 
     /// Execute a query using the persistent connection for in-memory databases.
     /// This ensures data written by migrations is visible to queries.
-    async fn query_with_persistent<'a>(
+    async fn query_with_persistent(
         &self,
-        sql: &'a str,
+        sql: &str,
         params: impl IntoParams,
     ) -> Result<libsql::Rows, BlockingStorageError> {
         if let Some(persistent) = self.db.persistent_connection() {
@@ -253,7 +253,7 @@ mod tests {
 
         // Remove one block
         let removed = storage
-            .remove_blocks(&user_jid, &[blocked_jid1.clone()])
+            .remove_blocks(&user_jid, std::slice::from_ref(&blocked_jid1))
             .await
             .unwrap();
         assert_eq!(removed, 1);
@@ -283,14 +283,14 @@ mod tests {
 
         // Add block
         let added = storage
-            .add_blocks(&user_jid, &[blocked_jid.clone()])
+            .add_blocks(&user_jid, std::slice::from_ref(&blocked_jid))
             .await
             .unwrap();
         assert_eq!(added, 1);
 
         // Add same block again - should be ignored
         let added = storage
-            .add_blocks(&user_jid, &[blocked_jid.clone()])
+            .add_blocks(&user_jid, std::slice::from_ref(&blocked_jid))
             .await
             .unwrap();
         assert_eq!(added, 0);
@@ -327,7 +327,7 @@ mod tests {
 
         // Alice blocks Eve
         storage
-            .add_blocks(&alice_jid, &[blocked_jid.clone()])
+            .add_blocks(&alice_jid, std::slice::from_ref(&blocked_jid))
             .await
             .unwrap();
 

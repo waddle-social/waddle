@@ -57,11 +57,7 @@ pub enum StanzaEvent {
         embeds: Vec<RawEmbed>,
     },
     /// MUC room subject was set.
-    RoomSubject {
-        room_jid: BareJid,
-        nick: Option<String>,
-        subject: String,
-    },
+    RoomSubject { room_jid: BareJid, subject: String },
     /// Successfully joined a MUC room (self-presence with status 110).
     RoomJoined { room_jid: BareJid },
     /// Left a MUC room (unavailable self-presence).
@@ -73,22 +69,20 @@ pub enum StanzaEvent {
         jid: BareJid,
         available: bool,
         show: Option<String>,
-        status: Option<String>,
     },
     /// MAM result: a forwarded historical message.
     MamMessage {
         room_jid: Option<BareJid>,
         id: Option<String>,
-        from: Option<Jid>,
         body: String,
         sender_nick: Option<String>,
         embeds: Vec<RawEmbed>,
         timestamp: Option<String>,
     },
     /// MAM query completed (fin element received).
-    MamFinished { complete: bool },
+    MamFinished,
     /// An IQ result we don't specifically handle.
-    UnhandledIq(Iq),
+    UnhandledIq,
 }
 
 /// Known namespaces that are part of standard XMPP and should NOT be treated as embeds.
@@ -178,16 +172,8 @@ fn dispatch_message(msg: Message) -> Vec<StanzaEvent> {
         MessageType::Groupchat => {
             // Check for subject
             if let Some((_lang, subject)) = msg.get_best_subject(vec!["en", ""]) {
-                let nick = match from.clone().try_into_full() {
-                    Ok(full) => Some(sanitize_for_terminal(
-                        full.resource().as_str(),
-                        Some(MAX_NICK_LEN),
-                    )),
-                    Err(_) => None,
-                };
                 events.push(StanzaEvent::RoomSubject {
                     room_jid: from.to_bare(),
-                    nick,
                     subject: sanitize_for_terminal(&subject.0, Some(MAX_BODY_LEN)),
                 });
             }
@@ -247,7 +233,7 @@ fn dispatch_presence(pres: Presence) -> Vec<StanzaEvent> {
                 return false;
             }
             MucUser::try_from(p.clone())
-                .map(|mu| mu.status.iter().any(|s| *s == Status::SelfPresence))
+                .map(|mu| mu.status.contains(&Status::SelfPresence))
                 .unwrap_or(false)
         });
 
@@ -268,17 +254,10 @@ fn dispatch_presence(pres: Presence) -> Vec<StanzaEvent> {
         // Regular contact presence
         let available = !matches!(pres.type_, PresenceType::Unavailable);
         let show = pres.show.as_ref().map(|s| format!("{s:?}"));
-        let status_text = pres
-            .statuses
-            .get("")
-            .or_else(|| pres.statuses.values().next())
-            .map(|s| sanitize_for_terminal(s, Some(MAX_BODY_LEN)));
-
         events.push(StanzaEvent::ContactPresence {
             jid: from.to_bare(),
             available,
             show,
-            status: status_text,
         });
     }
 
@@ -309,13 +288,13 @@ fn dispatch_iq(iq: Iq) -> Vec<StanzaEvent> {
             }
         } else if elem.is("fin", "urn:xmpp:mam:2") {
             // Handle MAM fin
-            let complete = elem.attr("complete").map(|v| v == "true").unwrap_or(false);
-            events.push(StanzaEvent::MamFinished { complete });
+            events.push(StanzaEvent::MamFinished);
             return events;
         }
     }
 
-    events.push(StanzaEvent::UnhandledIq(iq));
+    let _ = iq;
+    events.push(StanzaEvent::UnhandledIq);
     events
 }
 
@@ -350,7 +329,6 @@ fn parse_mam_result(result_elem: &Element) -> Option<StanzaEvent> {
     Some(StanzaEvent::MamMessage {
         room_jid,
         id: message.id.clone(),
-        from: from.clone(),
         body,
         sender_nick,
         embeds,
@@ -405,6 +383,7 @@ pub fn build_muc_join(room_jid: &BareJid, nickname: &str) -> Element {
 }
 
 /// Build a MUC leave presence stanza (unavailable presence to room).
+#[cfg(test)]
 pub fn build_muc_leave(room_jid: &BareJid, nickname: &str) -> Element {
     let full_jid = format!("{}/{}", room_jid, nickname);
     let jid = Jid::from_str(&full_jid).expect("valid room occupant JID");

@@ -310,7 +310,7 @@ mod hex {
     // Used only in tests for roundtrip verification
     #[cfg(test)]
     pub fn decode(s: &str) -> Result<Vec<u8>, ()> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err(());
         }
 

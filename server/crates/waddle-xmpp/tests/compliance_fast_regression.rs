@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Fast compliance regression tests.
 //!
 //! These tests are intentionally narrow and fast. They are not a replacement

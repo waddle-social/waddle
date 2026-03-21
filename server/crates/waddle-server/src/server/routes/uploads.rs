@@ -111,8 +111,6 @@ pub enum UploadError {
     SlotAlreadyUsed(String),
     /// File size mismatch
     SizeMismatch { expected: i64, actual: i64 },
-    /// Content type mismatch
-    ContentTypeMismatch { expected: String, actual: String },
     /// Storage error
     Storage(String),
     /// Database error
@@ -146,16 +144,6 @@ fn upload_error_to_response(err: UploadError) -> (StatusCode, Json<ErrorResponse
                 ),
             )),
         ),
-        UploadError::ContentTypeMismatch { expected, actual } => (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "content_type_mismatch",
-                &format!(
-                    "Content-Type mismatch: expected '{}', got '{}'",
-                    expected, actual
-                ),
-            )),
-        ),
         UploadError::Storage(msg) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new("storage_error", &msg)),
@@ -174,7 +162,6 @@ fn upload_error_to_response(err: UploadError) -> (StatusCode, Json<ErrorResponse
 /// Upload slot information from database
 #[derive(Debug)]
 struct UploadSlotInfo {
-    id: String,
     filename: String,
     size_bytes: i64,
     content_type: String,
@@ -218,7 +205,6 @@ async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSl
 
     match row {
         Some(row) => {
-            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
             let filename: String = row
                 .get(1)
                 .map_err(|e| format!("Failed to get filename: {}", e))?;
@@ -237,7 +223,6 @@ async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSl
                 .map_err(|e| format!("Failed to get expires_at: {}", e))?;
 
             Ok(Some(UploadSlotInfo {
-                id,
                 filename,
                 size_bytes,
                 content_type,
@@ -606,7 +591,6 @@ pub async fn download_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ServerConfig;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use axum::body::Body;
     use axum::http::Request;
@@ -622,10 +606,7 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(
-            Arc::new(db_pool),
-            ServerConfig::test_homeserver(),
-        ));
+        let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
 
         // Create upload state with temp directory
         let upload_dir = std::env::temp_dir().join(format!("waddle-test-{}", uuid::Uuid::new_v4()));

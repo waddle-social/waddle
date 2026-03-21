@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_target_sorting() {
         // Create targets with different priorities and weights
-        let mut targets = vec![
+        let mut targets = [
             ResolvedTarget::new("c.example.com".to_string(), 5269, 20, 50),
             ResolvedTarget::new("a.example.com".to_string(), 5269, 10, 30),
             ResolvedTarget::new("b.example.com".to_string(), 5269, 10, 70),

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! RFC 6120 Interoperability Tests
 //!
 //! This module contains integration tests that verify compliance with RFC 6120
@@ -2135,7 +2137,7 @@ async fn test_mam_query_basic() {
     println!("Joined room {}/{}", room_jid, nick);
 
     // === Step 3: Send multiple messages to the room ===
-    let test_messages = vec![
+    let test_messages = [
         "First MAM test message",
         "Second MAM test message",
         "Third MAM test message",
@@ -2197,7 +2199,7 @@ async fn test_mam_query_basic() {
 
     while std::time::Instant::now() < deadline {
         // Try to read more data
-        if let Ok(data) = client.read(Duration::from_millis(500)).await {
+        if let Ok(_data) = client.read(Duration::from_millis(500)).await {
             let buffer = client.take_buffer();
 
             // Check for result messages
@@ -2351,7 +2353,7 @@ async fn test_mam_query_with_rsm() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
 
     while std::time::Instant::now() < deadline {
-        if let Ok(_) = client.read(Duration::from_millis(500)).await {
+        if client.read(Duration::from_millis(500)).await.is_ok() {
             let buffer = client.take_buffer();
 
             // Count result elements

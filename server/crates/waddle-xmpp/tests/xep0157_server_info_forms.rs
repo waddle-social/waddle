@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! XEP-0157: Contact Addresses for XMPP Services dedicated suite.
 
 mod common;
