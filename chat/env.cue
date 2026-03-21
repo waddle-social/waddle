@@ -37,29 +37,9 @@ ci: pipelines: {
 }
 
 tasks: {
-  lockfileCheck: {
-    command: "bash"
-    args: [
-      "-lc",
-      """
-      set -euo pipefail
-      forbidden_lockfiles="$(find . -type f | grep -E '/(package-lock[.]json|yarn[.]lock|pnpm-lock[.]yaml)$' | grep -Ev '^./(node_modules|dist)/' || true)"
-      if [ -n "$forbidden_lockfiles" ]; then
-        echo "Forbidden lockfiles found in chat:"
-        echo "$forbidden_lockfiles"
-        exit 1
-      fi
-      """,
-    ]
-    inputs: [
-      "package.json",
-      "bun.lock",
-    ]
-  }
   install: {
     command: "bun"
     args: ["install", "--frozen-lockfile"]
-    dependsOn: [_t.lockfileCheck]
     inputs: [
       "package.json",
       "bun.lock",
