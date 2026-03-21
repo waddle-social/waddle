@@ -21,6 +21,7 @@ env: {
 
 ci: pipelines: {
   default: {
+    environment: "production"
     when: {
       branch:        ["main"]
       defaultBranch: true
@@ -29,6 +30,7 @@ ci: pipelines: {
     tasks: [_t.build]
   }
   pullRequest: {
+    environment: "production"
     when: {
       pullRequest: true
     }
