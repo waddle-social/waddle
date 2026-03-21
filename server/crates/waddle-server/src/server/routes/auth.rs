@@ -11,7 +11,8 @@ use crate::auth::identity::IdentityService;
 use crate::auth::oauth2;
 use crate::auth::oidc;
 use crate::auth::{
-    AuthError, AuthProviderConfig, AuthProviderKind, ProviderRegistry, Session, SessionManager,
+    localpart_to_jid, AuthError, AuthProviderConfig, AuthProviderKind, ProviderRegistry, Session,
+    SessionManager,
 };
 use crate::config::ServerConfig;
 use crate::server::AppState;
@@ -38,6 +39,7 @@ pub struct AuthState {
     pub identity_service: IdentityService,
     pub providers: ProviderRegistry,
     pub base_url: String,
+    pub xmpp_domain: String,
     pub http_client: reqwest::Client,
     pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
     pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
@@ -61,6 +63,8 @@ impl AuthState {
             identity_service,
             providers,
             base_url: server_config.base_url.trim_end_matches('/').to_string(),
+            xmpp_domain: std::env::var("WADDLE_XMPP_DOMAIN")
+                .unwrap_or_else(|_| "localhost".to_string()),
             http_client: reqwest::Client::new(),
             pending_auth: Arc::new(DashMap::new()),
             device_auth: Arc::new(DashMap::new()),
@@ -70,6 +74,45 @@ impl AuthState {
 
     fn callback_url(&self) -> String {
         format!("{}/api/auth/callback", self.base_url)
+    }
+
+    fn websocket_url(&self) -> String {
+        let parsed = match url::Url::parse(&self.base_url) {
+            Ok(parsed) => parsed,
+            Err(_) => return "ws://localhost/xmpp-websocket".to_string(),
+        };
+
+        let scheme = match parsed.scheme() {
+            "https" => "wss",
+            _ => "ws",
+        };
+
+        let Some(host) = parsed.host_str() else {
+            return "ws://localhost/xmpp-websocket".to_string();
+        };
+
+        let authority = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+
+        format!("{scheme}://{authority}/xmpp-websocket")
+    }
+
+    fn session_cookie_header(&self, session_id: Option<&str>, max_age: i64) -> String {
+        let mut parts = vec![
+            format!("waddle_session={}", session_id.unwrap_or_default()),
+            "Path=/".to_string(),
+            "HttpOnly".to_string(),
+            "SameSite=Lax".to_string(),
+            format!("Max-Age={max_age}"),
+        ];
+
+        if self.base_url.starts_with("https://") {
+            parts.push("Secure".to_string());
+        }
+
+        parts.join("; ")
     }
 
     fn create_pkce_verifier() -> String {
@@ -293,6 +336,8 @@ pub struct SessionResponse {
     pub user_id: String,
     pub username: String,
     pub xmpp_localpart: String,
+    pub jid: String,
+    pub xmpp_websocket_url: String,
     pub is_expired: bool,
     pub expires_at: Option<String>,
 }
@@ -553,14 +598,13 @@ pub async fn callback_handler(
         PendingFlow::Browser { next } => {
             let redirect_to = next.unwrap_or_else(|| "/".to_string());
             let mut response = Redirect::temporary(&redirect_to).into_response();
-            let cookie = format!(
-                "waddle_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-                session.id,
-                60 * 60 * 24 * 30
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                state
+                    .session_cookie_header(Some(&session.id), 60 * 60 * 24 * 30)
+                    .parse()
+                    .expect("valid cookie"),
             );
-            response
-                .headers_mut()
-                .append(header::SET_COOKIE, cookie.parse().expect("valid cookie"));
             response
         }
         PendingFlow::Device { device_code } => {
@@ -636,6 +680,8 @@ pub async fn session_handler(
         Ok(Some(session)) => {
             let is_expired = session.is_expired();
             let expires_at = session.expires_at.map(|v| v.to_rfc3339());
+            let jid = localpart_to_jid(&session.xmpp_localpart, &state.xmpp_domain)
+                .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, state.xmpp_domain));
             (
                 StatusCode::OK,
                 Json(SessionResponse {
@@ -643,6 +689,8 @@ pub async fn session_handler(
                     user_id: session.user_id,
                     username: session.username,
                     xmpp_localpart: session.xmpp_localpart,
+                    jid,
+                    xmpp_websocket_url: state.websocket_url(),
                     is_expired,
                     expires_at,
                 }),
@@ -672,9 +720,87 @@ pub async fn logout_handler(
     let mut resp = StatusCode::NO_CONTENT.into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        "waddle_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        state
+            .session_cookie_header(None, 0)
             .parse()
             .expect("valid cookie"),
     );
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::AppState;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn create_test_auth_state(server_config: &ServerConfig) -> Arc<AuthState> {
+        let config = DatabaseConfig::default();
+        let pool_config = PoolConfig::default();
+        let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .unwrap();
+
+        let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
+        Arc::new(AuthState::new(app_state, server_config, None))
+    }
+
+    #[tokio::test]
+    async fn session_response_includes_jid_and_websocket_url() {
+        let server_config = ServerConfig::test_homeserver();
+        let auth_state = create_test_auth_state(&server_config).await;
+        let session = Session::new("user-1", "alice", "alice");
+        auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+
+        let app = router(auth_state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/session")
+                    .header(header::COOKIE, format!("waddle_session={}", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let expected_jid = format!("alice@{}", auth_state.xmpp_domain);
+        assert_eq!(json["username"], "alice");
+        assert_eq!(json["jid"].as_str(), Some(expected_jid.as_str()));
+        assert_eq!(
+            json["xmpp_websocket_url"].as_str(),
+            Some("ws://localhost:3000/xmpp-websocket")
+        );
+    }
+
+    #[tokio::test]
+    async fn secure_cookie_header_tracks_base_url_scheme() {
+        let mut secure_config = ServerConfig::test_homeserver();
+        secure_config.base_url = "https://server.waddle.social".to_string();
+        let secure_state = create_test_auth_state(&secure_config).await;
+        assert!(secure_state
+            .session_cookie_header(Some("token"), 60)
+            .contains("Secure"));
+
+        let insecure_config = ServerConfig::test_homeserver();
+        let insecure_state = create_test_auth_state(&insecure_config).await;
+        assert!(!insecure_state
+            .session_cookie_header(Some("token"), 60)
+            .contains("Secure"));
+    }
 }

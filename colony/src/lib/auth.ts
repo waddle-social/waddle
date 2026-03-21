@@ -3,15 +3,19 @@ import { jwt, oidcProvider } from "better-auth/plugins";
 import { env } from "cloudflare:workers";
 
 import { database } from "./auth-database";
-import { trustedOidcClients } from "./oidc";
+import { buildTrustedOidcClients, trustedOidcOrigins } from "./oidc";
 
-function createAuth(secret: string, githubClientSecret: string) {
+function createAuth(
+  secret: string,
+  githubClientSecret: string,
+  serverOidcClientSecret: string,
+) {
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
     secret,
     database,
     disabledPaths: ["/token", "/oauth2/register"],
-    trustedOrigins: ["https://chat.waddle.social", "http://localhost:4321"],
+    trustedOrigins: trustedOidcOrigins,
     socialProviders: {
       github: {
         clientId: env.GITHUB_CLIENT_ID,
@@ -25,7 +29,7 @@ function createAuth(secret: string, githubClientSecret: string) {
       }),
       oidcProvider({
         loginPage: "/",
-        trustedClients: trustedOidcClients,
+        trustedClients: buildTrustedOidcClients(serverOidcClientSecret),
         useJWTPlugin: true,
       }),
     ],
@@ -38,7 +42,10 @@ export function getAuth() {
   authPromise ??= Promise.all([
     env.BETTER_AUTH_SECRET.get(),
     env.GITHUB_CLIENT_SECRET.get(),
-  ]).then(([secret, githubClientSecret]) => createAuth(secret, githubClientSecret));
+    env.WADDLE_SERVER_OIDC_CLIENT_SECRET.get(),
+  ]).then(([secret, githubClientSecret, serverOidcClientSecret]) =>
+    createAuth(secret, githubClientSecret, serverOidcClientSecret),
+  );
 
   return authPromise;
 }

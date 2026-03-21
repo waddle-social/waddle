@@ -75,25 +75,11 @@ tasks: {
       "astro.config.ts",
       "tsconfig.json",
       "wrangler.jsonc",
-      "drizzle.config.ts",
       "src/**",
       "public/**",
-      "drizzle/**",
     ]
     outputs: [
       "dist/**",
-    ]
-  }
-  migrateProduction: {
-    command: "bun"
-    args: ["x", "wrangler", "d1", "migrations", "apply", "chat", "--remote"]
-    dependsOn: [_t.build]
-    inputs: [
-      "wrangler.jsonc",
-      "drizzle/**",
-    ]
-    outputs: [
-      ".wrangler/**",
     ]
   }
   deployPreview: {
@@ -107,11 +93,10 @@ tasks: {
   deployProduction: {
     command: "bun"
     args: ["x", "wrangler", "deploy"]
-    dependsOn: [_t.migrateProduction]
+    dependsOn: [_t.build]
     inputs: [
       "wrangler.jsonc",
       "dist/**",
-      "drizzle/**",
     ]
     outputs: [
       ".wrangler/**",

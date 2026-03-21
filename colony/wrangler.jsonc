@@ -45,6 +45,11 @@
       "binding": "GITHUB_CLIENT_SECRET",
       "store_id": "421985d6f384493c938c0554fea33c77",
       "secret_name": "GITHUB_CLIENT_SECRET"
+    },
+    {
+      "binding": "WADDLE_SERVER_OIDC_CLIENT_SECRET",
+      "store_id": "421985d6f384493c938c0554fea33c77",
+      "secret_name": "WADDLE_SERVER_OIDC_CLIENT_SECRET"
     }
   ]
 }

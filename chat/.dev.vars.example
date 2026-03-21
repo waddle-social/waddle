@@ -1,4 +1,2 @@
 # Local Cloudflare-compatible vars used by Astro dev.
-BETTER_AUTH_URL=http://localhost:4321
-COLONY_AUTH_URL=https://colony.waddle.social
-COLONY_OIDC_CLIENT_ID=waddle-chat
+SERVER_BASE_URL=http://localhost:3000

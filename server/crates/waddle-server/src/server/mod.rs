@@ -3,7 +3,7 @@ use crate::db::{DatabasePool, PoolHealth};
 use anyhow::Result;
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::{header, Method, StatusCode},
     response::{IntoResponse, Json},
     routing::get,
     Router,
@@ -550,10 +550,15 @@ struct ServerInfoState {
 /// only those origins are allowed. Otherwise, falls back to permissive
 /// CORS (suitable for development).
 fn configure_cors() -> CorsLayer {
+    let origins = std::env::var("WADDLE_CORS_ORIGINS").ok();
+    build_cors(origins.as_deref())
+}
+
+fn build_cors(origins: Option<&str>) -> CorsLayer {
     use tower_http::cors::AllowOrigin;
 
-    match std::env::var("WADDLE_CORS_ORIGINS") {
-        Ok(origins) if !origins.is_empty() => {
+    match origins {
+        Some(origins) if !origins.is_empty() => {
             let allowed: Vec<_> = origins
                 .split(',')
                 .filter_map(|o| o.trim().parse().ok())
@@ -565,8 +570,21 @@ fn configure_cors() -> CorsLayer {
                 info!(origins = ?allowed, "Configured CORS with explicit allowed origins");
                 CorsLayer::new()
                     .allow_origin(AllowOrigin::list(allowed))
-                    .allow_methods(tower_http::cors::Any)
-                    .allow_headers(tower_http::cors::Any)
+                    .allow_methods([
+                        Method::GET,
+                        Method::POST,
+                        Method::PUT,
+                        Method::PATCH,
+                        Method::DELETE,
+                        Method::OPTIONS,
+                    ])
+                    .allow_headers([
+                        header::ACCEPT,
+                        header::AUTHORIZATION,
+                        header::CONTENT_TYPE,
+                        header::ORIGIN,
+                    ])
+                    .allow_credentials(true)
             }
         }
         _ => CorsLayer::permissive(),
@@ -1053,6 +1071,44 @@ mod tests {
         assert!(metrics.contains("waddle_connected_users"));
         assert!(metrics.contains("waddle_messages_per_second"));
         assert!(metrics.contains("waddle_room_count"));
+    }
+
+    #[tokio::test]
+    async fn test_explicit_cors_allows_credentials() {
+        let app = Router::new()
+            .route("/health", get(|| async { StatusCode::OK }))
+            .layer(build_cors(Some(
+                "https://chat.waddle.social,http://localhost:4321",
+            )));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/health")
+                    .header(header::ORIGIN, "https://chat.waddle.social")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("https://chat.waddle.social")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
     }
 
     #[tokio::test]

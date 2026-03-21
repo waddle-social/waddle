@@ -1,23 +1,37 @@
 import type { Client } from "better-auth/plugins/oidc-provider";
 
-export const CHAT_OIDC_CLIENT_ID = "waddle-chat";
+export const SERVER_OIDC_CLIENT_ID = "waddle-server";
 
-export const trustedOidcClients: Client[] = [
+const oidcClientDefinitions = [
   {
-    clientId: CHAT_OIDC_CLIENT_ID,
-    clientSecret: undefined,
-    type: "public",
-    name: "Waddle Chat",
-    icon: undefined,
+    clientId: SERVER_OIDC_CLIENT_ID,
+    type: "web" as const,
+    name: "Waddle Server",
     metadata: {
       firstParty: true,
-      product: "chat",
+      product: "server",
     },
-    disabled: false,
     redirectUrls: [
-      "http://localhost:4321/api/auth/oauth2/callback/colony",
-      "https://chat.waddle.social/api/auth/oauth2/callback/colony",
+      "http://localhost:3000/api/auth/callback",
+      "https://server.waddle.social/api/auth/callback",
     ],
     skipConsent: true,
   },
+];
+
+export function buildTrustedOidcClients(serverClientSecret: string): Client[] {
+  return oidcClientDefinitions.map((client) => ({
+    ...client,
+    clientSecret: serverClientSecret,
+    icon: undefined,
+    disabled: false,
+  }));
+}
+
+export const trustedOidcOrigins = [
+  ...new Set(
+    oidcClientDefinitions.flatMap((client) =>
+      client.redirectUrls.map((redirectUrl) => new URL(redirectUrl).origin),
+    ),
+  ),
 ];

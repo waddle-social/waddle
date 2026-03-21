@@ -1,9 +1,7 @@
 ---
+import { env } from "cloudflare:workers";
 import "../styles/global.css";
-
-const user = Astro.locals.user;
-const session = Astro.locals.session;
-const identity = user?.name?.trim() || user?.email || "Signed in";
+const serverBaseUrl = env.SERVER_BASE_URL;
 ---
 
 <html lang="en">
@@ -16,41 +14,90 @@ const identity = user?.name?.trim() || user?.email || "Signed in";
     <title>chat.waddle.social</title>
   </head>
   <body>
-    <main>
+    <main data-server-base-url={serverBaseUrl}>
       <div class="stack">
         <h1>chat.waddle.social</h1>
-        {user && session ? (
-          <section class="account" aria-label="Logged in area">
-            <p class="status">Signed in</p>
-            <p class="identity">{identity}</p>
-            {user.name && user.email ? <p class="detail">{user.email}</p> : null}
-            <button id="sign-out" type="button">Log out</button>
-          </section>
-        ) : (
-          <>
-            <button id="sign-in" type="button">Sign in with Colony</button>
-          </>
-        )}
+        <p id="status-copy" class="status">Checking session</p>
+        <section id="account" class="account" aria-label="Logged in area" hidden>
+          <p id="identity" class="identity"></p>
+          <p id="jid" class="detail"></p>
+          <p id="websocket" class="detail detail--muted"></p>
+          <button id="sign-out" type="button">Log out</button>
+        </section>
+        <p id="error-copy" class="detail detail--error" hidden></p>
+        <button id="sign-in" type="button" hidden>Log in with Colony</button>
       </div>
     </main>
 
     <script>
-      import { authClient } from "../lib/auth-client.ts";
+      import { createServerAuth } from "../lib/server-auth.ts";
 
-      const signInButton = document.getElementById("sign-in");
-      const signOutButton = document.getElementById("sign-out");
+      function requireElement(id: string): HTMLElement {
+        const element = document.getElementById(id);
+        if (!element) {
+          throw new Error(`Missing element: ${id}`);
+        }
+        return element;
+      }
 
-      signInButton?.addEventListener("click", async () => {
-        await authClient.signIn.oauth2({
-          providerId: "colony",
-          callbackURL: "/",
-        });
+      const main = document.querySelector("main");
+      const serverBaseUrl = main?.getAttribute("data-server-base-url");
+      if (!serverBaseUrl) {
+        throw new Error("Missing server base URL");
+      }
+
+      const auth = createServerAuth(serverBaseUrl);
+      const statusCopy = requireElement("status-copy");
+      const errorCopy = requireElement("error-copy");
+      const account = requireElement("account");
+      const identity = requireElement("identity");
+      const jid = requireElement("jid");
+      const websocket = requireElement("websocket");
+      const signInButton = requireElement("sign-in");
+      const signOutButton = requireElement("sign-out");
+
+      async function refreshSession() {
+        try {
+          const session = await auth.getSession();
+
+          if (!session || session.is_expired) {
+            if (session?.is_expired) {
+              await auth.logout().catch(() => undefined);
+            }
+            statusCopy.textContent = "Signed out";
+            signInButton.hidden = false;
+            account.hidden = true;
+            errorCopy.hidden = true;
+            return;
+          }
+
+          statusCopy.textContent = "Signed in";
+          identity.textContent = session.username;
+          jid.textContent = session.jid;
+          websocket.textContent = session.xmpp_websocket_url;
+          account.hidden = false;
+          signInButton.hidden = true;
+          errorCopy.hidden = true;
+        } catch (error) {
+          console.error(error);
+          statusCopy.textContent = "Unavailable";
+          account.hidden = true;
+          signInButton.hidden = false;
+          errorCopy.hidden = false;
+          errorCopy.textContent = "Session check failed";
+        }
+      }
+
+      signInButton.addEventListener("click", () => {
+        window.location.href = auth.loginUrl(window.location.href);
       });
 
-      signOutButton?.addEventListener("click", async () => {
-        await authClient.signOut();
+      signOutButton.addEventListener("click", async () => {
+        await auth.logout();
         window.location.reload();
       });
+
+      refreshSession();
     </script>
   </body>
 </html>
