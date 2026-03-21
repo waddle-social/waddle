@@ -40,7 +40,7 @@ const session = Astro.locals.session;
       signInButton?.addEventListener("click", async () => {
         await authClient.signIn.social({
           provider: "github",
-          callbackURL: "/",
+          callbackURL: `${window.location.pathname}${window.location.search}`,
         });
       });
 
