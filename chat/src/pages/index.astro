@@ -3,6 +3,7 @@ import "../styles/global.css";
 
 const user = Astro.locals.user;
 const session = Astro.locals.session;
+const identity = user?.name?.trim() || user?.email || "Signed in";
 ---
 
 <html lang="en">
@@ -19,14 +20,14 @@ const session = Astro.locals.session;
       <div class="stack">
         <h1>chat.waddle.social</h1>
         {user && session ? (
-          <>
+          <section class="account" aria-label="Logged in area">
             <p class="status">Signed in</p>
-            <p class="identity">{user.email}</p>
-            <button id="sign-out" type="button">Sign out</button>
-          </>
+            <p class="identity">{identity}</p>
+            {user.name && user.email ? <p class="detail">{user.email}</p> : null}
+            <button id="sign-out" type="button">Log out</button>
+          </section>
         ) : (
           <>
-            <p class="status">Use your Colony account to continue.</p>
             <button id="sign-in" type="button">Sign in with Colony</button>
           </>
         )}
