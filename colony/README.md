@@ -1,6 +1,6 @@
 # Colony
 
-Bun-based Astro 6 app targeting Cloudflare Workers with D1, Drizzle Kit, and Better Auth GitHub OAuth.
+Bun-based Astro 6 app targeting Cloudflare Workers with D1, Drizzle Kit, Better Auth GitHub OAuth, and a Better Auth OIDC provider used by `chat`.
 
 ## Setup
 
@@ -23,3 +23,13 @@ Bun-based Astro 6 app targeting Cloudflare Workers with D1, Drizzle Kit, and Bet
    - bun x wrangler secrets-store secret create 421985d6f384493c938c0554fea33c77 --name BETTER_AUTH_SECRET --scopes workers --remote
    - bun x wrangler secrets-store secret create 421985d6f384493c938c0554fea33c77 --name GITHUB_CLIENT_SECRET --scopes workers --remote
 8. Start development with bun run dev.
+
+## Chat OIDC
+
+- `colony` is the remote OIDC issuer for `chat`.
+- The first-party trusted client ID is `waddle-chat`.
+- Runtime OIDC clients are code-whitelisted only. Database-backed client registration is disabled.
+- Allowed Chat redirect URIs are:
+  - `http://localhost:4321/api/auth/oauth2/callback/colony`
+  - `https://chat.waddle.social/api/auth/oauth2/callback/colony`
+- The provider uses public-client PKCE for Chat, so Chat does not need an OIDC client secret.

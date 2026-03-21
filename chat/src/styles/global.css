@@ -18,7 +18,7 @@ body {
   place-items: center;
   background: var(--chat-canvas);
   color: var(--chat-ink);
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
 }
 
 main {
@@ -26,6 +26,14 @@ main {
   place-items: center;
   min-height: 100vh;
   width: 100%;
+  padding: 2rem;
+}
+
+.stack {
+  display: grid;
+  gap: 1rem;
+  justify-items: center;
+  text-align: center;
 }
 
 h1 {
@@ -35,4 +43,46 @@ h1 {
   line-height: 1;
   letter-spacing: -0.04em;
   text-align: center;
+}
+
+.status,
+.identity {
+  margin: 0;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.status {
+  opacity: 0.72;
+}
+
+.identity {
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+}
+
+button {
+  border: 1px solid color-mix(in oklab, var(--chat-ink) 20%, transparent);
+  background: color-mix(in oklab, white 75%, var(--chat-canvas));
+  color: var(--chat-ink);
+  border-radius: 999px;
+  padding: 0.8rem 1.4rem;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--chat-ink) 35%, transparent);
+}
+
+button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--chat-ink) 30%, transparent);
+  outline-offset: 3px;
 }

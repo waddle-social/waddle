@@ -7,6 +7,9 @@ export default defineConfig({
   output: "server",
   adapter: cloudflare(),
   integrations: [vue()],
+  server: {
+    port: 4321,
+  },
   vite: {
     plugins: [tailwindcss()],
   },

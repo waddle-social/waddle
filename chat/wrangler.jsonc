@@ -20,7 +20,27 @@
       "custom_domain": true
     }
   ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chat",
+      "database_id": "a970b2fb-33c2-494c-905b-b26ac3b0d796",
+      "migrations_dir": "./drizzle"
+    }
+  ],
   "observability": {
     "enabled": true
-  }
+  },
+  "vars": {
+    "BETTER_AUTH_URL": "https://chat.waddle.social",
+    "COLONY_AUTH_URL": "https://colony.waddle.social",
+    "COLONY_OIDC_CLIENT_ID": "waddle-chat"
+  },
+  "secrets_store_secrets": [
+    {
+      "binding": "BETTER_AUTH_SECRET",
+      "store_id": "421985d6f384493c938c0554fea33c77",
+      "secret_name": "BETTER_AUTH_SECRET"
+    }
+  ]
 }

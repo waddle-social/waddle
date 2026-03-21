@@ -1,5 +1,8 @@
 ---
 import "../styles/global.css";
+
+const user = Astro.locals.user;
+const session = Astro.locals.session;
 ---
 
 <html lang="en">
@@ -13,7 +16,40 @@ import "../styles/global.css";
   </head>
   <body>
     <main>
-      <h1>chat.waddle.social</h1>
+      <div class="stack">
+        <h1>chat.waddle.social</h1>
+        {user && session ? (
+          <>
+            <p class="status">Signed in</p>
+            <p class="identity">{user.email}</p>
+            <button id="sign-out" type="button">Sign out</button>
+          </>
+        ) : (
+          <>
+            <p class="status">Use your Colony account to continue.</p>
+            <button id="sign-in" type="button">Sign in with Colony</button>
+          </>
+        )}
+      </div>
     </main>
+
+    <script>
+      import { authClient } from "../lib/auth-client.ts";
+
+      const signInButton = document.getElementById("sign-in");
+      const signOutButton = document.getElementById("sign-out");
+
+      signInButton?.addEventListener("click", async () => {
+        await authClient.signIn.oauth2({
+          providerId: "colony",
+          callbackURL: "/",
+        });
+      });
+
+      signOutButton?.addEventListener("click", async () => {
+        await authClient.signOut();
+        window.location.reload();
+      });
+    </script>
   </body>
 </html>
