@@ -10,6 +10,7 @@ on:
     - .github/workflows/waddle-chat-default.yml
     - chat/astro.config.ts
     - chat/bun.lock
+    - chat/dist/**
     - chat/env.cue
     - chat/package.json
     - chat/public/**

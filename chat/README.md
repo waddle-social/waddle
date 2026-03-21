@@ -10,7 +10,8 @@ Run these from [`chat/`](/Users/icepuma/development/waddle/chat):
 cuenv task install
 cuenv task dev
 cuenv task build
-cuenv task deploy
+cuenv task deployPreview
+cuenv task deployProduction
 ```
 
 If you need Cloudflare runtime types without a full build:

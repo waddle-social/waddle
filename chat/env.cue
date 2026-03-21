@@ -27,14 +27,14 @@ ci: pipelines: {
       defaultBranch: true
       manual:        true
     }
-    tasks: [_t.build]
+    tasks: [_t.deployMain]
   }
   pullRequest: {
     environment: "production"
     when: {
       pullRequest: true
     }
-    tasks: [_t.build]
+    tasks: [_t.deployPreview]
   }
 }
 
@@ -82,21 +82,17 @@ tasks: {
       "dist/**",
     ]
   }
-  deploy: {
-    command: "bash"
-    args: [
-      "-lc",
-      """
-      set -euo pipefail
-      export HOME="${PWD}/.wrangler-home"
-      export XDG_CACHE_HOME="${PWD}/.wrangler/cache"
-      export XDG_CONFIG_HOME="${PWD}/.wrangler/config"
-      export XDG_DATA_HOME="${PWD}/.wrangler/data"
-      export WRANGLER_SEND_METRICS="false"
-      mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
-      bun run deploy
-      """,
+  deployPreview: {
+    command: "bun"
+    args: ["x", "wrangler", "versions", "upload"]
+    dependsOn: [_t.build]
+    outputs: [
+      ".wrangler/**",
     ]
+  }
+  deployProduction: {
+    command: "bun"
+    args: ["x", "wrangler", "deploy"]
     dependsOn: [_t.build]
     inputs: [
       "wrangler.jsonc",
@@ -104,7 +100,10 @@ tasks: {
     ]
     outputs: [
       ".wrangler/**",
-      ".wrangler-home/**",
     ]
+  }
+  deployMain: schema.#Task & {
+    command: "true"
+    dependsOn: [_t.deployProduction]
   }
 }
