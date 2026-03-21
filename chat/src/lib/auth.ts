@@ -31,7 +31,6 @@ function createAuth(secret: string) {
             clientId: env.COLONY_OIDC_CLIENT_ID,
             scopes: ["openid", "profile", "email"],
             pkce: true,
-            requireIssuerValidation: true,
             overrideUserInfo: true,
           },
         ],
