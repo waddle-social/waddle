@@ -11,6 +11,7 @@ function createAuth(secret: string, githubClientSecret: string) {
     secret,
     database,
     disabledPaths: ["/token", "/oauth2/register"],
+    trustedOrigins: ["https://chat.waddle.social", "http://localhost:4321"],
     socialProviders: {
       github: {
         clientId: env.GITHUB_CLIENT_ID,
