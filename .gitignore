@@ -4,6 +4,9 @@ node_modules
 # Codex
 .codex
 
+# Editor state
+.vscode/
+
 # direnv
 .direnv
 dist/
