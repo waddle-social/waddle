@@ -798,7 +798,7 @@ async fn insert_channel(
 }
 
 /// Get a channel from the per-waddle database
-async fn get_channel_from_db(
+pub(crate) async fn get_channel_from_db(
     db: &Database,
     waddle_id: &str,
     channel_id: &str,

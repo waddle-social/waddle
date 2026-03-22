@@ -62,8 +62,8 @@ tasks: {
   }
   dev: {
     command: "bun"
-    args: ["run", "dev"]
-    dependsOn: [_t.install]
+    args: ["x", "wrangler", "dev", "--local", "--port", "4321"]
+    dependsOn: [_t.build]
   }
   build: {
     command: "bun"
@@ -72,7 +72,8 @@ tasks: {
     inputs: [
       "package.json",
       "bun.lock",
-      "astro.config.ts",
+      "astro.config.mjs",
+      "svelte.config.js",
       "tsconfig.json",
       "wrangler.jsonc",
       "src/**",

@@ -1,5 +1,6 @@
 ---
 import { env } from "cloudflare:workers";
+import ChatApp from "../components/ChatApp.svelte";
 import "../styles/global.css";
 const serverBaseUrl = env.SERVER_BASE_URL;
 ---
@@ -11,93 +12,11 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width" />
     <meta name="generator" content={Astro.generator} />
-    <title>chat.waddle.social</title>
+    <title>Waddle Chat</title>
   </head>
   <body>
-    <main data-server-base-url={serverBaseUrl}>
-      <div class="stack">
-        <h1>chat.waddle.social</h1>
-        <p id="status-copy" class="status">Checking session</p>
-        <section id="account" class="account" aria-label="Logged in area" hidden>
-          <p id="identity" class="identity"></p>
-          <p id="jid" class="detail"></p>
-          <p id="websocket" class="detail detail--muted"></p>
-          <button id="sign-out" type="button">Log out</button>
-        </section>
-        <p id="error-copy" class="detail detail--error" hidden></p>
-        <button id="sign-in" type="button" hidden>Log in with Colony</button>
-      </div>
+    <main class="page">
+      <ChatApp client:only="svelte" serverBaseUrl={serverBaseUrl} />
     </main>
-
-    <script>
-      import { createServerAuth } from "../lib/server-auth.ts";
-
-      function requireElement(id: string): HTMLElement {
-        const element = document.getElementById(id);
-        if (!element) {
-          throw new Error(`Missing element: ${id}`);
-        }
-        return element;
-      }
-
-      const main = document.querySelector("main");
-      const serverBaseUrl = main?.getAttribute("data-server-base-url");
-      if (!serverBaseUrl) {
-        throw new Error("Missing server base URL");
-      }
-
-      const auth = createServerAuth(serverBaseUrl);
-      const statusCopy = requireElement("status-copy");
-      const errorCopy = requireElement("error-copy");
-      const account = requireElement("account");
-      const identity = requireElement("identity");
-      const jid = requireElement("jid");
-      const websocket = requireElement("websocket");
-      const signInButton = requireElement("sign-in");
-      const signOutButton = requireElement("sign-out");
-
-      async function refreshSession() {
-        try {
-          const session = await auth.getSession();
-
-          if (!session || session.is_expired) {
-            if (session?.is_expired) {
-              await auth.logout().catch(() => undefined);
-            }
-            statusCopy.textContent = "Signed out";
-            signInButton.hidden = false;
-            account.hidden = true;
-            errorCopy.hidden = true;
-            return;
-          }
-
-          statusCopy.textContent = "Signed in";
-          identity.textContent = session.username;
-          jid.textContent = session.jid;
-          websocket.textContent = session.xmpp_websocket_url;
-          account.hidden = false;
-          signInButton.hidden = true;
-          errorCopy.hidden = true;
-        } catch (error) {
-          console.error(error);
-          statusCopy.textContent = "Unavailable";
-          account.hidden = true;
-          signInButton.hidden = false;
-          errorCopy.hidden = false;
-          errorCopy.textContent = "Session check failed";
-        }
-      }
-
-      signInButton.addEventListener("click", () => {
-        window.location.href = auth.loginUrl(window.location.href);
-      });
-
-      signOutButton.addEventListener("click", async () => {
-        await auth.logout();
-        window.location.reload();
-      });
-
-      refreshSession();
-    </script>
   </body>
 </html>

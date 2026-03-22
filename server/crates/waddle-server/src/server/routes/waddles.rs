@@ -10,6 +10,7 @@
 //! Member management endpoints:
 //! - GET /v1/waddles/:id/members - List waddle members
 //! - POST /v1/waddles/:id/members - Add a member to the waddle
+//! - PATCH /v1/waddles/:id/members/:user_id - Update a member role
 //! - DELETE /v1/waddles/:id/members/:user_id - Remove a member from the waddle
 
 use crate::auth::{AuthError, SessionManager};
@@ -67,7 +68,7 @@ pub fn router(waddle_state: Arc<WaddleState>) -> Router {
         .route("/v1/waddles/:id/members", post(add_member_handler))
         .route(
             "/v1/waddles/:id/members/:member_user_id",
-            delete(remove_member_handler),
+            patch(update_member_role_handler).delete(remove_member_handler),
         )
         .with_state(waddle_state)
 }
@@ -176,6 +177,13 @@ pub struct AddMemberRequest {
 
 fn default_member_role() -> String {
     "member".to_string()
+}
+
+/// Request body for updating a member role.
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberRoleRequest {
+    /// Updated role for the member.
+    pub role: String,
 }
 
 /// Response for a single waddle member
@@ -396,7 +404,9 @@ pub async fn create_waddle_handler(
             }
 
             // Create default #general channel
-            if let Err(err) = create_default_channel(&waddle_db).await {
+            if let Err(err) =
+                create_default_channel(&waddle_db, &state.permission_service, &waddle_id).await
+            {
                 warn!("Failed to create default channel: {}", err);
                 // Continue - the waddle was created successfully
             }
@@ -957,6 +967,196 @@ pub async fn add_member_handler(
         }),
     )
         .into_response()
+}
+
+/// PATCH /v1/waddles/:id/members/:member_user_id
+///
+/// Update a member role in a waddle. Requires manage_members permission.
+/// The owner role cannot be assigned or changed via this endpoint.
+#[instrument(skip(state))]
+pub async fn update_member_role_handler(
+    State(state): State<Arc<WaddleState>>,
+    Path(path): Path<MemberPath>,
+    Query(params): Query<SessionQuery>,
+    Json(request): Json<UpdateMemberRoleRequest>,
+) -> impl IntoResponse {
+    let member_user_id = percent_encoding::percent_decode_str(&path.member_user_id)
+        .decode_utf8()
+        .map(|s| s.into_owned())
+        .unwrap_or_else(|_| path.member_user_id.clone());
+
+    info!(
+        "Updating member {} role to {} in waddle {}",
+        member_user_id, request.role, path.id
+    );
+
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
+        Ok(session) => session,
+        Err(err) => {
+            warn!("Session validation failed: {}", err);
+            return waddle_error_to_response(WaddleError::Auth(err)).into_response();
+        }
+    };
+
+    let valid_roles = ["member", "moderator", "admin"];
+    if !valid_roles.contains(&request.role.as_str()) {
+        return waddle_error_to_response(WaddleError::InvalidInput(format!(
+            "Invalid role '{}'. Valid roles are: member, moderator, admin",
+            request.role
+        )))
+        .into_response();
+    }
+
+    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &path.id).await {
+        Ok(Some(waddle)) => waddle,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "Waddle '{}' not found",
+                path.id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get waddle: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
+
+    if member_user_id == waddle.owner_user_id {
+        return waddle_error_to_response(WaddleError::InvalidInput(
+            "Cannot change the owner role via the member API".to_string(),
+        ))
+        .into_response();
+    }
+
+    let subject = Subject::user(&session.user_id);
+    let object = Object::new(ObjectType::Waddle, &path.id);
+    let can_manage = state
+        .permission_service
+        .check(&subject, "manage_members", &object)
+        .await
+        .map(|response| response.allowed)
+        .unwrap_or(false);
+
+    if !can_manage {
+        return waddle_error_to_response(WaddleError::Permission(PermissionError::Denied(
+            "You do not have permission to manage members in this waddle".to_string(),
+        )))
+        .into_response();
+    }
+
+    let current_role =
+        match get_member_role(state.app_state.db_pool.global(), &path.id, &member_user_id).await {
+            Ok(Some(role)) => role,
+            Ok(None) => {
+                return waddle_error_to_response(WaddleError::NotFound(format!(
+                    "Member '{}' not found in waddle",
+                    member_user_id
+                )))
+                .into_response();
+            }
+            Err(err) => {
+                error!("Failed to get member role: {}", err);
+                return waddle_error_to_response(WaddleError::Database(err)).into_response();
+            }
+        };
+
+    if current_role == request.role {
+        let member =
+            match get_waddle_member(state.app_state.db_pool.global(), &path.id, &member_user_id)
+                .await
+            {
+                Ok(Some(member)) => member,
+                Ok(None) => {
+                    return waddle_error_to_response(WaddleError::NotFound(format!(
+                        "Member '{}' not found in waddle",
+                        member_user_id
+                    )))
+                    .into_response();
+                }
+                Err(err) => {
+                    error!("Failed to get member: {}", err);
+                    return waddle_error_to_response(WaddleError::Database(err)).into_response();
+                }
+            };
+
+        return (StatusCode::OK, Json(member)).into_response();
+    }
+
+    let old_tuple = Tuple::new(
+        Object::new(ObjectType::Waddle, &path.id),
+        Relation::new(&current_role),
+        Subject::user(&member_user_id),
+    );
+
+    if let Err(err) = state.permission_service.delete_tuple(&old_tuple).await {
+        error!("Failed to delete old member permission tuple: {}", err);
+        return waddle_error_to_response(WaddleError::Permission(err)).into_response();
+    }
+
+    let new_tuple = Tuple::new(
+        Object::new(ObjectType::Waddle, &path.id),
+        Relation::new(&request.role),
+        Subject::user(&member_user_id),
+    );
+
+    if let Err(err) = state
+        .permission_service
+        .write_tuple(new_tuple.clone())
+        .await
+    {
+        error!("Failed to write updated member permission tuple: {}", err);
+        let _ = state.permission_service.write_tuple(old_tuple).await;
+        return waddle_error_to_response(WaddleError::Permission(err)).into_response();
+    }
+
+    if let Err(err) = update_waddle_member_role(
+        state.app_state.db_pool.global(),
+        &path.id,
+        &member_user_id,
+        &request.role,
+    )
+    .await
+    {
+        error!("Failed to update member role: {}", err);
+        let _ = state.permission_service.delete_tuple(&new_tuple).await;
+        let _ = state
+            .permission_service
+            .write_tuple(Tuple::new(
+                Object::new(ObjectType::Waddle, &path.id),
+                Relation::new(&current_role),
+                Subject::user(&member_user_id),
+            ))
+            .await;
+        return waddle_error_to_response(WaddleError::Database(err)).into_response();
+    }
+
+    let member = match get_waddle_member(
+        state.app_state.db_pool.global(),
+        &path.id,
+        &member_user_id,
+    )
+    .await
+    {
+        Ok(Some(member)) => member,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "Member '{}' not found in waddle",
+                member_user_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get updated member: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
+
+    (StatusCode::OK, Json(member)).into_response()
 }
 
 /// DELETE /v1/waddles/:id/members/:member_user_id
@@ -1552,6 +1752,47 @@ fn parse_member_row(row: &libsql::Row) -> Result<MemberResponse, String> {
     })
 }
 
+/// Get a single member in a waddle.
+async fn get_waddle_member(
+    db: &Database,
+    waddle_id: &str,
+    user_id: &str,
+) -> Result<Option<MemberResponse>, String> {
+    let query = r#"
+        SELECT u.id, u.username, wm.role, wm.joined_at
+        FROM waddle_members wm
+        JOIN users u ON wm.user_id = u.id
+        WHERE wm.waddle_id = ? AND wm.user_id = ?
+        LIMIT 1
+    "#;
+
+    let row = if let Some(persistent) = db.persistent_connection() {
+        let conn = persistent.lock().await;
+        let mut rows = conn
+            .query(query, libsql::params![waddle_id, user_id])
+            .await
+            .map_err(|e| format!("Failed to query member: {}", e))?;
+
+        rows.next()
+            .await
+            .map_err(|e| format!("Failed to read member row: {}", e))?
+    } else {
+        let conn = db
+            .connect()
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
+        let mut rows = conn
+            .query(query, libsql::params![waddle_id, user_id])
+            .await
+            .map_err(|e| format!("Failed to query member: {}", e))?;
+
+        rows.next()
+            .await
+            .map_err(|e| format!("Failed to read member row: {}", e))?
+    };
+
+    row.map(|row| parse_member_row(&row)).transpose()
+}
+
 /// Get member's role in a waddle (returns None if not a member)
 async fn get_member_role(
     db: &Database,
@@ -1598,6 +1839,36 @@ async fn get_member_role(
         }
         None => Ok(None),
     }
+}
+
+/// Update a member role in a waddle.
+async fn update_waddle_member_role(
+    db: &Database,
+    waddle_id: &str,
+    user_id: &str,
+    role: &str,
+) -> Result<(), String> {
+    let query = r#"
+        UPDATE waddle_members
+        SET role = ?
+        WHERE waddle_id = ? AND user_id = ?
+    "#;
+
+    if let Some(persistent) = db.persistent_connection() {
+        let conn = persistent.lock().await;
+        conn.execute(query, libsql::params![role, waddle_id, user_id])
+            .await
+            .map_err(|e| format!("Failed to update waddle member role: {}", e))?;
+    } else {
+        let conn = db
+            .connect()
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
+        conn.execute(query, libsql::params![role, waddle_id, user_id])
+            .await
+            .map_err(|e| format!("Failed to update waddle member role: {}", e))?;
+    }
+
+    Ok(())
 }
 
 /// Add a member to a waddle with a specific timestamp
@@ -1702,7 +1973,11 @@ async fn get_username_by_user_id(db: &Database, user_id: &str) -> Result<Option<
 }
 
 /// Create the default #general channel in a per-waddle database
-async fn create_default_channel(waddle_db: &Database) -> Result<(), String> {
+async fn create_default_channel(
+    waddle_db: &Database,
+    permission_service: &PermissionService,
+    waddle_id: &str,
+) -> Result<String, String> {
     let channel_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -1716,7 +1991,7 @@ async fn create_default_channel(waddle_db: &Database) -> Result<(), String> {
         conn.execute(
             query,
             libsql::params![
-                channel_id,
+                channel_id.as_str(),
                 "general",
                 "General discussion",
                 "text",
@@ -1736,7 +2011,7 @@ async fn create_default_channel(waddle_db: &Database) -> Result<(), String> {
         conn.execute(
             query,
             libsql::params![
-                channel_id,
+                channel_id.as_str(),
                 "general",
                 "General discussion",
                 "text",
@@ -1750,7 +2025,36 @@ async fn create_default_channel(waddle_db: &Database) -> Result<(), String> {
         .map_err(|e| format!("Failed to create default channel: {}", e))?;
     }
 
-    Ok(())
+    let parent_tuple = Tuple::new(
+        Object::new(ObjectType::Channel, &channel_id),
+        Relation::new("parent"),
+        Subject {
+            subject_type: crate::permissions::SubjectType::Waddle,
+            id: waddle_id.to_string(),
+            relation: None,
+        },
+    );
+
+    if let Err(err) = permission_service.write_tuple(parent_tuple).await {
+        let delete_query = "DELETE FROM channels WHERE id = ?";
+
+        if let Some(persistent) = waddle_db.persistent_connection() {
+            let conn = persistent.lock().await;
+            let _ = conn.execute(delete_query, [channel_id.as_str()]).await;
+        } else {
+            let conn = waddle_db
+                .connect()
+                .map_err(|e| format!("Failed to connect to waddle database: {}", e))?;
+            let _ = conn.execute(delete_query, [channel_id.as_str()]).await;
+        }
+
+        return Err(format!(
+            "Failed to create default channel permission tuple: {}",
+            err
+        ));
+    }
+
+    Ok(channel_id)
 }
 
 #[cfg(test)]
@@ -1793,6 +2097,33 @@ mod tests {
         session
     }
 
+    async fn get_default_channel_id(state: &WaddleState, waddle_id: &str) -> String {
+        let waddle_db = state
+            .app_state
+            .db_pool
+            .get_waddle_db(waddle_id)
+            .await
+            .unwrap();
+
+        let row = if let Some(persistent) = waddle_db.persistent_connection() {
+            let conn = persistent.lock().await;
+            let mut rows = conn
+                .query("SELECT id FROM channels WHERE is_default = 1 LIMIT 1", ())
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap()
+        } else {
+            let conn = waddle_db.connect().unwrap();
+            let mut rows = conn
+                .query("SELECT id FROM channels WHERE is_default = 1 LIMIT 1", ())
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap()
+        };
+
+        row.get(0).unwrap()
+    }
+
     #[tokio::test]
     async fn test_create_waddle() {
         let waddle_state = create_test_waddle_state().await;
@@ -1823,6 +2154,49 @@ mod tests {
         assert_eq!(json["owner_user_id"], session.user_id);
         assert_eq!(json["role"], "owner");
         assert!(json["is_public"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_waddle_owner_can_access_default_channel() {
+        let waddle_state = create_test_waddle_state().await;
+        let session = create_test_session(&waddle_state).await;
+        let app = router(waddle_state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/waddles?session_id={}", session.id))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name": "Test Waddle"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let waddle_id = json["id"].as_str().unwrap().to_string();
+        let default_channel_id = get_default_channel_id(&waddle_state, &waddle_id).await;
+
+        let subject = Subject::user(&session.user_id);
+        let channel = Object::new(ObjectType::Channel, &default_channel_id);
+
+        let view = waddle_state
+            .permission_service
+            .check(&subject, "view", &channel)
+            .await
+            .unwrap();
+        assert!(view.allowed);
+
+        let send = waddle_state
+            .permission_service
+            .check(&subject, "send_message", &channel)
+            .await
+            .unwrap();
+        assert!(send.allowed);
     }
 
     #[tokio::test]
@@ -2171,5 +2545,111 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_update_member_role() {
+        let waddle_state = create_test_waddle_state().await;
+        let owner_session = create_test_session(&waddle_state).await;
+        let member_session = create_test_session(&waddle_state).await;
+        let app = router(waddle_state.clone());
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name": "Role Test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = create_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let waddle_id = create_json["id"].as_str().unwrap();
+
+        let add_member_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/waddles/{}/members?session_id={}",
+                        waddle_id, owner_session.id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"user_id":"{}","role":"member"}}"#,
+                        member_session.user_id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(add_member_response.status(), StatusCode::CREATED);
+
+        let update_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!(
+                        "/v1/waddles/{}/members/{}?session_id={}",
+                        waddle_id, member_session.user_id, owner_session.id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"role":"admin"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(update_response.status(), StatusCode::OK);
+        let body = update_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["role"], "admin");
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/v1/waddles/{}/members?session_id={}",
+                        waddle_id, owner_session.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let body = list_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let members = json["members"].as_array().unwrap();
+        let updated = members
+            .iter()
+            .find(|member| member["user_id"] == member_session.user_id)
+            .unwrap();
+        assert_eq!(updated["role"], "admin");
     }
 }

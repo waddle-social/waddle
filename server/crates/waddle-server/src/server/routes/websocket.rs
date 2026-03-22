@@ -29,9 +29,14 @@ use xmpp_parsers::minidom::Element;
 use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
+use crate::auth::Session;
+use crate::messages::{MessageCreate, MessageRepository};
+use crate::server::AppState;
 
 /// WebSocket state containing all necessary registries for message routing
 pub struct WebSocketState {
+    /// Core app state for accessing the global and per-waddle databases.
+    pub app_state: Arc<AppState>,
     /// Authentication state for session validation
     pub auth_state: Arc<AuthState>,
     /// Registry for tracking active connections by JID
@@ -79,6 +84,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     // Track connection state
     let mut authenticated = false;
     let mut session_jid: Option<FullJid> = None;
+    let mut authenticated_session: Option<Session> = None;
     let mut registered = false;
     let mut resource_bound = false;
 
@@ -97,6 +103,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             &state,
                             &mut authenticated,
                             &mut session_jid,
+                            &mut authenticated_session,
                             &mut resource_bound,
                         ).await;
 
@@ -262,6 +269,7 @@ async fn handle_xmpp_frame(
     state: &WebSocketState,
     authenticated: &mut bool,
     session_jid: &mut Option<FullJid>,
+    authenticated_session: &mut Option<Session>,
     resource_bound: &mut bool,
 ) -> Vec<String> {
     let frame = frame.trim();
@@ -303,7 +311,15 @@ async fn handle_xmpp_frame(
 
     // Handle SASL authentication
     if frame.starts_with("<auth") && frame.contains("PLAIN") {
-        return handle_sasl_plain(frame, domain, state, authenticated, session_jid).await;
+        return handle_sasl_plain(
+            frame,
+            domain,
+            state,
+            authenticated,
+            session_jid,
+            authenticated_session,
+        )
+        .await;
     }
 
     // Handle resource binding
@@ -327,7 +343,14 @@ async fn handle_xmpp_frame(
 
     // Handle message stanzas
     if frame.starts_with("<message") {
-        return handle_message(frame, &muc_domain, state, session_jid).await;
+        return handle_message(
+            frame,
+            &muc_domain,
+            state,
+            session_jid,
+            authenticated_session,
+        )
+        .await;
     }
 
     warn!(frame = %frame, "Unhandled XMPP frame");
@@ -341,6 +364,7 @@ async fn handle_sasl_plain(
     state: &WebSocketState,
     authenticated: &mut bool,
     session_jid: &mut Option<FullJid>,
+    authenticated_session: &mut Option<Session>,
 ) -> Vec<String> {
     debug!(frame = %frame, "SASL PLAIN auth attempt");
 
@@ -413,6 +437,7 @@ async fn handle_sasl_plain(
         Ok(session) => {
             info!(jid = %username, user_id = %session.user_id, "SASL PLAIN authentication successful");
             *authenticated = true;
+            *authenticated_session = Some(session.clone());
 
             // Create a bare JID string (full JID is set during resource binding)
             let bare_jid_str = if username.contains('@') {
@@ -891,6 +916,7 @@ async fn handle_message(
     muc_domain: &str,
     state: &WebSocketState,
     session_jid: &Option<FullJid>,
+    authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let Some(ref sender_jid) = session_jid else {
         warn!("Message received without authenticated session");
@@ -949,12 +975,32 @@ async fn handle_message(
 
         drop(room);
 
+        let persisted_message_id = if let Some(session) = authenticated_session {
+            match persist_groupchat_message(state, &room_jid, &prototype_body(&incoming), session)
+                .await
+            {
+                Ok(message_id) => message_id,
+                Err(err) => {
+                    warn!(
+                        room = %room_jid,
+                        sender = %sender_jid,
+                        error = %err,
+                        "Failed to persist groupchat message"
+                    );
+                    return vec![];
+                }
+            }
+        } else {
+            warn!(sender = %sender_jid, "Authenticated XMPP message missing HTTP session context");
+            return vec![];
+        };
+
         // Build a prototype message, enrich once, then fan out to all occupants.
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
         let mut prototype = incoming.clone();
-        if prototype.id.is_none() {
-            prototype.id = Some(uuid::Uuid::new_v4().to_string());
-        }
+        prototype.id = persisted_message_id
+            .or_else(|| prototype.id.clone())
+            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
             prototype.from = Some(jid::Jid::from(from_jid));
         } else {
@@ -1051,6 +1097,55 @@ async fn handle_message(
 
     debug!(msg_type = ?incoming.type_, "Message stanza received");
     vec![]
+}
+
+async fn persist_groupchat_message(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    body: &Option<String>,
+    session: &Session,
+) -> Result<Option<String>, String> {
+    let Some(content) = body
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let (waddle_id, channel_id) = parse_room_jid_context(room_jid);
+    if waddle_id == "default" && channel_id == "default" {
+        return Err(format!(
+            "could not derive waddle/channel context from room JID '{}'",
+            room_jid
+        ));
+    }
+
+    let waddle_db = state
+        .app_state
+        .db_pool
+        .get_waddle_db(&waddle_id)
+        .await
+        .map_err(|e| format!("Failed to access waddle database: {}", e))?;
+
+    let repository = MessageRepository::new(Arc::new(waddle_db));
+    repository
+        .create(MessageCreate::new(
+            channel_id,
+            session.user_id.clone(),
+            content.to_string(),
+        ))
+        .await
+        .map(|message| Some(message.id))
+        .map_err(|e| e.to_string())
+}
+
+fn prototype_body(message: &xmpp_parsers::message::Message) -> Option<String> {
+    message
+        .bodies
+        .get("")
+        .or_else(|| message.bodies.values().next())
+        .map(|body| body.0.clone())
 }
 
 /// Create a presence stanza for MUC
@@ -1221,17 +1316,29 @@ mod tests {
         let server_config = ServerConfig::test_homeserver();
         let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
         let auth_state = Arc::new(AuthState::new(
-            app_state,
+            app_state.clone(),
             &server_config,
             Some(b"test-encryption-key-32-bytes!!!"),
         ));
 
         Arc::new(WebSocketState {
+            app_state,
             auth_state,
             connection_registry: Arc::new(ConnectionRegistry::new()),
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
             github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
         })
+    }
+
+    async fn create_test_session(state: &WebSocketState, username: &str) -> Session {
+        let session = Session::new(&uuid::Uuid::new_v4().to_string(), username, username);
+        state
+            .auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .expect("session");
+        session
     }
 
     #[test]
@@ -1302,8 +1409,14 @@ mod tests {
             recipient_jid
         );
 
-        let responses =
-            handle_message(&frame, "muc.example.com", state.as_ref(), &Some(sender_jid)).await;
+        let responses = handle_message(
+            &frame,
+            "muc.example.com",
+            state.as_ref(),
+            &Some(sender_jid),
+            &None,
+        )
+        .await;
 
         assert_eq!(responses.len(), 1, "sender should get an echo response");
         let sender_echo = &responses[0];
@@ -1331,6 +1444,63 @@ mod tests {
             routed_xml.contains("urn:waddle:github:0"),
             "routed stanza should preserve GitHub payload: {routed_xml}"
         );
+    }
+
+    #[tokio::test]
+    async fn persist_groupchat_message_writes_to_waddle_history() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let waddle_id = "waddle-alpha";
+        let channel_id = "channel-bravo";
+
+        let waddle_db = state
+            .app_state
+            .db_pool
+            .create_waddle_db(waddle_id)
+            .await
+            .expect("create waddle db");
+        MigrationRunner::waddle()
+            .run(&waddle_db)
+            .await
+            .expect("waddle migrations");
+
+        let conn = waddle_db
+            .persistent_connection()
+            .expect("persistent connection");
+        let conn = conn.lock().await;
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
+            libsql::params![channel_id, "General"],
+        )
+        .await
+        .expect("insert channel");
+        drop(conn);
+
+        let room_jid: BareJid = format!("{waddle_id}_{channel_id}@muc.example.com")
+            .parse()
+            .expect("room jid");
+
+        let persisted_id = persist_groupchat_message(
+            state.as_ref(),
+            &room_jid,
+            &Some("Hello from WebSocket".to_string()),
+            &session,
+        )
+        .await
+        .expect("persist message")
+        .expect("message id");
+
+        let repository = MessageRepository::new(Arc::new(waddle_db));
+        let (messages, cursor) = repository
+            .get_by_channel(channel_id, 10, None)
+            .await
+            .expect("read messages");
+
+        assert!(cursor.is_none());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, persisted_id);
+        assert_eq!(messages[0].author_user_id, session.user_id);
+        assert_eq!(messages[0].content.as_deref(), Some("Hello from WebSocket"));
     }
 
     #[test]

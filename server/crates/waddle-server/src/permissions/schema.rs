@@ -243,7 +243,7 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("writer"),
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
-                ComputedPermission::arrow("parent", "member"),
+                ComputedPermission::arrow("parent", "view"),
             ]),
         )
         .with_permission(
@@ -253,7 +253,7 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("writer"),
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
-                ComputedPermission::arrow("parent", "member"),
+                ComputedPermission::arrow("parent", "view"),
             ]),
         )
         .with_permission(
@@ -263,7 +263,7 @@ fn channel_schema() -> ObjectTypeSchema {
                 ComputedPermission::direct("writer"),
                 ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("manager"),
-                ComputedPermission::arrow("parent", "member"),
+                ComputedPermission::arrow("parent", "view"),
             ]),
         )
 }

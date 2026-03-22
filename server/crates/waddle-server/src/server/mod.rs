@@ -624,6 +624,7 @@ fn create_router(
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
+        app_state: state.clone(),
         auth_state: auth_state.clone(),
         connection_registry,
         muc_registry,
@@ -640,18 +641,20 @@ fn create_router(
         state.clone(),
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
-    let waddles_router = routes::waddles::router(waddle_state);
+    let waddles_router = routes::waddles::router(waddle_state.clone());
 
     // Channels router for channel CRUD operations
     let channel_state = Arc::new(ChannelState::new(
         state.clone(),
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
-    let channels_router = routes::channels::router(channel_state);
+    let channels_router = routes::channels::router(channel_state.clone());
+    let messages_router = routes::messages::router(channel_state.clone());
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
     let upload_router = routes::uploads::router(upload_state);
+    let users_router = routes::users::router(waddle_state.clone());
 
     // Create server info for the /api/v1/server-info endpoint
     let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
@@ -701,6 +704,10 @@ fn create_router(
         .merge(waddles_router)
         // Merge channels routes
         .merge(channels_router)
+        // Merge message history routes
+        .merge(messages_router)
+        // Merge authenticated user search
+        .merge(users_router)
         // Merge well-known endpoints for XMPP service discovery
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
