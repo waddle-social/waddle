@@ -1,0 +1,35 @@
+---
+const user = Astro.locals.user;
+
+if (user) {
+  return Astro.redirect(Astro.url.searchParams.get("redirect") ?? "/");
+}
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign In - Colony</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sign In</h1>
+      <p>Sign in to continue.</p>
+      <p><button id="sign-in" type="button">Sign in with GitHub</button></p>
+    </main>
+
+    <script>
+      import { authClient } from "../lib/auth-client.ts";
+
+      const signInButton = document.getElementById("sign-in");
+
+      signInButton?.addEventListener("click", async () => {
+        await authClient.signIn.social({
+          provider: "github",
+          callbackURL: window.location.href,
+        });
+      });
+    </script>
+  </body>
+</html>

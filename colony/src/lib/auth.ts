@@ -14,7 +14,6 @@ function createAuth(
     baseURL: env.BETTER_AUTH_URL,
     secret,
     database,
-    disabledPaths: ["/token", "/oauth2/register"],
     trustedOrigins: trustedOidcOrigins,
     socialProviders: {
       github: {
@@ -28,7 +27,9 @@ function createAuth(
         disableSettingJwtHeader: true,
       }),
       oidcProvider({
-        loginPage: "/",
+        loginPage: "/sign-in",
+        consentPage: "/oauth/consent",
+        allowDynamicClientRegistration: true,
         trustedClients: buildTrustedOidcClients(serverOidcClientSecret),
         useJWTPlugin: true,
       }),

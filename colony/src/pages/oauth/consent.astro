@@ -1,0 +1,64 @@
+---
+const user = Astro.locals.user;
+
+if (!user) {
+  return Astro.redirect(`/sign-in?redirect=${encodeURIComponent(Astro.url.toString())}`);
+}
+
+const clientId = Astro.url.searchParams.get("client_id");
+const scopes = Astro.url.searchParams.get("scope")?.split(" ") ?? [];
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Authorize - Colony</title>
+  </head>
+  <body>
+    <main>
+      <h1>Authorization Request</h1>
+      <p>An application is requesting access to your account.</p>
+
+      {clientId && (
+        <>
+          <p><strong>Client ID:</strong> {clientId}</p>
+          {scopes.length > 0 && (
+            <>
+              <p><strong>Requested scopes:</strong></p>
+              <ul>
+                {scopes.map((scope) => <li>{scope}</li>)}
+              </ul>
+            </>
+          )}
+        </>
+      )}
+
+      <div>
+        <button id="approve" type="button">Approve</button>
+        <button id="deny" type="button">Deny</button>
+      </div>
+    </main>
+
+    <script>
+      async function submitConsent(accept: boolean) {
+        const params = new URLSearchParams(window.location.search);
+        const res = await fetch("/api/auth/oauth2/consent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            accept,
+            scope: params.get("scope") ?? undefined,
+          }),
+        });
+        const data: { url?: string } = await res.json();
+        if (data.url) {
+          window.location.href = data.url;
+        }
+      }
+
+      document.getElementById("approve")?.addEventListener("click", () => submitConsent(true));
+      document.getElementById("deny")?.addEventListener("click", () => submitConsent(false));
+    </script>
+  </body>
+</html>
