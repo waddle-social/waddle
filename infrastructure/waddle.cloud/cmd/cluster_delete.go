@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,7 +17,7 @@ var clusterDeleteCmd = &cobra.Command{
 }
 
 func runClusterDelete(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 	clusterName, _ := cmd.Flags().GetString("environment")
 	cfgPathFlag, _ := cmd.Flags().GetString("file")
 

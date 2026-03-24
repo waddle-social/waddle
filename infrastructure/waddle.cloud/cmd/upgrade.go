@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -29,7 +28,7 @@ var upgradeK8sCmd = &cobra.Command{
 }
 
 func runUpgradeTalos(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")
 	version, _ := cmd.Flags().GetString("version")
@@ -101,7 +100,7 @@ func runUpgradeTalos(cmd *cobra.Command, args []string) error {
 }
 
 func runUpgradeK8s(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")
 	version, _ := cmd.Flags().GetString("version")

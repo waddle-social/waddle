@@ -11,7 +11,10 @@ import (
 )
 
 func TestIngressPublicIPv4ForOperationUsesDiscoveredPublicIP(t *testing.T) {
-	op := operation.New("op-test", operation.TypeCreateCluster, "production", nil)
+	op, err := operation.New("op-test", operation.TypeCreateCluster, "production", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	op.SetContext("publicIP", "51.159.1.2")
 
 	got, err := ingressPublicIPv4ForOperation(&config.Config{}, op)
@@ -24,7 +27,10 @@ func TestIngressPublicIPv4ForOperationUsesDiscoveredPublicIP(t *testing.T) {
 }
 
 func TestIngressPublicIPv4ForOperationUsesOverride(t *testing.T) {
-	op := operation.New("op-test", operation.TypeCreateCluster, "production", nil)
+	op, err := operation.New("op-test", operation.TypeCreateCluster, "production", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	op.SetContext("publicIP", "51.159.1.2")
 
 	got, err := ingressPublicIPv4ForOperation(&config.Config{
@@ -41,7 +47,10 @@ func TestIngressPublicIPv4ForOperationUsesOverride(t *testing.T) {
 }
 
 func TestIngressPublicIPv4ForOperationRequiresIPv4(t *testing.T) {
-	op := operation.New("op-test", operation.TypeCreateCluster, "production", nil)
+	op, err := operation.New("op-test", operation.TypeCreateCluster, "production", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	op.SetContext("publicIP", "not-an-ip")
 
 	if _, err := ingressPublicIPv4ForOperation(&config.Config{}, op); err == nil {

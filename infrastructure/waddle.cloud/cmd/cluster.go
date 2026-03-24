@@ -156,7 +156,7 @@ var (
 )
 
 func runClusterCreate(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 	clusterName, _ := cmd.Flags().GetString("environment")
 	cfgPathFlag, _ := cmd.Flags().GetString("file")
 	nodeNameFlag, _ := cmd.Flags().GetString("node-name")
@@ -211,7 +211,10 @@ func runClusterCreate(cmd *cobra.Command, args []string) error {
 		netbirdSecretKey = strings.TrimSpace(cfg.Secrets.NetbirdSecretKey)
 	}
 
-	op := operation.New(operation.GenerateID(), operation.TypeCreateCluster, cfg.Environment, createClusterPhases)
+	op, err := operation.New(operation.GenerateID(), operation.TypeCreateCluster, cfg.Environment, createClusterPhases)
+	if err != nil {
+		return fmt.Errorf("create operation: %w", err)
+	}
 	op.SetContext("nodeName", nodeName)
 	op.SetContext("role", pool.EffectiveType())
 	op.SetContext("poolName", pool.Name)

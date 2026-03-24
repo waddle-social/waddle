@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -28,7 +27,7 @@ var etcdRestoreCmd = &cobra.Command{
 }
 
 func runEtcdSnapshot(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")
@@ -76,7 +75,7 @@ func runEtcdSnapshot(cmd *cobra.Command, args []string) error {
 }
 
 func runEtcdRestore(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")

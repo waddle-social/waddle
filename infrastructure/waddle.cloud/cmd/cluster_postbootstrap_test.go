@@ -49,7 +49,7 @@ func restorePostBootstrapFns() {
 }
 
 func newPostBootstrapOperation() *operation.Operation {
-	op := operation.New("op-test", operation.TypeCreateCluster, "production", []string{"post-bootstrap"})
+	op, _ := operation.New("op-test", operation.TypeCreateCluster, "production", []string{"post-bootstrap"})
 	op.SetContext("zone", string(scw.ZoneFrPar1))
 	op.SetContext("privateNetworkID", "pn-123")
 	op.SetContext("publicIP", "51.159.1.2")
@@ -783,7 +783,7 @@ func TestMaybeRefreshOperationServerIPsUpdatesContext(t *testing.T) {
 	restorePostBootstrapFns()
 	t.Cleanup(restorePostBootstrapFns)
 
-	op := operation.New("op-test", operation.TypeCreateCluster, "production", []string{"post-bootstrap"})
+	op, _ := operation.New("op-test", operation.TypeCreateCluster, "production", []string{"post-bootstrap"})
 	op.SetContext("serverId", "srv-123")
 	op.SetContext("zone", string(scw.ZoneFrPar1))
 	op.SetContext("publicIP", "51.15.0.10")

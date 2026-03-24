@@ -42,7 +42,7 @@ func init() {
 }
 
 func runClusterAccess(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")

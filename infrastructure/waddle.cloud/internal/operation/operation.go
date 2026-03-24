@@ -58,10 +58,13 @@ type Operation struct {
 }
 
 // New creates a new operation with the given phases in order.
-func New(id string, opType Type, cluster string, phases []string) *Operation {
+func New(id string, opType Type, cluster string, phases []string) (*Operation, error) {
 	now := time.Now().UTC()
 	phaseMap := make(map[string]*Phase, len(phases))
 	for _, name := range phases {
+		if _, exists := phaseMap[name]; exists {
+			return nil, fmt.Errorf("duplicate phase name %q", name)
+		}
 		phaseMap[name] = &Phase{Status: PhasePending}
 	}
 
@@ -81,7 +84,7 @@ func New(id string, opType Type, cluster string, phases []string) *Operation {
 		Phases:       phaseMap,
 		Context:      make(map[string]any),
 		Cleanup:      nil,
-	}
+	}, nil
 }
 
 // IsComplete returns true if all phases are completed or skipped.
@@ -149,7 +152,11 @@ func (o *Operation) FailPhase(name string, err error) error {
 
 	now := time.Now().UTC()
 	phase.Status = PhaseFailed
-	phase.Error = err.Error()
+	if err != nil {
+		phase.Error = err.Error()
+	} else {
+		phase.Error = "unknown error"
+	}
 	o.UpdatedAt = now
 	return nil
 }

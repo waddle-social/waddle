@@ -13,6 +13,7 @@ import (
 	ciliumk8s "github.com/cilium/cilium/cilium-cli/k8s"
 	ciliumstatus "github.com/cilium/cilium/cilium-cli/status"
 	"helm.sh/helm/v3/pkg/cli/values"
+	"helm.sh/helm/v3/pkg/storage/driver"
 )
 
 // InstallParams holds parameters for Cilium CNI installation.
@@ -150,5 +151,9 @@ func installValues(hubble bool, ipv4NativeRoutingCIDR string) []string {
 }
 
 func isReleaseExistsError(err error) bool {
+	if errors.Is(err, driver.ErrReleaseExists) {
+		return true
+	}
+	// Fallback: cilium-cli wraps Helm errors, so typed checks may not unwrap.
 	return strings.Contains(strings.ToLower(err.Error()), "cannot re-use a name that is still in use")
 }

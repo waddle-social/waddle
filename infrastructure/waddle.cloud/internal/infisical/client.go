@@ -57,6 +57,9 @@ func (c *Client) SetSecret(_ context.Context, projectID, environment, secretPath
 		SecretPath:  secretPath,
 	})
 	if err != nil {
+		if !isSecretAlreadyExistsError(err) {
+			return fmt.Errorf("create secret %s: %w", key, err)
+		}
 		_, updateErr := c.sdk.Secrets().Update(infisicalsdk.UpdateSecretOptions{
 			SecretKey:      key,
 			NewSecretValue: value,
@@ -65,7 +68,7 @@ func (c *Client) SetSecret(_ context.Context, projectID, environment, secretPath
 			SecretPath:     secretPath,
 		})
 		if updateErr != nil {
-			return fmt.Errorf("set secret %s (create: %w, update: %w)", key, err, updateErr)
+			return fmt.Errorf("update secret %s: %w", key, updateErr)
 		}
 	}
 
@@ -103,6 +106,9 @@ func (c *Client) EnsureSecretPath(_ context.Context, projectID, environment, sec
 	currentPath := "/"
 
 	for _, segment := range segments {
+		if strings.TrimSpace(segment) == "" {
+			continue
+		}
 		_, err := c.sdk.Folders().Create(infisicalsdk.CreateFolderOptions{
 			ProjectID:   projectID,
 			Environment: environment,
@@ -125,6 +131,28 @@ func (c *Client) EnsureSecretPath(_ context.Context, projectID, environment, sec
 	}
 
 	return nil
+}
+
+func isSecretNotFoundError(err error) bool {
+	var apiErr *sdkerrors.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == 404
+}
+
+func isSecretAlreadyExistsError(err error) bool {
+	var apiErr *sdkerrors.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode == 409 {
+		return true
+	}
+	if apiErr.StatusCode == 400 && strings.Contains(strings.ToLower(apiErr.ErrorMessage), "already exists") {
+		return true
+	}
+	return false
 }
 
 func isFolderAlreadyExistsError(err error) bool {

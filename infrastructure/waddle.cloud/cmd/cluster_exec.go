@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -43,7 +42,7 @@ func init() {
 }
 
 func runClusterExec(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	clusterName, _ := cmd.Flags().GetString("cluster")
 	cfgFile, _ := cmd.Flags().GetString("file")

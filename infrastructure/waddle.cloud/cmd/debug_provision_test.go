@@ -46,7 +46,7 @@ func TestPhaseOrderServerDebugProvisionBuildsVerboseCloudInit(t *testing.T) {
 	t.Cleanup(restoreProvisioningFns)
 
 	cfg := newProvisionConfig(newNodePool("control-plane", config.NodeTypeControlPlane))
-	op := operation.New("op-debug", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
+	op, _ := operation.New("op-debug", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
 	op.SetContext("poolName", "control-plane")
 	op.SetContext("role", config.NodeTypeControlPlane)
 	op.SetContext("serverId", "srv-existing")

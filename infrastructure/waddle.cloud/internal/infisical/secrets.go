@@ -33,8 +33,10 @@ func (c *Client) StoreSecretsBundle(ctx context.Context, projectID, environment,
 func (c *Client) LoadSecretsBundle(ctx context.Context, projectID, environment, secretPath string) (*talos.SecretsBundle, error) {
 	value, err := c.GetSecret(ctx, projectID, environment, secretPath, secretsBundleKey)
 	if err != nil {
-		// If secret not found, return nil (first-time init)
-		return nil, nil
+		if isSecretNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load secrets bundle: %w", err)
 	}
 	if value == "" {
 		return nil, nil

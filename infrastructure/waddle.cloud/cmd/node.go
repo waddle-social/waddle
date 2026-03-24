@@ -34,7 +34,7 @@ var nodeRemoveCmd = &cobra.Command{
 }
 
 func runNodeAdd(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	nameFlag, _ := cmd.Flags().GetString("name")
 	roleRaw, _ := cmd.Flags().GetString("role")
@@ -341,7 +341,7 @@ func provisionNodeServer(
 }
 
 func runNodeRemove(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	name, _ := cmd.Flags().GetString("name")
 	clusterName, _ := cmd.Flags().GetString("cluster")

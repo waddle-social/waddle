@@ -148,7 +148,7 @@ func TestPhaseOrderServerReinstallUsesExistingServer(t *testing.T) {
 
 	cfg := newProvisionConfig(newNodePool("control-plane", config.NodeTypeControlPlane))
 	cfg.Storage.Provider = config.StorageProviderOpenEBSMayastorLab
-	op := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
+	op, _ := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
 	op.SetContext("poolName", "control-plane")
 	op.SetContext("role", config.NodeTypeControlPlane)
 	op.SetContext("serverId", "srv-existing")
@@ -281,7 +281,7 @@ func TestPhaseOrderServerOrderPathUnaffected(t *testing.T) {
 	t.Cleanup(restoreProvisioningFns)
 
 	cfg := newProvisionConfig(newNodePool("control-plane", config.NodeTypeControlPlane))
-	op := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
+	op, _ := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
 	op.SetContext("poolName", "control-plane")
 	op.SetContext("role", config.NodeTypeControlPlane)
 	op.SetContext("nodeName", "production-control-plane-01")
@@ -588,7 +588,7 @@ func TestPhaseOrderServerReinstallRequiresServerID(t *testing.T) {
 	t.Cleanup(restoreProvisioningFns)
 
 	cfg := newProvisionConfig(newNodePool("control-plane", config.NodeTypeControlPlane))
-	op := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
+	op, _ := operation.New("op-test", operation.TypeCreateCluster, cfg.Environment, []string{"order-server"})
 	op.SetContext("poolName", "control-plane")
 	op.SetContext("role", config.NodeTypeControlPlane)
 	op.SetContext(opContextReinstall, true)
