@@ -32,10 +32,11 @@ var gatewayAPIRequiredGVKs = []schema.GroupVersionKind{
 	{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "HTTPRoute"},
 	{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "GRPCRoute"},
 	{Group: "gateway.networking.k8s.io", Version: "v1beta1", Kind: "ReferenceGrant"},
+	{Group: "gateway.networking.k8s.io", Version: "v1alpha2", Kind: "TLSRoute"},
 }
 
-//go:embed manifests/gateway-api-standard-crds.yaml
-var gatewayAPIStandardCRDsManifest string
+//go:embed manifests/gateway-api-experimental-crds.yaml
+var gatewayAPIExperimentalCRDsManifest string
 
 func ensureGatewayAPICRDs(ctx context.Context, kubeconfig string) error {
 	restCfg, err := clientcmd.BuildConfigFromFlags("", strings.TrimSpace(kubeconfig))
@@ -54,7 +55,7 @@ func ensureGatewayAPICRDs(ctx context.Context, kubeconfig string) error {
 		return fmt.Errorf("create dynamic client: %w", err)
 	}
 
-	objects, err := decodeManifest(gatewayAPIStandardCRDsManifest)
+	objects, err := decodeManifest(gatewayAPIExperimentalCRDsManifest)
 	if err != nil {
 		return fmt.Errorf("decode gateway API CRDs manifest: %w", err)
 	}

@@ -30,4 +30,5 @@ spec:
     sources:
       - gateway-httproute
       - gateway-grpcroute
+      - gateway-tlsroute
     txtOwnerId: waddle-cluster

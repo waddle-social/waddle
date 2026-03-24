@@ -42,21 +42,30 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
-    - name: https-teleport
-      protocol: HTTPS
+    - name: teleport-passthrough
+      protocol: TLS
       port: 443
-      hostname: teleport.waddle.social
+      hostname: "teleport.waddle.social"
       tls:
-        mode: Terminate
-        certificateRefs:
-          - name: teleport-waddle-social-tls
+        mode: Passthrough
       allowedRoutes:
         namespaces:
           from: All
-    - name: http-teleport
-      protocol: HTTP
-      port: 80
-      hostname: teleport.waddle.social
+    - name: teleport-grpc-passthrough
+      protocol: TLS
+      port: 443
+      hostname: "*.teleport.cluster.local"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: teleport-kube-passthrough
+      protocol: TLS
+      port: 443
+      hostname: "*.teleport.waddle.social"
+      tls:
+        mode: Passthrough
       allowedRoutes:
         namespaces:
           from: All

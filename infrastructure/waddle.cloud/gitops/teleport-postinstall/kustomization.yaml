@@ -3,5 +3,5 @@ kind: Kustomization
 resources:
   - role.yaml
   - github-connector.yaml
-  - httproute-https.yaml
-  - httproute-http-redirect.yaml
+  - tls-route.yaml
+  - reference-grant.yaml

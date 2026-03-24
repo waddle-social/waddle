@@ -24,18 +24,18 @@ spec:
     clusterName: teleport.waddle.social
     kubeClusterName: ${WADDLE_CLUSTER_ENVIRONMENT}
     proxyListenerMode: multiplex
-    publicAddr:
-      - teleport.waddle.social:443
+    acme: true
+    acmeEmail: admin@waddle.social
+    proxyProtocol: "off"
     authentication:
       type: github
       connectorName: github
       localAuth: false
     service:
       type: ClusterIP
-    ingress:
-      enabled: true
-      useExisting: true
-      suppressAutomaticWildcards: true
+    teleportConfig:
+      proxy_service:
+        kube_listen_addr: "0.0.0.0:3026"
     highAvailability:
       replicaCount: 1
     proxy:

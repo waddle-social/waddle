@@ -129,6 +129,7 @@ func installValues(hubble bool, ipv4NativeRoutingCIDR string) []string {
 		"cgroup.autoMount.enabled=false",
 		"cgroup.hostRoot=/sys/fs/cgroup",
 		"envoy.securityContext.capabilities.keepCapNetBindService=true",
+		"envoy.securityContext.capabilities.envoy={NET_ADMIN,SYS_ADMIN,NET_BIND_SERVICE}",
 		"securityContext.capabilities.ciliumAgent={CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID,NET_BIND_SERVICE}",
 		"securityContext.capabilities.cleanCiliumState={NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}",
 	}
