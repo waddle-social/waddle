@@ -24,21 +24,21 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
-    - name: https-chat
+    - name: https-api
       protocol: HTTPS
       port: 443
-      hostname: chat.waddle.social
+      hostname: api.waddle.social
       tls:
         mode: Terminate
         certificateRefs:
-          - name: chat-waddle-social-tls
+          - name: api-waddle-social-tls
       allowedRoutes:
         namespaces:
           from: All
-    - name: http-chat
+    - name: http-api
       protocol: HTTP
       port: 80
-      hostname: chat.waddle.social
+      hostname: api.waddle.social
       allowedRoutes:
         namespaces:
           from: All

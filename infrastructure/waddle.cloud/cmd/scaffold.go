@@ -83,17 +83,6 @@ var clusterScaffoldCmd = &cobra.Command{
 	},
 }
 
-var scaffoldCmd = &cobra.Command{
-	Use:        "scaffold",
-	Short:      "Deprecated alias for cluster scaffold",
-	Deprecated: "use \"cluster scaffold -e <environment> [--output-file <path>]\" instead",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		environment, _ := cmd.Flags().GetString("name")
-		outputFile, _ := cmd.Flags().GetString("output")
-		return runClusterScaffold(environment, outputFile)
-	},
-}
-
 func runClusterScaffold(environment, outputFile string) error {
 	environment = strings.TrimSpace(environment)
 	if environment == "" {
@@ -125,12 +114,7 @@ func runClusterScaffold(environment, outputFile string) error {
 }
 
 func init() {
-	rootCmd.AddCommand(scaffoldCmd)
 	clusterScaffoldCmd.Flags().StringP("environment", "e", "", "Environment name")
 	clusterScaffoldCmd.Flags().String("output-file", "", "Output file path (default: ./<environment>.yaml)")
 	_ = clusterScaffoldCmd.MarkFlagRequired("environment")
-
-	// Deprecated alias flags
-	scaffoldCmd.Flags().String("name", "", "Environment/cluster name")
-	scaffoldCmd.Flags().String("output", "", "Output file path (default: clusters/<name>.yaml)")
 }

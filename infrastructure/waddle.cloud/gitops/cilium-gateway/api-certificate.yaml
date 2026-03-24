@@ -1,12 +1,12 @@
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: chat-waddle-social-tls
+  name: api-waddle-social-tls
   namespace: default
 spec:
-  secretName: chat-waddle-social-tls
+  secretName: api-waddle-social-tls
   issuerRef:
     name: letsencrypt-production
     kind: ClusterIssuer
   dnsNames:
-    - chat.waddle.social
+    - api.waddle.social

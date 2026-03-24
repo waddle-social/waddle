@@ -25,10 +25,8 @@ type Config struct {
 	Flux        FluxConfig        `yaml:"flux"`
 
 	// Runtime credentials loaded from secret providers, never serialized.
-	scwAccessKey       string
-	scwSecretKey       string
-	cloudflareAPIToken string
-	cloudflareAccount  string
+	scwAccessKey string
+	scwSecretKey string
 }
 
 // ClusterConfig holds Kubernetes/Talos version info.
@@ -145,12 +143,6 @@ func Load(path string) (*Config, error) {
 	}
 
 	// Environment variable overrides for sensitive values
-	if v := os.Getenv("CLOUDFLARE_API_TOKEN"); v != "" {
-		cfg.cloudflareAPIToken = v
-	}
-	if v := os.Getenv("CLOUDFLARE_ACCOUNT_ID"); v != "" {
-		cfg.cloudflareAccount = v
-	}
 	if v := os.Getenv("INFISICAL_CLIENT_ID"); v != "" && cfg.Infisical.ClientID == "" {
 		cfg.Infisical.ClientID = v
 	}
@@ -436,16 +428,6 @@ func Save(path string, cfg *Config) error {
 // ScalewayCredentials returns the Scaleway credentials loaded from the secret backend.
 func (c *Config) ScalewayCredentials() (accessKey, secretKey string) {
 	return c.scwAccessKey, c.scwSecretKey
-}
-
-// CloudflareAPIToken returns the Cloudflare API token loaded from environment variables.
-func (c *Config) CloudflareAPIToken() string {
-	return c.cloudflareAPIToken
-}
-
-// CloudflareAccountID returns the Cloudflare account ID from environment variables.
-func (c *Config) CloudflareAccountID() string {
-	return c.cloudflareAccount
 }
 
 // FindNodePool returns the NodePoolConfig with the given name, or an error.

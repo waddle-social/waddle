@@ -14,3 +14,4 @@ resources:
   - kustomization-infra-cilium-gateway.yaml
   - kustomization-infra-teleport-core.yaml
   - kustomization-infra-teleport-postinstall.yaml
+  - kustomization-infra-waddle-server.yaml
