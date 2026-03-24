@@ -1,0 +1,71 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: waddle-gateway
+  namespace: default
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.apps.waddle.social"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: apps-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: "*.apps.waddle.social"
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https-api
+      protocol: HTTPS
+      port: 443
+      hostname: api.waddle.social
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: api-waddle-social-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http-api
+      protocol: HTTP
+      port: 80
+      hostname: api.waddle.social
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: teleport-passthrough
+      protocol: TLS
+      port: 443
+      hostname: "teleport.waddle.social"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: teleport-grpc-passthrough
+      protocol: TLS
+      port: 443
+      hostname: "*.teleport.cluster.local"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: teleport-kube-passthrough
+      protocol: TLS
+      port: 443
+      hostname: "*.teleport.waddle.social"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: All

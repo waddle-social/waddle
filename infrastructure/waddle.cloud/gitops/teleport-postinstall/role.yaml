@@ -1,0 +1,18 @@
+apiVersion: resources.teleport.dev/v1
+kind: TeleportRoleV7
+metadata:
+  name: infra
+  namespace: teleport
+spec:
+  allow:
+    logins:
+      - root
+      - ubuntu
+    node_labels:
+      '*': '*'
+    kubernetes_groups:
+      - system:masters
+    kubernetes_labels:
+      '*': '*'
+    kubernetes_users:
+      - root

@@ -1,0 +1,24 @@
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: teleport
+  namespace: teleport
+spec:
+  hostnames:
+    - teleport.waddle.social
+    - "*.teleport.waddle.social"
+    - "*.teleport.cluster.local"
+  parentRefs:
+    - name: waddle-gateway
+      namespace: default
+      sectionName: teleport-passthrough
+    - name: waddle-gateway
+      namespace: default
+      sectionName: teleport-grpc-passthrough
+    - name: waddle-gateway
+      namespace: default
+      sectionName: teleport-kube-passthrough
+  rules:
+    - backendRefs:
+        - name: teleport
+          port: 443

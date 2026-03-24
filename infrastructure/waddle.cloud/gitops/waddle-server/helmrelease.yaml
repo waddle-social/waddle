@@ -1,0 +1,31 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: waddle-server
+  namespace: waddle
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: waddle-server
+      version: 0.1.x
+      sourceRef:
+        kind: HelmRepository
+        name: waddle-server
+        namespace: waddle
+      interval: 12h
+  values:
+    image:
+      repository: ghcr.io/waddle-social/waddle
+      tag: main
+    config:
+      baseUrl: https://api.waddle.social
+      corsOrigins: https://api.waddle.social
+    xmpp:
+      domain: api.waddle.social
+    persistence:
+      storageClassName: openebs-mayastor
+    service:
+      type: ClusterIP
+    secret:
+      create: true

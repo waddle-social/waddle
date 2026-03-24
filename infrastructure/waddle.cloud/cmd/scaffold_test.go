@@ -1,0 +1,40 @@
+package cmd
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestRunClusterScaffoldDefaultsFluxOCIRepo(t *testing.T) {
+	outputFile := filepath.Join(t.TempDir(), "staging.yaml")
+
+	if err := runClusterScaffold("staging", outputFile); err != nil {
+		t.Fatalf("runClusterScaffold returned error: %v", err)
+	}
+
+	content, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("read scaffolded config: %v", err)
+	}
+
+	if !strings.Contains(
+		string(content),
+		`ociRepo: "oci://ghcr.io/waddle-social/waddle/gitops"`,
+	) {
+		t.Fatalf("scaffolded config missing default flux ociRepo:\n%s", string(content))
+	}
+	if !strings.Contains(string(content), `privateNetworkIPv4CIDR: "172.16.16.0/24"`) {
+		t.Fatalf("scaffolded config missing default scaleway private network cidr:\n%s", string(content))
+	}
+	if !strings.Contains(string(content), "ingress:\n") || !strings.Contains(string(content), `publicIPv4: ""`) {
+		t.Fatalf("scaffolded config missing ingress publicIPv4 override:\n%s", string(content))
+	}
+	if !strings.Contains(string(content), "storage:\n") || !strings.Contains(string(content), `provider: openebs-mayastor-lab`) {
+		t.Fatalf("scaffolded config missing storage config:\n%s", string(content))
+	}
+	if !strings.Contains(string(content), `diskPoolDiskByID: /dev/disk/by-id/nvme-eui.REPLACE_ME`) {
+		t.Fatalf("scaffolded config missing mayastor diskPoolDiskByID placeholder:\n%s", string(content))
+	}
+}

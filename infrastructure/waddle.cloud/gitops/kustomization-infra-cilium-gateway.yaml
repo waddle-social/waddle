@@ -1,0 +1,22 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-cilium-gateway
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra-cert-manager-issuer
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./cilium-gateway
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: bootstrap
+  healthChecks:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: waddle-gateway
+      namespace: default

@@ -1,0 +1,50 @@
+environment: production
+
+cluster:
+  talosVersion: v1.12.0
+  kubernetesVersion: v1.35.0
+  # Must be updated to a schematic that includes nvme_tcp before using Mayastor.
+  talosSchematic: 81efb800f02421130d6f701caaae6f1cb182ef0e7631da1c801dfcb3699c86cd
+  ciliumVersion: v1.19.1
+  fluxVersion: latest
+  controlPlaneTaints: false
+
+scaleway:
+  projectId: da8a176b-80b5-46af-9401-44147a989863
+  organizationId: da8a176b-80b5-46af-9401-44147a989863
+  privateNetworkIPv4CIDR: 172.16.16.0/24
+
+nodePools:
+  - name: control-plane
+    type: control-plane
+    zone: fr-par-2
+    size: 1
+    offer: EM-A610R-NVMe
+    billingCycle: monthly
+    reservedPrivateIPs:
+      - 172.16.16.16
+    disks:
+      os: /dev/nvme0n1
+      data: /dev/nvme1n1
+
+storage:
+  provider: openebs-mayastor-lab
+  diskPoolDiskByID: /dev/disk/by-id/nvme-eui.002538b741b03f86
+  storageClassName: openebs-mayastor
+  defaultStorageClass: true
+  replicaCount: 1
+
+secrets:
+  provider: 1password
+  secretPath: /projects/waddle-social
+  netbirdSecretKey: NETBIRD_SETUP_KEY
+
+onepassword:
+  vault: waddle-infra
+  account: "waddle-social.1password.eu"
+
+ingress:
+  publicIPv4: ""
+
+flux:
+  ociRepo: oci://ghcr.io/waddle-social/waddle/gitops

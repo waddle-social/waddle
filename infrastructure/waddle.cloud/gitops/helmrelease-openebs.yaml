@@ -1,0 +1,67 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: openebs
+  namespace: openebs
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: openebs
+      version: 4.4.0
+      sourceRef:
+        kind: HelmRepository
+        name: openebs
+        namespace: openebs
+      interval: 30m
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+  values:
+    openebs-crds:
+      csi:
+        volumeSnapshots:
+          enabled: true
+    localpv-provisioner:
+      hostpathClass:
+        enabled: false
+    engines:
+      local:
+        lvm:
+          enabled: false
+        zfs:
+          enabled: false
+        rawfile:
+          enabled: false
+      replicated:
+        mayastor:
+          enabled: true
+    loki:
+      enabled: false
+    alloy:
+      enabled: false
+    mayastor:
+      localpv-provisioner:
+        enabled: false
+        hostpathClass:
+          enabled: false
+      nats:
+        cluster:
+          enabled: false
+          replicas: 1
+      storageClass:
+        enabled: false
+      etcd:
+        enabled: true
+        replicaCount: 1
+        localpvScConfig:
+          enabled: true
+        persistence:
+          enabled: true
+          storageClass: mayastor-etcd-localpv
+          size: 2Gi
+      loki:
+        enabled: false
+      alloy:
+        enabled: false

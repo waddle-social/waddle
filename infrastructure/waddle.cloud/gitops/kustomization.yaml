@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kustomization-openebs-core.yaml
+  - kustomization-openebs-postinstall.yaml
+  - kustomization-infra-external-secrets.yaml
+  - kustomization-infra-onepassword-connect.yaml
+  - kustomization-infra-cert-manager.yaml
+  - kustomization-infra-external-dns.yaml
+  - kustomization-infra-cloudnative-pg.yaml
+  - kustomization-infra-spicedb-operator-source.yaml
+  - kustomization-infra-spicedb-operator.yaml
+  - kustomization-infra-cert-manager-issuer.yaml
+  - kustomization-infra-cilium-gateway.yaml
+  - kustomization-infra-teleport-core.yaml
+  - kustomization-infra-teleport-postinstall.yaml
+  - kustomization-infra-waddle-server.yaml

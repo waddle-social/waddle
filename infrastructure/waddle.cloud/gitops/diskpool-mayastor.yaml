@@ -1,0 +1,9 @@
+apiVersion: openebs.io/v1beta3
+kind: DiskPool
+metadata:
+  name: ${WADDLE_STORAGE_NODE_NAME}-pool
+  namespace: openebs
+spec:
+  node: ${WADDLE_STORAGE_NODE_NAME}
+  disks:
+    - ${WADDLE_STORAGE_DISKPOOL_DISK_BY_ID}

@@ -1,0 +1,20 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-teleport-postinstall
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra-teleport-core
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./teleport-postinstall
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: bootstrap
+  postBuild:
+    substitute:
+      WADDLE_TELEPORT_GITHUB_CLIENT_ID: ${WADDLE_TELEPORT_GITHUB_CLIENT_ID}

@@ -1,0 +1,22 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: openebs-postinstall
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: openebs-core
+  force: true
+  interval: 5m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./postinstall
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: bootstrap
+  postBuild:
+    substitute:
+      WADDLE_STORAGE_NODE_NAME: ${WADDLE_STORAGE_NODE_NAME}
+      WADDLE_STORAGE_DISKPOOL_DISK_BY_ID: ${WADDLE_STORAGE_DISKPOOL_DISK_BY_ID}
