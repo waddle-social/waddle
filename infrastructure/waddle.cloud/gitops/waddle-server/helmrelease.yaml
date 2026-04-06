@@ -20,7 +20,7 @@ spec:
       tag: main
     config:
       baseUrl: https://api.waddle.social
-      corsOrigins: https://api.waddle.social
+      corsOrigins: https://api.waddle.social,https://chat.waddle.social,http://localhost:4321
     xmpp:
       domain: api.waddle.social
     persistence:

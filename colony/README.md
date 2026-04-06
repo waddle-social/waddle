@@ -34,4 +34,6 @@ Bun-based Astro 6 app targeting Cloudflare Workers with D1, Drizzle Kit, Better 
 - Allowed server redirect URIs are:
   - `http://localhost:3000/api/auth/callback`
   - `https://server.waddle.social/api/auth/callback`
+  - `https://api.waddle.social/api/auth/callback`
 - The provider uses a first-party `web` client with a shared secret for `waddle-server`. Configure the shared secret as `WADDLE_SERVER_OIDC_CLIENT_SECRET` in local generator env and in the Cloudflare Secrets Store.
+- The production value of `WADDLE_SERVER_OIDC_CLIENT_SECRET` is stored in 1Password at `op://waddle-production/waddle.chat/colonoy-oidc-client-secret`. It must match the `client_secret` field of the `colony` entry in `WADDLE_AUTH_PROVIDERS_JSON` on the `waddle-server-secrets` Kubernetes secret in the `waddle` namespace. When rotating, update both sides and redeploy colony + restart waddle-server.

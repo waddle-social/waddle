@@ -14,6 +14,7 @@ const oidcClientDefinitions = [
     redirectUrls: [
       "http://localhost:3000/api/auth/callback",
       "https://server.waddle.social/api/auth/callback",
+      "https://api.waddle.social/api/auth/callback",
     ],
     skipConsent: true,
   },
