@@ -5,17 +5,21 @@ import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
+import { parseRoute, pushRoute } from "@/composables/useRouting";
 import LandingState from "@/components/chat/LandingState.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import MobileHeader from "@/components/chat/MobileHeader.vue";
+import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import CreateWaddleDialog from "@/components/modals/CreateWaddleDialog.vue";
 import CreateChannelDialog from "@/components/modals/CreateChannelDialog.vue";
 import WaddleSettingsDialog from "@/components/modals/WaddleSettingsDialog.vue";
 import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
+import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
+import type { MemberSummary } from "@/lib/waddle-api";
 
 const props = defineProps<{ serverBaseUrl: string }>();
 
@@ -52,23 +56,54 @@ const messaging = useMessaging(
   ui.clearActionError,
 );
 
+// --- Deep linking ---
+
+function updateUrl() {
+  pushRoute(waddles.activeWaddleId.value, waddles.activeChannelId.value);
+}
+
+watch([waddles.activeWaddleId, waddles.activeChannelId], updateUrl);
+
+function onPopState() {
+  const route = parseRoute(window.location.pathname);
+  if (route.waddleId && route.waddleId !== waddles.activeWaddleId.value) {
+    void selectWaddle(route.waddleId, route.channelId);
+  } else if (route.channelId && route.channelId !== waddles.activeChannelId.value) {
+    void selectChannel(route.channelId);
+  }
+}
+
+// --- Bootstrap ---
+
 async function bootstrap() {
   await auth.bootstrap();
   if (auth.appState.value === "ready") {
-    await waddles.loadWaddles();
+    const route = parseRoute(window.location.pathname);
+    await waddles.loadWaddles(route.waddleId);
+
+    // If URL had a specific channel, select it
+    if (route.channelId && waddles.activeWaddleId.value) {
+      waddles.activeChannelId.value = route.channelId;
+      await messaging.loadMessages(waddles.activeWaddleId.value, route.channelId);
+    } else if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
+      await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
+    }
   }
 }
+
+// --- Actions ---
 
 async function handleLogout() {
   await messaging.disconnect();
   await auth.logout();
   waddles.clearData();
   messaging.clearMessages();
+  pushRoute(null, null);
 }
 
-async function selectWaddle(waddleId: string) {
+async function selectWaddle(waddleId: string, preferredChannelId?: string | null) {
   waddles.activeWaddleId.value = waddleId;
-  const channelId = await waddles.loadStructure(waddleId);
+  const channelId = await waddles.loadStructure(waddleId, preferredChannelId);
   if (channelId) {
     await messaging.loadMessages(waddleId, channelId);
   }
@@ -111,7 +146,11 @@ async function handleUpdateChannel() {
 }
 
 async function handleDeleteChannel() {
-  if (!confirm(`Delete #${waddles.currentChannel.value?.name}?`)) return;
+  ui.confirmDeleteChannel.value = true;
+}
+
+async function confirmDeleteChannel() {
+  ui.confirmDeleteChannel.value = false;
   await waddles.deleteChannel();
   ui.showEditChannel.value = false;
   if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
@@ -125,7 +164,11 @@ async function handleUpdateWaddle() {
 }
 
 async function handleDeleteWaddle() {
-  if (!confirm(`Delete ${waddles.currentWaddle.value?.name}?`)) return;
+  ui.confirmDeleteWaddle.value = true;
+}
+
+async function confirmDeleteWaddle() {
+  ui.confirmDeleteWaddle.value = false;
   await waddles.deleteWaddle();
   ui.showWaddleSettings.value = false;
   if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
@@ -133,9 +176,20 @@ async function handleDeleteWaddle() {
   }
 }
 
-async function handleRemoveMember(member: Parameters<typeof members.removeMember>[0]) {
-  if (!confirm(`Remove ${member.username}?`)) return;
-  await members.removeMember(member);
+let pendingRemoveMember: MemberSummary | null = null;
+
+function handleRemoveMember(member: MemberSummary) {
+  pendingRemoveMember = member;
+  ui.confirmRemoveMember.value = member.username;
+}
+
+async function confirmRemoveMember() {
+  if (pendingRemoveMember) {
+    const member = pendingRemoveMember;
+    pendingRemoveMember = null;
+    ui.confirmRemoveMember.value = null;
+    await members.removeMember(member);
+  }
 }
 
 function openChannelEdit() {
@@ -144,14 +198,13 @@ function openChannelEdit() {
   }
 }
 
-// Track ref for scrolling
-watch(messaging.timelineEl, () => {}, { immediate: true });
-
 onMounted(() => {
+  window.addEventListener("popstate", onPopState);
   void bootstrap();
 });
 
 onUnmounted(() => {
+  window.removeEventListener("popstate", onPopState);
   void messaging.disconnect();
 });
 </script>
@@ -202,9 +255,11 @@ onUnmounted(() => {
           <WaddlesSidebar
             :waddles="waddles.sortedWaddles.value"
             :active-waddle-id="waddles.activeWaddleId.value"
+            :session="auth.session.value"
             class="!w-full !border-r-0"
-            @select-waddle="selectWaddle"
+            @select-waddle="selectWaddle($event)"
             @create-waddle="ui.showCreateWaddle.value = true"
+            @logout="handleLogout"
           />
         </div>
         <TopicsPanel
@@ -214,10 +269,12 @@ onUnmounted(() => {
           :can-manage-channels="waddles.canManageChannels.value"
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
+          :member-count="waddles.members.value.length"
           class="!w-full !border-r-0"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
+          @open-members="ui.showMembers.value = true"
         />
       </div>
     </AppDrawer>
@@ -245,15 +302,9 @@ onUnmounted(() => {
           </button>
           <button
             class="w-full font-mono uppercase tracking-wider text-sm py-2 px-4 border border-foreground hover:bg-foreground hover:text-background transition-colors"
-            @click="ui.showMobileDetails.value = false; ui.adminTab.value = 'people'"
+            @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
           >
             Members ({{ waddles.members.value.length }})
-          </button>
-          <button
-            class="w-full font-mono uppercase tracking-wider text-sm py-2 px-4 border border-foreground text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
-            @click="handleLogout"
-          >
-            Log out
           </button>
         </div>
       </div>
@@ -261,13 +312,15 @@ onUnmounted(() => {
 
     <!-- Desktop layout -->
     <div class="flex-1 flex overflow-hidden">
-      <!-- Left sidebar: waddles -->
+      <!-- Left sidebar: waddles + profile -->
       <div class="hidden lg:flex">
         <WaddlesSidebar
           :waddles="waddles.sortedWaddles.value"
           :active-waddle-id="waddles.activeWaddleId.value"
-          @select-waddle="selectWaddle"
+          :session="auth.session.value"
+          @select-waddle="selectWaddle($event)"
           @create-waddle="ui.showCreateWaddle.value = true"
+          @logout="handleLogout"
         />
       </div>
 
@@ -280,9 +333,11 @@ onUnmounted(() => {
           :can-manage-channels="waddles.canManageChannels.value"
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
+          :member-count="waddles.members.value.length"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
+          @open-members="ui.showMembers.value = true"
         />
       </div>
 
@@ -340,7 +395,7 @@ onUnmounted(() => {
     />
 
     <MemberManagement
-      v-model:open="ui.showMobileDetails.value"
+      v-model:open="ui.showMembers.value"
       :members="waddles.sortedMembers.value"
       :member-query="members.memberQuery.value"
       :new-member-role="members.newMemberRole.value"
@@ -352,6 +407,37 @@ onUnmounted(() => {
       @add-member="members.addMember"
       @update-role="members.updateMemberRole"
       @remove-member="handleRemoveMember"
+    />
+
+    <!-- Confirmation dialogs -->
+    <ConfirmDialog
+      v-model:open="ui.confirmDeleteWaddle.value"
+      title="Delete Waddle?"
+      :message="`Are you sure you want to delete ${waddles.currentWaddle.value?.name ?? 'this waddle'}? All channels and messages will be permanently removed.`"
+      confirm-label="Delete Waddle"
+      destructive
+      :loading="waddles.isSubmitting.value"
+      @confirm="confirmDeleteWaddle"
+    />
+
+    <ConfirmDialog
+      v-model:open="ui.confirmDeleteChannel.value"
+      title="Delete Channel?"
+      :message="`Are you sure you want to delete #${waddles.currentChannel.value?.name ?? 'this channel'}? All messages in this channel will be permanently removed.`"
+      confirm-label="Delete Channel"
+      destructive
+      :loading="waddles.isSubmitting.value"
+      @confirm="confirmDeleteChannel"
+    />
+
+    <ConfirmDialog
+      :open="ui.confirmRemoveMember.value !== null"
+      title="Remove Member?"
+      :message="`Are you sure you want to remove ${ui.confirmRemoveMember.value ?? 'this member'} from the waddle?`"
+      confirm-label="Remove Member"
+      destructive
+      @update:open="(v: boolean) => { if (!v) ui.confirmRemoveMember.value = null }"
+      @confirm="confirmRemoveMember"
     />
   </div>
 </template>

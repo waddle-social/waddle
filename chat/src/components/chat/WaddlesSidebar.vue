@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Plus, Search, Lock } from "lucide-vue-next";
+import { Plus, Lock } from "lucide-vue-next";
 import type { WaddleSummary } from "@/lib/waddle-api";
+import type { WaddleSession } from "@/lib/server-auth";
+import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 
 const props = defineProps<{
   waddles: WaddleSummary[];
   activeWaddleId: string | null;
+  session: WaddleSession | null;
 }>();
 
 const emit = defineEmits<{
   selectWaddle: [id: string];
   createWaddle: [];
+  logout: [];
 }>();
 
 const publicWaddles = computed(() =>
@@ -100,5 +104,12 @@ function waddleColor(waddle: WaddleSummary): string {
         No waddles yet
       </div>
     </div>
+
+    <!-- Profile footer -->
+    <ProfilePanel
+      v-if="session"
+      :session="session"
+      @logout="emit('logout')"
+    />
   </div>
 </template>

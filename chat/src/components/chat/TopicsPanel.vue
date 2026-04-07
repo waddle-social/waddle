@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Hash, Lock, Plus, Settings } from "lucide-vue-next";
+import { Hash, Plus, Settings, Users, UserPlus } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 
 defineProps<{
@@ -9,12 +9,14 @@ defineProps<{
   canManageChannels: boolean;
   canManageCommunity: boolean;
   isLoading: boolean;
+  memberCount: number;
 }>();
 
 const emit = defineEmits<{
   selectChannel: [id: string];
   createChannel: [];
   openSettings: [];
+  openMembers: [];
 }>();
 </script>
 
@@ -31,6 +33,7 @@ const emit = defineEmits<{
         <button
           v-if="canManageCommunity"
           class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          title="Settings"
           @click="emit('openSettings')"
         >
           <Settings class="w-3.5 h-3.5" />
@@ -38,6 +41,7 @@ const emit = defineEmits<{
         <button
           v-if="canManageChannels"
           class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          title="Add channel"
           @click="emit('createChannel')"
         >
           <Plus class="w-3.5 h-3.5" />
@@ -74,6 +78,18 @@ const emit = defineEmits<{
           </span>
         </button>
       </div>
+    </div>
+
+    <!-- Members / Invite footer -->
+    <div v-if="waddle" class="border-t border-foreground">
+      <button
+        class="w-full flex items-center gap-3 px-8 py-3 hover:bg-muted transition-colors text-left"
+        @click="emit('openMembers')"
+      >
+        <Users class="w-3.5 h-3.5 flex-shrink-0" />
+        <span class="text-sm font-mono flex-1">Members</span>
+        <span class="text-xs font-mono text-muted-foreground">{{ memberCount }}</span>
+      </button>
     </div>
   </div>
 </template>

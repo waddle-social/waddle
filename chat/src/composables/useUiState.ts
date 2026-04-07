@@ -9,6 +9,10 @@ export function useUiState() {
   const showCreateChannel = ref(false);
   const showEditChannel = ref(false);
   const showWaddleSettings = ref(false);
+  const showMembers = ref(false);
+  const confirmDeleteWaddle = ref(false);
+  const confirmDeleteChannel = ref(false);
+  const confirmRemoveMember = ref<string | null>(null);
   const actionError = ref("");
 
   function clearActionError() {
@@ -27,6 +31,10 @@ export function useUiState() {
     showCreateChannel,
     showEditChannel,
     showWaddleSettings,
+    showMembers,
+    confirmDeleteWaddle,
+    confirmDeleteChannel,
+    confirmRemoveMember,
     actionError,
     clearActionError,
     normalizeError,
