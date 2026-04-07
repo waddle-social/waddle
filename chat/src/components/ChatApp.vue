@@ -5,7 +5,7 @@ import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
-import { parseRoute, pushRoute } from "@/composables/useRouting";
+import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import LandingState from "@/components/chat/LandingState.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
@@ -59,17 +59,28 @@ const messaging = useMessaging(
 // --- Deep linking ---
 
 function updateUrl() {
-  pushRoute(waddles.activeWaddleId.value, waddles.activeChannelId.value);
+  pushRoute(waddles.currentWaddle.value, waddles.currentChannel.value);
 }
 
 watch([waddles.activeWaddleId, waddles.activeChannelId], updateUrl);
 
 function onPopState() {
   const route = parseRoute(window.location.pathname);
-  if (route.waddleId && route.waddleId !== waddles.activeWaddleId.value) {
-    void selectWaddle(route.waddleId, route.channelId);
-  } else if (route.channelId && route.channelId !== waddles.activeChannelId.value) {
-    void selectChannel(route.channelId);
+  if (route.waddleSlug) {
+    const w = resolveWaddle(route.waddleSlug, waddles.waddles.value);
+    if (w && w.id !== waddles.activeWaddleId.value) {
+      const ch = route.channelSlug
+        ? resolveChannel(route.channelSlug, waddles.channels.value)
+        : undefined;
+      void selectWaddle(w.id, ch?.id);
+      return;
+    }
+  }
+  if (route.channelSlug) {
+    const ch = resolveChannel(route.channelSlug, waddles.channels.value);
+    if (ch && ch.id !== waddles.activeChannelId.value) {
+      void selectChannel(ch.id);
+    }
   }
 }
 
@@ -79,12 +90,32 @@ async function bootstrap() {
   await auth.bootstrap();
   if (auth.appState.value === "ready") {
     const route = parseRoute(window.location.pathname);
-    await waddles.loadWaddles(route.waddleId);
 
-    // If URL had a specific channel, select it
-    if (route.channelId && waddles.activeWaddleId.value) {
-      waddles.activeChannelId.value = route.channelId;
-      await messaging.loadMessages(waddles.activeWaddleId.value, route.channelId);
+    // Resolve waddle slug to ID for initial load
+    const preferredWaddleId = route.waddleSlug
+      ? undefined // will resolve after loading list
+      : undefined;
+
+    await waddles.loadWaddles(preferredWaddleId);
+
+    // Resolve slug after waddles are loaded
+    if (route.waddleSlug) {
+      const w = resolveWaddle(route.waddleSlug, waddles.waddles.value);
+      if (w && w.id !== waddles.activeWaddleId.value) {
+        waddles.activeWaddleId.value = w.id;
+        await waddles.loadStructure(w.id);
+      }
+    }
+
+    // Resolve channel slug after channels are loaded
+    if (route.channelSlug && waddles.activeWaddleId.value) {
+      const ch = resolveChannel(route.channelSlug, waddles.channels.value);
+      if (ch) {
+        waddles.activeChannelId.value = ch.id;
+        await messaging.loadMessages(waddles.activeWaddleId.value, ch.id);
+      } else if (waddles.activeChannelId.value) {
+        await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
+      }
     } else if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
       await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
     }
