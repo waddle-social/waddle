@@ -73,7 +73,6 @@ tasks: {
       "package.json",
       "bun.lock",
       "astro.config.mjs",
-      "svelte.config.js",
       "tsconfig.json",
       "wrangler.jsonc",
       "src/**",

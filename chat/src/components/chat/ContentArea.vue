@@ -1,0 +1,98 @@
+<script setup lang="ts">
+import { Hash, Settings } from "lucide-vue-next";
+import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
+import type { TimelineMessage } from "@/lib/chat-ui";
+import type { XmppStatusSnapshot } from "@/lib/xmpp-client";
+import MessageCard from "@/components/chat/MessageCard.vue";
+import MessageComposer from "@/components/chat/MessageComposer.vue";
+
+const draft = defineModel<string>("draft", { required: true });
+
+defineProps<{
+  waddle: WaddleSummary | null;
+  channel: ChannelSummary | null;
+  messages: TimelineMessage[];
+  xmppStatus: XmppStatusSnapshot;
+  actionError: string;
+  isLoadingMessages: boolean;
+  isSending: boolean;
+  canManageCommunity: boolean;
+}>();
+
+const emit = defineEmits<{
+  send: [];
+  openSettings: [];
+}>();
+</script>
+
+<template>
+  <div class="flex-1 flex flex-col min-w-0">
+    <!-- Header -->
+    <div class="h-20 border-b border-foreground px-8 flex items-center justify-between bg-background flex-shrink-0">
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2">
+          <Hash class="w-4 h-4" />
+          <h1 class="text-xl font-mono font-bold">{{ channel?.name ?? "..." }}</h1>
+        </div>
+        <div
+          v-if="xmppStatus.state !== 'online'"
+          class="flex items-center gap-2 text-xs font-mono text-muted-foreground"
+        >
+          <span
+            class="w-2 h-2 inline-block"
+            :class="xmppStatus.state === 'error' ? 'bg-destructive' : 'bg-muted-foreground'"
+          />
+          {{ xmppStatus.state }}
+        </div>
+      </div>
+      <button
+        v-if="canManageCommunity"
+        class="h-8 w-8 flex items-center justify-center hover:bg-muted transition-colors"
+        @click="emit('openSettings')"
+      >
+        <Settings class="w-4 h-4" />
+      </button>
+    </div>
+
+    <!-- Error banner -->
+    <div
+      v-if="actionError"
+      class="px-8 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
+    >
+      {{ actionError }}
+    </div>
+
+    <!-- Messages -->
+    <div class="flex-1 overflow-auto px-8 py-8">
+      <div v-if="isLoadingMessages" class="text-center py-12 text-sm font-mono text-muted-foreground">
+        Loading messages...
+      </div>
+
+      <div v-else-if="!channel" class="text-center py-12 text-sm font-mono text-muted-foreground">
+        Select a channel to start chatting
+      </div>
+
+      <div v-else-if="messages.length === 0" class="text-center py-12 text-sm font-mono text-muted-foreground">
+        No messages yet. Start the conversation!
+      </div>
+
+      <div v-else class="space-y-4 max-w-4xl">
+        <MessageCard
+          v-for="msg in messages"
+          :key="msg.id"
+          :message="msg"
+        />
+      </div>
+    </div>
+
+    <!-- Composer -->
+    <MessageComposer
+      v-if="channel"
+      v-model:draft="draft"
+      :channel-name="channel.name"
+      :is-sending="isSending"
+      :disabled="!channel"
+      @send="emit('send')"
+    />
+  </div>
+</template>

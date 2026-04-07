@@ -1,0 +1,379 @@
+import { ref, computed, watch, type Ref } from "vue";
+import type {
+  WaddleApi,
+  WaddleSummary,
+  ChannelSummary,
+  MemberSummary,
+} from "@/lib/waddle-api";
+import type { WaddleSession } from "@/lib/server-auth";
+import type { CommunityFormData, ChannelCreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
+
+export function useWaddles(
+  api: Ref<WaddleApi | null>,
+  session: Ref<WaddleSession | null>,
+  normalizeError: (v: unknown) => string,
+  actionError: Ref<string>,
+  clearActionError: () => void,
+) {
+  const waddles = ref<WaddleSummary[]>([]);
+  const channels = ref<ChannelSummary[]>([]);
+  const members = ref<MemberSummary[]>([]);
+
+  const activeWaddleId: Ref<string | null> = ref(null);
+  const activeChannelId: Ref<string | null> = ref(null);
+
+  const isLoadingStructure = ref(false);
+  const isSubmitting = ref(false);
+
+  let structureRequestId = 0;
+
+  const createWaddleForm = ref<CommunityFormData>({
+    name: "",
+    description: "",
+    is_public: true,
+  });
+
+  const editWaddleForm = ref<CommunityFormData>({
+    name: "",
+    description: "",
+    is_public: true,
+  });
+
+  const createChannelForm = ref<ChannelCreateFormData>({
+    name: "",
+    description: "",
+    channel_type: "text",
+    position: 0,
+  });
+
+  const editChannelForm = ref<ChannelEditFormData>({
+    name: "",
+    description: "",
+    position: 0,
+  });
+
+  const currentWaddle = computed(
+    () => waddles.value.find((w) => w.id === activeWaddleId.value) ?? null,
+  );
+
+  const currentChannel = computed(
+    () => channels.value.find((c) => c.id === activeChannelId.value) ?? null,
+  );
+
+  const currentRole = computed(() => {
+    if (!session.value || !currentWaddle.value) return null;
+    return (
+      members.value.find((m) => m.user_id === session.value!.user_id)?.role ??
+      currentWaddle.value.role ??
+      null
+    );
+  });
+
+  const sortedWaddles = computed(() =>
+    [...waddles.value].sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+    ),
+  );
+
+  const sortedChannels = computed(() =>
+    [...channels.value].sort(
+      (a, b) =>
+        a.position - b.position ||
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+    ),
+  );
+
+  const sortedMembers = computed(() => {
+    const order = { owner: 0, admin: 1, moderator: 2, member: 3 } as const;
+    return [...members.value].sort(
+      (a, b) =>
+        (order[a.role] ?? 4) - (order[b.role] ?? 4) ||
+        a.username.localeCompare(b.username, undefined, { sensitivity: "base" }),
+    );
+  });
+
+  const canManageCommunity = computed(() =>
+    ["owner", "admin"].includes(currentRole.value ?? ""),
+  );
+
+  const canManageChannels = computed(() =>
+    ["owner", "admin", "moderator"].includes(currentRole.value ?? ""),
+  );
+
+  const canManageMembers = computed(() =>
+    ["owner", "admin"].includes(currentRole.value ?? ""),
+  );
+
+  watch(currentWaddle, (w) => {
+    if (w) {
+      editWaddleForm.value = {
+        name: w.name,
+        description: w.description ?? "",
+        is_public: w.is_public,
+      };
+    }
+  });
+
+  watch(currentChannel, (c) => {
+    if (c) {
+      editChannelForm.value = {
+        name: c.name,
+        description: c.description ?? "",
+        position: c.position,
+      };
+    }
+  });
+
+  function resetForms() {
+    createWaddleForm.value = { name: "", description: "", is_public: true };
+    createChannelForm.value = {
+      name: "",
+      description: "",
+      channel_type: "text",
+      position: channels.value.length,
+    };
+  }
+
+  async function loadStructure(
+    waddleId: string,
+    preferredChannelId?: string | null,
+  ): Promise<string | null> {
+    if (!api.value) return null;
+
+    const requestId = ++structureRequestId;
+    isLoadingStructure.value = true;
+    clearActionError();
+
+    try {
+      const [channelRes, memberRes] = await Promise.all([
+        api.value.listChannels(waddleId),
+        api.value.listMembers(waddleId),
+      ]);
+
+      if (requestId !== structureRequestId || activeWaddleId.value !== waddleId) {
+        return null;
+      }
+
+      channels.value = channelRes.channels;
+      members.value = memberRes.members;
+
+      const nextChannelId =
+        preferredChannelId && channelRes.channels.some((c) => c.id === preferredChannelId)
+          ? preferredChannelId
+          : activeChannelId.value && channelRes.channels.some((c) => c.id === activeChannelId.value)
+            ? activeChannelId.value
+            : channelRes.channels[0]?.id ?? null;
+
+      activeChannelId.value = nextChannelId;
+      resetForms();
+      return nextChannelId;
+    } catch (e) {
+      if (requestId === structureRequestId) {
+        actionError.value = normalizeError(e);
+      }
+      return null;
+    } finally {
+      if (requestId === structureRequestId) {
+        isLoadingStructure.value = false;
+      }
+    }
+  }
+
+  async function loadWaddles(preferredId?: string | null) {
+    if (!api.value) return;
+
+    const res = await api.value.listWaddles();
+    waddles.value = res.waddles;
+
+    const nextId =
+      preferredId && res.waddles.some((w) => w.id === preferredId)
+        ? preferredId
+        : activeWaddleId.value && res.waddles.some((w) => w.id === activeWaddleId.value)
+          ? activeWaddleId.value
+          : res.waddles[0]?.id ?? null;
+
+    activeWaddleId.value = nextId;
+
+    if (nextId) {
+      return loadStructure(nextId);
+    } else {
+      channels.value = [];
+      members.value = [];
+      activeChannelId.value = null;
+      return null;
+    }
+  }
+
+  async function createWaddle(): Promise<ReturnType<WaddleApi["createWaddle"]> extends Promise<infer T> ? T | undefined : never> {
+    if (!api.value || !createWaddleForm.value.name.trim()) return undefined;
+
+    isSubmitting.value = true;
+    clearActionError();
+
+    try {
+      const desc = createWaddleForm.value.description.trim();
+      const created = await api.value.createWaddle({
+        name: createWaddleForm.value.name.trim(),
+        ...(desc ? { description: desc } : {}),
+        is_public: createWaddleForm.value.is_public,
+      });
+      resetForms();
+      await loadWaddles(created.id);
+      return created;
+    } catch (e) {
+      actionError.value = normalizeError(e);
+      return undefined;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  async function updateWaddle() {
+    if (!api.value || !currentWaddle.value || !editWaddleForm.value.name.trim()) return;
+
+    isSubmitting.value = true;
+    clearActionError();
+
+    try {
+      const desc = editWaddleForm.value.description.trim();
+      await api.value.updateWaddle(currentWaddle.value.id, {
+        name: editWaddleForm.value.name.trim(),
+        ...(desc ? { description: desc } : {}),
+        is_public: editWaddleForm.value.is_public,
+      });
+      await loadWaddles(currentWaddle.value.id);
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  async function deleteWaddle() {
+    if (!api.value || !currentWaddle.value) return;
+
+    isSubmitting.value = true;
+    clearActionError();
+
+    try {
+      await api.value.deleteWaddle(currentWaddle.value.id);
+      await loadWaddles();
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  async function createChannel() {
+    if (!api.value || !activeWaddleId.value || !createChannelForm.value.name.trim()) return undefined;
+
+    isSubmitting.value = true;
+    clearActionError();
+
+    try {
+      const desc = createChannelForm.value.description.trim();
+      const created = await api.value.createChannel(activeWaddleId.value, {
+        name: createChannelForm.value.name.trim(),
+        ...(desc ? { description: desc } : {}),
+        channel_type: createChannelForm.value.channel_type,
+        position: createChannelForm.value.position,
+      });
+      createChannelForm.value = {
+        name: "",
+        description: "",
+        channel_type: "text",
+        position: channels.value.length + 1,
+      };
+      await loadStructure(activeWaddleId.value, created.id);
+      return created;
+    } catch (e) {
+      actionError.value = normalizeError(e);
+      return undefined;
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  async function updateChannel() {
+    if (!api.value || !activeWaddleId.value || !currentChannel.value || !editChannelForm.value.name.trim()) return;
+
+    isSubmitting.value = true;
+    clearActionError();
+
+    try {
+      const desc = editChannelForm.value.description.trim();
+      await api.value.updateChannel(activeWaddleId.value, currentChannel.value.id, {
+        name: editChannelForm.value.name.trim(),
+        ...(desc ? { description: desc } : {}),
+        position: editChannelForm.value.position,
+      });
+      await loadStructure(activeWaddleId.value, currentChannel.value.id);
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  async function deleteChannel() {
+    if (!api.value || !activeWaddleId.value || !currentChannel.value) return;
+
+    isSubmitting.value = true;
+    clearActionError();
+
+    try {
+      const deletedId = currentChannel.value.id;
+      await api.value.deleteChannel(activeWaddleId.value, deletedId);
+      await loadStructure(
+        activeWaddleId.value,
+        channels.value.find((c) => c.id !== deletedId)?.id ?? null,
+      );
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      isSubmitting.value = false;
+    }
+  }
+
+  function clearData() {
+    waddles.value = [];
+    channels.value = [];
+    members.value = [];
+    activeWaddleId.value = null;
+    activeChannelId.value = null;
+  }
+
+  return {
+    waddles,
+    channels,
+    members,
+    activeWaddleId,
+    activeChannelId,
+    isLoadingStructure,
+    isSubmitting,
+    createWaddleForm,
+    editWaddleForm,
+    createChannelForm,
+    editChannelForm,
+    currentWaddle,
+    currentChannel,
+    currentRole,
+    sortedWaddles,
+    sortedChannels,
+    sortedMembers,
+    canManageCommunity,
+    canManageChannels,
+    canManageMembers,
+    loadWaddles,
+    loadStructure,
+    createWaddle,
+    updateWaddle,
+    deleteWaddle,
+    createChannel,
+    updateChannel,
+    deleteChannel,
+    clearData,
+    resetForms,
+  };
+}

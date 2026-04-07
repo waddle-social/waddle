@@ -1,6 +1,7 @@
 ---
+import Font from "astro/components/Font.astro";
 import { env } from "cloudflare:workers";
-import ChatApp from "../components/ChatApp.svelte";
+import ChatApp from "../components/ChatApp.vue";
 import "../styles/global.css";
 const serverBaseUrl = env.SERVER_BASE_URL;
 ---
@@ -12,11 +13,10 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width" />
     <meta name="generator" content={Astro.generator} />
+    <Font cssVariable="--font-geist-mono" preload />
     <title>Waddle Chat</title>
   </head>
   <body>
-    <main class="page">
-      <ChatApp client:only="svelte" serverBaseUrl={serverBaseUrl} />
-    </main>
+    <ChatApp client:only="vue" serverBaseUrl={serverBaseUrl} />
   </body>
 </html>
