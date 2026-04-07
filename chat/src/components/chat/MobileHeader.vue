@@ -15,9 +15,9 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="lg:hidden sticky top-0 z-10 grid grid-cols-[auto_1fr_auto] gap-3 items-center p-3 border-b border-foreground bg-background">
+  <div class="lg:hidden sticky top-0 z-10 grid grid-cols-[auto_1fr_auto] gap-4 items-center px-4 py-3 border-b border-foreground bg-background">
     <button
-      class="text-sm font-mono uppercase tracking-wider px-2 py-1 border border-foreground hover:bg-foreground hover:text-background transition-colors"
+      class="text-sm font-mono uppercase tracking-wider px-3 py-1.5 border border-foreground hover:bg-foreground hover:text-background transition-colors"
       @click="emit('openNav')"
     >
       Menu
@@ -31,7 +31,7 @@ const emit = defineEmits<{
       </div>
     </div>
     <button
-      class="text-sm font-mono uppercase tracking-wider px-2 py-1 border border-foreground hover:bg-foreground hover:text-background transition-colors"
+      class="text-sm font-mono uppercase tracking-wider px-3 py-1.5 border border-foreground hover:bg-foreground hover:text-background transition-colors"
       @click="emit('openDetails')"
     >
       Details

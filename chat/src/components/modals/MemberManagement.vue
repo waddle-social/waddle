@@ -37,7 +37,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
     </div>
 
     <!-- Search -->
-    <div v-if="canManageMembers" class="p-6 border-b border-foreground space-y-3">
+    <div v-if="canManageMembers" class="p-6 border-b border-foreground space-y-4">
       <div class="relative">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <input
@@ -115,7 +115,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         </div>
       </div>
 
-      <div v-if="members.length === 0" class="text-center py-4 text-sm font-mono text-muted-foreground">
+      <div v-if="members.length === 0" class="text-center py-8 text-sm font-mono text-muted-foreground">
         No members
       </div>
     </div>

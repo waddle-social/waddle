@@ -28,7 +28,7 @@ const emit = defineEmits<{
       </button>
     </div>
 
-    <div class="p-6 space-y-6">
+    <div class="p-6 space-y-4">
       <div>
         <label class="block text-xs font-mono uppercase tracking-widest text-muted-foreground mb-2">
           Waddle Name
@@ -46,7 +46,7 @@ const emit = defineEmits<{
         </label>
         <textarea
           :value="form.description"
-          class="w-full font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 py-2 bg-background text-sm min-h-24 resize-y"
+          class="w-full font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 py-2 bg-background text-sm min-h-20 resize-y"
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
       </div>

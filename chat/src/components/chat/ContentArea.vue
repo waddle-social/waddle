@@ -28,7 +28,7 @@ const emit = defineEmits<{
 <template>
   <div class="flex-1 flex flex-col min-w-0">
     <!-- Header -->
-    <div class="h-20 border-b border-foreground px-8 flex items-center justify-between bg-background flex-shrink-0">
+    <div class="h-20 border-b border-foreground px-6 flex items-center justify-between bg-background flex-shrink-0">
       <div class="flex items-center gap-4">
         <div class="flex items-center gap-2">
           <Hash class="w-4 h-4" />
@@ -47,32 +47,32 @@ const emit = defineEmits<{
       </div>
       <button
         v-if="canManageCommunity"
-        class="h-8 w-8 flex items-center justify-center hover:bg-muted transition-colors"
+        class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
         @click="emit('openSettings')"
       >
-        <Settings class="w-4 h-4" />
+        <Settings class="w-3.5 h-3.5" />
       </button>
     </div>
 
     <!-- Error banner -->
     <div
       v-if="actionError"
-      class="px-8 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
+      class="px-6 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
     >
       {{ actionError }}
     </div>
 
     <!-- Messages -->
-    <div class="flex-1 overflow-auto px-8 py-8">
-      <div v-if="isLoadingMessages" class="text-center py-12 text-sm font-mono text-muted-foreground">
+    <div class="flex-1 overflow-auto px-6 py-6">
+      <div v-if="isLoadingMessages" class="text-center py-8 text-sm font-mono text-muted-foreground">
         Loading messages...
       </div>
 
-      <div v-else-if="!channel" class="text-center py-12 text-sm font-mono text-muted-foreground">
+      <div v-else-if="!channel" class="text-center py-8 text-sm font-mono text-muted-foreground">
         Select a channel to start chatting
       </div>
 
-      <div v-else-if="messages.length === 0" class="text-center py-12 text-sm font-mono text-muted-foreground">
+      <div v-else-if="messages.length === 0" class="text-center py-8 text-sm font-mono text-muted-foreground">
         No messages yet. Start the conversation!
       </div>
 

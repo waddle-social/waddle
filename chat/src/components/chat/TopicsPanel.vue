@@ -22,7 +22,7 @@ const emit = defineEmits<{
 
 <template>
   <div class="w-80 border-r border-foreground bg-background flex flex-col flex-shrink-0">
-    <div class="h-20 px-8 border-b border-foreground flex items-center justify-between">
+    <div class="h-20 px-6 border-b border-foreground flex items-center justify-between">
       <div>
         <h2 class="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-1">
           Channels
@@ -83,7 +83,7 @@ const emit = defineEmits<{
     <!-- Members / Invite footer -->
     <div v-if="waddle" class="border-t border-foreground">
       <button
-        class="w-full flex items-center gap-3 px-8 py-3 hover:bg-muted transition-colors text-left"
+        class="w-full flex items-center gap-3 px-6 py-3 hover:bg-muted transition-colors text-left"
         @click="emit('openMembers')"
       >
         <Users class="w-3.5 h-3.5 flex-shrink-0" />

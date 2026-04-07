@@ -17,10 +17,10 @@ function close() {
           :class="side === 'left' ? 'left-0 border-r' : 'right-0 border-l'"
           @click.stop
         >
-          <div class="sticky top-0 z-10 flex items-center justify-between p-4 border-b border-foreground bg-background">
+          <div class="sticky top-0 z-10 flex items-center justify-between px-6 py-4 border-b border-foreground bg-background">
             <slot name="title" />
             <button
-              class="text-sm font-mono uppercase tracking-wider px-3 py-1 border border-foreground hover:bg-foreground hover:text-background transition-colors"
+              class="text-sm font-mono uppercase tracking-wider px-3 py-1.5 border border-foreground hover:bg-foreground hover:text-background transition-colors"
               @click="close"
             >
               Close

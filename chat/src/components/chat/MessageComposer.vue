@@ -22,15 +22,15 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="border-t border-foreground bg-background px-8 py-6">
-    <div class="flex gap-4">
+  <div class="border-t border-foreground bg-background px-6 py-4">
+    <div class="flex gap-3">
       <div class="flex-1">
         <textarea
           v-model="draft"
           :placeholder="`Message #${channelName}`"
           :disabled="disabled"
           rows="1"
-          class="w-full font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 py-2.5 bg-background resize-none text-sm"
+          class="w-full font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 py-2 bg-background resize-none text-sm"
           @keydown="onKeydown"
         />
       </div>

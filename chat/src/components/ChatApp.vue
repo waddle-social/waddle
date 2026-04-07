@@ -286,11 +286,10 @@ onUnmounted(() => {
           <WaddlesSidebar
             :waddles="waddles.sortedWaddles.value"
             :active-waddle-id="waddles.activeWaddleId.value"
-            :session="auth.session.value"
+            :session="null"
             class="!w-full !border-r-0"
             @select-waddle="selectWaddle($event)"
             @create-waddle="ui.showCreateWaddle.value = true"
-            @logout="handleLogout"
           />
         </div>
         <TopicsPanel
@@ -301,11 +300,16 @@ onUnmounted(() => {
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
-          class="!w-full !border-r-0"
+          class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"
+        />
+        <ProfilePanel
+          v-if="auth.session.value"
+          :session="auth.session.value"
+          @logout="handleLogout"
         />
       </div>
     </AppDrawer>

@@ -13,7 +13,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="border-t border-foreground p-3 flex items-center gap-3">
+  <div class="border-t border-foreground p-4 flex items-center gap-3">
     <AppAvatar :name="session.username" size="sm" />
     <div class="flex-1 min-w-0">
       <div class="text-sm font-mono font-bold truncate">{{ session.username }}</div>
