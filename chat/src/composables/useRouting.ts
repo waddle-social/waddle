@@ -6,22 +6,17 @@ export interface RouteState {
 const PREFIX_WADDLE = "/w/";
 const PREFIX_CHANNEL = "/c/";
 
+// Parses /w/{waddleId}/c/{channelId} from pathname segments
 export function parseRoute(pathname: string): RouteState {
+  const segments = pathname.split("/").filter(Boolean);
   let waddleId: string | null = null;
   let channelId: string | null = null;
 
-  const wIdx = pathname.indexOf(PREFIX_WADDLE);
-  if (wIdx !== -1) {
-    const rest = pathname.slice(wIdx + PREFIX_WADDLE.length);
-    const parts = rest.split("/");
-    waddleId = decodeURIComponent(parts[0] || "");
-    if (!waddleId) waddleId = null;
-
-    const cIdx = rest.indexOf(PREFIX_CHANNEL.slice(1));
-    if (cIdx !== -1) {
-      const afterC = rest.slice(cIdx + PREFIX_CHANNEL.length - 1);
-      channelId = decodeURIComponent(afterC.split("/")[0] || "");
-      if (!channelId) channelId = null;
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (segments[i] === "w") {
+      waddleId = decodeURIComponent(segments[i + 1]!);
+    } else if (segments[i] === "c") {
+      channelId = decodeURIComponent(segments[i + 1]!);
     }
   }
 
