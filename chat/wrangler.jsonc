@@ -24,6 +24,6 @@
     "enabled": true
   },
   "vars": {
-    "SERVER_BASE_URL": "https://server.waddle.social"
+    "SERVER_BASE_URL": "https://api.waddle.social"
   }
 }
