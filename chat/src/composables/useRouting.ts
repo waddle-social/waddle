@@ -12,21 +12,13 @@ function slugify(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
-// Parses /w/{waddleSlug}/c/{channelSlug} from pathname segments
+// Parses /{waddleSlug}/{channelSlug} from pathname segments
 export function parseRoute(pathname: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
-  let waddleSlug: string | null = null;
-  let channelSlug: string | null = null;
-
-  for (let i = 0; i < segments.length - 1; i++) {
-    if (segments[i] === "w") {
-      waddleSlug = decodeURIComponent(segments[i + 1]!);
-    } else if (segments[i] === "c") {
-      channelSlug = decodeURIComponent(segments[i + 1]!);
-    }
-  }
-
-  return { waddleSlug, channelSlug };
+  return {
+    waddleSlug: segments[0] ? decodeURIComponent(segments[0]) : null,
+    channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
+  };
 }
 
 export function resolveWaddle(slug: string, waddles: WaddleSummary[]): WaddleSummary | undefined {
@@ -52,11 +44,11 @@ export function buildPath(
   channel: ChannelSummary | null,
 ): string {
   if (!waddle) return "/";
-  let path = `/w/${encodeURIComponent(slugify(waddle.name))}`;
+  const wSlug = encodeURIComponent(slugify(waddle.name));
   if (channel) {
-    path += `/c/${encodeURIComponent(slugify(channel.name))}`;
+    return `/${wSlug}/${encodeURIComponent(slugify(channel.name))}`;
   }
-  return path;
+  return `/${wSlug}`;
 }
 
 export function pushRoute(waddle: WaddleSummary | null, channel: ChannelSummary | null) {
