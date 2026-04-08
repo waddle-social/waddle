@@ -28,3 +28,4 @@ cue.mod/pkg/
 # Gateway generated schemas
 gateway/schemas/
 gateway/supergraph.graphql
+app/crates/gui-backend/gen/
