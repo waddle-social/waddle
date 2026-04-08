@@ -229,6 +229,7 @@ impl PendingAuthorization {
 pub enum PendingFlow {
     Browser {
         next: Option<String>,
+        session_transport: BrowserSessionTransport,
     },
     Device {
         device_code: String,
@@ -238,6 +239,24 @@ pub enum PendingFlow {
         client_state: Option<String>,
         client_code_challenge: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserSessionTransport {
+    Cookie,
+    Fragment,
+}
+
+impl BrowserSessionTransport {
+    fn from_query(value: &str) -> Result<Self, AuthError> {
+        match value {
+            "cookie" => Ok(Self::Cookie),
+            "fragment" => Ok(Self::Fragment),
+            _ => Err(AuthError::InvalidRequest(
+                "session_transport must be cookie|fragment".to_string(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +313,8 @@ pub struct StartQuery {
     pub flow: String,
     #[serde(default)]
     pub next: Option<String>,
+    #[serde(default = "default_session_transport")]
+    pub session_transport: String,
 
     // XMPP fields
     #[serde(default)]
@@ -310,6 +331,10 @@ pub struct StartQuery {
 
 fn default_flow() -> String {
     "browser".to_string()
+}
+
+fn default_session_transport() -> String {
+    "cookie".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,7 +432,17 @@ pub async fn start_handler(
     };
 
     let flow = match query.flow.as_str() {
-        "browser" => PendingFlow::Browser { next: query.next },
+        "browser" => {
+            let session_transport =
+                match BrowserSessionTransport::from_query(&query.session_transport) {
+                    Ok(value) => value,
+                    Err(err) => return auth_error_to_response(err).into_response(),
+                };
+            PendingFlow::Browser {
+                next: query.next,
+                session_transport,
+            }
+        }
         "device" => {
             let Some(device_code) = query.device_code else {
                 return auth_error_to_response(AuthError::InvalidRequest(
@@ -595,8 +630,46 @@ pub async fn callback_handler(
     }
 
     match pending.flow {
-        PendingFlow::Browser { next } => {
-            let redirect_to = next.unwrap_or_else(|| "/".to_string());
+        PendingFlow::Browser {
+            next,
+            session_transport,
+        } => {
+            let redirect_to = match session_transport {
+                BrowserSessionTransport::Cookie => next.unwrap_or_else(|| "/".to_string()),
+                BrowserSessionTransport::Fragment => {
+                    let target = next.unwrap_or_else(|| "/".to_string());
+                    let mut url = match url::Url::parse(&target) {
+                        Ok(parsed) => parsed,
+                        Err(_) => match url::Url::parse(&state.base_url)
+                            .and_then(|base| base.join(&target))
+                        {
+                            Ok(parsed) => parsed,
+                            Err(err) => {
+                                return auth_error_to_response(AuthError::InvalidRequest(format!(
+                                    "invalid browser redirect target: {}",
+                                    err
+                                )))
+                                .into_response();
+                            }
+                        },
+                    };
+
+                    let mut fragment = url::form_urlencoded::Serializer::new(String::new());
+                    if let Some(existing) = url.fragment() {
+                        for (key, value) in
+                            url::form_urlencoded::parse(existing.as_bytes()).into_owned()
+                        {
+                            if key != "waddle_session_id" {
+                                fragment.append_pair(&key, &value);
+                            }
+                        }
+                    }
+                    fragment.append_pair("waddle_session_id", &session.id);
+                    url.set_fragment(Some(&fragment.finish()));
+                    url.to_string()
+                }
+            };
+
             let mut response = Redirect::temporary(&redirect_to).into_response();
             response.headers_mut().append(
                 header::SET_COOKIE,

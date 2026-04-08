@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import { ChevronDown, ChevronUp, Loader2 } from "lucide-vue-next";
+import { ChevronDown, ChevronUp } from "lucide-vue-next";
 import type { AuthProvider } from "@/lib/server-auth";
 
 const props = defineProps<{
   defaultServerUrl: string;
+  activeServerUrl: string;
   providers: AuthProvider[];
+  errorMessage: string;
 }>();
 
 const emit = defineEmits<{
@@ -16,7 +18,10 @@ const emit = defineEmits<{
 const showCustomServer = ref(false);
 const useCustom = ref(false);
 const customUrl = ref("");
-const isFetchingProviders = ref(false);
+
+function normalizeServerUrl(value: string) {
+  return value.trim().replace(/\/$/, "");
+}
 
 const displayDefault = computed(() => {
   try {
@@ -25,6 +30,17 @@ const displayDefault = computed(() => {
     return props.defaultServerUrl;
   }
 });
+
+watch(
+  () => props.activeServerUrl,
+  (serverUrl) => {
+    const normalizedActive = normalizeServerUrl(serverUrl);
+    const normalizedDefault = normalizeServerUrl(props.defaultServerUrl);
+    useCustom.value = normalizedActive !== normalizedDefault;
+    customUrl.value = useCustom.value ? normalizedActive : "";
+  },
+  { immediate: true },
+);
 
 const activeServerUrl = computed(() =>
   useCustom.value && customUrl.value.trim()
@@ -43,8 +59,13 @@ const activeServerDisplay = computed(() => {
   return displayDefault.value;
 });
 
+const singleProviderLabel = computed(
+  () => props.providers[0]?.display_name || props.providers[0]?.id || activeServerDisplay.value,
+);
+
 function selectDefault() {
   useCustom.value = false;
+  customUrl.value = "";
   emit("fetchProviders", props.defaultServerUrl);
 }
 
@@ -135,7 +156,7 @@ function handleLogin(providerId?: string) {
               v-if="useCustom"
               v-model="customUrl"
               type="url"
-              placeholder="https://api.example.com"
+              placeholder="https://server.example.com"
               class="w-full font-mono text-sm px-3 py-2 border border-current bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-background"
               @focus="selectCustom"
             />
@@ -145,6 +166,13 @@ function handleLogin(providerId?: string) {
 
       <!-- Providers / Login -->
       <div class="p-6 space-y-3">
+        <p
+          v-if="errorMessage"
+          class="border border-destructive px-3 py-2 text-sm font-mono text-destructive"
+        >
+          {{ errorMessage }}
+        </p>
+
         <template v-if="providers.length > 1">
           <label class="text-xs font-mono uppercase tracking-widest text-muted-foreground">
             Sign in with
@@ -162,9 +190,11 @@ function handleLogin(providerId?: string) {
         <button
           v-else
           class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
+          :disabled="providers.length === 0"
+          :class="providers.length === 0 ? 'opacity-50 cursor-not-allowed' : ''"
           @click="handleLogin(providers[0]?.id)"
         >
-          Sign in via {{ activeServerDisplay }}
+          {{ providers.length === 0 ? "No sign-in methods found" : `Sign in with ${singleProviderLabel}` }}
         </button>
       </div>
     </div>

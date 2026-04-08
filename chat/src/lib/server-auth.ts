@@ -19,6 +19,10 @@ export interface AuthProvider {
   display_name?: string;
 }
 
+export interface LoginUrlOptions {
+  sessionTransport?: "cookie" | "fragment";
+}
+
 export function createServerAuth(serverBaseUrl: string) {
   const baseUrl = trimTrailingSlash(serverBaseUrl);
 
@@ -36,15 +40,23 @@ export function createServerAuth(serverBaseUrl: string) {
       return Array.isArray(data) ? (data as AuthProvider[]) : [];
     },
 
-    loginUrl(nextUrl: string, providerId: string) {
+    loginUrl(nextUrl: string, providerId: string, options?: LoginUrlOptions) {
       const url = new URL("/api/auth/start", `${baseUrl}/`);
       url.searchParams.set("provider", providerId);
       url.searchParams.set("flow", "browser");
       url.searchParams.set("next", nextUrl);
+      if (options?.sessionTransport) {
+        url.searchParams.set("session_transport", options.sessionTransport);
+      }
       return url.toString();
     },
-    async getSession() {
-      const response = await fetch(`${baseUrl}/api/auth/session`, {
+    async getSession(sessionId?: string) {
+      const url = new URL("/api/auth/session", `${baseUrl}/`);
+      if (sessionId) {
+        url.searchParams.set("session_id", sessionId);
+      }
+
+      const response = await fetch(url.toString(), {
         credentials: "include",
       });
 
@@ -58,11 +70,19 @@ export function createServerAuth(serverBaseUrl: string) {
 
       return (await response.json()) as WaddleSession;
     },
-    async logout() {
-      const response = await fetch(`${baseUrl}/api/auth/logout`, {
+    async logout(sessionId?: string) {
+      const init: RequestInit = {
         method: "POST",
         credentials: "include",
-      });
+        headers: {
+          "Content-Type": "application/json",
+        },
+      };
+      if (sessionId) {
+        init.body = JSON.stringify({ session_id: sessionId });
+      }
+
+      const response = await fetch(`${baseUrl}/api/auth/logout`, init);
 
       if (!response.ok && response.status !== 204) {
         throw new Error(`Failed to log out (${response.status})`);
