@@ -7,6 +7,7 @@ import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
 import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import LandingState from "@/components/chat/LandingState.vue";
+import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
@@ -248,12 +249,10 @@ onUnmounted(() => {
   />
 
   <!-- Signed out -->
-  <LandingState
+  <LoginScreen
     v-else-if="auth.appState.value === 'signed-out'"
-    title="Sign in with Colony."
-    copy="Rooms, membership, and live chat in one compact client."
-    action-label="Log in"
-    @action="auth.login"
+    :default-server-url="props.serverBaseUrl"
+    @login="auth.login"
   />
 
   <!-- Error -->

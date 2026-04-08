@@ -3,8 +3,10 @@ import { createServerAuth, type WaddleSession } from "@/lib/server-auth";
 import { WaddleApi } from "@/lib/waddle-api";
 import type { AppState } from "@/lib/chat-ui";
 
-export function useAuth(serverBaseUrl: string) {
-  const auth = createServerAuth(serverBaseUrl);
+export function useAuth(defaultServerUrl: string) {
+  const activeServerUrl = ref(defaultServerUrl);
+
+  let auth = createServerAuth(activeServerUrl.value);
 
   const appState = ref<AppState>("loading");
   const session: Ref<WaddleSession | null> = ref(null);
@@ -28,7 +30,7 @@ export function useAuth(serverBaseUrl: string) {
       }
 
       session.value = loaded;
-      api.value = new WaddleApi(serverBaseUrl, loaded.session_id);
+      api.value = new WaddleApi(activeServerUrl.value, loaded.session_id);
       appState.value = "ready";
     } catch (e) {
       appError.value = e instanceof Error ? e.message : "Something went wrong.";
@@ -38,7 +40,11 @@ export function useAuth(serverBaseUrl: string) {
     }
   }
 
-  function login() {
+  function login(serverUrl?: string) {
+    if (serverUrl && serverUrl !== activeServerUrl.value) {
+      activeServerUrl.value = serverUrl;
+      auth = createServerAuth(serverUrl);
+    }
     window.location.href = auth.loginUrl(window.location.href);
   }
 
@@ -60,6 +66,7 @@ export function useAuth(serverBaseUrl: string) {
     api,
     appError,
     isBootstrapping,
+    activeServerUrl,
     bootstrap,
     login,
     logout,
