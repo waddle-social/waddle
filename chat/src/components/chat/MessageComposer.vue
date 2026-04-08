@@ -22,12 +22,12 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="h-14 border-t border-foreground bg-background px-6 flex items-center gap-3 flex-shrink-0">
+  <div class="h-16 border-t border-foreground bg-background px-6 flex items-center gap-3 flex-shrink-0">
     <input
       :value="draft"
       :placeholder="`Message #${channelName}`"
       :disabled="disabled"
-      class="flex-1 font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 py-1.5 bg-background text-sm h-9"
+      class="flex-1 font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 bg-background text-sm h-9"
       @input="draft = ($event.target as HTMLInputElement).value"
       @keydown="onKeydown"
     />

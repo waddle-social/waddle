@@ -386,9 +386,9 @@ onUnmounted(() => {
         :action-error="ui.actionError.value"
         :is-loading-messages="messaging.isLoadingMessages.value"
         :is-sending="messaging.isSending.value"
-        :can-manage-community="waddles.canManageCommunity.value"
+        :can-manage-channels="waddles.canManageChannels.value"
         @send="messaging.sendMessage"
-        @open-settings="ui.showWaddleSettings.value = true"
+        @edit-channel="openChannelEdit"
       />
     </div>
 

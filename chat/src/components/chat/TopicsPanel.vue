@@ -81,7 +81,7 @@ const emit = defineEmits<{
     </div>
 
     <!-- Members / Invite footer -->
-    <div v-if="waddle" class="h-14 border-t border-foreground flex-shrink-0">
+    <div v-if="waddle" class="h-16 border-t border-foreground flex-shrink-0">
       <button
         class="w-full h-full flex items-center gap-3 px-6 hover:bg-muted transition-colors text-left"
         @click="emit('openMembers')"

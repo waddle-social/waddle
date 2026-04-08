@@ -16,12 +16,12 @@ defineProps<{
   actionError: string;
   isLoadingMessages: boolean;
   isSending: boolean;
-  canManageCommunity: boolean;
+  canManageChannels: boolean;
 }>();
 
 const emit = defineEmits<{
   send: [];
-  openSettings: [];
+  editChannel: [];
 }>();
 </script>
 
@@ -46,9 +46,10 @@ const emit = defineEmits<{
         </div>
       </div>
       <button
-        v-if="canManageCommunity"
+        v-if="canManageChannels && channel"
         class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
-        @click="emit('openSettings')"
+        title="Channel settings"
+        @click="emit('editChannel')"
       >
         <Settings class="w-3.5 h-3.5" />
       </button>
