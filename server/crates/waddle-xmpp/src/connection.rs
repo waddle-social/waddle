@@ -23,7 +23,7 @@ use crate::disco::{
     build_disco_info_response_with_extensions, build_disco_items_response,
     build_server_info_abuse_form, is_disco_info_query, is_disco_items_query, muc_room_features,
     muc_service_features, parse_disco_info_query, parse_disco_items_query, pubsub_service_features,
-    server_features, upload_service_features, DiscoItem, Identity,
+    server_features, spaces_service_features, upload_service_features, DiscoItem, Identity,
 };
 use crate::isr::{
     build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore,
@@ -3673,6 +3673,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
+        // Route PubSub IQs addressed to spaces.{domain} to the spaces handler (XEP-0503)
+        {
+            let spaces_domain = format!("spaces.{}", self.domain);
+            if is_pubsub_iq(&iq)
+                && iq
+                    .to
+                    .as_ref()
+                    .map(|j| j.to_bare().to_string() == spaces_domain)
+                    .unwrap_or(false)
+            {
+                return self.handle_spaces_pubsub_iq(iq).await;
+            }
+        }
+
         // Check if this is a MUC owner IQ (XEP-0045 §10.1-10.2, room config/destroy)
         let muc_domain = self.room_registry.muc_domain();
         if (is_muc_owner_get(&iq) || is_muc_owner_set(&iq))
@@ -3767,6 +3781,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let muc_domain = self.room_registry.muc_domain();
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
+        let spaces_domain = format!("spaces.{}", self.domain);
 
         // Determine what entity is being queried
         let (identities, features, extensions) = match query.target.as_deref() {
@@ -3805,6 +3820,40 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     pubsub_service_features(),
                     vec![],
                 )
+            }
+            // Query to spaces service domain (XEP-0503)
+            Some(target) if target == spaces_domain => {
+                if let Some(ref node) = query.node {
+                    // disco#info for a specific space node (waddle)
+                    debug!(domain = %spaces_domain, node = %node, "disco#info query to space node");
+                    if let Ok(Some(waddle)) =
+                        self.app_state.get_waddle_details(node).await
+                    {
+                        (
+                            vec![Identity::spaces_node(Some(&waddle.name))],
+                            vec![
+                                crate::disco::Feature::disco_info(),
+                                crate::disco::Feature::pubsub(),
+                                crate::disco::Feature::pubsub_retrieve_items(),
+                                crate::disco::Feature::spaces(),
+                            ],
+                            vec![crate::xep::xep0503::build_spaces_type_form()],
+                        )
+                    } else {
+                        return Err(XmppError::item_not_found(Some(format!(
+                            "Space node '{}' not found",
+                            node
+                        ))));
+                    }
+                } else {
+                    // disco#info for the spaces service itself
+                    debug!(domain = %spaces_domain, "disco#info query to spaces domain");
+                    (
+                        vec![Identity::spaces_service(Some("Spaces"))],
+                        spaces_service_features(),
+                        vec![],
+                    )
+                }
             }
             // Query to MUC room
             Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
@@ -3970,6 +4019,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let muc_domain = self.room_registry.muc_domain();
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
+        let spaces_domain = format!("spaces.{}", self.domain);
 
         // Determine what entity is being queried
         let items = match query.target.as_deref() {
@@ -3980,6 +4030,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     DiscoItem::muc_service(muc_domain, Some("Multi-User Chat")),
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
+                    DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
                 ]
             }
             // Query to MUC domain - return room list
@@ -4002,6 +4053,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // List all nodes across all users from shared storage
                 // For now, return empty - a full implementation would list all public nodes
                 vec![]
+            }
+            // Query to spaces domain (XEP-0503)
+            Some(target) if target == spaces_domain => {
+                self.handle_spaces_disco_items(&query).await?
             }
             // Query to MUC room - return empty list (no sub-items)
             Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
@@ -4036,6 +4091,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     DiscoItem::muc_service(muc_domain, Some("Multi-User Chat")),
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
+                    DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
                 ]
             }
         };
@@ -4620,6 +4676,144 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 debug!("PubSub subscribe/unsubscribe - using implicit PEP subscriptions");
                 let response = build_pubsub_success(&iq);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle disco#items queries directed at the spaces service (XEP-0503).
+    ///
+    /// Without a node: lists all space nodes (waddles) the user belongs to,
+    /// or all waddles in single-tenant mode.
+    /// With a node: lists channels in that waddle as disco items.
+    async fn handle_spaces_disco_items(
+        &mut self,
+        query: &crate::disco::DiscoItemsQuery,
+    ) -> Result<Vec<DiscoItem>, XmppError> {
+        let spaces_domain = format!("spaces.{}", self.domain);
+        let muc_domain = self.room_registry.muc_domain();
+
+        match query.node.as_deref() {
+            // No node: list space nodes (waddles)
+            None => {
+                debug!(domain = %spaces_domain, "disco#items query to spaces domain - listing spaces");
+                let user_jid = self.jid.as_ref().map(|j| j.to_bare());
+
+                let waddles = if let Some(ref jid) = user_jid {
+                    let user_id = jid.node().map(|n| n.to_string()).unwrap_or_default();
+                    self.app_state
+                        .get_user_waddles_with_details(&user_id)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                Ok(waddles
+                    .iter()
+                    .map(|w| {
+                        DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name))
+                    })
+                    .collect())
+            }
+            // With node: list channels in that waddle
+            Some(node) => {
+                debug!(
+                    domain = %spaces_domain,
+                    node = %node,
+                    "disco#items query to spaces domain - listing channels in space"
+                );
+
+                let channels = self
+                    .app_state
+                    .list_waddle_channels(node)
+                    .await
+                    .unwrap_or_default();
+
+                Ok(channels
+                    .iter()
+                    .map(|c| {
+                        let room_jid = format!("{}@{}", c.id, muc_domain);
+                        DiscoItem::muc_room(&room_jid, &c.name)
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    /// Handle PubSub IQs addressed to the spaces service (XEP-0503).
+    ///
+    /// Supports `<items>` retrieval for space nodes (returns XEP-0402 bookmark items).
+    /// Write operations return `<service-unavailable/>` (Phase F).
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_spaces_pubsub_iq(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
+        let request = match parse_pubsub_iq(&iq) {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("Failed to parse spaces PubSub request: {}", e);
+                let error = build_pubsub_error(&iq, PubSubError::InvalidJid);
+                self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                return Ok(());
+            }
+        };
+
+        match request {
+            PubSubRequest::Items {
+                node,
+                max_items: _,
+                item_ids: _,
+            } => {
+                debug!(node = %node, "Spaces pubsub items request");
+                let muc_domain = self.room_registry.muc_domain();
+
+                // Verify space exists
+                match self.app_state.get_waddle_details(&node).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(node = %node, error = %e, "Failed to get waddle details for spaces");
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                        return Ok(());
+                    }
+                }
+
+                // Get channels and build bookmark items
+                let channels = self
+                    .app_state
+                    .list_waddle_channels(&node)
+                    .await
+                    .unwrap_or_default();
+
+                let items: Vec<PubSubItem> = channels
+                    .iter()
+                    .map(|c| crate::xep::xep0503::build_channel_item(c, muc_domain))
+                    .collect();
+
+                let response = build_pubsub_items_result(&iq, &node, &items);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                debug!(node = %node, count = items.len(), "Sent spaces pubsub items response");
+            }
+            // Write operations are not supported in Phase A - return service-unavailable
+            _ => {
+                debug!("Spaces service received unsupported pubsub operation, returning service-unavailable");
+                let error = crate::generate_iq_error(
+                    &iq.id,
+                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                    crate::StanzaErrorCondition::ServiceUnavailable,
+                    crate::StanzaErrorType::Cancel,
+                    None,
+                );
+                self.stream.write_raw(&error).await?;
             }
         }
 

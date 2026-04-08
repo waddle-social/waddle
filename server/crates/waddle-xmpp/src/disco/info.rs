@@ -70,6 +70,16 @@ impl Identity {
     pub fn pubsub_leaf(name: Option<&str>) -> Self {
         Self::new("pubsub", "leaf", name)
     }
+
+    /// Spaces service identity (category="pubsub", type="service") for XEP-0503.
+    pub fn spaces_service(name: Option<&str>) -> Self {
+        Self::new("pubsub", "service", name)
+    }
+
+    /// Space node identity (category="pubsub", type="collection") for XEP-0503.
+    pub fn spaces_node(name: Option<&str>) -> Self {
+        Self::new("pubsub", "collection", name)
+    }
 }
 
 /// Feature element for disco#info response.
@@ -301,6 +311,11 @@ impl Feature {
     pub fn private_storage() -> Self {
         Self::new("jabber:iq:private")
     }
+
+    /// XEP-0503 Spaces feature.
+    pub fn spaces() -> Self {
+        Self::new("urn:xmpp:spaces:0")
+    }
 }
 
 /// Check if an IQ is a disco#info query.
@@ -489,6 +504,17 @@ pub fn pubsub_service_features() -> Vec<Feature> {
         Feature::pubsub_subscribe(),
         Feature::pubsub_access_whitelist(),
         Feature::pubsub_access_presence(),
+    ]
+}
+
+/// Get features for the Spaces service component (XEP-0503).
+pub fn spaces_service_features() -> Vec<Feature> {
+    vec![
+        Feature::disco_info(),
+        Feature::disco_items(),
+        Feature::pubsub(),
+        Feature::pubsub_retrieve_items(),
+        Feature::spaces(),
     ]
 }
 

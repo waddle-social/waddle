@@ -1658,6 +1658,145 @@ fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
     })
 }
 
+/// Parse a waddle row from a query that does NOT include the role column.
+fn parse_waddle_row_no_role(row: &libsql::Row) -> Result<WaddleResponse, String> {
+    let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
+    let name: String = row
+        .get(1)
+        .map_err(|e| format!("Failed to get name: {}", e))?;
+    let description: Option<String> = row.get(2).ok();
+    let owner_user_id: String = row
+        .get(3)
+        .map_err(|e| format!("Failed to get owner_user_id: {}", e))?;
+    let icon_url: Option<String> = row.get(4).ok();
+    let is_public: i32 = row
+        .get(5)
+        .map_err(|e| format!("Failed to get is_public: {}", e))?;
+    let created_at: String = row
+        .get(6)
+        .map_err(|e| format!("Failed to get created_at: {}", e))?;
+
+    Ok(WaddleResponse {
+        id,
+        name,
+        description,
+        owner_user_id,
+        icon_url,
+        is_public: is_public != 0,
+        role: None,
+        created_at,
+        updated_at: None,
+    })
+}
+
+/// Get a single waddle by ID.
+///
+/// Used by the XEP-0503 spaces service to look up space metadata.
+pub(crate) async fn get_waddle_by_id(
+    db: &Database,
+    waddle_id: &str,
+) -> Result<Option<WaddleResponse>, String> {
+    let query = r#"
+        SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+        FROM waddles w
+        JOIN users u ON w.owner_id = u.id
+        WHERE w.id = ?
+    "#;
+
+    if let Some(persistent) = db.persistent_connection() {
+        let conn = persistent.lock().await;
+        let mut rows = conn
+            .query(query, libsql::params![waddle_id])
+            .await
+            .map_err(|e| format!("Failed to query waddle: {}", e))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("Failed to read waddle row: {}", e))?
+        {
+            Ok(Some(parse_waddle_row_no_role(&row)?))
+        } else {
+            Ok(None)
+        }
+    } else {
+        let conn = db
+            .connect()
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
+
+        let mut rows = conn
+            .query(query, libsql::params![waddle_id])
+            .await
+            .map_err(|e| format!("Failed to query waddle: {}", e))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("Failed to read waddle row: {}", e))?
+        {
+            Ok(Some(parse_waddle_row_no_role(&row)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// List all waddles with pagination.
+///
+/// Used by the XEP-0503 spaces service for single-tenant public discovery.
+pub(crate) async fn list_all_waddles_from_db(
+    db: &Database,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<WaddleResponse>, String> {
+    let query = r#"
+        SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+        FROM waddles w
+        JOIN users u ON w.owner_id = u.id
+        ORDER BY w.created_at DESC
+        LIMIT ? OFFSET ?
+    "#;
+
+    let mut waddles = Vec::new();
+
+    if let Some(persistent) = db.persistent_connection() {
+        let conn = persistent.lock().await;
+        let mut rows = conn
+            .query(query, libsql::params![limit as i64, offset as i64])
+            .await
+            .map_err(|e| format!("Failed to query waddles: {}", e))?;
+
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("Failed to read waddle row: {}", e))?
+        {
+            let waddle = parse_waddle_row_no_role(&row)?;
+            waddles.push(waddle);
+        }
+    } else {
+        let conn = db
+            .connect()
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
+
+        let mut rows = conn
+            .query(query, libsql::params![limit as i64, offset as i64])
+            .await
+            .map_err(|e| format!("Failed to query waddles: {}", e))?;
+
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("Failed to read waddle row: {}", e))?
+        {
+            let waddle = parse_waddle_row_no_role(&row)?;
+            waddles.push(waddle);
+        }
+    }
+
+    Ok(waddles)
+}
+
 // === Member Management Database Helper Functions ===
 
 /// List members of a waddle with pagination

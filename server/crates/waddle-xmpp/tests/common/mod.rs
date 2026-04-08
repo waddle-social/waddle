@@ -409,6 +409,31 @@ impl AppState for MockAppState {
         // Mock returns no channels
         Ok(Vec::new())
     }
+
+    async fn get_waddle_details(
+        &self,
+        _waddle_id: &str,
+    ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
+        // Mock returns no waddle details
+        Ok(None)
+    }
+
+    async fn get_user_waddles_with_details(
+        &self,
+        _user_id: &str,
+    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
+        // Mock returns no waddle details
+        Ok(Vec::new())
+    }
+
+    async fn list_all_waddles(
+        &self,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
+        // Mock returns no waddles
+        Ok(Vec::new())
+    }
 }
 
 /// Generated TLS credentials for testing.
