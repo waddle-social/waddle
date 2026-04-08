@@ -38,7 +38,7 @@ function waddleColor(waddle: WaddleSummary): string {
 </script>
 
 <template>
-  <div class="w-48 border-r border-foreground bg-background flex flex-col flex-shrink-0">
+  <div class="w-56 border-r border-foreground bg-background flex flex-col flex-shrink-0">
     <div class="h-20 border-b border-foreground px-6 flex items-center justify-between">
       <span class="text-sm font-mono font-bold uppercase tracking-wider">Waddles</span>
       <div class="flex gap-1">

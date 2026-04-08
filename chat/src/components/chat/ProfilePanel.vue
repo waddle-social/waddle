@@ -13,12 +13,9 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="border-t border-foreground px-6 py-4 flex items-center gap-3">
+  <div class="h-14 border-t border-foreground px-6 flex items-center gap-3 flex-shrink-0">
     <AppAvatar :name="session.username" size="sm" />
-    <div class="flex-1 min-w-0">
-      <div class="text-sm font-mono font-bold break-all">{{ session.username }}</div>
-      <div class="text-[10px] font-mono text-muted-foreground break-all">{{ session.jid }}</div>
-    </div>
+    <span class="flex-1 min-w-0 text-sm font-mono font-bold truncate">{{ session.username }}</span>
     <button
       class="h-7 w-7 flex items-center justify-center hover:bg-destructive hover:text-destructive-foreground transition-colors flex-shrink-0"
       title="Log out"
