@@ -1625,8 +1625,8 @@ pub(crate) async fn list_user_waddles(
     Ok(waddles)
 }
 
-/// Parse a waddle row from the list query
-fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
+/// Parse the core waddle fields from a row (columns 0-6, no role/updated_at).
+fn parse_waddle_row_base(row: &libsql::Row) -> Result<(String, String, Option<String>, String, Option<String>, bool, String), String> {
     let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
     let name: String = row
         .get(1)
@@ -1642,6 +1642,13 @@ fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
     let created_at: String = row
         .get(6)
         .map_err(|e| format!("Failed to get created_at: {}", e))?;
+    Ok((id, name, description, owner_user_id, icon_url, is_public != 0, created_at))
+}
+
+/// Parse a waddle row from the list query (includes updated_at and role columns).
+fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
+    let (id, name, description, owner_user_id, icon_url, is_public, created_at) =
+        parse_waddle_row_base(row)?;
     let updated_at: Option<String> = row.get(7).ok();
     let role: Option<String> = row.get(8).ok();
 
@@ -1651,30 +1658,17 @@ fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
         description,
         owner_user_id,
         icon_url,
-        is_public: is_public != 0,
+        is_public,
         role,
         created_at,
         updated_at,
     })
 }
 
-/// Parse a waddle row from a query that does NOT include the role column.
+/// Parse a waddle row from a query without role/updated_at columns.
 fn parse_waddle_row_no_role(row: &libsql::Row) -> Result<WaddleResponse, String> {
-    let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
-    let name: String = row
-        .get(1)
-        .map_err(|e| format!("Failed to get name: {}", e))?;
-    let description: Option<String> = row.get(2).ok();
-    let owner_user_id: String = row
-        .get(3)
-        .map_err(|e| format!("Failed to get owner_user_id: {}", e))?;
-    let icon_url: Option<String> = row.get(4).ok();
-    let is_public: i32 = row
-        .get(5)
-        .map_err(|e| format!("Failed to get is_public: {}", e))?;
-    let created_at: String = row
-        .get(6)
-        .map_err(|e| format!("Failed to get created_at: {}", e))?;
+    let (id, name, description, owner_user_id, icon_url, is_public, created_at) =
+        parse_waddle_row_base(row)?;
 
     Ok(WaddleResponse {
         id,
@@ -1682,7 +1676,7 @@ fn parse_waddle_row_no_role(row: &libsql::Row) -> Result<WaddleResponse, String>
         description,
         owner_user_id,
         icon_url,
-        is_public: is_public != 0,
+        is_public,
         role: None,
         created_at,
         updated_at: None,
