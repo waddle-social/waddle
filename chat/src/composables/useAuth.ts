@@ -1,10 +1,11 @@
 import { ref, type Ref } from "vue";
-import { createServerAuth, type WaddleSession } from "@/lib/server-auth";
+import { createServerAuth, type WaddleSession, type AuthProvider } from "@/lib/server-auth";
 import { WaddleApi } from "@/lib/waddle-api";
 import type { AppState } from "@/lib/chat-ui";
 
 export function useAuth(defaultServerUrl: string) {
   const activeServerUrl = ref(defaultServerUrl);
+  const providers = ref<AuthProvider[]>([]);
 
   let auth = createServerAuth(activeServerUrl.value);
 
@@ -25,6 +26,8 @@ export function useAuth(defaultServerUrl: string) {
       if (!loaded || loaded.is_expired) {
         session.value = null;
         api.value = null;
+        // Fetch available providers for the login screen
+        providers.value = await auth.getProviders();
         appState.value = "signed-out";
         return;
       }
@@ -40,12 +43,25 @@ export function useAuth(defaultServerUrl: string) {
     }
   }
 
-  function login(serverUrl?: string) {
+  async function login(serverUrl?: string, providerId?: string) {
     if (serverUrl && serverUrl !== activeServerUrl.value) {
       activeServerUrl.value = serverUrl;
       auth = createServerAuth(serverUrl);
+      // Re-fetch providers for new server
+      providers.value = await auth.getProviders();
     }
-    window.location.href = auth.loginUrl(window.location.href);
+
+    // Use provided ID, or first available provider, or omit
+    const pid = providerId ?? providers.value[0]?.id;
+    window.location.href = auth.loginUrl(window.location.href, pid);
+  }
+
+  async function fetchProviders(serverUrl: string) {
+    if (serverUrl !== activeServerUrl.value) {
+      activeServerUrl.value = serverUrl;
+      auth = createServerAuth(serverUrl);
+    }
+    providers.value = await auth.getProviders();
   }
 
   async function logout() {
@@ -67,8 +83,10 @@ export function useAuth(defaultServerUrl: string) {
     appError,
     isBootstrapping,
     activeServerUrl,
+    providers,
     bootstrap,
     login,
+    fetchProviders,
     logout,
   };
 }

@@ -13,13 +13,34 @@ function trimTrailingSlash(value: string) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
+export interface AuthProvider {
+  id: string;
+  type: string;
+  name?: string;
+}
+
 export function createServerAuth(serverBaseUrl: string) {
   const baseUrl = trimTrailingSlash(serverBaseUrl);
 
   return {
-    loginUrl(nextUrl: string) {
+    async getProviders(): Promise<AuthProvider[]> {
+      const response = await fetch(`${baseUrl}/api/auth/providers`, {
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        return [];
+      }
+
+      const data = (await response.json()) as { providers: AuthProvider[] };
+      return data.providers ?? [];
+    },
+
+    loginUrl(nextUrl: string, providerId?: string) {
       const url = new URL("/api/auth/start", `${baseUrl}/`);
-      url.searchParams.set("provider", "colony");
+      if (providerId) {
+        url.searchParams.set("provider", providerId);
+      }
       url.searchParams.set("flow", "browser");
       url.searchParams.set("next", nextUrl);
       return url.toString();

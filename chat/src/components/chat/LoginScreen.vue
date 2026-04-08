@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
-import { ChevronDown, ChevronUp } from "lucide-vue-next";
+import { ref, computed, watch } from "vue";
+import { ChevronDown, ChevronUp, Loader2 } from "lucide-vue-next";
+import type { AuthProvider } from "@/lib/server-auth";
 
 const props = defineProps<{
   defaultServerUrl: string;
+  providers: AuthProvider[];
 }>();
 
 const emit = defineEmits<{
-  login: [serverUrl: string];
+  login: [serverUrl: string, providerId?: string];
+  fetchProviders: [serverUrl: string];
 }>();
 
 const showCustomServer = ref(false);
 const useCustom = ref(false);
 const customUrl = ref("");
+const isFetchingProviders = ref(false);
 
 const displayDefault = computed(() => {
   try {
@@ -41,14 +45,28 @@ const activeServerDisplay = computed(() => {
 
 function selectDefault() {
   useCustom.value = false;
+  emit("fetchProviders", props.defaultServerUrl);
 }
 
-function selectCustom() {
+async function selectCustom() {
   useCustom.value = true;
 }
 
-function handleLogin() {
-  emit("login", activeServerUrl.value);
+let fetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(customUrl, (url) => {
+  if (!useCustom.value) return;
+  if (fetchTimer) clearTimeout(fetchTimer);
+  const trimmed = url.trim();
+  if (!trimmed) return;
+
+  fetchTimer = setTimeout(() => {
+    emit("fetchProviders", trimmed);
+  }, 500);
+});
+
+function handleLogin(providerId?: string) {
+  emit("login", activeServerUrl.value, providerId);
 }
 </script>
 
@@ -84,7 +102,6 @@ function handleLogin() {
         </div>
 
         <div v-else class="space-y-3">
-          <!-- Default server option -->
           <label
             class="flex items-center gap-3 p-3 border cursor-pointer transition-colors"
             :class="!useCustom ? 'border-foreground bg-foreground text-background' : 'border-foreground hover:bg-muted'"
@@ -100,7 +117,6 @@ function handleLogin() {
             <span class="text-xs font-mono opacity-60 ml-auto">default</span>
           </label>
 
-          <!-- Custom server option -->
           <label
             class="flex flex-col gap-2 p-3 border cursor-pointer transition-colors"
             :class="useCustom ? 'border-foreground bg-foreground text-background' : 'border-foreground hover:bg-muted'"
@@ -127,11 +143,26 @@ function handleLogin() {
         </div>
       </div>
 
-      <!-- Login button -->
-      <div class="p-6">
+      <!-- Providers / Login -->
+      <div class="p-6 space-y-3">
+        <template v-if="providers.length > 1">
+          <label class="text-xs font-mono uppercase tracking-widest text-muted-foreground">
+            Sign in with
+          </label>
+          <button
+            v-for="provider in providers"
+            :key="provider.id"
+            class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
+            @click="handleLogin(provider.id)"
+          >
+            {{ provider.name || provider.id }}
+          </button>
+        </template>
+
         <button
+          v-else
           class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
-          @click="handleLogin"
+          @click="handleLogin(providers[0]?.id)"
         >
           Sign in via {{ activeServerDisplay }}
         </button>

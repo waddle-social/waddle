@@ -252,7 +252,9 @@ onUnmounted(() => {
   <LoginScreen
     v-else-if="auth.appState.value === 'signed-out'"
     :default-server-url="props.serverBaseUrl"
-    @login="auth.login"
+    :providers="auth.providers.value"
+    @login="(url, pid) => auth.login(url, pid)"
+    @fetch-providers="auth.fetchProviders"
   />
 
   <!-- Error -->
