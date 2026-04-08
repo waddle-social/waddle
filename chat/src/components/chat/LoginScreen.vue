@@ -155,7 +155,7 @@ function handleLogin(providerId?: string) {
             class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
             @click="handleLogin(provider.id)"
           >
-            {{ provider.name || provider.id }}
+            {{ provider.display_name || provider.id }}
           </button>
         </template>
 

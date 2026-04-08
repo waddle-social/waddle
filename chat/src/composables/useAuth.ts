@@ -47,12 +47,14 @@ export function useAuth(defaultServerUrl: string) {
     if (serverUrl && serverUrl !== activeServerUrl.value) {
       activeServerUrl.value = serverUrl;
       auth = createServerAuth(serverUrl);
-      // Re-fetch providers for new server
       providers.value = await auth.getProviders();
     }
 
-    // Use provided ID, or first available provider, or omit
     const pid = providerId ?? providers.value[0]?.id;
+    if (!pid) {
+      appError.value = "No auth providers available on this server.";
+      return;
+    }
     window.location.href = auth.loginUrl(window.location.href, pid);
   }
 

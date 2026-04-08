@@ -15,8 +15,8 @@ function trimTrailingSlash(value: string) {
 
 export interface AuthProvider {
   id: string;
-  type: string;
-  name?: string;
+  kind: string;
+  display_name?: string;
 }
 
 export function createServerAuth(serverBaseUrl: string) {
@@ -32,15 +32,13 @@ export function createServerAuth(serverBaseUrl: string) {
         return [];
       }
 
-      const data = (await response.json()) as { providers: AuthProvider[] };
-      return data.providers ?? [];
+      const data = await response.json();
+      return Array.isArray(data) ? (data as AuthProvider[]) : [];
     },
 
-    loginUrl(nextUrl: string, providerId?: string) {
+    loginUrl(nextUrl: string, providerId: string) {
       const url = new URL("/api/auth/start", `${baseUrl}/`);
-      if (providerId) {
-        url.searchParams.set("provider", providerId);
-      }
+      url.searchParams.set("provider", providerId);
       url.searchParams.set("flow", "browser");
       url.searchParams.set("next", nextUrl);
       return url.toString();
