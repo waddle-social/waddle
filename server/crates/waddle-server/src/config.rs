@@ -82,6 +82,9 @@ pub struct ServerConfig {
     pub base_url: String,
     pub session_key: Option<String>,
     pub auth: AuthConfig,
+    /// When true, all spaces are publicly discoverable (single-tenant mode).
+    /// Controlled by `WADDLE_SINGLE_TENANT` env var.
+    pub single_tenant: bool,
 }
 
 impl Default for ServerConfig {
@@ -91,6 +94,7 @@ impl Default for ServerConfig {
             base_url: "http://localhost:3000".to_string(),
             session_key: None,
             auth: AuthConfig::default(),
+            single_tenant: false,
         }
     }
 }
@@ -106,11 +110,16 @@ impl ServerConfig {
         let session_key = std::env::var("WADDLE_SESSION_KEY").ok();
         let auth = AuthConfig::from_env()?;
 
+        let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+
         Ok(Self {
             mode,
             base_url,
             session_key,
             auth,
+            single_tenant,
         })
     }
 
@@ -130,6 +139,14 @@ impl ServerConfig {
                 "disabled"
             }
         );
+        info!(
+            "Single-tenant mode: {}",
+            if self.single_tenant {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
 
     #[cfg(test)]
@@ -139,6 +156,7 @@ impl ServerConfig {
             base_url: "http://localhost:3000".to_string(),
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
+            single_tenant: false,
         }
     }
 
@@ -149,6 +167,7 @@ impl ServerConfig {
             base_url: "http://localhost:3000".to_string(),
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
+            single_tenant: false,
         }
     }
 }

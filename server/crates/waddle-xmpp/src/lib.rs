@@ -389,6 +389,36 @@ pub trait AppState: Send + Sync + 'static {
         &self,
         waddle_id: &str,
     ) -> impl std::future::Future<Output = Result<Vec<ChannelInfo>, XmppError>> + Send;
+
+    // =========================================================================
+    // XEP-0503: Spaces Service (Waddle Details)
+    // =========================================================================
+
+    /// Get detailed information about a specific waddle by ID.
+    ///
+    /// Used by the XEP-0503 spaces service to return space metadata.
+    fn get_waddle_details(
+        &self,
+        waddle_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<WaddleDetails>, XmppError>> + Send;
+
+    /// Get detailed information about all waddles a user belongs to.
+    ///
+    /// Used by the XEP-0503 spaces service for per-user space enumeration.
+    fn get_user_waddles_with_details(
+        &self,
+        user_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<WaddleDetails>, XmppError>> + Send;
+
+    /// List all waddles with pagination.
+    ///
+    /// Used by the XEP-0503 spaces service for single-tenant discovery
+    /// where all spaces are publicly browsable.
+    fn list_all_waddles(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<WaddleDetails>, XmppError>> + Send;
 }
 
 /// Basic waddle information for auto-join enumeration.
@@ -409,6 +439,25 @@ pub struct ChannelInfo {
     pub name: String,
     /// Channel type (e.g., "text", "voice")
     pub channel_type: String,
+}
+
+/// Detailed waddle information for XEP-0503 spaces service.
+#[derive(Debug, Clone)]
+pub struct WaddleDetails {
+    /// Waddle ID
+    pub id: String,
+    /// Waddle name
+    pub name: String,
+    /// Waddle description
+    pub description: Option<String>,
+    /// Owner user ID
+    pub owner_id: String,
+    /// Icon URL
+    pub icon_url: Option<String>,
+    /// Whether the waddle is public
+    pub is_public: bool,
+    /// When the waddle was created (ISO 8601)
+    pub created_at: String,
 }
 
 /// Information about a created upload slot (XEP-0363).

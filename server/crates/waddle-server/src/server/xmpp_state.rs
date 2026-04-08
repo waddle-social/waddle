@@ -1099,6 +1099,106 @@ impl waddle_xmpp::AppState for XmppAppState {
         debug!(waddle_id = %waddle_id, count = result.len(), "Found waddle channels");
         Ok(result)
     }
+
+    // =========================================================================
+    // XEP-0503: Spaces Service (Waddle Details)
+    // =========================================================================
+
+    /// Get detailed information about a specific waddle.
+    async fn get_waddle_details(
+        &self,
+        waddle_id: &str,
+    ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
+        debug!(waddle_id = %waddle_id, "Getting waddle details for spaces service");
+
+        use crate::server::routes::waddles::get_waddle_by_id as get_waddle_by_id_from_db;
+        let row = get_waddle_by_id_from_db(self.db.as_ref(), waddle_id)
+            .await
+            .map_err(|e| {
+                warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle details");
+                XmppError::internal(format!("Failed to get waddle details: {}", e))
+            })?;
+
+        Ok(row.map(|w| waddle_xmpp::WaddleDetails {
+            id: w.id,
+            name: w.name,
+            description: w.description,
+            owner_id: w.owner_user_id,
+            icon_url: w.icon_url,
+            is_public: w.is_public,
+            created_at: w.created_at,
+        }))
+    }
+
+    /// Get detailed information about all waddles a user belongs to.
+    async fn get_user_waddles_with_details(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
+        debug!(user_id = %user_id, "Listing user waddles with details for spaces service");
+
+        const PAGE_SIZE: usize = 200;
+        let mut offset = 0usize;
+        let mut result = Vec::new();
+
+        loop {
+            let page = list_user_waddles_from_db(self.db.as_ref(), user_id, PAGE_SIZE, offset)
+                .await
+                .map_err(|e| {
+                    warn!(user_id = %user_id, error = %e, "Failed to list user waddles with details");
+                    XmppError::internal(format!("Failed to list user waddles: {}", e))
+                })?;
+
+            let page_len = page.len();
+            result.extend(page.into_iter().map(|w| waddle_xmpp::WaddleDetails {
+                id: w.id,
+                name: w.name,
+                description: w.description,
+                owner_id: w.owner_user_id,
+                icon_url: w.icon_url,
+                is_public: w.is_public,
+                created_at: w.created_at,
+            }));
+
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            offset += PAGE_SIZE;
+        }
+
+        debug!(user_id = %user_id, count = result.len(), "Found user waddles with details");
+        Ok(result)
+    }
+
+    /// List all waddles with pagination.
+    async fn list_all_waddles(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
+        debug!(limit = limit, offset = offset, "Listing all waddles for spaces service");
+
+        use crate::server::routes::waddles::list_all_waddles_from_db;
+        let rows = list_all_waddles_from_db(self.db.as_ref(), limit, offset)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to list all waddles");
+                XmppError::internal(format!("Failed to list all waddles: {}", e))
+            })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|w| waddle_xmpp::WaddleDetails {
+                id: w.id,
+                name: w.name,
+                description: w.description,
+                owner_id: w.owner_user_id,
+                icon_url: w.icon_url,
+                is_public: w.is_public,
+                created_at: w.created_at,
+            })
+            .collect())
+    }
 }
 
 // =========================================================================

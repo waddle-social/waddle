@@ -61,6 +61,20 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
+    /// Create a Spaces service item (XEP-0503).
+    pub fn spaces_service(domain: &str, name: Option<&str>) -> Self {
+        Self::new(domain, name, None)
+    }
+
+    /// Create a Spaces node item (waddle as a space).
+    pub fn spaces_node(jid: &str, node: &str, name: Option<&str>) -> Self {
+        Self {
+            jid: jid.to_string(),
+            name: name.map(|s| s.to_string()),
+            node: Some(node.to_string()),
+        }
+    }
+
     /// Create a PubSub node item.
     pub fn pubsub_node(jid: &str, node: &str) -> Self {
         Self::new(jid, None, Some(node))
