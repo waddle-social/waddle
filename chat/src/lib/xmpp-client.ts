@@ -155,14 +155,14 @@ export class BrowserXmppClient {
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.xmpp?.removeListener("stanza", handler);
+        this.xmpp?.off("stanza", handler);
         reject(new Error("IQ timeout"));
       }, 10000);
 
       const handler = (stanza: XmppElement) => {
         if (!stanza.is("iq") || stanza.attrs.id !== id) return;
         clearTimeout(timer);
-        this.xmpp?.removeListener("stanza", handler);
+        this.xmpp?.off("stanza", handler);
         if (stanza.attrs.type === "error") {
           reject(new Error("IQ error response"));
         } else {
@@ -173,7 +173,7 @@ export class BrowserXmppClient {
       this.xmpp!.on("stanza", handler);
       this.xmpp!.send(iq).catch((err: unknown) => {
         clearTimeout(timer);
-        this.xmpp?.removeListener("stanza", handler);
+        this.xmpp?.off("stanza", handler);
         reject(err);
       });
     });
@@ -188,16 +188,16 @@ export class BrowserXmppClient {
       spacesDomain,
     );
 
-    const query = response.getChild("query", "http://jabber.org/protocol/disco#items");
+    const query = response.getChild("query");
     if (!query) return [];
 
-    return query
-      .getChildren("item")
-      .map((item) => ({
-        id: (item.attrs.node as string | undefined) ?? "",
-        name: (item.attrs.name as string | undefined) ?? (item.attrs.node as string | undefined) ?? "",
+    return query.children
+      .filter((item: XmppElement) => item.is("item"))
+      .map((item: XmppElement) => ({
+        id: item.attrs.node ?? "",
+        name: item.attrs.name ?? item.attrs.node ?? "",
       }))
-      .filter((w) => w.id);
+      .filter((w: { id: string; name: string }) => w.id);
   }
 
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
@@ -209,24 +209,24 @@ export class BrowserXmppClient {
       spacesDomain,
     );
 
-    const query = response.getChild("query", "http://jabber.org/protocol/disco#items");
+    const query = response.getChild("query");
     if (!query) return [];
 
     const prefix = `${waddleId}_`;
-    return query
-      .getChildren("item")
-      .map((item) => {
-        const jid: string = (item.attrs.jid as string | undefined) ?? "";
+    return query.children
+      .filter((item: XmppElement) => item.is("item"))
+      .map((item: XmppElement) => {
+        const jid: string = item.attrs.jid ?? "";
         const localPart = jid.split("@")[0] ?? "";
         const channelId = localPart.startsWith(prefix)
           ? localPart.slice(prefix.length)
           : localPart;
         return {
           id: channelId,
-          name: (item.attrs.name as string | undefined) ?? channelId,
+          name: item.attrs.name ?? channelId,
         };
       })
-      .filter((c) => c.id);
+      .filter((c: { id: string; name: string }) => c.id);
   }
 
   async switchRoom(waddleId: string, channelId: string) {
