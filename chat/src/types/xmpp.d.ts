@@ -4,6 +4,7 @@ declare module "@xmpp/xml" {
     is(name: string): boolean;
     getChild(name: string): XmppElement | null;
     getChildText(name: string): string | undefined;
+    children: XmppElement[];
     text(): string;
     toString(): string;
   }
@@ -37,6 +38,10 @@ declare module "@xmpp/client" {
     on(event: "error", listener: (error: Error) => void): this;
     on(event: "stanza", listener: (stanza: import("@xmpp/xml").XmppElement) => void): this;
     on(event: "online", listener: (address: XmppAddress) => void): this;
+    off(event: "status", listener: (status: string) => void): this;
+    off(event: "error", listener: (error: Error) => void): this;
+    off(event: "stanza", listener: (stanza: import("@xmpp/xml").XmppElement) => void): this;
+    off(event: "online", listener: (address: XmppAddress) => void): this;
     start(): Promise<void>;
     stop(): Promise<void>;
     send(stanza: ReturnType<typeof xml>): Promise<void>;
