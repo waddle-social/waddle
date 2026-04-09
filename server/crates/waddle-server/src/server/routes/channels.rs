@@ -1035,9 +1035,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-
-
-
     #[tokio::test]
     async fn test_update_channel() {
         let channel_state = create_test_channel_state().await;

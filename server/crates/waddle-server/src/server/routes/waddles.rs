@@ -2244,8 +2244,6 @@ mod tests {
         assert_eq!(json["error"], "invalid_input");
     }
 
-
-
     #[tokio::test]
     async fn test_update_waddle() {
         let waddle_state = create_test_waddle_state().await;
@@ -2349,7 +2347,6 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
-
 
     #[tokio::test]
     async fn test_delete_waddle_permission_denied() {
