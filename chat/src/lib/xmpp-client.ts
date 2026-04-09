@@ -19,6 +19,7 @@ export interface LiveRoomMessage {
 export interface DiscoveredWaddle {
   id: string;
   name: string;
+  isPublic: boolean;
 }
 
 export interface DiscoveredChannel {
@@ -179,6 +180,25 @@ export class BrowserXmppClient {
     });
   }
 
+  private parseAccessModel(response: XmppElement): "open" | "whitelist" | null {
+    const query = response.getChild("query");
+    if (!query) return null;
+
+    for (const form of query.children.filter((child: XmppElement) => child.is("x"))) {
+      const fields = form.children.filter((child: XmppElement) => child.is("field"));
+      const accessModelField = fields.find(
+        (field: XmppElement) => field.attrs.var === "pubsub#access_model",
+      );
+      if (!accessModelField) continue;
+      const value = accessModelField.getChildText("value")?.trim().toLowerCase();
+      if (value === "open" || value === "whitelist") {
+        return value;
+      }
+    }
+
+    return null;
+  }
+
   async discoverWaddles(): Promise<DiscoveredWaddle[]> {
     const domain = jidDomain(this.session.jid);
     const spacesDomain = `spaces.${domain}`;
@@ -191,13 +211,39 @@ export class BrowserXmppClient {
     const query = response.getChild("query");
     if (!query) return [];
 
-    return query.children
+    const discovered = query.children
       .filter((item: XmppElement) => item.is("item"))
       .map((item: XmppElement) => ({
         id: item.attrs.node ?? "",
         name: item.attrs.name ?? item.attrs.node ?? "",
       }))
       .filter((w: { id: string; name: string }) => w.id);
+
+    const withVisibility = await Promise.all(
+      discovered.map(async (waddle: { id: string; name: string }) => {
+        try {
+          const infoResponse = await this.sendIq(
+            xml("query", {
+              xmlns: "http://jabber.org/protocol/disco#info",
+              node: waddle.id,
+            }),
+            spacesDomain,
+          );
+          const accessModel = this.parseAccessModel(infoResponse);
+          return {
+            ...waddle,
+            isPublic: accessModel !== "whitelist",
+          };
+        } catch {
+          return {
+            ...waddle,
+            isPublic: true,
+          };
+        }
+      }),
+    );
+
+    return withVisibility;
   }
 
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
@@ -315,4 +361,3 @@ export class BrowserXmppClient {
     await xmpp.stop().catch(() => undefined);
   }
 }
-

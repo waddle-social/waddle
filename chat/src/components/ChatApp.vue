@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, shallowRef, watch } from "vue";
+import { onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useAuth } from "@/composables/useAuth";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
@@ -16,6 +16,7 @@ import MobileHeader from "@/components/chat/MobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import CreateWaddleDialog from "@/components/modals/CreateWaddleDialog.vue";
+import BrowsePublicWaddlesDialog from "@/components/modals/BrowsePublicWaddlesDialog.vue";
 import CreateChannelDialog from "@/components/modals/CreateChannelDialog.vue";
 import WaddleSettingsDialog from "@/components/modals/WaddleSettingsDialog.vue";
 import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
@@ -61,6 +62,8 @@ const messaging = useMessaging(
   ui.actionError,
   ui.clearActionError,
 );
+
+const publicBrowseQuery = ref("");
 
 // --- Deep linking ---
 
@@ -168,6 +171,25 @@ async function handleCreateWaddle() {
     if (channelId) {
       await messaging.loadMessages(created.id, channelId);
     }
+  }
+}
+
+async function openBrowsePublicWaddles() {
+  ui.showBrowsePublicWaddles.value = true;
+  await waddles.loadPublicWaddles(publicBrowseQuery.value);
+}
+
+async function refreshPublicWaddles() {
+  await waddles.loadPublicWaddles(publicBrowseQuery.value);
+}
+
+async function handleJoinPublicWaddle(waddleId: string) {
+  const joined = await waddles.joinPublicWaddle(waddleId);
+  if (!joined) return;
+
+  ui.showBrowsePublicWaddles.value = false;
+  if (joined.channelId) {
+    await messaging.loadMessages(joined.waddleId, joined.channelId);
   }
 }
 
@@ -302,6 +324,7 @@ onUnmounted(() => {
             :session="null"
             class="!w-full !border-r-0"
             @select-waddle="selectWaddle($event)"
+            @browse-public-waddles="openBrowsePublicWaddles"
             @create-waddle="ui.showCreateWaddle.value = true"
           />
         </div>
@@ -367,6 +390,7 @@ onUnmounted(() => {
           :active-waddle-id="waddles.activeWaddleId.value"
           :session="auth.session.value"
           @select-waddle="selectWaddle($event)"
+          @browse-public-waddles="openBrowsePublicWaddles"
           @create-waddle="ui.showCreateWaddle.value = true"
           @logout="handleLogout"
         />
@@ -412,6 +436,18 @@ onUnmounted(() => {
       :is-submitting="waddles.isSubmitting.value"
       @update:form="waddles.createWaddleForm.value = $event"
       @submit="handleCreateWaddle"
+    />
+
+    <BrowsePublicWaddlesDialog
+      v-model:open="ui.showBrowsePublicWaddles.value"
+      :spaces="waddles.publicWaddles.value"
+      :joined-waddle-ids="waddles.waddles.value.map((w) => w.id)"
+      :is-loading="waddles.isLoadingPublicWaddles.value"
+      :joining-waddle-id="waddles.joiningPublicWaddleId.value"
+      :query="publicBrowseQuery.value"
+      @update:query="publicBrowseQuery.value = $event"
+      @refresh="refreshPublicWaddles"
+      @join="handleJoinPublicWaddle"
     />
 
     <CreateChannelDialog

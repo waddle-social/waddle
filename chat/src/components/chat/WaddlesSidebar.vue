@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Plus, Lock } from "lucide-vue-next";
+import { Plus, Lock, Compass } from "lucide-vue-next";
 import type { WaddleSummary } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
@@ -14,6 +14,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectWaddle: [id: string];
   createWaddle: [];
+  browsePublicWaddles: [];
   logout: [];
 }>();
 
@@ -42,6 +43,13 @@ function waddleColor(waddle: WaddleSummary): string {
     <div class="h-20 border-b border-foreground px-6 flex items-center justify-between">
       <span class="text-sm font-mono font-bold uppercase tracking-wider">Waddles</span>
       <div class="flex gap-1">
+        <button
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          title="Browse public spaces"
+          @click="emit('browsePublicWaddles')"
+        >
+          <Compass class="w-3.5 h-3.5" />
+        </button>
         <button
           class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
           @click="emit('createWaddle')"

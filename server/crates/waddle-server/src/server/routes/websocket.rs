@@ -19,12 +19,14 @@ use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     connection::Stanza,
     disco::{
-        build_disco_info_response, build_disco_items_response, parse_disco_items_query,
+        build_disco_info_response, build_disco_info_response_with_extensions,
+        build_disco_items_response, parse_disco_info_query, parse_disco_items_query,
         spaces_service_features, DiscoItem, Feature, Identity,
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
     registry::{ConnectionRegistry, OutboundStanza},
-    Affiliation, Role,
+    xep::build_spaces_metadata_form,
+    Affiliation, Role, WaddleDetails,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
@@ -35,7 +37,9 @@ use super::auth::AuthState;
 use crate::auth::Session;
 use crate::messages::{MessageCreate, MessageRepository};
 use crate::server::routes::channels::list_channels_from_db;
-use crate::server::routes::waddles::{list_all_waddles_from_db, list_user_waddles};
+use crate::server::routes::waddles::{
+    get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
+};
 use crate::server::AppState;
 
 /// WebSocket state containing all necessary registries for message routing
@@ -798,6 +802,85 @@ async fn handle_iq(
 
             // Disco info on spaces service
             if to.as_deref() == Some(spaces_domain.as_str()) {
+                let query = match parse_disco_info_query(request_iq) {
+                    Ok(query) => query,
+                    Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+                };
+
+                if let Some(node) = query.node.as_deref() {
+                    let waddle = match get_waddle_by_id(state.app_state.db_pool.global(), node)
+                        .await
+                    {
+                        Ok(Some(waddle)) => waddle,
+                        Ok(None) => {
+                            return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                        }
+                        Err(err) => {
+                            warn!(
+                                node = %node,
+                                error = %err,
+                                "Failed to load space node for disco#info"
+                            );
+                            return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                        }
+                    };
+
+                    let is_member = if single_tenant {
+                        true
+                    } else if let Some(session) = authenticated_session {
+                        match list_user_waddles(
+                            state.app_state.db_pool.global(),
+                            &session.user_id,
+                            200,
+                            0,
+                        )
+                        .await
+                        {
+                            Ok(waddles) => waddles.iter().any(|candidate| candidate.id == node),
+                            Err(err) => {
+                                warn!(
+                                    user_id = %session.user_id,
+                                    node = %node,
+                                    error = %err,
+                                    "Failed membership check for space node disco#info"
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !single_tenant && !is_member && !waddle.is_public {
+                        return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                    }
+
+                    let identities = vec![Identity::pubsub_leaf(Some(&waddle.name))];
+                    let features = vec![
+                        Feature::disco_info(),
+                        Feature::pubsub(),
+                        Feature::pubsub_retrieve_items(),
+                        Feature::spaces(),
+                    ];
+                    let metadata = build_spaces_metadata_form(&WaddleDetails {
+                        id: waddle.id.clone(),
+                        name: waddle.name.clone(),
+                        description: waddle.description.clone(),
+                        owner_id: waddle.owner_user_id.clone(),
+                        icon_url: waddle.icon_url.clone(),
+                        is_public: waddle.is_public,
+                        created_at: waddle.created_at.clone(),
+                    });
+                    let response = build_disco_info_response_with_extensions(
+                        request_iq,
+                        &identities,
+                        &features,
+                        Some(node),
+                        &[metadata],
+                    );
+                    return vec![iq_to_xml(response)];
+                }
+
                 let identities = vec![Identity::spaces_service(Some("Spaces"))];
                 let features = spaces_service_features();
                 let response = build_disco_info_response(request_iq, &identities, &features, None);
@@ -1517,11 +1600,12 @@ mod tests {
         assert_eq!(channel, "default");
     }
 
-    async fn seed_user_waddle_membership(
+    async fn seed_waddle(
         state: &WebSocketState,
-        user_id: &str,
+        owner_id: &str,
         waddle_id: &str,
         waddle_name: &str,
+        is_public: bool,
     ) {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = state
@@ -1537,15 +1621,31 @@ mod tests {
                 waddle_id,
                 waddle_name,
                 Option::<String>::None,
-                user_id,
+                owner_id,
                 Option::<String>::None,
-                1i64,
+                if is_public { 1i64 } else { 0i64 },
                 now.clone(),
                 now
             ],
         )
         .await
         .expect("insert waddle");
+    }
+
+    async fn seed_user_waddle_membership(
+        state: &WebSocketState,
+        user_id: &str,
+        waddle_id: &str,
+        waddle_name: &str,
+    ) {
+        seed_waddle(state, user_id, waddle_id, waddle_name, true).await;
+        let conn = state
+            .app_state
+            .db_pool
+            .global()
+            .persistent_connection()
+            .expect("persistent connection");
+        let conn = conn.lock().await;
         conn.execute(
             "INSERT INTO waddle_members (waddle_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
             libsql::params![waddle_id, user_id, chrono::Utc::now().to_rfc3339()],
@@ -1691,6 +1791,78 @@ mod tests {
         assert!(
             response.contains("General"),
             "expected channel name in spaces node disco#items: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
+        let state = create_test_websocket_state().await;
+        let owner = create_test_session(state.as_ref(), "owner").await;
+        let viewer = create_test_session(state.as_ref(), "viewer").await;
+        seed_waddle(
+            state.as_ref(),
+            &owner.user_id,
+            "waddle-public",
+            "Public Space",
+            true,
+        )
+        .await;
+
+        let query = r#"<iq xmlns="jabber:client" id="space-node-info" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#info" node="waddle-public"/></iq>"#;
+        let responses = handle_iq(
+            query,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(viewer),
+        )
+        .await;
+        let response = responses.first().expect("spaces node disco info response");
+
+        assert!(
+            response.contains("type=\"result\"") || response.contains("type='result'"),
+            "expected successful node disco#info response: {response}"
+        );
+        assert!(
+            response.contains("pubsub#access_model"),
+            "expected access model metadata in node disco#info: {response}"
+        );
+        assert!(
+            response.contains(">open<"),
+            "expected public access model=open in metadata: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_disco_info_spaces_node_hides_private_space_from_non_member() {
+        let state = create_test_websocket_state().await;
+        let owner = create_test_session(state.as_ref(), "owner").await;
+        let viewer = create_test_session(state.as_ref(), "viewer").await;
+        seed_waddle(
+            state.as_ref(),
+            &owner.user_id,
+            "waddle-private",
+            "Private Space",
+            false,
+        )
+        .await;
+
+        let query = r#"<iq xmlns="jabber:client" id="space-node-info-private" type="get" to="spaces.example.com"><query xmlns="http://jabber.org/protocol/disco#info" node="waddle-private"/></iq>"#;
+        let responses = handle_iq(
+            query,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(viewer),
+        )
+        .await;
+        let response = responses
+            .first()
+            .expect("spaces node private disco info response");
+
+        assert!(
+            response.contains("item-not-found"),
+            "private space should not be discoverable by non-members: {response}"
         );
     }
 

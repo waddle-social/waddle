@@ -66,6 +66,11 @@ interface SearchUsersResponse {
   users: UserSearchResult[];
 }
 
+interface ListPublicWaddlesResponse {
+  waddles: WaddleSummary[];
+  total: number;
+}
+
 function trimTrailingSlash(value: string) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
@@ -166,6 +171,21 @@ export class WaddleApi {
     if (!response.ok && response.status !== 204) {
       await expectJson<never>(response);
     }
+  }
+
+  async listPublicWaddles(query?: string) {
+    return this.json<ListPublicWaddlesResponse>(
+      "/v1/waddles/public",
+      undefined,
+      { query, limit: 100 },
+    );
+  }
+
+  async joinWaddle(waddleId: string) {
+    return this.json<WaddleSummary>(
+      `/v1/waddles/${encodeURIComponent(waddleId)}/join`,
+      { method: "POST" },
+    );
   }
 
   async createChannel(

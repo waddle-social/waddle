@@ -6,6 +6,7 @@ export function useUiState() {
   const showMobileNav = ref(false);
   const showMobileDetails = ref(false);
   const showCreateWaddle = ref(false);
+  const showBrowsePublicWaddles = ref(false);
   const showCreateChannel = ref(false);
   const showEditChannel = ref(false);
   const showWaddleSettings = ref(false);
@@ -28,6 +29,7 @@ export function useUiState() {
     showMobileNav,
     showMobileDetails,
     showCreateWaddle,
+    showBrowsePublicWaddles,
     showCreateChannel,
     showEditChannel,
     showWaddleSettings,

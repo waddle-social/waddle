@@ -18,6 +18,7 @@ export function useWaddles(
   clearActionError: () => void,
 ) {
   const waddles = ref<WaddleSummary[]>([]);
+  const publicWaddles = ref<WaddleSummary[]>([]);
   const channels = ref<ChannelSummary[]>([]);
   const members = ref<MemberSummary[]>([]);
 
@@ -25,7 +26,9 @@ export function useWaddles(
   const activeChannelId: Ref<string | null> = ref(null);
 
   const isLoadingStructure = ref(false);
+  const isLoadingPublicWaddles = ref(false);
   const isSubmitting = ref(false);
+  const joiningPublicWaddleId = ref<string | null>(null);
 
   let structureRequestId = 0;
 
@@ -190,7 +193,11 @@ export function useWaddles(
     if (!xmppClient.value) return;
 
     const discovered = await xmppClient.value.discoverWaddles();
-    const waddleList: WaddleSummary[] = discovered.map((w) => ({ id: w.id, name: w.name }));
+    const waddleList: WaddleSummary[] = discovered.map((w) => ({
+      id: w.id,
+      name: w.name,
+      is_public: w.isPublic,
+    }));
     waddles.value = waddleList;
 
     const nextId =
@@ -209,6 +216,40 @@ export function useWaddles(
       members.value = [];
       activeChannelId.value = null;
       return null;
+    }
+  }
+
+  async function loadPublicWaddles(query?: string) {
+    if (!api.value) return;
+
+    isLoadingPublicWaddles.value = true;
+    clearActionError();
+    try {
+      const response = await api.value.listPublicWaddles(query);
+      publicWaddles.value = response.waddles;
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      isLoadingPublicWaddles.value = false;
+    }
+  }
+
+  async function joinPublicWaddle(
+    waddleId: string,
+  ): Promise<{ waddleId: string; channelId: string | null } | null> {
+    if (!api.value) return null;
+
+    joiningPublicWaddleId.value = waddleId;
+    clearActionError();
+    try {
+      await api.value.joinWaddle(waddleId);
+      const channelId = (await loadWaddles(waddleId)) ?? null;
+      return { waddleId, channelId };
+    } catch (e) {
+      actionError.value = normalizeError(e);
+      return null;
+    } finally {
+      joiningPublicWaddleId.value = null;
     }
   }
 
@@ -346,20 +387,26 @@ export function useWaddles(
 
   function clearData() {
     waddles.value = [];
+    publicWaddles.value = [];
     channels.value = [];
     members.value = [];
+    isLoadingPublicWaddles.value = false;
+    joiningPublicWaddleId.value = null;
     activeWaddleId.value = null;
     activeChannelId.value = null;
   }
 
   return {
     waddles,
+    publicWaddles,
     channels,
     members,
     activeWaddleId,
     activeChannelId,
     isLoadingStructure,
+    isLoadingPublicWaddles,
     isSubmitting,
+    joiningPublicWaddleId,
     createWaddleForm,
     editWaddleForm,
     createChannelForm,
@@ -374,7 +421,9 @@ export function useWaddles(
     canManageChannels,
     canManageMembers,
     loadWaddles,
+    loadPublicWaddles,
     loadStructure,
+    joinPublicWaddle,
     createWaddle,
     updateWaddle,
     deleteWaddle,

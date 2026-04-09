@@ -65,7 +65,9 @@ impl WaddleState {
 /// Create the waddles router
 pub fn router(waddle_state: Arc<WaddleState>) -> Router {
     Router::new()
+        .route("/v1/waddles/public", get(list_public_waddles_handler))
         .route("/v1/waddles", post(create_waddle_handler))
+        .route("/v1/waddles/:id/join", post(join_public_waddle_handler))
         .route("/v1/waddles/:id", patch(update_waddle_handler))
         .route("/v1/waddles/:id", delete(delete_waddle_handler))
         // Member management routes
@@ -140,6 +142,30 @@ pub struct WaddleResponse {
 pub struct SessionQuery {
     /// Session ID for authentication
     pub session_id: String,
+}
+
+/// Query parameters for public-space browsing.
+#[derive(Debug, Deserialize)]
+pub struct ListPublicWaddlesQuery {
+    /// Session ID for authentication
+    pub session_id: String,
+    /// Optional search term over space name/id
+    pub query: Option<String>,
+    /// Maximum number of results (default: 50)
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Offset for pagination (default: 0)
+    #[serde(default)]
+    pub offset: usize,
+}
+
+/// Response payload for public-space browsing.
+#[derive(Debug, Serialize)]
+pub struct ListPublicWaddlesResponse {
+    /// Public spaces matching the query.
+    pub waddles: Vec<WaddleResponse>,
+    /// Number of returned rows.
+    pub total: usize,
 }
 
 fn default_limit() -> usize {
@@ -292,6 +318,63 @@ fn waddle_error_to_response(err: WaddleError) -> (StatusCode, Json<ErrorResponse
 
 // === Handlers ===
 
+/// GET /v1/waddles/public
+///
+/// Browse discoverable public spaces, optionally filtered by query text.
+#[instrument(skip(state))]
+pub async fn list_public_waddles_handler(
+    State(state): State<Arc<WaddleState>>,
+    Query(params): Query<ListPublicWaddlesQuery>,
+) -> impl IntoResponse {
+    debug!("Listing public waddles");
+
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
+        Ok(session) => session,
+        Err(err) => {
+            warn!("Session validation failed: {}", err);
+            return waddle_error_to_response(WaddleError::Auth(err)).into_response();
+        }
+    };
+
+    let mut waddles = match list_public_waddles_from_db(
+        state.app_state.db_pool.global(),
+        params.query.as_deref(),
+        params.limit,
+        params.offset,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            error!("Failed to list public waddles: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
+
+    for waddle in &mut waddles {
+        if let Ok(role) = get_user_role(
+            state.app_state.db_pool.global(),
+            &waddle.id,
+            &session.user_id,
+        )
+        .await
+        {
+            waddle.role = role;
+        }
+    }
+
+    let total = waddles.len();
+    (
+        StatusCode::OK,
+        Json(ListPublicWaddlesResponse { waddles, total }),
+    )
+        .into_response()
+}
+
 /// POST /v1/waddles
 ///
 /// Create a new waddle with the authenticated user as owner.
@@ -431,6 +514,117 @@ pub async fn create_waddle_handler(
             role: Some("owner".to_string()),
             created_at: now.clone(),
             updated_at: Some(now),
+        }),
+    )
+        .into_response()
+}
+
+/// POST /v1/waddles/:id/join
+///
+/// Join a public waddle as a member using the authenticated session user.
+#[instrument(skip(state))]
+pub async fn join_public_waddle_handler(
+    State(state): State<Arc<WaddleState>>,
+    Path(waddle_id): Path<String>,
+    Query(params): Query<SessionQuery>,
+) -> impl IntoResponse {
+    info!("Joining public waddle: {}", waddle_id);
+
+    let session = match state
+        .session_manager
+        .validate_session(&params.session_id)
+        .await
+    {
+        Ok(session) => session,
+        Err(err) => {
+            warn!("Session validation failed: {}", err);
+            return waddle_error_to_response(WaddleError::Auth(err)).into_response();
+        }
+    };
+
+    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
+        Ok(Some(waddle)) => waddle,
+        Ok(None) => {
+            return waddle_error_to_response(WaddleError::NotFound(format!(
+                "Waddle '{}' not found",
+                waddle_id
+            )))
+            .into_response();
+        }
+        Err(err) => {
+            error!("Failed to get waddle: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
+
+    if !waddle.is_public {
+        return waddle_error_to_response(WaddleError::Permission(PermissionError::Denied(
+            "Only public waddles can be joined directly".to_string(),
+        )))
+        .into_response();
+    }
+
+    let existing_role = match get_member_role(
+        state.app_state.db_pool.global(),
+        &waddle_id,
+        &session.user_id,
+    )
+    .await
+    {
+        Ok(role) => role,
+        Err(err) => {
+            error!("Failed to check existing membership: {}", err);
+            return waddle_error_to_response(WaddleError::Database(err)).into_response();
+        }
+    };
+
+    if let Some(role) = existing_role {
+        return (
+            StatusCode::OK,
+            Json(WaddleResponse {
+                role: Some(role),
+                ..waddle
+            }),
+        )
+            .into_response();
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(err) = add_waddle_member_with_timestamp(
+        state.app_state.db_pool.global(),
+        &waddle_id,
+        &session.user_id,
+        "member",
+        &now,
+    )
+    .await
+    {
+        error!("Failed to add public waddle member: {}", err);
+        return waddle_error_to_response(WaddleError::Database(err)).into_response();
+    }
+
+    let tuple = Tuple::new(
+        Object::new(ObjectType::Waddle, &waddle_id),
+        Relation::new("member"),
+        Subject::user(&session.user_id),
+    );
+
+    if let Err(err) = state.permission_service.write_tuple(tuple).await {
+        error!("Failed to write member permission tuple: {}", err);
+        let _ = remove_waddle_member(
+            state.app_state.db_pool.global(),
+            &waddle_id,
+            &session.user_id,
+        )
+        .await;
+        return waddle_error_to_response(WaddleError::Permission(err)).into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(WaddleResponse {
+            role: Some("member".to_string()),
+            ..waddle
         }),
     )
         .into_response()
@@ -1657,6 +1851,93 @@ pub(crate) async fn list_all_waddles_from_db(
     Ok(waddles)
 }
 
+/// List only public waddles with pagination.
+///
+/// Used by the XEP-0503 spaces service so users can discover public spaces
+/// they are not yet a member of.
+pub(crate) async fn list_public_waddles_from_db(
+    db: &Database,
+    query: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<WaddleResponse>, String> {
+    let normalized_query = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("%{}%", value.to_lowercase()));
+
+    let (sql, params): (&str, Vec<libsql::Value>) = if let Some(pattern) = normalized_query {
+        (
+            r#"
+                SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+                FROM waddles w
+                JOIN users u ON w.owner_id = u.id
+                WHERE w.is_public = 1
+                  AND (LOWER(w.name) LIKE ? OR LOWER(w.id) LIKE ?)
+                ORDER BY w.created_at DESC
+                LIMIT ? OFFSET ?
+            "#,
+            vec![
+                pattern.clone().into(),
+                pattern.into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        )
+    } else {
+        (
+            r#"
+                SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+                FROM waddles w
+                JOIN users u ON w.owner_id = u.id
+                WHERE w.is_public = 1
+                ORDER BY w.created_at DESC
+                LIMIT ? OFFSET ?
+            "#,
+            vec![(limit as i64).into(), (offset as i64).into()],
+        )
+    };
+
+    let mut waddles = Vec::new();
+
+    if let Some(persistent) = db.persistent_connection() {
+        let conn = persistent.lock().await;
+        let mut rows = conn
+            .query(sql, params.clone())
+            .await
+            .map_err(|e| format!("Failed to query public waddles: {}", e))?;
+
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("Failed to read public waddle row: {}", e))?
+        {
+            let waddle = parse_waddle_row_base(&row)?;
+            waddles.push(waddle);
+        }
+    } else {
+        let conn = db
+            .connect()
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
+
+        let mut rows = conn
+            .query(sql, params)
+            .await
+            .map_err(|e| format!("Failed to query public waddles: {}", e))?;
+
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("Failed to read public waddle row: {}", e))?
+        {
+            let waddle = parse_waddle_row_base(&row)?;
+            waddles.push(waddle);
+        }
+    }
+
+    Ok(waddles)
+}
+
 // === Member Management Database Helper Functions ===
 
 /// List members of a waddle with pagination
@@ -2500,5 +2781,178 @@ mod tests {
             .find(|member| member["user_id"] == member_session.user_id)
             .unwrap();
         assert_eq!(updated["role"], "admin");
+    }
+
+    #[tokio::test]
+    async fn test_list_public_waddles_only_returns_public_spaces() {
+        let waddle_state = create_test_waddle_state().await;
+        let owner_session = create_test_session(&waddle_state).await;
+        let viewer_session = create_test_session(&waddle_state).await;
+        let app = router(waddle_state.clone());
+
+        let create_public = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"Public Space","is_public":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_public.status(), StatusCode::CREATED);
+        let public_body = create_public
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let public_json: serde_json::Value = serde_json::from_slice(&public_body).unwrap();
+        let public_id = public_json["id"].as_str().unwrap().to_string();
+
+        let create_private = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"Private Space","is_public":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_private.status(), StatusCode::CREATED);
+        let private_body = create_private
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let private_json: serde_json::Value = serde_json::from_slice(&private_body).unwrap();
+        let private_id = private_json["id"].as_str().unwrap().to_string();
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/v1/waddles/public?session_id={}",
+                        viewer_session.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = list_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+        let rows = list_json["waddles"].as_array().unwrap();
+
+        assert!(
+            rows.iter().any(|row| row["id"] == public_id),
+            "public space should be browseable"
+        );
+        assert!(
+            rows.iter().all(|row| row["id"] != private_id),
+            "private space must not appear in public browse"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_join_public_waddle_allows_public_and_rejects_private() {
+        let waddle_state = create_test_waddle_state().await;
+        let owner_session = create_test_session(&waddle_state).await;
+        let joiner_session = create_test_session(&waddle_state).await;
+        let app = router(waddle_state.clone());
+
+        let create_public = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"Joinable","is_public":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_public.status(), StatusCode::CREATED);
+        let public_body = create_public
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let public_json: serde_json::Value = serde_json::from_slice(&public_body).unwrap();
+        let public_id = public_json["id"].as_str().unwrap().to_string();
+
+        let create_private = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/waddles?session_id={}", owner_session.id))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"Closed","is_public":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_private.status(), StatusCode::CREATED);
+        let private_body = create_private
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let private_json: serde_json::Value = serde_json::from_slice(&private_body).unwrap();
+        let private_id = private_json["id"].as_str().unwrap().to_string();
+
+        let join_public = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/waddles/{}/join?session_id={}",
+                        public_id, joiner_session.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(join_public.status(), StatusCode::OK);
+        let join_public_body = join_public.into_body().collect().await.unwrap().to_bytes();
+        let join_public_json: serde_json::Value =
+            serde_json::from_slice(&join_public_body).unwrap();
+        assert_eq!(join_public_json["id"], public_id);
+        assert_eq!(join_public_json["role"], "member");
+
+        let join_private = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/waddles/{}/join?session_id={}",
+                        private_id, joiner_session.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(join_private.status(), StatusCode::FORBIDDEN);
     }
 }
