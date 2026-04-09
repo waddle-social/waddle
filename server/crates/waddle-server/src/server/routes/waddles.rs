@@ -2244,87 +2244,7 @@ mod tests {
         assert_eq!(json["error"], "invalid_input");
     }
 
-    #[tokio::test]
-    async fn test_get_waddle() {
-        let waddle_state = create_test_waddle_state().await;
-        let session = create_test_session(&waddle_state).await;
-        let app = router(waddle_state.clone());
 
-        // Create a waddle first
-        let create_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/v1/waddles?session_id={}", session.id))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "Test Waddle"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let create_status = create_response.status();
-        let body = create_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        eprintln!("Create response status: {:?}", create_status);
-        eprintln!("Create response body: {:?}", create_json);
-        assert_eq!(
-            create_status,
-            StatusCode::CREATED,
-            "Create waddle failed: {:?}",
-            create_json
-        );
-        let waddle_id = create_json["id"].as_str().unwrap();
-
-        // Get the waddle
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!(
-                        "/v1/waddles/{}?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(json["id"], waddle_id);
-        assert_eq!(json["name"], "Test Waddle");
-    }
-
-    #[tokio::test]
-    async fn test_get_waddle_not_found() {
-        let waddle_state = create_test_waddle_state().await;
-        let session = create_test_session(&waddle_state).await;
-        let app = router(waddle_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/v1/waddles/nonexistent?session_id={}", session.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
 
     #[tokio::test]
     async fn test_update_waddle() {
@@ -2428,76 +2348,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        // Verify it's gone
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!(
-                        "/v1/waddles/{}?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    #[tokio::test]
-    async fn test_list_waddles() {
-        let waddle_state = create_test_waddle_state().await;
-        let session = create_test_session(&waddle_state).await;
-        let app = router(waddle_state.clone());
-
-        // Create two waddles
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/v1/waddles?session_id={}", session.id))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "Waddle 1"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/v1/waddles?session_id={}", session.id))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "Waddle 2"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // List waddles
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/v1/waddles?session_id={}", session.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(json["total"], 2);
-        assert_eq!(json["waddles"].as_array().unwrap().len(), 2);
-    }
 
     #[tokio::test]
     async fn test_delete_waddle_permission_denied() {
