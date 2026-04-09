@@ -92,6 +92,10 @@ pub struct XmppConfig {
     /// When enabled, users can register new accounts before authentication.
     /// Security note: Enable with caution on public servers.
     pub registration_enabled: bool,
+    /// Whether the server operates in single-tenant mode (default: false).
+    /// When true, all spaces are publicly discoverable regardless of membership.
+    /// Controlled by `WADDLE_SINGLE_TENANT` env var.
+    pub single_tenant: bool,
     /// ACME configuration for managed TLS certificates.
     pub acme: XmppAcmeConfig,
 }
@@ -109,6 +113,7 @@ impl Default for XmppConfig {
             mam_db_path: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
+            single_tenant: false,
             acme: XmppAcmeConfig {
                 enabled: false,
                 email: None,
@@ -164,6 +169,10 @@ impl XmppConfig {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
 
+        let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+
         let s2s_enabled = std::env::var("WADDLE_XMPP_S2S_ENABLED")
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false);
@@ -184,6 +193,7 @@ impl XmppConfig {
             mam_db_path,
             native_auth_enabled,
             registration_enabled,
+            single_tenant,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
                 email: acme_email,
@@ -213,6 +223,7 @@ impl XmppConfig {
             mam_db_path: self.mam_db_path.clone(),
             native_auth_enabled: self.native_auth_enabled,
             registration_enabled: self.registration_enabled,
+            single_tenant: self.single_tenant,
         }
     }
 }
@@ -383,6 +394,20 @@ pub async fn start_with_config(
     } else {
         None
     };
+
+    // Single-tenant boot-time guard: fail-fast if no waddles exist
+    if xmpp_config.single_tenant {
+        if let Some(ref xmpp_state) = xmpp_app_state {
+            use waddle_xmpp::AppState as XmppAppStateTrait;
+            let waddles = xmpp_state.list_all_waddles(1, 0).await.unwrap_or_default();
+            if waddles.is_empty() {
+                anyhow::bail!(
+                    "Single-tenant mode is enabled (WADDLE_SINGLE_TENANT=true) but no waddles exist. \
+                     Create a waddle before enabling single-tenant mode."
+                );
+            }
+        }
+    }
 
     // Create HTTP state (shares db_pool via Arc)
     let state = Arc::new(AppState::new(Arc::clone(&db_pool)));

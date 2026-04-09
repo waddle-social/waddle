@@ -72,6 +72,8 @@ pub struct RouterConfig {
     pub local_domain: String,
     /// The MUC subdomain (e.g., "muc.waddle.social")
     pub muc_domain: String,
+    /// The Spaces subdomain (e.g., "spaces.waddle.social") for XEP-0503
+    pub spaces_domain: String,
     /// Whether S2S federation is enabled
     pub federation_enabled: bool,
 }
@@ -80,9 +82,11 @@ impl RouterConfig {
     /// Create a new router configuration.
     pub fn new(local_domain: String) -> Self {
         let muc_domain = format!("muc.{}", local_domain);
+        let spaces_domain = format!("spaces.{}", local_domain);
         Self {
             local_domain,
             muc_domain,
+            spaces_domain,
             federation_enabled: false,
         }
     }
@@ -107,6 +111,8 @@ pub enum RoutingDestination {
     Local,
     /// JID is for the MUC service on this server
     LocalMuc,
+    /// JID is for the Spaces service on this server (XEP-0503)
+    LocalSpaces,
     /// JID is on a remote server (requires S2S)
     Remote {
         /// The remote domain
@@ -185,6 +191,8 @@ impl StanzaRouter {
             RoutingDestination::Local
         } else if domain == self.config.muc_domain {
             RoutingDestination::LocalMuc
+        } else if domain == self.config.spaces_domain {
+            RoutingDestination::LocalSpaces
         } else {
             RoutingDestination::Remote {
                 domain: domain.to_string(),
@@ -196,7 +204,9 @@ impl StanzaRouter {
     pub fn is_local_jid(&self, jid: &Jid) -> bool {
         matches!(
             self.get_destination(jid),
-            RoutingDestination::Local | RoutingDestination::LocalMuc
+            RoutingDestination::Local
+                | RoutingDestination::LocalMuc
+                | RoutingDestination::LocalSpaces
         )
     }
 
@@ -230,10 +240,10 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_message_local(message).await,
-            RoutingDestination::LocalMuc => {
-                // MUC messages should be handled by the MUC room registry,
+            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
+                // MUC/Spaces messages should be handled by their respective services,
                 // not by this router directly. Return as local.
-                debug!("Message to MUC should be handled by room registry");
+                debug!("Message to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
                     offline_count: 0,
@@ -364,9 +374,9 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_presence_local(presence).await,
-            RoutingDestination::LocalMuc => {
-                // MUC presence should be handled by the MUC room registry
-                debug!("Presence to MUC should be handled by room registry");
+            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
+                // MUC/Spaces presence should be handled by their respective services
+                debug!("Presence to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
                     offline_count: 0,
@@ -493,9 +503,9 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_iq_local(iq).await,
-            RoutingDestination::LocalMuc => {
-                // MUC IQs should be handled by the MUC room registry
-                debug!("IQ to MUC should be handled by room registry");
+            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
+                // MUC/Spaces IQs should be handled by their respective services
+                debug!("IQ to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
                     offline_count: 0,
@@ -667,6 +677,19 @@ mod tests {
     }
 
     #[test]
+    fn test_get_destination_spaces() {
+        let config = create_test_config();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let router = StanzaRouter::new(config, registry, None);
+
+        let jid = create_test_jid("spaces.waddle.social");
+        assert_eq!(
+            router.get_destination(&jid),
+            RoutingDestination::LocalSpaces
+        );
+    }
+
+    #[test]
     fn test_get_destination_remote() {
         let config = create_test_config();
         let registry = Arc::new(ConnectionRegistry::new());
@@ -697,6 +720,7 @@ mod tests {
 
         assert!(router.is_local_jid(&create_test_jid("user@waddle.social")));
         assert!(router.is_local_jid(&create_test_jid("room@muc.waddle.social")));
+        assert!(router.is_local_jid(&create_test_jid("spaces.waddle.social")));
         assert!(!router.is_local_jid(&create_test_jid("user@example.com")));
     }
 

@@ -1626,7 +1626,10 @@ pub(crate) async fn list_user_waddles(
 }
 
 /// Parse the core waddle fields from a row (columns 0-6, no role/updated_at).
-fn parse_waddle_row_base(row: &libsql::Row) -> Result<(String, String, Option<String>, String, Option<String>, bool, String), String> {
+///
+/// Returns a `WaddleResponse` with `role` and `updated_at` set to `None`.
+/// Callers that need those fields should override them after calling this.
+fn parse_waddle_row_base(row: &libsql::Row) -> Result<WaddleResponse, String> {
     let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
     let name: String = row
         .get(1)
@@ -1642,45 +1645,25 @@ fn parse_waddle_row_base(row: &libsql::Row) -> Result<(String, String, Option<St
     let created_at: String = row
         .get(6)
         .map_err(|e| format!("Failed to get created_at: {}", e))?;
-    Ok((id, name, description, owner_user_id, icon_url, is_public != 0, created_at))
-}
-
-/// Parse a waddle row from the list query (includes updated_at and role columns).
-fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
-    let (id, name, description, owner_user_id, icon_url, is_public, created_at) =
-        parse_waddle_row_base(row)?;
-    let updated_at: Option<String> = row.get(7).ok();
-    let role: Option<String> = row.get(8).ok();
-
     Ok(WaddleResponse {
         id,
         name,
         description,
         owner_user_id,
         icon_url,
-        is_public,
-        role,
-        created_at,
-        updated_at,
-    })
-}
-
-/// Parse a waddle row from a query without role/updated_at columns.
-fn parse_waddle_row_no_role(row: &libsql::Row) -> Result<WaddleResponse, String> {
-    let (id, name, description, owner_user_id, icon_url, is_public, created_at) =
-        parse_waddle_row_base(row)?;
-
-    Ok(WaddleResponse {
-        id,
-        name,
-        description,
-        owner_user_id,
-        icon_url,
-        is_public,
+        is_public: is_public != 0,
         role: None,
         created_at,
         updated_at: None,
     })
+}
+
+/// Parse a waddle row from the list query (includes updated_at and role columns).
+fn parse_waddle_row(row: &libsql::Row) -> Result<WaddleResponse, String> {
+    let mut waddle = parse_waddle_row_base(row)?;
+    waddle.updated_at = row.get(7).ok();
+    waddle.role = row.get(8).ok();
+    Ok(waddle)
 }
 
 /// Get a single waddle by ID.
@@ -1709,7 +1692,7 @@ pub(crate) async fn get_waddle_by_id(
             .await
             .map_err(|e| format!("Failed to read waddle row: {}", e))?
         {
-            Ok(Some(parse_waddle_row_no_role(&row)?))
+            Ok(Some(parse_waddle_row_base(&row)?))
         } else {
             Ok(None)
         }
@@ -1728,7 +1711,7 @@ pub(crate) async fn get_waddle_by_id(
             .await
             .map_err(|e| format!("Failed to read waddle row: {}", e))?
         {
-            Ok(Some(parse_waddle_row_no_role(&row)?))
+            Ok(Some(parse_waddle_row_base(&row)?))
         } else {
             Ok(None)
         }
@@ -1765,7 +1748,7 @@ pub(crate) async fn list_all_waddles_from_db(
             .await
             .map_err(|e| format!("Failed to read waddle row: {}", e))?
         {
-            let waddle = parse_waddle_row_no_role(&row)?;
+            let waddle = parse_waddle_row_base(&row)?;
             waddles.push(waddle);
         }
     } else {
@@ -1783,7 +1766,7 @@ pub(crate) async fn list_all_waddles_from_db(
             .await
             .map_err(|e| format!("Failed to read waddle row: {}", e))?
         {
-            let waddle = parse_waddle_row_no_role(&row)?;
+            let waddle = parse_waddle_row_base(&row)?;
             waddles.push(waddle);
         }
     }

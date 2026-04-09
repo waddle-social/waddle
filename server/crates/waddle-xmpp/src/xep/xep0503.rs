@@ -16,14 +16,16 @@
 //! - `disco#items` on `spaces.<domain>` with `node=<waddle_id>`: returns channel items
 //! - pubsub `<items>` on `spaces.<domain>` for `node=<waddle_id>`: returns XEP-0402 bookmark items
 //!
-//! Write operations (create/delete spaces, publish/retract channels, subscribe)
-//! return `<service-unavailable/>` and are planned for Phase F.
+//! **Note:** The full XEP-0503 feature set is advertised in `disco#info` even
+//! though write operations (create/delete spaces, publish/retract channels,
+//! subscribe) return `<service-unavailable/>`. This is acceptable for an
+//! Experimental XEP and will be implemented in Phase F.
 
 use minidom::Element;
 
 use crate::pubsub::stanzas::PubSubItem;
 use crate::xep::xep0402;
-use crate::ChannelInfo;
+use crate::{ChannelInfo, WaddleDetails, XmppError};
 
 /// XEP-0503 Spaces namespace.
 pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
@@ -32,48 +34,84 @@ pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
 ///
 /// Each channel is represented as an XEP-0402 `<conference>` bookmark element
 /// with the channel's MUC room JID and name. The item ID is the channel ID.
-pub fn build_channel_item(channel: &ChannelInfo, muc_domain: &str) -> PubSubItem {
+pub fn build_channel_item(channel: &ChannelInfo, muc_domain: &str) -> Result<PubSubItem, XmppError> {
     let room_jid_str = format!("{}@{}", channel.id, muc_domain);
     let room_jid: jid::BareJid = room_jid_str
         .parse()
-        .expect("Channel ID + MUC domain should form a valid bare JID");
+        .map_err(|e| XmppError::internal(format!("Invalid room JID '{}': {}", room_jid_str, e)))?;
     let bookmark = xep0402::Bookmark::new(room_jid)
         .with_name(&channel.name)
         .with_autojoin(true);
     let payload = xep0402::build_bookmark_element(&bookmark);
 
-    PubSubItem {
+    Ok(PubSubItem {
         id: Some(channel.id.clone()),
         payload: Some(payload),
-    }
+    })
 }
 
-/// Build a `pubsub#type` data form indicating a spaces node.
+/// Build a rich `pubsub#meta-data` form for a space node's `disco#info` response.
 ///
-/// This form is included in `disco#info` responses for individual space nodes
-/// to advertise the node type as `urn:xmpp:spaces:0` per XEP-0503 §3.
+/// Includes all metadata fields specified by XEP-0503: type, title, description,
+/// owner, creation date, and access model.
+pub fn build_spaces_metadata_form(waddle: &WaddleDetails) -> Element {
+    let mut form = Element::builder("x", "jabber:x:data")
+        .attr("type", "result")
+        .append(build_hidden_field(
+            "FORM_TYPE",
+            "http://jabber.org/protocol/pubsub#meta-data",
+        ))
+        .append(build_field("pubsub#type", NS_SPACES))
+        .append(build_field("pubsub#title", &waddle.name));
+
+    if let Some(ref desc) = waddle.description {
+        form = form.append(build_field("pubsub#description", desc));
+    }
+
+    form.append(build_field("pubsub#owner", &waddle.owner_id))
+        .append(build_field("pubsub#creation_date", &waddle.created_at))
+        .append(build_field(
+            "pubsub#access_model",
+            if waddle.is_public { "open" } else { "whitelist" },
+        ))
+        .build()
+}
+
+/// Build a simple `pubsub#type` data form indicating a spaces node.
+///
+/// Lighter-weight alternative to `build_spaces_metadata_form` when only the
+/// node type needs to be advertised.
 pub fn build_spaces_type_form() -> Element {
     Element::builder("x", "jabber:x:data")
         .attr("type", "result")
+        .append(build_hidden_field(
+            "FORM_TYPE",
+            "http://jabber.org/protocol/pubsub#meta-data",
+        ))
+        .append(build_field("pubsub#type", NS_SPACES))
+        .build()
+}
+
+/// Build a data form field with a single value.
+fn build_field(var: &str, value: &str) -> Element {
+    Element::builder("field", "jabber:x:data")
+        .attr("var", var)
         .append(
-            Element::builder("field", "jabber:x:data")
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
-                .append(
-                    Element::builder("value", "jabber:x:data")
-                        .append("http://jabber.org/protocol/pubsub#meta-data")
-                        .build(),
-                )
+            Element::builder("value", "jabber:x:data")
+                .append(value)
                 .build(),
         )
+        .build()
+}
+
+/// Build a hidden FORM_TYPE field.
+fn build_hidden_field(var: &str, value: &str) -> Element {
+    Element::builder("field", "jabber:x:data")
+        .attr("var", var)
+        .attr("type", "hidden")
         .append(
-            Element::builder("field", "jabber:x:data")
-                .attr("var", "pubsub#type")
-                .append(
-                    Element::builder("value", "jabber:x:data")
-                        .append(NS_SPACES)
-                        .build(),
-                )
+            Element::builder("value", "jabber:x:data")
+                .append(value)
                 .build(),
         )
         .build()
@@ -82,6 +120,18 @@ pub fn build_spaces_type_form() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_waddle() -> WaddleDetails {
+        WaddleDetails {
+            id: "waddle-1".to_string(),
+            name: "My Waddle".to_string(),
+            description: Some("A test waddle".to_string()),
+            owner_id: "alice".to_string(),
+            icon_url: None,
+            is_public: true,
+            created_at: "2026-01-15T10:00:00Z".to_string(),
+        }
+    }
 
     #[test]
     fn test_ns_spaces_constant() {
@@ -96,7 +146,7 @@ mod tests {
             channel_type: "text".to_string(),
         };
 
-        let item = build_channel_item(&channel, "muc.example.com");
+        let item = build_channel_item(&channel, "muc.example.com").unwrap();
 
         assert_eq!(item.id, Some("general".to_string()));
         assert!(item.payload.is_some());
@@ -116,16 +166,28 @@ mod tests {
             channel_type: "text".to_string(),
         };
 
-        let item = build_channel_item(&channel, "muc.waddle.social");
+        let item = build_channel_item(&channel, "muc.waddle.social").unwrap();
 
-        // The item ID is the channel ID
         assert_eq!(item.id, Some("dev-chat".to_string()));
 
-        // The bookmark payload should reference the MUC room JID
         let payload = item.payload.unwrap();
-        // The bookmark element has autojoin=true and name set
         assert_eq!(payload.attr("autojoin"), Some("true"));
         assert_eq!(payload.attr("name"), Some("Dev Chat"));
+    }
+
+    #[test]
+    fn test_build_channel_item_with_special_characters() {
+        let channel = ChannelInfo {
+            id: "hello-world".to_string(),
+            name: "Hello & World <Test>".to_string(),
+            channel_type: "text".to_string(),
+        };
+
+        let item = build_channel_item(&channel, "muc.example.com").unwrap();
+        let payload = item.payload.unwrap();
+
+        // Name should be preserved as-is (XML escaping handled by minidom)
+        assert_eq!(payload.attr("name"), Some("Hello & World <Test>"));
     }
 
     #[test]
@@ -165,17 +227,70 @@ mod tests {
     }
 
     #[test]
-    fn test_build_channel_item_with_special_characters() {
-        let channel = ChannelInfo {
-            id: "hello-world".to_string(),
-            name: "Hello & World <Test>".to_string(),
-            channel_type: "text".to_string(),
-        };
+    fn test_build_spaces_metadata_form_public_waddle() {
+        let waddle = test_waddle();
+        let form = build_spaces_metadata_form(&waddle);
 
-        let item = build_channel_item(&channel, "muc.example.com");
-        let payload = item.payload.unwrap();
+        assert_eq!(form.name(), "x");
+        assert_eq!(form.ns(), "jabber:x:data");
+        assert_eq!(form.attr("type"), Some("result"));
 
-        // Name should be preserved as-is (XML escaping handled by minidom)
-        assert_eq!(payload.attr("name"), Some("Hello & World <Test>"));
+        let fields: Vec<&Element> = form.children().collect();
+        // FORM_TYPE, pubsub#type, pubsub#title, pubsub#description, pubsub#owner,
+        // pubsub#creation_date, pubsub#access_model
+        assert_eq!(fields.len(), 7);
+
+        // FORM_TYPE
+        assert_eq!(fields[0].attr("var"), Some("FORM_TYPE"));
+        assert_eq!(fields[0].attr("type"), Some("hidden"));
+
+        // pubsub#type = urn:xmpp:spaces:0
+        assert_eq!(fields[1].attr("var"), Some("pubsub#type"));
+        let type_val: String = fields[1].children().next().unwrap().texts().collect();
+        assert_eq!(type_val, NS_SPACES);
+
+        // pubsub#title
+        assert_eq!(fields[2].attr("var"), Some("pubsub#title"));
+        let title_val: String = fields[2].children().next().unwrap().texts().collect();
+        assert_eq!(title_val, "My Waddle");
+
+        // pubsub#description
+        assert_eq!(fields[3].attr("var"), Some("pubsub#description"));
+        let desc_val: String = fields[3].children().next().unwrap().texts().collect();
+        assert_eq!(desc_val, "A test waddle");
+
+        // pubsub#owner
+        assert_eq!(fields[4].attr("var"), Some("pubsub#owner"));
+        let owner_val: String = fields[4].children().next().unwrap().texts().collect();
+        assert_eq!(owner_val, "alice");
+
+        // pubsub#creation_date
+        assert_eq!(fields[5].attr("var"), Some("pubsub#creation_date"));
+        let date_val: String = fields[5].children().next().unwrap().texts().collect();
+        assert_eq!(date_val, "2026-01-15T10:00:00Z");
+
+        // pubsub#access_model = open (public waddle)
+        assert_eq!(fields[6].attr("var"), Some("pubsub#access_model"));
+        let access_val: String = fields[6].children().next().unwrap().texts().collect();
+        assert_eq!(access_val, "open");
+    }
+
+    #[test]
+    fn test_build_spaces_metadata_form_private_waddle() {
+        let mut waddle = test_waddle();
+        waddle.is_public = false;
+        waddle.description = None;
+
+        let form = build_spaces_metadata_form(&waddle);
+        let fields: Vec<&Element> = form.children().collect();
+
+        // Without description: FORM_TYPE, type, title, owner, creation_date, access_model
+        assert_eq!(fields.len(), 6);
+
+        // Last field: pubsub#access_model = whitelist (private waddle)
+        let last = fields.last().unwrap();
+        assert_eq!(last.attr("var"), Some("pubsub#access_model"));
+        let access_val: String = last.children().next().unwrap().texts().collect();
+        assert_eq!(access_val, "whitelist");
     }
 }

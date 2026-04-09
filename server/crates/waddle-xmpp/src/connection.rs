@@ -162,6 +162,9 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     converting_avatar: bool,
     /// GitHub link enricher for expanding GitHub URLs in messages
     github_enricher: Option<Arc<MessageEnricher>>,
+    /// Whether the server operates in single-tenant mode (XEP-0503).
+    /// When true, all spaces are publicly discoverable regardless of membership.
+    single_tenant: bool,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
@@ -186,6 +189,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         registration_enabled: bool,
         pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
         github_enricher: Option<Arc<MessageEnricher>>,
+        single_tenant: bool,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -214,6 +218,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
             github_enricher,          // GitHub link enrichment (optional)
+            single_tenant,            // XEP-0503: single-tenant mode for spaces
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -3826,18 +3831,27 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 if let Some(ref node) = query.node {
                     // disco#info for a specific space node (waddle)
                     debug!(domain = %spaces_domain, node = %node, "disco#info query to space node");
+
+                    // In multi-tenant mode, verify requester is a member
+                    if !self.single_tenant && !self.is_user_in_waddle(node).await {
+                        return Err(XmppError::item_not_found(Some(format!(
+                            "Space node '{}' not found",
+                            node
+                        ))));
+                    }
+
                     if let Ok(Some(waddle)) =
                         self.app_state.get_waddle_details(node).await
                     {
                         (
-                            vec![Identity::spaces_node(Some(&waddle.name))],
+                            vec![Identity::pubsub_leaf(Some(&waddle.name))],
                             vec![
                                 crate::disco::Feature::disco_info(),
                                 crate::disco::Feature::pubsub(),
                                 crate::disco::Feature::pubsub_retrieve_items(),
                                 crate::disco::Feature::spaces(),
                             ],
-                            vec![crate::xep::xep0503::build_spaces_type_form()],
+                            vec![crate::xep::xep0503::build_spaces_metadata_form(&waddle)],
                         )
                     } else {
                         return Err(XmppError::item_not_found(Some(format!(
@@ -4682,6 +4696,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         Ok(())
     }
 
+    /// Check if the current user is a member of the given waddle.
+    ///
+    /// Used for authorization in multi-tenant mode (XEP-0503).
+    async fn is_user_in_waddle(&self, waddle_id: &str) -> bool {
+        let user_id = match self.jid.as_ref() {
+            Some(jid) => jid.to_bare().node().map(|n| n.to_string()).unwrap_or_default(),
+            None => return false,
+        };
+        let waddles = self
+            .app_state
+            .get_user_waddles_with_details(&user_id)
+            .await
+            .unwrap_or_default();
+        waddles.iter().any(|w| w.id == waddle_id)
+    }
+
     /// Handle disco#items queries directed at the spaces service (XEP-0503).
     ///
     /// Without a node: lists all space nodes (waddles) the user belongs to,
@@ -4697,17 +4727,26 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         match query.node.as_deref() {
             // No node: list space nodes (waddles)
             None => {
-                debug!(domain = %spaces_domain, "disco#items query to spaces domain - listing spaces");
-                let user_jid = self.jid.as_ref().map(|j| j.to_bare());
+                debug!(domain = %spaces_domain, single_tenant = self.single_tenant, "disco#items query to spaces domain - listing spaces");
 
-                let waddles = if let Some(ref jid) = user_jid {
-                    let user_id = jid.node().map(|n| n.to_string()).unwrap_or_default();
+                let waddles = if self.single_tenant {
+                    // Single-tenant mode: all spaces are publicly discoverable
                     self.app_state
-                        .get_user_waddles_with_details(&user_id)
+                        .list_all_waddles(100, 0)
                         .await
                         .unwrap_or_default()
                 } else {
-                    vec![]
+                    // Multi-tenant mode: only show user's spaces
+                    let user_jid = self.jid.as_ref().map(|j| j.to_bare());
+                    if let Some(ref jid) = user_jid {
+                        let user_id = jid.node().map(|n| n.to_string()).unwrap_or_default();
+                        self.app_state
+                            .get_user_waddles_with_details(&user_id)
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    }
                 };
 
                 Ok(waddles
@@ -4724,6 +4763,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     node = %node,
                     "disco#items query to spaces domain - listing channels in space"
                 );
+
+                // In multi-tenant mode, verify the requester is a member
+                if !self.single_tenant && !self.is_user_in_waddle(node).await {
+                    return Ok(vec![]);
+                }
 
                 let channels = self
                     .app_state
@@ -4764,15 +4808,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         match request {
             PubSubRequest::Items {
                 node,
-                max_items: _,
-                item_ids: _,
+                max_items,
+                item_ids,
             } => {
                 debug!(node = %node, "Spaces pubsub items request");
                 let muc_domain = self.room_registry.muc_domain();
 
                 // Verify space exists
                 match self.app_state.get_waddle_details(&node).await {
-                    Ok(Some(_)) => {}
+                    Ok(Some(_)) => {
+                        // In multi-tenant mode, verify requester is a member
+                        if !self.single_tenant && !self.is_user_in_waddle(&node).await {
+                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                            self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                            return Ok(());
+                        }
+                    }
                     Ok(None) => {
                         let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
                         self.stream.write_stanza(&Stanza::Iq(error)).await?;
@@ -4793,10 +4844,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .await
                     .unwrap_or_default();
 
-                let items: Vec<PubSubItem> = channels
+                let mut items: Vec<PubSubItem> = channels
                     .iter()
-                    .map(|c| crate::xep::xep0503::build_channel_item(c, muc_domain))
+                    .filter_map(|c| crate::xep::xep0503::build_channel_item(c, muc_domain).ok())
                     .collect();
+
+                // Apply item_ids filter if specified
+                if !item_ids.is_empty() {
+                    items.retain(|item| {
+                        item.id.as_ref().is_some_and(|id| item_ids.contains(id))
+                    });
+                }
+
+                // Apply max_items limit if specified
+                if let Some(max) = max_items {
+                    items.truncate(max as usize);
+                }
 
                 let response = build_pubsub_items_result(&iq, &node, &items);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
