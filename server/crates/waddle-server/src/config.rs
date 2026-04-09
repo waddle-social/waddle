@@ -111,7 +111,7 @@ impl ServerConfig {
         let auth = AuthConfig::from_env()?;
 
         let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
 
         Ok(Self {

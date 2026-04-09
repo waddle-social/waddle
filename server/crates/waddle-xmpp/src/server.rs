@@ -50,6 +50,10 @@ pub struct XmppServerConfig {
     /// When enabled, users can register new accounts before authentication.
     /// Security note: Enable with caution on public servers.
     pub registration_enabled: bool,
+    /// Whether the server operates in single-tenant mode (default: false).
+    /// When true, all spaces are publicly discoverable regardless of membership.
+    /// Controlled by `WADDLE_SINGLE_TENANT` env var.
+    pub single_tenant: bool,
 }
 
 impl Default for XmppServerConfig {
@@ -65,6 +69,7 @@ impl Default for XmppServerConfig {
             mam_db_path: None, // In-memory by default
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
+            single_tenant: false,
         }
     }
 }
@@ -308,6 +313,7 @@ impl<S: AppState> XmppServer<S> {
             let sm_session_registry = self.sm_session_registry;
             let pubsub_storage = self.pubsub_storage;
             let registration_enabled = self.config.registration_enabled;
+            let single_tenant = self.config.single_tenant;
             let github_enricher = self.github_enricher;
 
             tokio::spawn(async move {
@@ -355,6 +361,7 @@ impl<S: AppState> XmppServer<S> {
                                 registration_enabled,
                                 pubsub_storage,
                                 github_enricher,
+                                single_tenant,
                             )
                             .await
                             {

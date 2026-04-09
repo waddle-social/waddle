@@ -75,11 +75,6 @@ impl Identity {
     pub fn spaces_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
-
-    /// Space node identity (category="pubsub", type="collection") for XEP-0503.
-    pub fn spaces_node(name: Option<&str>) -> Self {
-        Self::new("pubsub", "collection", name)
-    }
 }
 
 /// Feature element for disco#info response.
@@ -508,13 +503,27 @@ pub fn pubsub_service_features() -> Vec<Feature> {
 }
 
 /// Get features for the Spaces service component (XEP-0503).
+///
+/// The full XEP-0503 mandated feature set is advertised even though write
+/// operations return `<service-unavailable/>` in Phase A. This is acceptable
+/// for an Experimental XEP and documented in the `xep0503` module.
 pub fn spaces_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
         Feature::disco_items(),
         Feature::pubsub(),
-        Feature::pubsub_retrieve_items(),
         Feature::spaces(),
+        Feature::pubsub_retrieve_items(),
+        Feature::new("http://jabber.org/protocol/pubsub#subscribe"),
+        Feature::new("http://jabber.org/protocol/pubsub#create-nodes"),
+        Feature::new("http://jabber.org/protocol/pubsub#delete-nodes"),
+        Feature::new("http://jabber.org/protocol/pubsub#config-node"),
+        Feature::new("http://jabber.org/protocol/pubsub#meta-data"),
+        Feature::new("http://jabber.org/protocol/pubsub#delete-items"),
+        Feature::new("http://jabber.org/protocol/pubsub#retract-items"),
+        Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
+        Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
+        Feature::new("http://jabber.org/protocol/pubsub#manage-subscriptions"),
     ]
 }
 

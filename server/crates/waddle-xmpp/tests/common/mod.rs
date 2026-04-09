@@ -86,6 +86,10 @@ pub struct MockAppState {
     pub domain: String,
     /// Whether to accept all auth attempts (true) or reject them (false)
     pub accept_auth: bool,
+    /// XEP-0503: waddle details for spaces service tests
+    pub waddle_details: Vec<waddle_xmpp::WaddleDetails>,
+    /// XEP-0503: channels per waddle (keyed by waddle ID)
+    pub waddle_channels: std::collections::HashMap<String, Vec<waddle_xmpp::ChannelInfo>>,
 }
 
 impl MockAppState {
@@ -93,6 +97,8 @@ impl MockAppState {
         Self {
             domain: domain.to_string(),
             accept_auth: true,
+            waddle_details: Vec::new(),
+            waddle_channels: std::collections::HashMap::new(),
         }
     }
 
@@ -100,7 +106,21 @@ impl MockAppState {
         Self {
             domain: domain.to_string(),
             accept_auth: false,
+            waddle_details: Vec::new(),
+            waddle_channels: std::collections::HashMap::new(),
         }
+    }
+
+    /// Add a waddle with its channels for XEP-0503 tests.
+    pub fn with_waddle(
+        mut self,
+        details: waddle_xmpp::WaddleDetails,
+        channels: Vec<waddle_xmpp::ChannelInfo>,
+    ) -> Self {
+        let waddle_id = details.id.clone();
+        self.waddle_details.push(details);
+        self.waddle_channels.insert(waddle_id, channels);
+        self
     }
 }
 
@@ -404,35 +424,36 @@ impl AppState for MockAppState {
 
     async fn list_waddle_channels(
         &self,
-        _waddle_id: &str,
+        waddle_id: &str,
     ) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
-        // Mock returns no channels
-        Ok(Vec::new())
+        Ok(self
+            .waddle_channels
+            .get(waddle_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn get_waddle_details(
         &self,
-        _waddle_id: &str,
+        waddle_id: &str,
     ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
-        // Mock returns no waddle details
-        Ok(None)
+        Ok(self.waddle_details.iter().find(|w| w.id == waddle_id).cloned())
     }
 
     async fn get_user_waddles_with_details(
         &self,
         _user_id: &str,
     ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        // Mock returns no waddle details
-        Ok(Vec::new())
+        // In tests, return all waddles for any authenticated user
+        Ok(self.waddle_details.clone())
     }
 
     async fn list_all_waddles(
         &self,
-        _limit: usize,
+        limit: usize,
         _offset: usize,
     ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        // Mock returns no waddles
-        Ok(Vec::new())
+        Ok(self.waddle_details.iter().take(limit).cloned().collect())
     }
 }
 
@@ -602,7 +623,7 @@ async fn run_test_server<S: AppState>(
                         let registration_enabled = true;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, false
                             ).await;
                         });
                     }
