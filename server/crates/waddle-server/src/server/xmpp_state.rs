@@ -1176,7 +1176,11 @@ impl waddle_xmpp::AppState for XmppAppState {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<waddle_xmpp::WaddleDetails>, XmppError> {
-        debug!(limit = limit, offset = offset, "Listing all waddles for spaces service");
+        debug!(
+            limit = limit,
+            offset = offset,
+            "Listing all waddles for spaces service"
+        );
 
         use crate::server::routes::waddles::list_all_waddles_from_db;
         let rows = list_all_waddles_from_db(self.db.as_ref(), limit, offset)

@@ -126,7 +126,9 @@ pub use xep0461::{
     set_thread_id, thread_id_from_message, ReplyReference, NS_REPLY,
 };
 
-pub use xep0503::{build_channel_item, build_spaces_metadata_form, build_spaces_type_form, NS_SPACES};
+pub use xep0503::{
+    build_channel_item, build_spaces_metadata_form, build_spaces_type_form, NS_SPACES,
+};
 
 // Re-export commonly used items at the xep module level
 pub mod prelude {

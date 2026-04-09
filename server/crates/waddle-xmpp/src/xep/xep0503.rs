@@ -34,7 +34,10 @@ pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
 ///
 /// Each channel is represented as an XEP-0402 `<conference>` bookmark element
 /// with the channel's MUC room JID and name. The item ID is the channel ID.
-pub fn build_channel_item(channel: &ChannelInfo, muc_domain: &str) -> Result<PubSubItem, XmppError> {
+pub fn build_channel_item(
+    channel: &ChannelInfo,
+    muc_domain: &str,
+) -> Result<PubSubItem, XmppError> {
     let room_jid_str = format!("{}@{}", channel.id, muc_domain);
     let room_jid: jid::BareJid = room_jid_str
         .parse()
@@ -72,7 +75,11 @@ pub fn build_spaces_metadata_form(waddle: &WaddleDetails) -> Element {
         .append(build_field("pubsub#creation_date", &waddle.created_at))
         .append(build_field(
             "pubsub#access_model",
-            if waddle.is_public { "open" } else { "whitelist" },
+            if waddle.is_public {
+                "open"
+            } else {
+                "whitelist"
+            },
         ))
         .build()
 }
@@ -204,12 +211,7 @@ mod tests {
         // First field: FORM_TYPE
         assert_eq!(fields[0].attr("var"), Some("FORM_TYPE"));
         assert_eq!(fields[0].attr("type"), Some("hidden"));
-        let form_type_value: String = fields[0]
-            .children()
-            .next()
-            .unwrap()
-            .texts()
-            .collect();
+        let form_type_value: String = fields[0].children().next().unwrap().texts().collect();
         assert_eq!(
             form_type_value,
             "http://jabber.org/protocol/pubsub#meta-data"
@@ -217,12 +219,7 @@ mod tests {
 
         // Second field: pubsub#type
         assert_eq!(fields[1].attr("var"), Some("pubsub#type"));
-        let type_value: String = fields[1]
-            .children()
-            .next()
-            .unwrap()
-            .texts()
-            .collect();
+        let type_value: String = fields[1].children().next().unwrap().texts().collect();
         assert_eq!(type_value, NS_SPACES);
     }
 

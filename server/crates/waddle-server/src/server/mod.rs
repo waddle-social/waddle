@@ -665,6 +665,7 @@ fn create_router(
     let waddle_state = Arc::new(WaddleState::new(
         state.clone(),
         encryption_key.as_ref().map(|s| s.as_bytes()),
+        server_config.single_tenant,
     ));
     let waddles_router = routes::waddles::router(waddle_state.clone());
 

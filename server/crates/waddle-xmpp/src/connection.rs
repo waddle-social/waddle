@@ -3840,9 +3840,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         ))));
                     }
 
-                    if let Ok(Some(waddle)) =
-                        self.app_state.get_waddle_details(node).await
-                    {
+                    if let Ok(Some(waddle)) = self.app_state.get_waddle_details(node).await {
                         (
                             vec![Identity::pubsub_leaf(Some(&waddle.name))],
                             vec![
@@ -4701,7 +4699,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Used for authorization in multi-tenant mode (XEP-0503).
     async fn is_user_in_waddle(&self, waddle_id: &str) -> bool {
         let user_id = match self.jid.as_ref() {
-            Some(jid) => jid.to_bare().node().map(|n| n.to_string()).unwrap_or_default(),
+            Some(jid) => jid
+                .to_bare()
+                .node()
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
             None => return false,
         };
         let waddles = self
@@ -4730,9 +4732,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 debug!(domain = %spaces_domain, single_tenant = self.single_tenant, "disco#items query to spaces domain - listing spaces");
 
                 let waddles = if self.single_tenant {
-                    // Single-tenant mode: all spaces are publicly discoverable
+                    // Single-tenant mode: return the canonical space (limit=1)
                     self.app_state
-                        .list_all_waddles(100, 0)
+                        .list_all_waddles(1, 0)
                         .await
                         .unwrap_or_default()
                 } else {
@@ -4751,9 +4753,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 Ok(waddles
                     .iter()
-                    .map(|w| {
-                        DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name))
-                    })
+                    .map(|w| DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name)))
                     .collect())
             }
             // With node: list channels in that waddle
@@ -4791,10 +4791,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Supports `<items>` retrieval for space nodes (returns XEP-0402 bookmark items).
     /// Write operations return `<service-unavailable/>` (Phase F).
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_spaces_pubsub_iq(
-        &mut self,
-        iq: xmpp_parsers::iq::Iq,
-    ) -> Result<(), XmppError> {
+    async fn handle_spaces_pubsub_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let request = match parse_pubsub_iq(&iq) {
             Ok(req) => req,
             Err(e) => {
@@ -4851,9 +4848,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 // Apply item_ids filter if specified
                 if !item_ids.is_empty() {
-                    items.retain(|item| {
-                        item.id.as_ref().is_some_and(|id| item_ids.contains(id))
-                    });
+                    items.retain(|item| item.id.as_ref().is_some_and(|id| item_ids.contains(id)));
                 }
 
                 // Apply max_items limit if specified

@@ -39,11 +39,17 @@ pub struct WaddleState {
     pub permission_service: PermissionService,
     /// Session manager
     pub session_manager: SessionManager,
+    /// When true, only one waddle is allowed (single-tenant mode).
+    pub single_tenant: bool,
 }
 
 impl WaddleState {
     /// Create new waddle state
-    pub fn new(app_state: Arc<AppState>, encryption_key: Option<&[u8]>) -> Self {
+    pub fn new(
+        app_state: Arc<AppState>,
+        encryption_key: Option<&[u8]>,
+        single_tenant: bool,
+    ) -> Self {
         let db = Arc::new(app_state.db_pool.global().clone());
         let permission_service = PermissionService::new(Arc::clone(&db));
         let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
@@ -51,6 +57,7 @@ impl WaddleState {
             app_state,
             permission_service,
             session_manager,
+            single_tenant,
         }
     }
 }
@@ -319,6 +326,23 @@ pub async fn create_waddle_handler(
     Json(request): Json<CreateWaddleRequest>,
 ) -> impl IntoResponse {
     info!("Creating waddle: {}", request.name);
+
+    // Single-tenant guard: reject creation when a waddle already exists
+    if state.single_tenant {
+        match list_all_waddles_from_db(state.app_state.db_pool.global(), 1, 0).await {
+            Ok(rows) if !rows.is_empty() => {
+                warn!("Rejected waddle creation: single-tenant mode and a waddle already exists");
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Single-tenant mode: only one waddle is allowed"
+                    })),
+                )
+                    .into_response();
+            }
+            _ => {}
+        }
+    }
 
     // Validate session
     let session = match state
@@ -2196,6 +2220,7 @@ mod tests {
         Arc::new(WaddleState::new(
             app_state,
             Some(b"test-encryption-key-32-bytes!!!"),
+            false,
         ))
     }
 
