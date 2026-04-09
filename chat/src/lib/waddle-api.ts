@@ -1,25 +1,25 @@
 export interface WaddleSummary {
   id: string;
   name: string;
-  description: string | null;
-  owner_user_id: string;
-  icon_url: string | null;
-  is_public: boolean;
+  description?: string | null;
+  owner_user_id?: string;
+  icon_url?: string | null;
+  is_public?: boolean;
   role?: "owner" | "admin" | "moderator" | "member" | null;
-  created_at: string;
-  updated_at: string | null;
+  created_at?: string;
+  updated_at?: string | null;
 }
 
 export interface ChannelSummary {
   id: string;
-  waddle_id: string;
   name: string;
-  description: string | null;
-  channel_type: string;
-  position: number;
-  is_default: boolean;
-  created_at: string;
-  updated_at: string | null;
+  waddle_id?: string;
+  description?: string | null;
+  channel_type?: string;
+  position?: number;
+  is_default?: boolean;
+  created_at?: string;
+  updated_at?: string | null;
 }
 
 export interface MemberSummary {
@@ -51,14 +51,6 @@ export interface ChannelMessage {
   edited_at: string | null;
   created_at: string;
   expires_at: string | null;
-}
-
-interface ListWaddlesResponse {
-  waddles: WaddleSummary[];
-}
-
-interface ListChannelsResponse {
-  channels: ChannelSummary[];
 }
 
 interface ListMembersResponse {
@@ -140,14 +132,6 @@ export class WaddleApi {
     return expectJson<T>(response);
   }
 
-  async listWaddles() {
-    const response = await fetch(this.url("/v1/waddles"), {
-      credentials: "include",
-    });
-
-    return expectJson<ListWaddlesResponse>(response);
-  }
-
   async createWaddle(input: {
     name: string;
     description?: string;
@@ -182,14 +166,6 @@ export class WaddleApi {
     if (!response.ok && response.status !== 204) {
       await expectJson<never>(response);
     }
-  }
-
-  async listChannels(waddleId: string) {
-    const response = await fetch(this.url(`/v1/waddles/${waddleId}/channels`), {
-      credentials: "include",
-    });
-
-    return expectJson<ListChannelsResponse>(response);
   }
 
   async createChannel(

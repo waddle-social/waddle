@@ -66,8 +66,6 @@ impl WaddleState {
 pub fn router(waddle_state: Arc<WaddleState>) -> Router {
     Router::new()
         .route("/v1/waddles", post(create_waddle_handler))
-        .route("/v1/waddles", get(list_waddles_handler))
-        .route("/v1/waddles/:id", get(get_waddle_handler))
         .route("/v1/waddles/:id", patch(update_waddle_handler))
         .route("/v1/waddles/:id", delete(delete_waddle_handler))
         // Member management routes
@@ -137,33 +135,11 @@ pub struct WaddleResponse {
     pub updated_at: Option<String>,
 }
 
-/// Response for list of waddles
-#[derive(Debug, Serialize)]
-pub struct ListWaddlesResponse {
-    /// List of waddles
-    pub waddles: Vec<WaddleResponse>,
-    /// Total count
-    pub total: usize,
-}
-
 /// Query parameters for session authentication
 #[derive(Debug, Deserialize)]
 pub struct SessionQuery {
     /// Session ID for authentication
     pub session_id: String,
-}
-
-/// Query parameters for listing waddles
-#[derive(Debug, Deserialize)]
-pub struct ListWaddlesQuery {
-    /// Session ID for authentication
-    pub session_id: String,
-    /// Maximum number of results (default: 50)
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    /// Offset for pagination (default: 0)
-    #[serde(default)]
-    pub offset: usize,
 }
 
 fn default_limit() -> usize {
@@ -460,79 +436,6 @@ pub async fn create_waddle_handler(
         .into_response()
 }
 
-/// GET /v1/waddles/:id
-///
-/// Get waddle details with permission check.
-#[instrument(skip(state))]
-pub async fn get_waddle_handler(
-    State(state): State<Arc<WaddleState>>,
-    Path(waddle_id): Path<String>,
-    Query(params): Query<SessionQuery>,
-) -> impl IntoResponse {
-    debug!("Getting waddle: {}", waddle_id);
-
-    // Validate session
-    let session = match state
-        .session_manager
-        .validate_session(&params.session_id)
-        .await
-    {
-        Ok(session) => session,
-        Err(err) => {
-            warn!("Session validation failed: {}", err);
-            return waddle_error_to_response(WaddleError::Auth(err)).into_response();
-        }
-    };
-
-    // Get waddle from database
-    let waddle = match get_waddle_from_db(state.app_state.db_pool.global(), &waddle_id).await {
-        Ok(Some(waddle)) => waddle,
-        Ok(None) => {
-            return waddle_error_to_response(WaddleError::NotFound(format!(
-                "Waddle '{}' not found",
-                waddle_id
-            )))
-            .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get waddle: {}", err);
-            return waddle_error_to_response(WaddleError::Database(err)).into_response();
-        }
-    };
-
-    // Check if user has permission to view this waddle
-    // Either the waddle is public OR user is a member
-    let subject = Subject::user(&session.user_id);
-    let object = Object::new(ObjectType::Waddle, &waddle_id);
-
-    let has_view_permission = waddle.is_public
-        || state
-            .permission_service
-            .check(&subject, "view", &object)
-            .await
-            .map(|r| r.allowed)
-            .unwrap_or(false);
-
-    if !has_view_permission {
-        return waddle_error_to_response(WaddleError::Permission(PermissionError::Denied(
-            "You do not have permission to view this waddle".to_string(),
-        )))
-        .into_response();
-    }
-
-    // Get user's role in this waddle
-    let role = get_user_role(
-        state.app_state.db_pool.global(),
-        &waddle_id,
-        &session.user_id,
-    )
-    .await
-    .ok()
-    .flatten();
-
-    (StatusCode::OK, Json(WaddleResponse { role, ..waddle })).into_response()
-}
-
 /// PATCH /v1/waddles/:id
 ///
 /// Update waddle metadata with owner/admin permission check.
@@ -724,50 +627,6 @@ pub async fn delete_waddle_handler(
     info!("Waddle deleted: {}", waddle_id);
 
     StatusCode::NO_CONTENT.into_response()
-}
-
-/// GET /v1/waddles
-///
-/// List waddles the authenticated user is a member of.
-#[instrument(skip(state))]
-pub async fn list_waddles_handler(
-    State(state): State<Arc<WaddleState>>,
-    Query(params): Query<ListWaddlesQuery>,
-) -> impl IntoResponse {
-    debug!("Listing waddles for session: {}", params.session_id);
-
-    // Validate session
-    let session = match state
-        .session_manager
-        .validate_session(&params.session_id)
-        .await
-    {
-        Ok(session) => session,
-        Err(err) => {
-            warn!("Session validation failed: {}", err);
-            return waddle_error_to_response(WaddleError::Auth(err)).into_response();
-        }
-    };
-
-    // Get user's waddles from database
-    let waddles = match list_user_waddles(
-        state.app_state.db_pool.global(),
-        &session.user_id,
-        params.limit,
-        params.offset,
-    )
-    .await
-    {
-        Ok(waddles) => waddles,
-        Err(err) => {
-            error!("Failed to list waddles: {}", err);
-            return waddle_error_to_response(WaddleError::Database(err)).into_response();
-        }
-    };
-
-    let total = waddles.len();
-
-    (StatusCode::OK, Json(ListWaddlesResponse { waddles, total })).into_response()
 }
 
 // === Member Management Handlers ===

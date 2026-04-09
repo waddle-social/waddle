@@ -16,6 +16,16 @@ export interface LiveRoomMessage {
   type: "message" | "subject";
 }
 
+export interface DiscoveredWaddle {
+  id: string;
+  name: string;
+}
+
+export interface DiscoveredChannel {
+  id: string;
+  name: string;
+}
+
 function jidDomain(jid: string) {
   return jid.split("@")[1] ?? "localhost";
 }
@@ -42,19 +52,21 @@ function occupantJidFor(
 
 export class BrowserXmppClient {
   private readonly session: WaddleSession;
-  private readonly onMessage: (message: LiveRoomMessage) => void;
-  private readonly onStatus: (status: XmppStatusSnapshot) => void;
+  private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
+  private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
 
-  constructor(
-    session: WaddleSession,
-    onMessage: (message: LiveRoomMessage) => void,
-    onStatus: (status: XmppStatusSnapshot) => void,
-  ) {
+  constructor(session: WaddleSession) {
     this.session = session;
-    this.onMessage = onMessage;
-    this.onStatus = onStatus;
+  }
+
+  setMessageHandler(handler: (message: LiveRoomMessage) => void) {
+    this.messageHandler = handler;
+  }
+
+  setStatusHandler(handler: (status: XmppStatusSnapshot) => void) {
+    this.statusHandler = handler;
   }
 
   async connect() {
@@ -71,7 +83,7 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("status", (status: string) => {
-      this.onStatus({
+      this.statusHandler?.({
         state: status,
         detail:
           status === "online"
@@ -83,7 +95,7 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("error", (error: Error) => {
-      this.onStatus({
+      this.statusHandler?.({
         state: "error",
         detail: error.message,
       });
@@ -107,7 +119,7 @@ export class BrowserXmppClient {
         return;
       }
 
-      this.onMessage({
+      this.messageHandler?.({
         id: stanza.attrs.id ?? crypto.randomUUID(),
         roomJid,
         nick,
@@ -118,7 +130,7 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("online", () => {
-      this.onStatus({
+      this.statusHandler?.({
         state: "online",
         detail: "Live room connection ready",
       });
@@ -132,6 +144,89 @@ export class BrowserXmppClient {
       this.xmpp = null;
       throw error;
     }
+  }
+
+  private async sendIq(queryEl: XmppElement, to: string): Promise<XmppElement> {
+    await this.connect();
+    if (!this.xmpp) throw new Error("XMPP not connected");
+
+    const id = crypto.randomUUID();
+    const iq = xml("iq", { type: "get", to, id }, queryEl);
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.xmpp?.removeListener("stanza", handler);
+        reject(new Error("IQ timeout"));
+      }, 10000);
+
+      const handler = (stanza: XmppElement) => {
+        if (!stanza.is("iq") || stanza.attrs.id !== id) return;
+        clearTimeout(timer);
+        this.xmpp?.removeListener("stanza", handler);
+        if (stanza.attrs.type === "error") {
+          reject(new Error("IQ error response"));
+        } else {
+          resolve(stanza);
+        }
+      };
+
+      this.xmpp!.on("stanza", handler);
+      this.xmpp!.send(iq).catch((err: unknown) => {
+        clearTimeout(timer);
+        this.xmpp?.removeListener("stanza", handler);
+        reject(err);
+      });
+    });
+  }
+
+  async discoverWaddles(): Promise<DiscoveredWaddle[]> {
+    const domain = jidDomain(this.session.jid);
+    const spacesDomain = `spaces.${domain}`;
+
+    const response = await this.sendIq(
+      xml("query", "http://jabber.org/protocol/disco#items"),
+      spacesDomain,
+    );
+
+    const query = response.getChild("query", "http://jabber.org/protocol/disco#items");
+    if (!query) return [];
+
+    return query
+      .getChildren("item")
+      .map((item) => ({
+        id: (item.attrs.node as string | undefined) ?? "",
+        name: (item.attrs.name as string | undefined) ?? (item.attrs.node as string | undefined) ?? "",
+      }))
+      .filter((w) => w.id);
+  }
+
+  async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
+    const domain = jidDomain(this.session.jid);
+    const spacesDomain = `spaces.${domain}`;
+
+    const response = await this.sendIq(
+      xml("query", { xmlns: "http://jabber.org/protocol/disco#items", node: waddleId }),
+      spacesDomain,
+    );
+
+    const query = response.getChild("query", "http://jabber.org/protocol/disco#items");
+    if (!query) return [];
+
+    const prefix = `${waddleId}_`;
+    return query
+      .getChildren("item")
+      .map((item) => {
+        const jid: string = (item.attrs.jid as string | undefined) ?? "";
+        const localPart = jid.split("@")[0] ?? "";
+        const channelId = localPart.startsWith(prefix)
+          ? localPart.slice(prefix.length)
+          : localPart;
+        return {
+          id: channelId,
+          name: (item.attrs.name as string | undefined) ?? channelId,
+        };
+      })
+      .filter((c) => c.id);
   }
 
   async switchRoom(waddleId: string, channelId: string) {
@@ -220,3 +315,4 @@ export class BrowserXmppClient {
     await xmpp.stop().catch(() => undefined);
   }
 }
+

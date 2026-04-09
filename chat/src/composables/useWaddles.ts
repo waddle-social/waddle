@@ -6,10 +6,12 @@ import type {
   MemberSummary,
 } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
+import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, ChannelCreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
 
 export function useWaddles(
   api: Ref<WaddleApi | null>,
+  xmppClient: Ref<BrowserXmppClient | null>,
   session: Ref<WaddleSession | null>,
   normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
@@ -78,7 +80,7 @@ export function useWaddles(
   const sortedChannels = computed(() =>
     [...channels.value].sort(
       (a, b) =>
-        a.position - b.position ||
+        (a.position ?? 0) - (b.position ?? 0) ||
         a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
     ),
   );
@@ -109,7 +111,7 @@ export function useWaddles(
       editWaddleForm.value = {
         name: w.name,
         description: w.description ?? "",
-        is_public: w.is_public,
+        is_public: w.is_public ?? true,
       };
     }
   });
@@ -119,7 +121,7 @@ export function useWaddles(
       editChannelForm.value = {
         name: c.name,
         description: c.description ?? "",
-        position: c.position,
+        position: c.position ?? 0,
       };
     }
   });
@@ -138,15 +140,15 @@ export function useWaddles(
     waddleId: string,
     preferredChannelId?: string | null,
   ): Promise<string | null> {
-    if (!api.value) return null;
+    if (!api.value || !xmppClient.value) return null;
 
     const requestId = ++structureRequestId;
     isLoadingStructure.value = true;
     clearActionError();
 
     try {
-      const [channelRes, memberRes] = await Promise.all([
-        api.value.listChannels(waddleId),
+      const [discoveredChannels, memberRes] = await Promise.all([
+        xmppClient.value.discoverChannels(waddleId),
         api.value.listMembers(waddleId),
       ]);
 
@@ -154,15 +156,20 @@ export function useWaddles(
         return null;
       }
 
-      channels.value = channelRes.channels;
+      const channelList: ChannelSummary[] = discoveredChannels.map((c) => ({
+        id: c.id,
+        name: c.name,
+      }));
+
+      channels.value = channelList;
       members.value = memberRes.members;
 
       const nextChannelId =
-        preferredChannelId && channelRes.channels.some((c) => c.id === preferredChannelId)
+        preferredChannelId && channelList.some((c) => c.id === preferredChannelId)
           ? preferredChannelId
-          : activeChannelId.value && channelRes.channels.some((c) => c.id === activeChannelId.value)
+          : activeChannelId.value && channelList.some((c) => c.id === activeChannelId.value)
             ? activeChannelId.value
-            : channelRes.channels[0]?.id ?? null;
+            : channelList[0]?.id ?? null;
 
       activeChannelId.value = nextChannelId;
       resetForms();
@@ -180,17 +187,18 @@ export function useWaddles(
   }
 
   async function loadWaddles(preferredId?: string | null) {
-    if (!api.value) return;
+    if (!xmppClient.value) return;
 
-    const res = await api.value.listWaddles();
-    waddles.value = res.waddles;
+    const discovered = await xmppClient.value.discoverWaddles();
+    const waddleList: WaddleSummary[] = discovered.map((w) => ({ id: w.id, name: w.name }));
+    waddles.value = waddleList;
 
     const nextId =
-      preferredId && res.waddles.some((w) => w.id === preferredId)
+      preferredId && waddleList.some((w) => w.id === preferredId)
         ? preferredId
-        : activeWaddleId.value && res.waddles.some((w) => w.id === activeWaddleId.value)
+        : activeWaddleId.value && waddleList.some((w) => w.id === activeWaddleId.value)
           ? activeWaddleId.value
-          : res.waddles[0]?.id ?? null;
+          : waddleList[0]?.id ?? null;
 
     activeWaddleId.value = nextId;
 

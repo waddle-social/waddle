@@ -4778,7 +4778,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 Ok(channels
                     .iter()
                     .map(|c| {
-                        let room_jid = format!("{}@{}", c.id, muc_domain);
+                        let room_jid = format!("{}_{}@{}", node, c.id, muc_domain);
                         DiscoItem::muc_room(&room_jid, &c.name)
                     })
                     .collect())
