@@ -12,43 +12,58 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Add Rust targets
 RUN rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 
-# Install cargo-chef for dependency caching
-RUN cargo install cargo-chef
+# Install cargo-chef without compiling it from source every cold build
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
+    cargo install --locked cargo-binstall \
+    && cargo binstall --no-confirm cargo-chef
 
 WORKDIR /workspace
 
 # ── Plan dependencies ───────────────────────────────────────────────
 FROM builder AS planner
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo chef prepare --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
+    cargo chef prepare --recipe-path recipe.json
 
-# ── Cook + build for amd64 ──────────────────────────────────────────
-FROM builder AS build-amd64
+# ── Cook + build for target arch ────────────────────────────────────
+FROM builder AS build
+ARG TARGETARCH
 
 COPY --from=planner /workspace/recipe.json recipe.json
-RUN cargo chef cook --release --target x86_64-unknown-linux-gnu --recipe-path recipe.json --package waddle-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,target=/workspace/target,sharing=locked \
+    set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+      arm64) \
+        RUST_TARGET=aarch64-unknown-linux-gnu; \
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc; \
+        export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc ;; \
+      *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cargo chef cook --release --target "${RUST_TARGET}" --recipe-path recipe.json --package waddle-server
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --target x86_64-unknown-linux-gnu --package waddle-server --bin waddle-server \
-    && mkdir -p /out && cp target/x86_64-unknown-linux-gnu/release/waddle-server /out/waddle-server
-
-# ── Cook + build for arm64 ──────────────────────────────────────────
-FROM builder AS build-arm64
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-
-COPY --from=planner /workspace/recipe.json recipe.json
-RUN cargo chef cook --release --target aarch64-unknown-linux-gnu --recipe-path recipe.json --package waddle-server
-
-COPY Cargo.toml ./
-COPY crates ./crates
-RUN cargo build --release --target aarch64-unknown-linux-gnu --package waddle-server --bin waddle-server \
-    && mkdir -p /out && cp target/aarch64-unknown-linux-gnu/release/waddle-server /out/waddle-server
-
-# ── Select correct binary ──────────────────────────────────────────
-FROM build-${TARGETARCH} AS build
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,target=/workspace/target,sharing=locked \
+    set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+      arm64) \
+        RUST_TARGET=aarch64-unknown-linux-gnu; \
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc; \
+        export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc ;; \
+      *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cargo build --release --locked --target "${RUST_TARGET}" --package waddle-server --bin waddle-server; \
+    mkdir -p /out; \
+    cp "target/${RUST_TARGET}/release/waddle-server" /out/waddle-server
 
 # ── Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

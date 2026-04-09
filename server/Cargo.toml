@@ -113,8 +113,12 @@ codegen-units = 1
 strip = true
 opt-level = "z"
 
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 4
+
 [profile.dev]
 opt-level = 0
 debug = true
-
 

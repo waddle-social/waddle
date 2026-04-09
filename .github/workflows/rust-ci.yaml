@@ -60,7 +60,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets --locked
 
+      - name: Build CI binary
+        if: github.event_name == 'pull_request'
+        run: cargo build --profile ci --locked --package waddle-server
+
       - name: Build release binary
+        if: github.event_name != 'pull_request'
         run: cargo build --release --locked --package waddle-server
 
       - name: Upload server artifact
