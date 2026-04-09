@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, watch } from "vue";
+import { onMounted, onUnmounted, shallowRef, watch } from "vue";
 import { useAuth } from "@/composables/useAuth";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
 import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
+import { BrowserXmppClient } from "@/lib/xmpp-client";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
@@ -27,8 +28,11 @@ const props = defineProps<{ serverBaseUrl: string }>();
 const ui = useUiState();
 const auth = useAuth(props.serverBaseUrl);
 
+const xmppClient = shallowRef<BrowserXmppClient | null>(null);
+
 const waddles = useWaddles(
   auth.api,
+  xmppClient,
   auth.session,
   ui.normalizeError,
   ui.actionError,
@@ -50,6 +54,7 @@ const members = useMembers(
 const messaging = useMessaging(
   auth.session,
   auth.api,
+  xmppClient,
   waddles.activeWaddleId,
   waddles.activeChannelId,
   ui.normalizeError,
@@ -89,7 +94,9 @@ function onPopState() {
 
 async function bootstrap() {
   await auth.bootstrap();
-  if (auth.appState.value === "ready") {
+  if (auth.appState.value === "ready" && auth.session.value) {
+    xmppClient.value = new BrowserXmppClient(auth.session.value);
+
     const route = parseRoute(window.location.pathname);
 
     // Resolve waddle slug to ID for initial load
@@ -126,7 +133,9 @@ async function bootstrap() {
 // --- Actions ---
 
 async function handleLogout() {
-  await messaging.disconnect();
+  messaging.disconnect();
+  await xmppClient.value?.disconnect().catch(() => undefined);
+  xmppClient.value = null;
   await auth.logout();
   waddles.clearData();
   messaging.clearMessages();
@@ -237,7 +246,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
-  void messaging.disconnect();
+  messaging.disconnect();
+  void xmppClient.value?.disconnect().catch(() => undefined);
 });
 </script>
 

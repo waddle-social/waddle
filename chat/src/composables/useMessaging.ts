@@ -1,4 +1,4 @@
-import { ref, computed, nextTick, type Ref } from "vue";
+import { ref, computed, nextTick, watch, type Ref } from "vue";
 import type { WaddleApi, ChannelMessage } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
@@ -41,13 +41,13 @@ export function formatStamp(value: string) {
 export function useMessaging(
   session: Ref<WaddleSession | null>,
   api: Ref<WaddleApi | null>,
+  xmppClient: Ref<BrowserXmppClient | null>,
   activeWaddleId: Ref<string | null>,
   activeChannelId: Ref<string | null>,
   normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
   clearActionError: () => void,
 ) {
-  let xmpp: BrowserXmppClient | null = null;
   const xmppStatus = ref<XmppStatusSnapshot>({
     state: "offline",
     detail: "Live room offline",
@@ -66,6 +66,25 @@ export function useMessaging(
     return roomBareJidFor(session.value, activeWaddleId.value, activeChannelId.value);
   });
 
+  watch(xmppClient, (client) => {
+    if (client) {
+      client.setMessageHandler((msg) => {
+        if (
+          !currentRoomJid.value ||
+          msg.roomJid !== currentRoomJid.value ||
+          msg.type !== "message"
+        )
+          return;
+        mergeLiveMessage(fromLiveMessage(session.value!, msg));
+      });
+      client.setStatusHandler((status) => {
+        xmppStatus.value = status;
+      });
+    } else {
+      xmppStatus.value = { state: "offline", detail: "Live room offline" };
+    }
+  });
+
   async function scrollToBottom() {
     await nextTick();
     timelineEl.value?.scrollTo({
@@ -80,27 +99,6 @@ export function useMessaging(
     void scrollToBottom();
   }
 
-  async function ensureXmpp() {
-    if (!session.value || xmpp) return;
-
-    xmpp = new BrowserXmppClient(
-      session.value,
-      (msg) => {
-        if (!currentRoomJid.value || msg.roomJid !== currentRoomJid.value || msg.type !== "message") return;
-        mergeLiveMessage(fromLiveMessage(session.value!, msg));
-      },
-      (status) => {
-        xmppStatus.value = status;
-      },
-    );
-
-    try {
-      await xmpp.connect();
-    } catch (e) {
-      xmppStatus.value = { state: "error", detail: normalizeError(e) };
-    }
-  }
-
   async function loadMessages(waddleId: string, channelId: string) {
     if (!api.value || !session.value) return;
 
@@ -109,14 +107,16 @@ export function useMessaging(
     clearActionError();
 
     try {
-      await ensureXmpp();
-
       const [history] = await Promise.all([
         api.value.listMessages(waddleId, channelId),
-        xmpp?.switchRoom(waddleId, channelId),
+        xmppClient.value?.switchRoom(waddleId, channelId),
       ]);
 
-      if (requestId !== messageRequestId || activeWaddleId.value !== waddleId || activeChannelId.value !== channelId) {
+      if (
+        requestId !== messageRequestId ||
+        activeWaddleId.value !== waddleId ||
+        activeChannelId.value !== channelId
+      ) {
         return;
       }
 
@@ -140,13 +140,23 @@ export function useMessaging(
   }
 
   async function sendMessage() {
-    if (!xmpp || !activeWaddleId.value || !activeChannelId.value || !draft.value.trim()) return;
+    if (
+      !xmppClient.value ||
+      !activeWaddleId.value ||
+      !activeChannelId.value ||
+      !draft.value.trim()
+    )
+      return;
 
     isSending.value = true;
     clearActionError();
 
     try {
-      await xmpp.sendGroupMessage(activeWaddleId.value, activeChannelId.value, draft.value);
+      await xmppClient.value.sendGroupMessage(
+        activeWaddleId.value,
+        activeChannelId.value,
+        draft.value,
+      );
       draft.value = "";
     } catch (e) {
       actionError.value = normalizeError(e);
@@ -155,12 +165,7 @@ export function useMessaging(
     }
   }
 
-  async function disconnect() {
-    if (xmpp) {
-      const ref = xmpp;
-      xmpp = null;
-      await ref.disconnect().catch(() => undefined);
-    }
+  function disconnect() {
     xmppStatus.value = { state: "offline", detail: "Live room offline" };
   }
 

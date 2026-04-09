@@ -17,12 +17,12 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{delete, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
 /// Extended application state for channel routes
@@ -57,12 +57,7 @@ pub fn router(channel_state: Arc<ChannelState>) -> Router {
             "/v1/waddles/:waddle_id/channels",
             post(create_channel_handler),
         )
-        .route(
-            "/v1/waddles/:waddle_id/channels",
-            get(list_channels_handler),
-        )
         // Channel-scoped routes (require waddle_id in query params)
-        .route("/v1/channels/:id", get(get_channel_handler))
         .route("/v1/channels/:id", patch(update_channel_handler))
         .route("/v1/channels/:id", delete(delete_channel_handler))
         .with_state(channel_state)
@@ -123,15 +118,6 @@ pub struct ChannelResponse {
     pub updated_at: Option<String>,
 }
 
-/// Response for list of channels
-#[derive(Debug, Serialize)]
-pub struct ListChannelsResponse {
-    /// List of channels
-    pub channels: Vec<ChannelResponse>,
-    /// Total count
-    pub total: usize,
-}
-
 /// Query parameters for session authentication
 #[derive(Debug, Deserialize)]
 pub struct SessionQuery {
@@ -146,23 +132,6 @@ pub struct ChannelQuery {
     pub session_id: String,
     /// Waddle ID the channel belongs to
     pub waddle_id: String,
-}
-
-/// Query parameters for listing channels
-#[derive(Debug, Deserialize)]
-pub struct ListChannelsQuery {
-    /// Session ID for authentication
-    pub session_id: String,
-    /// Maximum number of results (default: 100)
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    /// Offset for pagination (default: 0)
-    #[serde(default)]
-    pub offset: usize,
-}
-
-fn default_limit() -> usize {
-    100
 }
 
 /// Error response
@@ -371,157 +340,6 @@ pub async fn create_channel_handler(
         }),
     )
         .into_response()
-}
-
-/// GET /v1/waddles/:waddle_id/channels
-///
-/// List all channels in a waddle. Requires view permission on the waddle.
-#[instrument(skip(state))]
-pub async fn list_channels_handler(
-    State(state): State<Arc<ChannelState>>,
-    Path(waddle_id): Path<String>,
-    Query(params): Query<ListChannelsQuery>,
-) -> impl IntoResponse {
-    debug!("Listing channels in waddle: {}", waddle_id);
-
-    // Validate session
-    let session = match state
-        .session_manager
-        .validate_session(&params.session_id)
-        .await
-    {
-        Ok(session) => session,
-        Err(err) => {
-            warn!("Session validation failed: {}", err);
-            return channel_error_to_response(ChannelError::Auth(err)).into_response();
-        }
-    };
-
-    // Check if user has permission to view this waddle
-    let subject = Subject::user(&session.user_id);
-    let waddle_object = Object::new(ObjectType::Waddle, &waddle_id);
-
-    let can_view = state
-        .permission_service
-        .check(&subject, "view", &waddle_object)
-        .await
-        .map(|r| r.allowed)
-        .unwrap_or(false);
-
-    if !can_view {
-        return channel_error_to_response(ChannelError::Permission(PermissionError::Denied(
-            "You do not have permission to view this waddle".to_string(),
-        )))
-        .into_response();
-    }
-
-    // Get the waddle database
-    let waddle_db = match state.app_state.db_pool.get_waddle_db(&waddle_id).await {
-        Ok(db) => db,
-        Err(err) => {
-            error!("Failed to get waddle database: {}", err);
-            return channel_error_to_response(ChannelError::Database(format!(
-                "Failed to access waddle database: {}",
-                err
-            )))
-            .into_response();
-        }
-    };
-
-    // List channels from database
-    let channels =
-        match list_channels_from_db(&waddle_db, &waddle_id, params.limit, params.offset).await {
-            Ok(channels) => channels,
-            Err(err) => {
-                error!("Failed to list channels: {}", err);
-                return channel_error_to_response(ChannelError::Database(err)).into_response();
-            }
-        };
-
-    let total = channels.len();
-
-    (
-        StatusCode::OK,
-        Json(ListChannelsResponse { channels, total }),
-    )
-        .into_response()
-}
-
-/// GET /v1/channels/:id
-///
-/// Get channel details. Requires view permission on the parent waddle.
-#[instrument(skip(state))]
-pub async fn get_channel_handler(
-    State(state): State<Arc<ChannelState>>,
-    Path(channel_id): Path<String>,
-    Query(params): Query<ChannelQuery>,
-) -> impl IntoResponse {
-    debug!("Getting channel: {}", channel_id);
-
-    // Validate session
-    let session = match state
-        .session_manager
-        .validate_session(&params.session_id)
-        .await
-    {
-        Ok(session) => session,
-        Err(err) => {
-            warn!("Session validation failed: {}", err);
-            return channel_error_to_response(ChannelError::Auth(err)).into_response();
-        }
-    };
-
-    let waddle_id = &params.waddle_id;
-
-    // Get the waddle database first to check if channel exists
-    let waddle_db = match state.app_state.db_pool.get_waddle_db(waddle_id).await {
-        Ok(db) => db,
-        Err(err) => {
-            error!("Failed to get waddle database: {}", err);
-            return channel_error_to_response(ChannelError::Database(format!(
-                "Failed to access waddle database: {}",
-                err
-            )))
-            .into_response();
-        }
-    };
-
-    // Check if channel exists BEFORE checking permissions
-    // This ensures we return 404 for non-existent channels, not 403
-    let channel = match get_channel_from_db(&waddle_db, waddle_id, &channel_id).await {
-        Ok(Some(channel)) => channel,
-        Ok(None) => {
-            return channel_error_to_response(ChannelError::NotFound(format!(
-                "Channel '{}' not found",
-                channel_id
-            )))
-            .into_response();
-        }
-        Err(err) => {
-            error!("Failed to get channel: {}", err);
-            return channel_error_to_response(ChannelError::Database(err)).into_response();
-        }
-    };
-
-    // Check if user has permission to view this channel (via waddle membership)
-    let subject = Subject::user(&session.user_id);
-    let channel_object = Object::new(ObjectType::Channel, &channel_id);
-
-    let can_view = state
-        .permission_service
-        .check(&subject, "view", &channel_object)
-        .await
-        .map(|r| r.allowed)
-        .unwrap_or(false);
-
-    if !can_view {
-        return channel_error_to_response(ChannelError::Permission(PermissionError::Denied(
-            "You do not have permission to view this channel".to_string(),
-        )))
-        .into_response();
-    }
-
-    (StatusCode::OK, Json(channel)).into_response()
 }
 
 /// PATCH /v1/channels/:id
