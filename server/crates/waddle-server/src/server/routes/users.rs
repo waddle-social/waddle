@@ -241,6 +241,7 @@ mod tests {
         Arc::new(WaddleState::new(
             app_state,
             Some(b"test-encryption-key-32-bytes!!!"),
+            false,
         ))
     }
 

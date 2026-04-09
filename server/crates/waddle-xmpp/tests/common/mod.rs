@@ -437,7 +437,11 @@ impl AppState for MockAppState {
         &self,
         waddle_id: &str,
     ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
-        Ok(self.waddle_details.iter().find(|w| w.id == waddle_id).cloned())
+        Ok(self
+            .waddle_details
+            .iter()
+            .find(|w| w.id == waddle_id)
+            .cloned())
     }
 
     async fn get_user_waddles_with_details(
@@ -533,6 +537,16 @@ impl TestServer {
 
     /// Start a test server with custom app state.
     pub async fn start_with_state<S: AppState>(app_state: Arc<S>) -> Self {
+        Self::start_with_state_config(app_state, false).await
+    }
+
+    /// Start a test server with custom app state and single-tenant mode.
+    pub async fn start_with_state_single_tenant<S: AppState>(app_state: Arc<S>) -> Self {
+        Self::start_with_state_config(app_state, true).await
+    }
+
+    /// Start a test server with custom app state and configuration.
+    async fn start_with_state_config<S: AppState>(app_state: Arc<S>, single_tenant: bool) -> Self {
         install_crypto_provider();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -552,6 +566,7 @@ impl TestServer {
             domain.clone(),
             app_state,
             shutdown_rx,
+            single_tenant,
         ));
 
         Self {
@@ -583,6 +598,7 @@ async fn run_test_server<S: AppState>(
     domain: String,
     app_state: Arc<S>,
     mut shutdown_rx: oneshot::Receiver<()>,
+    single_tenant: bool,
 ) {
     // Create SHARED registries at server level - these are used by all connections
     let muc_domain = format!("muc.{}", domain);
@@ -621,9 +637,10 @@ async fn run_test_server<S: AppState>(
                         let pubsub = Arc::clone(&pubsub_storage);
                         // Enable registration for tests
                         let registration_enabled = true;
+                        let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, false
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st
                             ).await;
                         });
                     }
