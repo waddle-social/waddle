@@ -177,6 +177,16 @@ impl Feature {
         Self::new("urn:xmpp:extdisco:2")
     }
 
+    /// XEP-0047 In-Band Bytestreams feature
+    pub fn ibb() -> Self {
+        Self::new("http://jabber.org/protocol/ibb")
+    }
+
+    /// XEP-0050 Ad-Hoc Commands feature
+    pub fn commands() -> Self {
+        Self::new("http://jabber.org/protocol/commands")
+    }
+
     /// XEP-0352 Client State Indication feature
     pub fn csi() -> Self {
         Self::new("urn:xmpp:csi:0")
@@ -453,6 +463,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::ping(),
         Feature::extdisco(),
         Feature::server_info(),
+        Feature::commands(),
         Feature::csi(),
         Feature::pubsub(),
         Feature::pep(),

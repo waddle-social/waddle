@@ -18,7 +18,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0030** | **Service Discovery** | Final |
 | 0033 | Extended Stanza Addressing | Draft |
 | **0047** | **In-Band Bytestreams** | Final |
-| **0050** | **Ad-Hoc Commands** | Draft |
+| **0050** | **Ad-Hoc Commands** | Draft | Implemented |
 | 0053 | XMPP Registrar Function | Active |
 | **0059** | **Result Set Management** | Draft |
 | **0060** | **Publish-Subscribe** | Draft |
@@ -206,7 +206,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
-| **0050** | **Ad-Hoc Commands** | Draft | Admin commands |
+| **0050** | **Ad-Hoc Commands** | Draft | Admin commands | Implemented |
 | **0133** | **Service Administration** | Active | Server admin |
 | **0191** | **Blocking Command** | Draft | Block users |
 | **0377** | **Blocking Command Reports** | Proposed | Report abuse |

@@ -9,7 +9,8 @@
       "Bash(cargo test:*)",
       "Bash(cargo clippy:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(grep -r 'cuenv up' /Users/rawkode/Code/src/github.com/cuenv/cuenv --include=*.md --include=*.rs)"
     ]
   }
 }

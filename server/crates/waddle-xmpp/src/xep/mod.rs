@@ -8,6 +8,7 @@
 //! - **XEP-0004**: Data Forms - Typed data form exchange for configuration,
 //!   search, and reporting workflows.
 //! - **XEP-0012**: Last Activity - Server uptime and user last activity queries.
+//! - **XEP-0047**: In-Band Bytestreams - Base64-encoded data transfer over XMPP.
 //! - **XEP-0085**: Chat State Notifications - Typing indicators and
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
@@ -43,6 +44,7 @@
 //!   element containing `<reaction>` children. - Control server-side processing
 //!   with no-store, no-copy, no-permanent-store, and store hints.
 //! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
+//! - **XEP-0050**: Ad-Hoc Commands - Multi-step command execution via data forms.
 //! - **XEP-0049**: Private XML Storage - Arbitrary per-user XML key-value store.
 //! - **XEP-0054**: vcard-temp - User profile information via vCard format.
 //! - **XEP-0077**: In-Band Registration - Allows users to register accounts
@@ -68,7 +70,9 @@
 
 pub mod xep0004;
 pub mod xep0012;
+pub mod xep0047;
 pub mod xep0048;
+pub mod xep0050;
 pub mod xep0085;
 pub mod xep0049;
 pub mod xep0172;
@@ -109,6 +113,27 @@ pub use xep0004::{
 };
 
 pub use xep0012::{build_last_activity_response, is_last_activity_query, NS_LAST_ACTIVITY};
+
+pub use xep0047::{
+    build_ibb_close, build_ibb_data_element, build_ibb_data_iq, build_ibb_item_not_found,
+    build_ibb_not_acceptable, build_ibb_open, build_ibb_resource_constraint, build_ibb_result,
+    build_ibb_unexpected_request, is_ibb_close, is_ibb_data, is_ibb_open, message_has_ibb_data,
+    next_seq, parse_ibb_close, parse_ibb_data_from_iq, parse_ibb_data_from_message, parse_ibb_open,
+    validate_data_size, IbbClose, IbbData, IbbError, IbbOpen, StanzaType as IbbStanzaType,
+    NS_IBB,
+};
+
+pub use xep0050::{
+    build_bad_request as build_command_bad_request, build_bad_session_id, build_command_error,
+    build_command_items, build_command_result, build_forbidden as build_command_forbidden,
+    build_item_not_found as build_command_item_not_found,
+    build_not_allowed as build_command_not_allowed, build_session_expired,
+    is_command_node_disco_info, is_command_request, is_commands_disco_info,
+    is_commands_disco_items, parse_command_from_iq, Action as CommandAction,
+    AllowedActions as CommandAllowedActions, Command, CommandDefinition, CommandError,
+    Note as CommandNote, NoteType as CommandNoteType, Status as CommandStatus,
+    NODE_COMMANDS, NS_COMMANDS,
+};
 
 pub use xep0054::{
     build_empty_vcard_response, build_vcard_element, build_vcard_error, build_vcard_response,
