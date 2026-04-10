@@ -430,6 +430,7 @@ onUnmounted(() => {
         @edit-message="messaging.editMessage"
         @retract-message="messaging.retractMessage"
         @react-message="messaging.toggleReaction"
+        @displayed="messaging.markDisplayed"
         @edit-channel="openChannelEdit"
       />
     </div>

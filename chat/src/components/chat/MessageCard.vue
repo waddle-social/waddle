@@ -88,6 +88,13 @@ function onEditKeydown(e: KeyboardEvent) {
           <Check v-if="message.deliveryStatus === 'sending'" class="w-3 h-3" />
           <CheckCheck v-else-if="message.deliveryStatus === 'delivered'" class="w-3 h-3" />
         </span>
+        <span
+          v-if="message.isSelf && message.readBy && message.readBy.length > 0"
+          class="text-xs font-mono text-muted-foreground"
+          :title="message.readBy.join(', ')"
+        >
+          Read by {{ message.readBy.length }}
+        </span>
         <span v-if="message.isSelf && !isEditing" class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
           <button
             class="text-muted-foreground hover:text-foreground"

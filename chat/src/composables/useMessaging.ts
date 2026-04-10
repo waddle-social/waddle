@@ -112,6 +112,10 @@ export function useMessaging(
         if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
         applyReaction(event.messageId, event.nick, event.emojis);
       });
+      client.setDisplayedHandler((event) => {
+        if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
+        applyDisplayed(event.messageId, event.nick);
+      });
     } else {
       xmppStatus.value = { state: "offline", detail: "Live room offline" };
       clearTypingState();
@@ -176,6 +180,22 @@ export function useMessaging(
       top: timelineEl.value.scrollHeight,
       behavior: "auto",
     });
+  }
+
+  function applyDisplayed(messageId: string, nick: string) {
+    messages.value = messages.value.map((m): TimelineMessage => {
+      if (m.id !== messageId) return m;
+      const existing = m.readBy ? [...m.readBy] : [];
+      if (!existing.includes(nick)) {
+        existing.push(nick);
+      }
+      return { ...m, readBy: existing };
+    });
+  }
+
+  function markDisplayed(messageId: string) {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    xmppClient.value.sendDisplayed(activeWaddleId.value, activeChannelId.value, messageId);
   }
 
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
@@ -415,6 +435,7 @@ export function useMessaging(
     editMessage,
     retractMessage,
     toggleReaction,
+    markDisplayed,
     notifyComposing,
     disconnect,
     clearMessages,

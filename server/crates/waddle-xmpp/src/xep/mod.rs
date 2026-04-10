@@ -14,6 +14,8 @@
 //!   message delivery with `<request/>` and `<received/>` elements.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
 //!   via `<replace/>` element referencing the original message id.
+//! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
+//!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
 //! - **XEP-0334**: Message Processing Hints
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
@@ -60,6 +62,7 @@ pub mod xep0199;
 pub mod xep0223;
 pub mod xep0249;
 pub mod xep0308;
+pub mod xep0333;
 pub mod xep0334;
 pub mod xep0352;
 pub mod xep0363;
@@ -130,6 +133,13 @@ pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,
     extract_replaces_id, is_correction_message, is_replace_element, set_correction,
     strip_correction, Correction, CorrectionCarrier, CorrectionError, NS_MESSAGE_CORRECT,
+};
+
+pub use xep0333::{
+    add_markable, build_acknowledged_element, build_displayed_element, build_displayed_message,
+    build_markable_element, build_received_element, extract_marker_from_message, extract_marker_id,
+    has_markable, has_marker, is_marker_element, is_standalone_marker, strip_markers, Marker,
+    MarkerCarrier, MarkerError, NS_CHAT_MARKERS,
 };
 
 pub use xep0334::{

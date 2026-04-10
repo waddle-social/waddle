@@ -82,7 +82,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0280** | **Message Carbons** | Draft | Multi-device message sync |
 | **0308** | **Last Message Correction** | Draft | Edit messages | Implemented |
 | **0313** | **Message Archive Management (MAM)** | Draft | Message history / scrollback |
-| **0333** | **Displayed Markers** | Draft | Read receipts |
+| **0333** | **Displayed Markers** | Draft | Read receipts | Implemented |
 | **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |

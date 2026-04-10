@@ -37,6 +37,15 @@ const MESSAGE_RETRACT_NS = "urn:xmpp:message-retract:1";
 /** XEP-0444 namespace */
 const REACTIONS_NS = "urn:xmpp:reactions:0";
 
+/** XEP-0333 namespace */
+const CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
+
+export interface DisplayedEvent {
+  roomJid: string;
+  nick: string;
+  messageId: string;
+}
+
 export interface ReactionEvent {
   roomJid: string;
   nick: string;
@@ -90,6 +99,7 @@ export class BrowserXmppClient {
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
+  private displayedHandler: ((event: DisplayedEvent) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
@@ -112,6 +122,10 @@ export class BrowserXmppClient {
 
   setReactionHandler(handler: (event: ReactionEvent) => void) {
     this.reactionHandler = handler;
+  }
+
+  setDisplayedHandler(handler: (event: DisplayedEvent) => void) {
+    this.displayedHandler = handler;
   }
 
   async connect() {
@@ -184,6 +198,16 @@ export class BrowserXmppClient {
         };
         this.messageHandler?.(retractMsg);
         return;
+      }
+
+      // XEP-0333: Check for displayed markers (before body check - markers are body-less)
+      const displayedEl = stanza.getChild("displayed");
+      if (displayedEl && nick !== this.session.username) {
+        const markerMsgId = displayedEl.attrs?.id as string | undefined;
+        if (markerMsgId) {
+          this.displayedHandler?.({ roomJid, nick, messageId: markerMsgId });
+          return;
+        }
       }
 
       // XEP-0444: Check for reactions (before body check - reactions are body-less)
@@ -420,6 +444,21 @@ export class BrowserXmppClient {
     );
   }
 
+  async sendDisplayed(waddleId: string, channelId: string, messageId: string) {
+    if (!this.xmpp) return;
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml("displayed", { xmlns: CHAT_MARKERS_NS, id: messageId }),
+      ),
+    );
+  }
+
   async sendReaction(waddleId: string, channelId: string, messageId: string, emojis: string[]) {
     if (!this.xmpp) return;
 
@@ -503,6 +542,7 @@ export class BrowserXmppClient {
         },
         xml("body", {}, text),
         xml("request", RECEIPTS_NS),
+        xml("markable", CHAT_MARKERS_NS),
       ),
     );
 

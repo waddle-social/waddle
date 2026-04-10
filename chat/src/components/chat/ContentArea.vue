@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { watch } from "vue";
 import { Hash, Settings } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
@@ -8,7 +9,7 @@ import MessageComposer from "@/components/chat/MessageComposer.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 
-defineProps<{
+const props = defineProps<{
   waddle: WaddleSummary | null;
   channel: ChannelSummary | null;
   messages: TimelineMessage[];
@@ -26,8 +27,21 @@ const emit = defineEmits<{
   editMessage: [messageId: string, newBody: string];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
+  displayed: [messageId: string];
   editChannel: [];
 }>();
+
+// XEP-0333: Send displayed marker for the latest non-self message
+watch(
+  () => props.messages,
+  (msgs) => {
+    const last = [...msgs].reverse().find((m) => !m.isSelf && !m.isRetracted);
+    if (last) {
+      emit("displayed", last.id);
+    }
+  },
+  { deep: true },
+);
 </script>
 
 <template>
