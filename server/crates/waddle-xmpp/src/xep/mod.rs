@@ -16,6 +16,8 @@
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
 //!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
+//! - **XEP-0359**: Unique and Stable Stanza IDs - Server-assigned `<stanza-id/>`
+//!   and client-assigned `<origin-id/>` for stable message referencing.
 //! - **XEP-0334**: Message Processing Hints
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
@@ -65,6 +67,7 @@ pub mod xep0308;
 pub mod xep0333;
 pub mod xep0334;
 pub mod xep0352;
+pub mod xep0359;
 pub mod xep0363;
 pub mod xep0398;
 pub mod xep0424;
@@ -146,6 +149,14 @@ pub use xep0334::{
     add_hint, build_hint_element, extract_hints_from_message, has_hint, is_hint_element,
     remove_hint, should_skip_carbons, should_skip_storage, strip_hints, Hint, HintCarrier,
     NS_HINTS,
+};
+
+pub use xep0359::{
+    add_origin_id, add_stanza_id as add_stanza_id_xep0359, build_origin_id_element,
+    build_stanza_id_element, extract_origin_id as extract_origin_id_xep0359,
+    extract_origin_id_str, extract_stanza_id_by, extract_stanza_ids, has_origin_id, has_stanza_id,
+    is_origin_id_element, is_stanza_id_element, remove_stanza_ids_by, strip_all_ids,
+    OriginId as Xep0359OriginId, StanzaId as Xep0359StanzaId, StanzaIdCarrier, NS_SID,
 };
 
 pub use xep0352::{

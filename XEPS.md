@@ -84,7 +84,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0313** | **Message Archive Management (MAM)** | Draft | Message history / scrollback |
 | **0333** | **Displayed Markers** | Draft | Read receipts | Implemented |
 | **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented |
-| **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references |
+| **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references | Implemented |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
 | **0372** | **References** | Experimental | @mentions in messages |
 | 0382 | Spoiler messages | Deferred | Content warnings / spoiler tags |
