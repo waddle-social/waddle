@@ -101,12 +101,10 @@ pub fn should_copy_message(msg: &Message) -> bool {
         _ => {}
     }
 
-    // Check for <no-copy/> hint (urn:xmpp:hints)
-    for payload in &msg.payloads {
-        if payload.name() == "no-copy" && payload.ns() == "urn:xmpp:hints" {
-            debug!("Message has <no-copy/> hint, skipping carbon");
-            return false;
-        }
+    // Check for <no-copy/> hint (XEP-0334: Message Processing Hints)
+    if crate::xep::xep0334::should_skip_carbons(msg) {
+        debug!("Message has <no-copy/> hint, skipping carbon");
+        return false;
     }
 
     // Check for <private/> element (carbons namespace)

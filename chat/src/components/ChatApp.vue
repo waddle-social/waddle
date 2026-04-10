@@ -427,6 +427,8 @@ onUnmounted(() => {
         :typing-users="messaging.typingUsers.value"
         @send="messaging.sendMessage"
         @typing="messaging.notifyComposing"
+        @edit-message="messaging.editMessage"
+        @retract-message="messaging.retractMessage"
         @edit-channel="openChannelEdit"
       />
     </div>

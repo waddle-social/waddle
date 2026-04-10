@@ -23,6 +23,8 @@ defineProps<{
 const emit = defineEmits<{
   send: [];
   typing: [];
+  editMessage: [messageId: string, newBody: string];
+  retractMessage: [messageId: string];
   editChannel: [];
 }>();
 </script>
@@ -84,6 +86,8 @@ const emit = defineEmits<{
           v-for="msg in messages"
           :key="msg.id"
           :message="msg"
+          @edit="(id, body) => emit('editMessage', id, body)"
+          @retract="(id) => emit('retractMessage', id)"
         />
       </div>
     </div>

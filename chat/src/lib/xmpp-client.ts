@@ -14,12 +14,25 @@ export interface LiveRoomMessage {
   body: string;
   createdAt: string;
   type: "message" | "subject";
+  /** XEP-0308: ID of the message this replaces, if any */
+  replacesId?: string;
+  /** XEP-0424: ID of the message this retracts, if any */
+  retractsId?: string;
 }
 
 /** XEP-0085 chat state types */
 export type ChatStateType = "active" | "composing" | "paused" | "inactive" | "gone";
 
 const CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
+
+/** XEP-0184 namespace */
+const RECEIPTS_NS = "urn:xmpp:receipts";
+
+/** XEP-0308 namespace */
+const MESSAGE_CORRECT_NS = "urn:xmpp:message-correct:0";
+
+/** XEP-0424 namespace */
+const MESSAGE_RETRACT_NS = "urn:xmpp:message-retract:1";
 
 export interface ChatStateEvent {
   roomJid: string;
@@ -141,20 +154,45 @@ export class BrowserXmppClient {
         }
       }
 
+      // XEP-0424: Check for message retraction (before body check)
+      const retractEl = stanza.getChild("retract");
+      const retractsId = retractEl?.attrs?.id as string | undefined;
+      if (retractsId) {
+        const retractMsg: LiveRoomMessage = {
+          id: stanza.attrs.id ?? crypto.randomUUID(),
+          roomJid,
+          nick,
+          body: "",
+          createdAt: new Date().toISOString(),
+          type: "message",
+          retractsId,
+        };
+        this.messageHandler?.(retractMsg);
+        return;
+      }
+
       const body = stanza.getChildText("body");
       const subject = stanza.getChildText("subject");
       if (!body && !subject) {
         return;
       }
 
-      this.messageHandler?.({
+      // XEP-0308: Check for message correction
+      const replaceEl = stanza.getChild("replace");
+      const replacesId = replaceEl?.attrs?.id as string | undefined;
+
+      const liveMsg: LiveRoomMessage = {
         id: stanza.attrs.id ?? crypto.randomUUID(),
         roomJid,
         nick,
         body: body ?? subject ?? "",
         createdAt: new Date().toISOString(),
         type: body ? "message" : "subject",
-      });
+      };
+      if (replacesId) {
+        liveMsg.replacesId = replacesId;
+      }
+      this.messageHandler?.(liveMsg);
     });
 
     xmpp.on("online", () => {
@@ -353,18 +391,8 @@ export class BrowserXmppClient {
     );
   }
 
-  async sendGroupMessage(waddleId: string, channelId: string, body: string) {
-    const text = body.trim();
-    if (!text) {
-      return;
-    }
-
-    await this.connect();
-    await this.switchRoom(waddleId, channelId);
-
-    if (!this.xmpp) {
-      return;
-    }
+  async sendRetraction(waddleId: string, channelId: string, retractsId: string) {
+    if (!this.xmpp) return;
 
     await this.xmpp.send(
       xml(
@@ -374,9 +402,64 @@ export class BrowserXmppClient {
           to: roomBareJidFor(this.session, waddleId, channelId),
           type: "groupchat",
         },
-        xml("body", {}, text),
+        xml("body", {}, "This person attempted to retract a previous message."),
+        xml("retract", { xmlns: MESSAGE_RETRACT_NS, id: retractsId }),
       ),
     );
+  }
+
+  async sendCorrection(waddleId: string, channelId: string, body: string, replacesId: string): Promise<string | null> {
+    const text = body.trim();
+    if (!text) return null;
+    if (!this.xmpp) return null;
+
+    const msgId = crypto.randomUUID();
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          id: msgId,
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml("body", {}, text),
+        xml("replace", { xmlns: MESSAGE_CORRECT_NS, id: replacesId }),
+      ),
+    );
+
+    return msgId;
+  }
+
+  async sendGroupMessage(waddleId: string, channelId: string, body: string): Promise<string | null> {
+    const text = body.trim();
+    if (!text) {
+      return null;
+    }
+
+    await this.connect();
+    await this.switchRoom(waddleId, channelId);
+
+    if (!this.xmpp) {
+      return null;
+    }
+
+    const msgId = crypto.randomUUID();
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          id: msgId,
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml("body", {}, text),
+        xml("request", RECEIPTS_NS),
+      ),
+    );
+
+    return msgId;
   }
 
   async disconnect() {

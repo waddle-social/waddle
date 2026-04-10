@@ -8,7 +8,7 @@ import {
   type XmppStatusSnapshot,
   type ChatStateType,
 } from "@/lib/xmpp-client";
-import type { TimelineMessage } from "@/lib/chat-ui";
+import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
 
 function toTimelineMessage(session: WaddleSession, msg: ChannelMessage): TimelineMessage {
   return {
@@ -82,6 +82,19 @@ export function useMessaging(
           return;
         // When a user sends a real message, clear their typing state
         removeTypingUser(msg.nick);
+
+        // XEP-0424: Handle message retractions
+        if (msg.retractsId) {
+          applyRetraction(msg.retractsId);
+          return;
+        }
+
+        // XEP-0308: Handle message corrections
+        if (msg.replacesId) {
+          applyCorrection(msg.replacesId, msg.body);
+          return;
+        }
+
         mergeLiveMessage(fromLiveMessage(session.value!, msg));
       });
       client.setStatusHandler((status) => {
@@ -161,8 +174,32 @@ export function useMessaging(
     });
   }
 
+  function applyRetraction(retractsId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === retractsId ? { ...m, body: "", isRetracted: true } : m,
+    );
+  }
+
+  function applyCorrection(replacesId: string, newBody: string) {
+    const idx = messages.value.findIndex((m) => m.id === replacesId);
+    if (idx === -1) return;
+    messages.value = messages.value.map((m) =>
+      m.id === replacesId ? { ...m, body: newBody.trim(), isEdited: true } : m,
+    );
+  }
+
   function mergeLiveMessage(msg: TimelineMessage) {
-    if (messages.value.some((m) => m.id === msg.id)) return;
+    // Check if this is a self-echo confirming delivery of an optimistic message
+    const existing = messages.value.find((m) => m.id === msg.id);
+    if (existing) {
+      if (existing.deliveryStatus === "sending") {
+        // Self-echo received: upgrade from "sending" to "delivered"
+        messages.value = messages.value.map((m) =>
+          m.id === msg.id ? { ...m, deliveryStatus: "delivered" as DeliveryStatus } : m,
+        );
+      }
+      return;
+    }
     messages.value = [...messages.value, msg];
     void scrollToBottom();
   }
@@ -220,12 +257,29 @@ export function useMessaging(
     isSending.value = true;
     clearActionError();
 
+    const bodyText = draft.value;
+
     try {
-      await xmppClient.value.sendGroupMessage(
+      const msgId = await xmppClient.value.sendGroupMessage(
         activeWaddleId.value,
         activeChannelId.value,
-        draft.value,
+        bodyText,
       );
+
+      if (msgId && session.value) {
+        // Optimistic insert: show message immediately with "sending" status
+        const optimistic: TimelineMessage = {
+          id: msgId,
+          author: session.value.username,
+          body: bodyText.trim(),
+          createdAt: new Date().toISOString(),
+          isSelf: true,
+          deliveryStatus: "sending",
+        };
+        messages.value = [...messages.value, optimistic];
+        void scrollToBottom();
+      }
+
       draft.value = "";
       // Send "active" state after sending a message (stops composing indicator)
       if (composingTimeout) {
@@ -238,6 +292,40 @@ export function useMessaging(
       actionError.value = normalizeError(e);
     } finally {
       isSending.value = false;
+    }
+  }
+
+  async function retractMessage(messageId: string) {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+
+    clearActionError();
+
+    try {
+      await xmppClient.value.sendRetraction(
+        activeWaddleId.value,
+        activeChannelId.value,
+        messageId,
+      );
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    }
+  }
+
+  async function editMessage(messageId: string, newBody: string) {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !newBody.trim())
+      return;
+
+    clearActionError();
+
+    try {
+      await xmppClient.value.sendCorrection(
+        activeWaddleId.value,
+        activeChannelId.value,
+        newBody,
+        messageId,
+      );
+    } catch (e) {
+      actionError.value = normalizeError(e);
     }
   }
 
@@ -262,6 +350,8 @@ export function useMessaging(
     loadMessages,
     selectChannel,
     sendMessage,
+    editMessage,
+    retractMessage,
     notifyComposing,
     disconnect,
     clearMessages,

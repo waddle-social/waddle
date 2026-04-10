@@ -54,7 +54,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0288** | **Bidirectional S2S Connections** | Draft |
 | **0297** | **Stanza Forwarding** | Draft |
 | **0300** | **Cryptographic Hash Functions** | Draft |
-| **0334** | **Message Processing Hints** | Draft |
+| **0334** | **Message Processing Hints** | Draft | Implemented |
 | **0352** | **Client State Indication** | Draft |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental |
 | **0363** | **HTTP File Upload** | Draft |
@@ -78,19 +78,19 @@ XEPs for rich messaging features expected in a modern community app.
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | **0085** | **Chat State Notifications** | Final | Typing indicators | Implemented |
-| **0184** | **Message Delivery Receipts** | Draft | Delivery confirmation |
+| **0184** | **Message Delivery Receipts** | Draft | Delivery confirmation | Implemented |
 | **0280** | **Message Carbons** | Draft | Multi-device message sync |
-| **0308** | **Last Message Correction** | Draft | Edit messages |
+| **0308** | **Last Message Correction** | Draft | Edit messages | Implemented |
 | **0313** | **Message Archive Management (MAM)** | Draft | Message history / scrollback |
 | **0333** | **Displayed Markers** | Draft | Read receipts |
-| **0334** | **Message Processing Hints** | Draft | Control server-side processing |
+| **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
 | **0372** | **References** | Experimental | @mentions in messages |
 | 0382 | Spoiler messages | Deferred | Content warnings / spoiler tags |
 | **0393** | **Message Styling** | Draft | Bold, italic, code formatting |
 | 0394 | Message Markup | Experimental | Structured text markup |
-| **0424** | **Message Retraction** | Proposed | Delete messages |
+| **0424** | **Message Retraction** | Proposed | Delete messages | Implemented |
 | **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages |
 | 0428 | Fallback Indication | Experimental | Graceful degradation |
 | **0444** | **Message Reactions** | Experimental | Emoji reactions |

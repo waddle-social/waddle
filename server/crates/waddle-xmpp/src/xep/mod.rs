@@ -10,6 +10,14 @@
 //! - **XEP-0012**: Last Activity - Server uptime and user last activity queries.
 //! - **XEP-0085**: Chat State Notifications - Typing indicators and
 //!   conversational state (active, composing, paused, inactive, gone).
+//! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
+//!   message delivery with `<request/>` and `<received/>` elements.
+//! - **XEP-0308**: Last Message Correction - Replace previously sent messages
+//!   via `<replace/>` element referencing the original message id.
+//! - **XEP-0334**: Message Processing Hints
+//! - **XEP-0424**: Message Retraction - Retract previously sent messages
+//!   with `<retract/>` and `<retracted/>` tombstone elements. - Control server-side processing
+//!   with no-store, no-copy, no-permanent-store, and store hints.
 //! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
 //! - **XEP-0049**: Private XML Storage - Arbitrary per-user XML key-value store.
 //! - **XEP-0054**: vcard-temp - User profile information via vCard format.
@@ -39,6 +47,7 @@ pub mod xep0012;
 pub mod xep0048;
 pub mod xep0085;
 pub mod xep0049;
+pub mod xep0184;
 pub mod xep0054;
 pub mod xep0077;
 pub mod xep0084;
@@ -48,9 +57,12 @@ pub mod xep0191;
 pub mod xep0199;
 pub mod xep0223;
 pub mod xep0249;
+pub mod xep0308;
+pub mod xep0334;
 pub mod xep0352;
 pub mod xep0363;
 pub mod xep0398;
+pub mod xep0424;
 pub mod xep0402;
 pub mod xep0461;
 pub mod xep0503;
@@ -102,12 +114,39 @@ pub use xep0085::{
     NS_CHATSTATES,
 };
 
+pub use xep0184::{
+    build_receipt_message, build_receipt_received_element, build_receipt_request_element,
+    extract_receipt_from_message, extract_received_id, has_receipt_received, has_receipt_request,
+    is_receipt_received_element, is_receipt_request_element, is_standalone_receipt, set_receipt_received,
+    set_receipt_request, strip_receipts, ReceiptCarrier, ReceiptError, ReceiptKind, NS_RECEIPTS,
+};
+
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0308::{
+    build_correction_message, build_replace_element, extract_correction_from_message,
+    extract_replaces_id, is_correction_message, is_replace_element, set_correction,
+    strip_correction, Correction, CorrectionCarrier, CorrectionError, NS_MESSAGE_CORRECT,
+};
+
+pub use xep0334::{
+    add_hint, build_hint_element, extract_hints_from_message, has_hint, is_hint_element,
+    remove_hint, should_skip_carbons, should_skip_storage, strip_hints, Hint, HintCarrier,
+    NS_HINTS,
+};
 
 pub use xep0352::{
     build_csi_feature, classify_message_urgency, classify_presence_urgency,
     data_contains_csi_active, data_contains_csi_inactive, is_csi_active, is_csi_inactive,
     is_muc_mention, ClientState, StanzaUrgency, MAX_CSI_BUFFER_SIZE, NS_CSI,
+};
+
+pub use xep0424::{
+    build_retract_element, build_retracted_element, build_retraction_message,
+    build_tombstone_message, extract_retraction_from_message, extract_retracts_id,
+    is_retract_element, is_retracted_element, is_retraction_message, is_tombstone_message,
+    set_retraction, strip_retraction, Retracted, Retraction, RetractionCarrier, RetractionError,
+    RetractionKind, NS_MESSAGE_RETRACT,
 };
 
 pub use xep0402::{
