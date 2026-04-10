@@ -37,7 +37,9 @@
 //! - **XEP-0334**: Message Processing Hints
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
-//! - **XEP-0444**: Message Reactions - Emoji reactions via `<reactions/>`
+//! - **XEP-0444**: Message Reactions
+//! - **XEP-0446**: File Metadata Element - Structured file info (name, size,
+//!   type, dimensions) for file sharing messages. - Emoji reactions via `<reactions/>`
 //!   element containing `<reaction>` children. - Control server-side processing
 //!   with no-store, no-copy, no-permanent-store, and store hints.
 //! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
@@ -97,6 +99,7 @@ pub mod xep0398;
 pub mod xep0424;
 pub mod xep0402;
 pub mod xep0444;
+pub mod xep0446;
 pub mod xep0461;
 pub mod xep0503;
 
@@ -279,6 +282,12 @@ pub use xep0398::{
 };
 
 pub use xep0223::{is_private_storage_node, FEATURE_ACCESS_WHITELIST, FEATURE_PERSISTENT_ITEMS};
+
+pub use xep0446::{
+    build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
+    is_file_metadata_element, parse_file_metadata_element, set_file_metadata, strip_file_metadata,
+    FileMetadata, FileMetadataCarrier, FileMetadataError, NS_FILE_METADATA,
+};
 
 pub use xep0461::{
     build_reply_element, is_reply_element, parse_reply_from_message, set_reply_payload,
