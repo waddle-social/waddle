@@ -92,9 +92,12 @@ impl OccupantIdCarrier for Presence {
 /// Uses HMAC-SHA-256 with the room JID as key and user JID as message,
 /// producing a hex-encoded opaque identifier. The same inputs always
 /// produce the same output.
-pub fn generate_occupant_id(user_bare_jid: &str, room_jid: &str, server_secret: &[u8]) -> OccupantId {
-    let mut mac = HmacSha256::new_from_slice(server_secret)
-        .expect("HMAC accepts any key length");
+pub fn generate_occupant_id(
+    user_bare_jid: &str,
+    room_jid: &str,
+    server_secret: &[u8],
+) -> OccupantId {
+    let mut mac = HmacSha256::new_from_slice(server_secret).expect("HMAC accepts any key length");
     mac.update(room_jid.as_bytes());
     mac.update(b":");
     mac.update(user_bare_jid.as_bytes());
@@ -328,10 +331,7 @@ mod tests {
             Presence::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid presence");
 
         assert!(presence.has_occupant_id());
-        assert_eq!(
-            presence.occupant_id(),
-            Some(OccupantId::new("pres-test"))
-        );
+        assert_eq!(presence.occupant_id(), Some(OccupantId::new("pres-test")));
     }
 
     #[test]

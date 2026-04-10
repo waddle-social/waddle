@@ -108,7 +108,12 @@ pub fn apply_cvd_correction(hue: f64, correction: CvdCorrection) -> f64 {
 ///
 /// Uses the default saturation (100%) and lightness (50%).
 pub fn generate_color(input: &str) -> HslColor {
-    generate_color_with_params(input, DEFAULT_SATURATION, DEFAULT_LIGHTNESS, CvdCorrection::None)
+    generate_color_with_params(
+        input,
+        DEFAULT_SATURATION,
+        DEFAULT_LIGHTNESS,
+        CvdCorrection::None,
+    )
 }
 
 /// Generate a consistent color with custom parameters.
@@ -247,8 +252,12 @@ mod tests {
     #[test]
     fn test_cvd_red_green() {
         let normal = generate_color("test");
-        let corrected =
-            generate_color_with_params("test", DEFAULT_SATURATION, DEFAULT_LIGHTNESS, CvdCorrection::RedGreen);
+        let corrected = generate_color_with_params(
+            "test",
+            DEFAULT_SATURATION,
+            DEFAULT_LIGHTNESS,
+            CvdCorrection::RedGreen,
+        );
         // Red-green maps to 180°–300° range
         assert!(corrected.hue >= 180.0 && corrected.hue <= 300.0);
         // Should differ from uncorrected (usually)
@@ -312,8 +321,7 @@ mod tests {
 
     #[test]
     fn test_consistent_color_with_params() {
-        let color =
-            "alice".consistent_color_with(75.0, 60.0, CvdCorrection::None);
+        let color = "alice".consistent_color_with(75.0, 60.0, CvdCorrection::None);
         assert_eq!(color.saturation, 75.0);
         assert_eq!(color.lightness, 60.0);
     }

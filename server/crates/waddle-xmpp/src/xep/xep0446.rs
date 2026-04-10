@@ -200,9 +200,7 @@ pub fn parse_file_metadata_element(elem: &Element) -> FileMetadata {
             .filter(|t| !t.is_empty())
     };
 
-    let num_child = |name: &str| -> Option<u64> {
-        text_child(name).and_then(|t| t.parse().ok())
-    };
+    let num_child = |name: &str| -> Option<u64> { text_child(name).and_then(|t| t.parse().ok()) };
 
     FileMetadata {
         media_type: text_child("media-type"),
@@ -256,15 +254,13 @@ pub fn build_file_metadata_element(meta: &FileMetadata) -> Element {
 
 /// Add file metadata to a message, replacing any existing.
 pub fn set_file_metadata(msg: &mut Message, meta: &FileMetadata) {
-    msg.payloads
-        .retain(|e| e.ns() != NS_FILE_METADATA);
+    msg.payloads.retain(|e| e.ns() != NS_FILE_METADATA);
     msg.payloads.push(build_file_metadata_element(meta));
 }
 
 /// Remove file metadata from a message.
 pub fn strip_file_metadata(msg: &mut Message) {
-    msg.payloads
-        .retain(|e| e.ns() != NS_FILE_METADATA);
+    msg.payloads.retain(|e| e.ns() != NS_FILE_METADATA);
 }
 
 #[cfg(test)]
@@ -432,8 +428,14 @@ mod tests {
 
     #[test]
     fn test_human_size() {
-        assert_eq!(FileMetadata::new().with_size(500).human_size().as_deref(), Some("500 B"));
-        assert_eq!(FileMetadata::new().with_size(1536).human_size().as_deref(), Some("1.5 KB"));
+        assert_eq!(
+            FileMetadata::new().with_size(500).human_size().as_deref(),
+            Some("500 B")
+        );
+        assert_eq!(
+            FileMetadata::new().with_size(1536).human_size().as_deref(),
+            Some("1.5 KB")
+        );
         assert_eq!(
             FileMetadata::new()
                 .with_size(5 * 1024 * 1024)

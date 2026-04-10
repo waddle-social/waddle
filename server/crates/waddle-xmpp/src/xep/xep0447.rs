@@ -323,10 +323,7 @@ mod tests {
         assert_eq!(sharing.metadata.name.as_deref(), Some("doc.pdf"));
         assert_eq!(sharing.disposition, Disposition::Attachment);
         assert!(!sharing.is_inline());
-        assert_eq!(
-            sharing.first_url(),
-            Some("https://example.com/doc.pdf")
-        );
+        assert_eq!(sharing.first_url(), Some("https://example.com/doc.pdf"));
     }
 
     #[test]
@@ -377,10 +374,7 @@ mod tests {
         set_file_sharing(&mut msg, &sharing2);
         let extracted = extract_file_sharing_from_message(&msg).expect("has sharing");
         assert_eq!(extracted.metadata.name.as_deref(), Some("new.jpg"));
-        assert_eq!(
-            msg.payloads.iter().filter(|e| e.ns() == NS_SFS).count(),
-            1
-        );
+        assert_eq!(msg.payloads.iter().filter(|e| e.ns() == NS_SFS).count(), 1);
     }
 
     #[test]

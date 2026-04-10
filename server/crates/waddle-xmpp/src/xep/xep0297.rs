@@ -93,8 +93,8 @@ pub fn build_forwarded_element(fwd: &ForwardedMessage) -> Element {
     let mut builder = Element::builder("forwarded", NS_FORWARD);
 
     if let Some(stamp) = fwd.stamp {
-        let mut delay_builder = Element::builder("delay", NS_DELAY)
-            .attr("stamp", stamp.to_rfc3339());
+        let mut delay_builder =
+            Element::builder("delay", NS_DELAY).attr("stamp", stamp.to_rfc3339());
         if let Some(ref from) = fwd.delay_from {
             delay_builder = delay_builder.attr("from", from.as_str());
         }
@@ -117,11 +117,7 @@ pub fn build_forwarded_now(message: &Message) -> Element {
 /// Build a forwarded element with a specific timestamp and from entity.
 ///
 /// Convenience for MAM results.
-pub fn build_forwarded_with_delay(
-    message: &Message,
-    stamp: DateTime<Utc>,
-    from: &str,
-) -> Element {
+pub fn build_forwarded_with_delay(message: &Message, stamp: DateTime<Utc>, from: &str) -> Element {
     build_forwarded_element(
         &ForwardedMessage::with_stamp(message.clone(), stamp).with_delay_from(from),
     )
@@ -136,13 +132,13 @@ pub fn parse_forwarded_element(elem: &Element) -> Option<ForwardedMessage> {
     }
 
     // Extract the inner message
-    let msg_elem = elem
-        .children()
-        .find(|c| c.name() == "message")?;
+    let msg_elem = elem.children().find(|c| c.name() == "message")?;
     let message = Message::try_from(msg_elem.clone()).ok()?;
 
     // Extract optional delay
-    let delay_elem = elem.children().find(|c| c.name() == "delay" && c.ns() == NS_DELAY);
+    let delay_elem = elem
+        .children()
+        .find(|c| c.name() == "delay" && c.ns() == NS_DELAY);
     let stamp = delay_elem
         .and_then(|d| d.attr("stamp"))
         .and_then(|s| s.parse::<DateTime<Utc>>().ok());
@@ -182,18 +178,11 @@ mod tests {
 
     fn make_test_message() -> Message {
         let mut msg = Message::new(Some(
-            "juliet@example.com"
-                .parse::<jid::Jid>()
-                .expect("valid jid"),
+            "juliet@example.com".parse::<jid::Jid>().expect("valid jid"),
         ));
-        msg.from = Some(
-            "romeo@example.com"
-                .parse::<jid::Jid>()
-                .expect("valid jid"),
-        );
+        msg.from = Some("romeo@example.com".parse::<jid::Jid>().expect("valid jid"));
         msg.type_ = MessageType::Chat;
-        msg.bodies
-            .insert(String::new(), Body("Hello!".to_string()));
+        msg.bodies.insert(String::new(), Body("Hello!".to_string()));
         msg
     }
 
@@ -306,16 +295,16 @@ mod tests {
         assert!(fwd.stamp.is_some());
         assert!(fwd.delay_from.is_none());
 
-        let fwd2 = ForwardedMessage::with_stamp(msg, test_stamp())
-            .with_delay_from("srv.example.com");
+        let fwd2 =
+            ForwardedMessage::with_stamp(msg, test_stamp()).with_delay_from("srv.example.com");
         assert_eq!(fwd2.delay_from.as_deref(), Some("srv.example.com"));
     }
 
     #[test]
     fn test_roundtrip() {
         let msg = make_test_message();
-        let original = ForwardedMessage::with_stamp(msg, test_stamp())
-            .with_delay_from("room@muc.example.com");
+        let original =
+            ForwardedMessage::with_stamp(msg, test_stamp()).with_delay_from("room@muc.example.com");
         let elem = build_forwarded_element(&original);
         let parsed = parse_forwarded_element(&elem).expect("roundtrip");
 

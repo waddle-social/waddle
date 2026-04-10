@@ -382,10 +382,8 @@ mod tests {
 
     #[test]
     fn test_conversion_from_xmpp_parsers() {
-        let parser_hash = xmpp_parsers::hashes::Hash::new(
-            xmpp_parsers::hashes::Algo::Sha_256,
-            vec![1, 2, 3],
-        );
+        let parser_hash =
+            xmpp_parsers::hashes::Hash::new(xmpp_parsers::hashes::Algo::Sha_256, vec![1, 2, 3]);
         let local: HashValue = parser_hash.into();
         assert_eq!(local.algo, HashAlgo::Sha256);
         assert_eq!(local.bytes, vec![1, 2, 3]);

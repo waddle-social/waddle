@@ -30,11 +30,7 @@ pub fn is_last_activity_query(iq: &Iq) -> bool {
 /// * `original_iq` - The incoming IQ request (used for from/to/id).
 /// * `seconds` - Number of seconds since last activity.
 /// * `status` - Optional status text (e.g., last unavailable presence status).
-pub fn build_last_activity_response(
-    original_iq: &Iq,
-    seconds: u64,
-    status: Option<&str>,
-) -> Iq {
+pub fn build_last_activity_response(original_iq: &Iq, seconds: u64, status: Option<&str>) -> Iq {
     let mut query = Element::builder("query", NS_LAST_ACTIVITY)
         .attr("seconds", seconds.to_string())
         .build();

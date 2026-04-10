@@ -45,16 +45,8 @@ pub fn build_time_response(original_iq: &Iq, now: DateTime<Utc>, tzo: &str) -> I
     let utc_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let time_elem = Element::builder("time", NS_TIME)
-        .append(
-            Element::builder("tzo", NS_TIME)
-                .append(tzo)
-                .build(),
-        )
-        .append(
-            Element::builder("utc", NS_TIME)
-                .append(utc_str)
-                .build(),
-        )
+        .append(Element::builder("tzo", NS_TIME).append(tzo).build())
+        .append(Element::builder("utc", NS_TIME).append(utc_str).build())
         .build();
 
     Iq {
@@ -140,7 +132,10 @@ mod tests {
     #[test]
     fn test_build_time_response() {
         let query = make_time_query();
-        let now = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).single().expect("valid test date");
+        let now = Utc
+            .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+            .single()
+            .expect("valid test date");
         let result = build_time_response(&query, now, "+00:00");
 
         assert_eq!(result.id, "time-1");
@@ -170,7 +165,10 @@ mod tests {
     #[test]
     fn test_build_time_response_with_offset() {
         let query = make_time_query();
-        let now = Utc.with_ymd_and_hms(2024, 1, 15, 18, 30, 0).single().expect("valid test date");
+        let now = Utc
+            .with_ymd_and_hms(2024, 1, 15, 18, 30, 0)
+            .single()
+            .expect("valid test date");
         let result = build_time_response(&query, now, "-06:00");
 
         if let IqType::Result(Some(elem)) = &result.payload {
@@ -212,7 +210,10 @@ mod tests {
     #[test]
     fn test_parse_time_response() {
         let query = make_time_query();
-        let now = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).single().expect("valid test date");
+        let now = Utc
+            .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+            .single()
+            .expect("valid test date");
         let result = build_time_response(&query, now, "-05:00");
 
         let (utc, tzo) = parse_time_response(&result).expect("parseable");

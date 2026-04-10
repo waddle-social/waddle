@@ -155,8 +155,7 @@ pub fn extract_delay_stamp(msg: &Message) -> Option<DateTime<Utc>> {
 
 /// Build a `<delay/>` element.
 pub fn build_delay_element(info: &DelayInfo) -> Element {
-    let mut builder = Element::builder("delay", NS_DELAY)
-        .attr("stamp", info.stamp.to_rfc3339());
+    let mut builder = Element::builder("delay", NS_DELAY).attr("stamp", info.stamp.to_rfc3339());
 
     if let Some(ref from) = info.from {
         builder = builder.attr("from", from.as_str());
@@ -188,8 +187,7 @@ pub fn add_delay(msg: &mut Message, info: &DelayInfo) {
 
 /// Add a simple delay with timestamp and from entity.
 pub fn add_delay_stamp(msg: &mut Message, stamp: DateTime<Utc>, from: &str) {
-    msg.payloads
-        .push(build_delay_element_simple(stamp, from));
+    msg.payloads.push(build_delay_element_simple(stamp, from));
 }
 
 /// Remove all delay elements from a message.
