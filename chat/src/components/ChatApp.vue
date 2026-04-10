@@ -429,6 +429,7 @@ onUnmounted(() => {
         @typing="messaging.notifyComposing"
         @edit-message="messaging.editMessage"
         @retract-message="messaging.retractMessage"
+        @react-message="messaging.toggleReaction"
         @edit-channel="openChannelEdit"
       />
     </div>

@@ -108,6 +108,10 @@ export function useMessaging(
           removeTypingUser(event.nick);
         }
       });
+      client.setReactionHandler((event) => {
+        if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
+        applyReaction(event.messageId, event.nick, event.emojis);
+      });
     } else {
       xmppStatus.value = { state: "offline", detail: "Live room offline" };
       clearTypingState();
@@ -171,6 +175,30 @@ export function useMessaging(
     timelineEl.value?.scrollTo({
       top: timelineEl.value.scrollHeight,
       behavior: "auto",
+    });
+  }
+
+  function applyReaction(messageId: string, nick: string, emojis: string[]) {
+    messages.value = messages.value.map((m): TimelineMessage => {
+      if (m.id !== messageId) return m;
+      const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
+      // Remove this nick from all existing emoji lists
+      for (const key of Object.keys(existing)) {
+        existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
+        if (existing[key].length === 0) delete existing[key];
+      }
+      // Add the nick to each new emoji
+      for (const emoji of emojis) {
+        if (!existing[emoji]) existing[emoji] = [];
+        existing[emoji].push(nick);
+      }
+      const updated = { ...m };
+      if (Object.keys(existing).length > 0) {
+        updated.reactions = existing;
+      } else {
+        delete updated.reactions;
+      }
+      return updated;
     });
   }
 
@@ -295,6 +323,40 @@ export function useMessaging(
     }
   }
 
+  async function toggleReaction(messageId: string, emoji: string) {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !session.value)
+      return;
+
+    // Compute the new reaction set for this user
+    const msg = messages.value.find((m) => m.id === messageId);
+    const myNick = session.value.username;
+    const currentReactions = msg?.reactions ?? {};
+
+    // Gather all emojis this user currently has on this message
+    const myEmojis = new Set<string>();
+    for (const [e, nicks] of Object.entries(currentReactions)) {
+      if (nicks.includes(myNick)) myEmojis.add(e);
+    }
+
+    // Toggle the emoji
+    if (myEmojis.has(emoji)) {
+      myEmojis.delete(emoji);
+    } else {
+      myEmojis.add(emoji);
+    }
+
+    try {
+      await xmppClient.value.sendReaction(
+        activeWaddleId.value,
+        activeChannelId.value,
+        messageId,
+        [...myEmojis],
+      );
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    }
+  }
+
   async function retractMessage(messageId: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
 
@@ -352,6 +414,7 @@ export function useMessaging(
     sendMessage,
     editMessage,
     retractMessage,
+    toggleReaction,
     notifyComposing,
     disconnect,
     clearMessages,

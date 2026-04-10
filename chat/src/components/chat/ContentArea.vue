@@ -25,6 +25,7 @@ const emit = defineEmits<{
   typing: [];
   editMessage: [messageId: string, newBody: string];
   retractMessage: [messageId: string];
+  reactMessage: [messageId: string, emoji: string];
   editChannel: [];
 }>();
 </script>
@@ -88,6 +89,7 @@ const emit = defineEmits<{
           :message="msg"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
+          @react="(id, emoji) => emit('reactMessage', id, emoji)"
         />
       </div>
     </div>

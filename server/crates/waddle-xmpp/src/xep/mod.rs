@@ -16,7 +16,9 @@
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0334**: Message Processing Hints
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
-//!   with `<retract/>` and `<retracted/>` tombstone elements. - Control server-side processing
+//!   with `<retract/>` and `<retracted/>` tombstone elements.
+//! - **XEP-0444**: Message Reactions - Emoji reactions via `<reactions/>`
+//!   element containing `<reaction>` children. - Control server-side processing
 //!   with no-store, no-copy, no-permanent-store, and store hints.
 //! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
 //! - **XEP-0049**: Private XML Storage - Arbitrary per-user XML key-value store.
@@ -64,6 +66,7 @@ pub mod xep0363;
 pub mod xep0398;
 pub mod xep0424;
 pub mod xep0402;
+pub mod xep0444;
 pub mod xep0461;
 pub mod xep0503;
 
@@ -147,6 +150,13 @@ pub use xep0424::{
     is_retract_element, is_retracted_element, is_retraction_message, is_tombstone_message,
     set_retraction, strip_retraction, Retracted, Retraction, RetractionCarrier, RetractionError,
     RetractionKind, NS_MESSAGE_RETRACT,
+};
+
+pub use xep0444::{
+    build_reaction_element, build_reaction_message, build_reactions_element,
+    extract_reacted_id, extract_reactions_from_message, is_reaction_message,
+    is_reactions_element, set_reactions, strip_reactions, ReactionCarrier, ReactionError,
+    ReactionSet, NS_REACTIONS,
 };
 
 pub use xep0402::{

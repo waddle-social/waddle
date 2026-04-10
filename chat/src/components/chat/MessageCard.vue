@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { Check, CheckCheck, Pencil, Trash2 } from "lucide-vue-next";
+import { Check, CheckCheck, Pencil, SmilePlus, Trash2 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import { formatStamp } from "@/composables/useMessaging";
@@ -12,7 +12,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   edit: [messageId: string, newBody: string];
   retract: [messageId: string];
+  react: [messageId: string, emoji: string];
 }>();
+
+const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
 const isEditing = ref(false);
 const editDraft = ref("");
@@ -122,6 +125,48 @@ function onEditKeydown(e: KeyboardEvent) {
 
       <!-- Normal display -->
       <p v-else class="text-sm leading-relaxed whitespace-pre-wrap break-words">{{ message.body }}</p>
+
+      <!-- Reactions display -->
+      <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">
+        <button
+          v-for="(nicks, emoji) in message.reactions"
+          :key="emoji"
+          class="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs border border-foreground/30 hover:border-foreground transition-colors font-mono"
+          :title="nicks.join(', ')"
+          @click="emit('react', message.id, emoji)"
+        >
+          <span>{{ emoji }}</span>
+          <span class="text-muted-foreground">{{ nicks.length }}</span>
+        </button>
+        <button
+          class="opacity-0 group-hover:opacity-100 inline-flex items-center px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground border border-transparent hover:border-foreground/30 transition-all"
+          title="Add reaction"
+          @click.stop
+        >
+          <span class="relative">
+            <SmilePlus class="w-3.5 h-3.5" />
+            <span class="absolute left-full top-1/2 -translate-y-1/2 ml-1 flex gap-0.5 whitespace-nowrap">
+              <button
+                v-for="e in quickEmojis"
+                :key="e"
+                class="hover:scale-125 transition-transform"
+                @click="emit('react', message.id, e)"
+              >{{ e }}</button>
+            </span>
+          </span>
+        </button>
+      </div>
+
+      <!-- Quick react (when no reactions yet) -->
+      <div v-else class="opacity-0 group-hover:opacity-100 flex gap-1 mt-1 transition-opacity">
+        <button
+          v-for="e in quickEmojis"
+          :key="e"
+          class="text-sm hover:scale-125 transition-transform"
+          :title="`React with ${e}`"
+          @click="emit('react', message.id, e)"
+        >{{ e }}</button>
+      </div>
     </div>
   </div>
 </template>

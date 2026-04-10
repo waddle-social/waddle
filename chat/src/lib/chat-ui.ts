@@ -17,6 +17,8 @@ export interface TimelineMessage {
   isEdited?: boolean;
   /** Whether this message has been retracted (XEP-0424). */
   isRetracted?: boolean;
+  /** Aggregated emoji reactions: emoji -> list of nicks (XEP-0444). */
+  reactions?: Record<string, string[]>;
 }
 
 export interface CommunityFormData {

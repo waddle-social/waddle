@@ -93,7 +93,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0424** | **Message Retraction** | Proposed | Delete messages | Implemented |
 | **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages |
 | 0428 | Fallback Indication | Experimental | Graceful degradation |
-| **0444** | **Message Reactions** | Experimental | Emoji reactions |
+| **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented |
 | **0461** | **Message Replies** | Experimental | Threaded replies |
 | **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state |
 | **0513** | **Explicit Mentions** | Experimental | @user / @role mentions |

@@ -34,6 +34,16 @@ const MESSAGE_CORRECT_NS = "urn:xmpp:message-correct:0";
 /** XEP-0424 namespace */
 const MESSAGE_RETRACT_NS = "urn:xmpp:message-retract:1";
 
+/** XEP-0444 namespace */
+const REACTIONS_NS = "urn:xmpp:reactions:0";
+
+export interface ReactionEvent {
+  roomJid: string;
+  nick: string;
+  messageId: string;
+  emojis: string[];
+}
+
 export interface ChatStateEvent {
   roomJid: string;
   nick: string;
@@ -79,6 +89,7 @@ export class BrowserXmppClient {
   private readonly session: WaddleSession;
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
+  private reactionHandler: ((event: ReactionEvent) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
@@ -97,6 +108,10 @@ export class BrowserXmppClient {
 
   setChatStateHandler(handler: (event: ChatStateEvent) => void) {
     this.chatStateHandler = handler;
+  }
+
+  setReactionHandler(handler: (event: ReactionEvent) => void) {
+    this.reactionHandler = handler;
   }
 
   async connect() {
@@ -169,6 +184,20 @@ export class BrowserXmppClient {
         };
         this.messageHandler?.(retractMsg);
         return;
+      }
+
+      // XEP-0444: Check for reactions (before body check - reactions are body-less)
+      const reactionsEl = stanza.getChild("reactions");
+      if (reactionsEl) {
+        const reactedId = reactionsEl.attrs?.id as string | undefined;
+        if (reactedId) {
+          const emojis: string[] = reactionsEl.children
+            .filter((c: XmppElement) => c.is("reaction"))
+            .map((c: XmppElement) => c.text())
+            .filter((t: string) => t.length > 0);
+          this.reactionHandler?.({ roomJid, nick, messageId: reactedId, emojis });
+          return;
+        }
       }
 
       const body = stanza.getChildText("body");
@@ -387,6 +416,24 @@ export class BrowserXmppClient {
           type: "groupchat",
         },
         xml(state, CHATSTATES_NS),
+      ),
+    );
+  }
+
+  async sendReaction(waddleId: string, channelId: string, messageId: string, emojis: string[]) {
+    if (!this.xmpp) return;
+
+    const reactionChildren = emojis.map((emoji) => xml("reaction", REACTIONS_NS, emoji));
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          id: crypto.randomUUID(),
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml("reactions", { xmlns: REACTIONS_NS, id: messageId }, ...reactionChildren),
       ),
     );
   }
