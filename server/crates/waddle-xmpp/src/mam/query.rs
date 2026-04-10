@@ -11,6 +11,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::{ArchivedMessage, MamQuery, MamResult};
+use crate::xep::xep0059::{self, RsmResponse, NS_RSM};
 use crate::xep::xep0461::NS_REPLY;
 use crate::XmppError;
 
@@ -18,7 +19,9 @@ use crate::XmppError;
 pub const MAM_NS: &str = "urn:xmpp:mam:2";
 
 /// Result Set Management namespace (XEP-0059).
-pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
+///
+/// Re-exported from [`crate::xep::xep0059::NS_RSM`] for backwards compatibility.
+pub const RSM_NS: &str = NS_RSM;
 
 /// Data Forms namespace.
 pub const DATA_FORMS_NS: &str = "jabber:x:data";
@@ -133,31 +136,14 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> Result<(), XmppError
     Ok(())
 }
 
-/// Parse RSM pagination parameters.
+/// Parse RSM pagination parameters using the standalone XEP-0059 module.
 fn parse_rsm(rsm: &Element, query: &mut MamQuery) -> Result<(), XmppError> {
-    for child in rsm.children() {
-        // Element::text() returns String directly
-        match child.name() {
-            "max" => {
-                let text = child.text();
-                if !text.is_empty() {
-                    query.max = text.parse().ok();
-                }
-            }
-            "after" => {
-                let text = child.text();
-                if !text.is_empty() {
-                    query.after_id = Some(text);
-                }
-            }
-            "before" => {
-                // Empty <before/> means "get last page"
-                let text = child.text();
-                query.before_id = Some(text);
-            }
-            _ => {} // Ignore unknown elements
-        }
-    }
+    let request = xep0059::parse_rsm_request(rsm)
+        .map_err(|e| XmppError::bad_request(Some(format!("Invalid RSM: {}", e))))?;
+
+    query.max = request.max;
+    query.after_id = request.after;
+    query.before_id = request.before;
 
     Ok(())
 }
@@ -295,33 +281,25 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
 /// </iq>
 /// ```
 pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
-    let mut set_builder = Element::builder("set", RSM_NS);
+    let mut rsm_response = RsmResponse::new();
 
     if let Some(ref first) = result.first_id {
-        let first_elem = Element::builder("first", RSM_NS)
-            .attr("index", "0")
-            .append(first.clone())
-            .build();
-        set_builder = set_builder.append(first_elem);
+        rsm_response = rsm_response.with_first(first.clone(), Some(0));
     }
 
     if let Some(ref last) = result.last_id {
-        let last_elem = Element::builder("last", RSM_NS)
-            .append(last.clone())
-            .build();
-        set_builder = set_builder.append(last_elem);
+        rsm_response = rsm_response.with_last(last.clone());
     }
 
     if let Some(count) = result.count {
-        let count_elem = Element::builder("count", RSM_NS)
-            .append(count.to_string())
-            .build();
-        set_builder = set_builder.append(count_elem);
+        rsm_response = rsm_response.with_count(count);
     }
+
+    let rsm_element = xep0059::build_rsm_response_element(&rsm_response);
 
     let fin = Element::builder("fin", MAM_NS)
         .attr("complete", if result.complete { "true" } else { "false" })
-        .append(set_builder.build())
+        .append(rsm_element)
         .build();
 
     // Build the result IQ

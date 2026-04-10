@@ -9,6 +9,8 @@
 //!   search, and reporting workflows.
 //! - **XEP-0012**: Last Activity - Server uptime and user last activity queries.
 //! - **XEP-0047**: In-Band Bytestreams - Base64-encoded data transfer over XMPP.
+//! - **XEP-0059**: Result Set Management - Generic pagination for XMPP result
+//!   sets via `<set>` elements with max, after, before, index, first, last, count.
 //! - **XEP-0085**: Chat State Notifications - Typing indicators and
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
@@ -75,6 +77,7 @@ pub mod xep0012;
 pub mod xep0047;
 pub mod xep0048;
 pub mod xep0050;
+pub mod xep0059;
 pub mod xep0085;
 pub mod xep0049;
 pub mod xep0172;
@@ -325,6 +328,12 @@ pub use xep0446::{
 pub use xep0461::{
     build_reply_element, is_reply_element, parse_reply_from_message, set_reply_payload,
     set_thread_id, thread_id_from_message, ReplyReference, NS_REPLY,
+};
+
+pub use xep0059::{
+    build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
+    extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response,
+    RsmError, RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
 };
 
 pub use xep0503::{

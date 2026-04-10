@@ -15,12 +15,12 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0004** | **Data Forms** | Final | Implemented |
 | 0009 | Jabber-RPC | Final |
 | **0012** | **Last Activity** | Final | Implemented |
-| **0030** | **Service Discovery** | Final |
+| **0030** | **Service Discovery** | Final | Implemented |
 | 0033 | Extended Stanza Addressing | Draft |
-| **0047** | **In-Band Bytestreams** | Final |
+| **0047** | **In-Band Bytestreams** | Final | Implemented |
 | **0050** | **Ad-Hoc Commands** | Draft | Implemented |
 | 0053 | XMPP Registrar Function | Active |
-| **0059** | **Result Set Management** | Draft |
+| **0059** | **Result Set Management** | Draft | Implemented |
 | **0060** | **Publish-Subscribe** | Draft |
 | 0065 | SOCKS5 Bytestreams | Draft |
 | 0066 | Out of Band Data | Draft |
