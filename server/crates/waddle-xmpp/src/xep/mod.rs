@@ -12,6 +12,8 @@
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
+//! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
+//!   messages via `<delay/>` element with stamp and from attributes.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
@@ -56,6 +58,7 @@ pub mod xep0048;
 pub mod xep0085;
 pub mod xep0049;
 pub mod xep0184;
+pub mod xep0203;
 pub mod xep0054;
 pub mod xep0077;
 pub mod xep0084;
@@ -134,6 +137,12 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0203::{
+    add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
+    extract_delay_from_message, extract_delay_stamp, has_delay, is_delay_element,
+    parse_delay_element, strip_delay, DelayCarrier, DelayError, DelayInfo, NS_DELAY,
+};
 
 pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,

@@ -44,7 +44,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0198** | **Stream Management** | Draft |
 | **0199** | **XMPP Ping** | Final |
 | **0202** | **Entity Time** | Final |
-| **0203** | **Delayed Delivery** | Final |
+| **0203** | **Delayed Delivery** | Final | Implemented |
 | 0206 | XMPP Over BOSH | Draft |
 | **0220** | **Server Dialback** | Draft |
 | 0227 | Portable Import/Export Format | Draft |
