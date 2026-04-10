@@ -16,6 +16,8 @@
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
 //!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
+//! - **XEP-0393**: Message Styling - Inline text formatting parser for
+//!   bold, italic, strikethrough, code, code blocks, and block quotes.
 //! - **XEP-0359**: Unique and Stable Stanza IDs - Server-assigned `<stanza-id/>`
 //!   and client-assigned `<origin-id/>` for stable message referencing.
 //! - **XEP-0334**: Message Processing Hints
@@ -69,6 +71,7 @@ pub mod xep0334;
 pub mod xep0352;
 pub mod xep0359;
 pub mod xep0363;
+pub mod xep0393;
 pub mod xep0398;
 pub mod xep0424;
 pub mod xep0402;
@@ -149,6 +152,11 @@ pub use xep0334::{
     add_hint, build_hint_element, extract_hints_from_message, has_hint, is_hint_element,
     remove_hint, should_skip_carbons, should_skip_storage, strip_hints, Hint, HintCarrier,
     NS_HINTS,
+};
+
+pub use xep0393::{
+    blocks_to_html, blocks_to_plain, parse_blocks, parse_spans, spans_to_html, spans_to_plain,
+    Block, Span, StyledBody,
 };
 
 pub use xep0359::{

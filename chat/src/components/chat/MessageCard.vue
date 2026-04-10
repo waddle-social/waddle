@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import type { TimelineMessage } from "@/lib/chat-ui";
+import { renderStyledBody, type TimelineMessage } from "@/lib/chat-ui";
 import { formatStamp } from "@/composables/useMessaging";
 
 const props = defineProps<{
@@ -16,6 +16,8 @@ const emit = defineEmits<{
 }>();
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
+
+const styledHtml = computed(() => renderStyledBody(props.message.body));
 
 const isEditing = ref(false);
 const editDraft = ref("");
@@ -130,8 +132,8 @@ function onEditKeydown(e: KeyboardEvent) {
         >Cancel</button>
       </div>
 
-      <!-- Normal display -->
-      <p v-else class="text-sm leading-relaxed whitespace-pre-wrap break-words">{{ message.body }}</p>
+      <!-- Normal display (XEP-0393 styled) -->
+      <div v-else class="text-sm leading-relaxed break-words styled-body" v-html="styledHtml" />
 
       <!-- Reactions display -->
       <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">

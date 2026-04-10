@@ -88,7 +88,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
 | **0372** | **References** | Experimental | @mentions in messages |
 | 0382 | Spoiler messages | Deferred | Content warnings / spoiler tags |
-| **0393** | **Message Styling** | Draft | Bold, italic, code formatting |
+| **0393** | **Message Styling** | Draft | Bold, italic, code formatting | Implemented |
 | 0394 | Message Markup | Experimental | Structured text markup |
 | **0424** | **Message Retraction** | Proposed | Delete messages | Implemented |
 | **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages |
