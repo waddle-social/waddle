@@ -16,6 +16,8 @@
 //!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
 //!   messages via `<delay/>` element with stamp and from attributes.
+//! - **XEP-0297**: Stanza Forwarding - Wraps forwarded stanzas in
+//!   `<forwarded/>` with optional delay, used by carbons and MAM.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
@@ -75,6 +77,7 @@ pub mod xep0191;
 pub mod xep0199;
 pub mod xep0223;
 pub mod xep0249;
+pub mod xep0297;
 pub mod xep0308;
 pub mod xep0333;
 pub mod xep0334;
@@ -155,6 +158,12 @@ pub use xep0203::{
     add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
     extract_delay_from_message, extract_delay_stamp, has_delay, is_delay_element,
     parse_delay_element, strip_delay, DelayCarrier, DelayError, DelayInfo, NS_DELAY,
+};
+
+pub use xep0297::{
+    build_forwarded_element, build_forwarded_now, build_forwarded_with_delay,
+    extract_forwarded_from_message, is_forwarded_element, parse_forwarded_element,
+    ForwardedMessage, ForwardingCarrier, NS_FORWARD,
 };
 
 pub use xep0308::{

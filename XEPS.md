@@ -52,7 +52,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0249 | Direct MUC Invitations | Draft |
 | 0258 | Security Labels in XMPP | Draft |
 | **0288** | **Bidirectional S2S Connections** | Draft |
-| **0297** | **Stanza Forwarding** | Draft |
+| **0297** | **Stanza Forwarding** | Draft | Implemented |
 | **0300** | **Cryptographic Hash Functions** | Draft |
 | **0334** | **Message Processing Hints** | Draft | Implemented |
 | **0352** | **Client State Indication** | Draft |
