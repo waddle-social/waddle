@@ -312,10 +312,7 @@ pub fn spans_to_html(spans: &[Span]) -> String {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    html_escape::encode_text(s).into_owned()
 }
 
 #[cfg(test)]
@@ -523,10 +520,7 @@ mod tests {
     #[test]
     fn test_html_escaping() {
         let blocks = parse_blocks("a < b & c > d");
-        assert_eq!(
-            blocks_to_html(&blocks),
-            "<p>a &lt; b &amp; c &gt; d</p>"
-        );
+        assert_eq!(blocks_to_html(&blocks), "<p>a &lt; b &amp; c &gt; d</p>");
     }
 
     #[test]

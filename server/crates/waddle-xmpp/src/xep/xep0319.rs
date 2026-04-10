@@ -231,7 +231,8 @@ mod tests {
         assert!(has_idle(&presence));
 
         // Replace
-        let new_time = Utc.with_ymd_and_hms(2024, 7, 1, 0, 0, 0)
+        let new_time = Utc
+            .with_ymd_and_hms(2024, 7, 1, 0, 0, 0)
             .single()
             .expect("valid test date");
         add_idle(&mut presence, new_time);

@@ -130,7 +130,12 @@ pub fn unescape_node(input: &str) -> String {
 
 /// Check if a local part contains characters that need escaping.
 pub fn needs_escaping(input: &str) -> bool {
-    input.chars().any(|ch| matches!(ch, ' ' | '"' | '&' | '\'' | '/' | ':' | '<' | '>' | '@' | '\\'))
+    input.chars().any(|ch| {
+        matches!(
+            ch,
+            ' ' | '"' | '&' | '\'' | '/' | ':' | '<' | '>' | '@' | '\\'
+        )
+    })
 }
 
 /// Check if a local part contains escape sequences.
@@ -262,7 +267,10 @@ mod tests {
 
     #[test]
     fn test_unescape_all() {
-        assert_eq!(unescape_node("\\22\\26\\27\\2f\\3a\\3c\\3e\\40\\5c"), "\"&'/:<>@\\");
+        assert_eq!(
+            unescape_node("\\22\\26\\27\\2f\\3a\\3c\\3e\\40\\5c"),
+            "\"&'/:<>@\\"
+        );
     }
 
     #[test]
@@ -337,7 +345,10 @@ mod tests {
     #[test]
     fn test_spec_examples() {
         assert_eq!(escape_node("space cadet"), "space\\20cadet");
-        assert_eq!(escape_node("call me \"ishmael\""), "call\\20me\\20\\22ishmael\\22");
+        assert_eq!(
+            escape_node("call me \"ishmael\""),
+            "call\\20me\\20\\22ishmael\\22"
+        );
         assert_eq!(escape_node("at&t guy"), "at\\26t\\20guy");
         assert_eq!(escape_node("d'artagnan"), "d\\27artagnan");
         assert_eq!(escape_node("/.telekinesis"), "\\2f.telekinesis");

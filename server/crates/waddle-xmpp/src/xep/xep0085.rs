@@ -182,15 +182,13 @@ pub fn build_chat_state_message(
 
 /// Set the chat state on an existing message, replacing any existing chat state.
 pub fn set_chat_state(msg: &mut Message, state: ChatState) {
-    msg.payloads
-        .retain(|elem| elem.ns() != NS_CHATSTATES);
+    msg.payloads.retain(|elem| elem.ns() != NS_CHATSTATES);
     msg.payloads.push(build_chat_state_element(state));
 }
 
 /// Remove all chat state elements from a message.
 pub fn strip_chat_states(msg: &mut Message) {
-    msg.payloads
-        .retain(|elem| elem.ns() != NS_CHATSTATES);
+    msg.payloads.retain(|elem| elem.ns() != NS_CHATSTATES);
 }
 
 /// Check if a message is a body-less chat state notification.
@@ -198,11 +196,7 @@ pub fn strip_chat_states(msg: &mut Message) {
 /// These messages carry only conversational state (e.g., typing indicators)
 /// and should not be archived or counted as real messages.
 pub fn is_standalone_notification(msg: &Message) -> bool {
-    msg.bodies.is_empty()
-        && msg
-            .payloads
-            .iter()
-            .any(|elem| is_chat_state_element(elem))
+    msg.bodies.is_empty() && msg.payloads.iter().any(|elem| is_chat_state_element(elem))
 }
 
 /// Convert from `xmpp_parsers::chatstates::ChatState` to our local enum.
@@ -238,12 +232,18 @@ mod tests {
 
     #[test]
     fn test_parse_all_states() {
-        assert_eq!(parse_chat_state("active").expect("valid"), ChatState::Active);
+        assert_eq!(
+            parse_chat_state("active").expect("valid"),
+            ChatState::Active
+        );
         assert_eq!(
             parse_chat_state("composing").expect("valid"),
             ChatState::Composing
         );
-        assert_eq!(parse_chat_state("paused").expect("valid"), ChatState::Paused);
+        assert_eq!(
+            parse_chat_state("paused").expect("valid"),
+            ChatState::Paused
+        );
         assert_eq!(
             parse_chat_state("inactive").expect("valid"),
             ChatState::Inactive
@@ -348,10 +348,7 @@ mod tests {
         strip_chat_states(&mut msg);
 
         assert_eq!(extract_chat_state_from_message(&msg), None);
-        assert!(msg
-            .payloads
-            .iter()
-            .all(|e| e.ns() != NS_CHATSTATES));
+        assert!(msg.payloads.iter().all(|e| e.ns() != NS_CHATSTATES));
     }
 
     #[test]

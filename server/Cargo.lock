@@ -5904,6 +5904,7 @@ dependencies = [
  "futures",
  "hickory-resolver 0.25.2",
  "hmac",
+ "html-escape",
  "jid",
  "kameo",
  "libsql",

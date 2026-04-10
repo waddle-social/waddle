@@ -64,120 +64,147 @@ export function consistentColor(input: string, saturation = 65, lightness = 50):
   return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
 }
 
-// ── XEP-0393 Message Styling ────────────────────────────────────────
+// ── XEP-0393 Message Styling (via marked) ───────────────────────────
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+import { Marked } from "marked";
+
+/**
+ * XEP-0393 defines `*text*` as bold (not italic like standard Markdown)
+ * and `~text~` as strikethrough (standard GFM uses `~~text~~`).
+ *
+ * We pre-process the text to map XEP-0393 syntax to standard GFM before
+ * passing it to `marked` for rendering.
+ */
+
+const WB = /[\s.,;:!?'"()\[\]{}]/;
+
+/** Convert XEP-0393 body text to GitHub-Flavored Markdown. */
+function xep0393ToGfm(input: string): string {
+  const lines = input.split("\n");
+  let out = "";
+  let inCode = false;
+
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      inCode = !inCode;
+      out += line + "\n";
+      continue;
+    }
+    if (inCode) {
+      out += line + "\n";
+      continue;
+    }
+    out += convertInline(line) + "\n";
+  }
+
+  // Remove trailing newline added by loop
+  return out.slice(0, -1);
 }
 
-function parseInlineSpans(input: string): string {
+/** Convert XEP-0393 inline styling to GFM inline styling within a single line. */
+function convertInline(line: string): string {
+  const chars = [...line];
   let result = "";
-  const chars = [...input];
   let i = 0;
-  let plain = "";
-
-  const flush = () => {
-    if (plain) { result += escapeHtml(plain); plain = ""; }
-  };
 
   while (i < chars.length) {
-    const ch = chars[i];
+    const ch = chars[i]!;
 
-    // Inline code
+    // Skip inline code spans — pass through unchanged
     if (ch === "`") {
       const end = chars.indexOf("`", i + 1);
       if (end !== -1) {
-        flush();
-        result += `<code class="px-1 bg-muted font-mono text-xs">${escapeHtml(chars.slice(i + 1, end).join(""))}</code>`;
+        result += chars.slice(i, end + 1).join("");
         i = end + 1;
         continue;
       }
     }
 
-    // Styled: * _ ~
-    if ((ch === "*" || ch === "_" || ch === "~") && isSpanStart(chars, i)) {
-      const end = findClosing(chars, i + 1, ch);
-      if (end !== null && isSpanEnd(chars, end)) {
-        flush();
+    // *text* → **text** (XEP-0393 bold → GFM bold)
+    if (ch === "*" && isStart(chars, i)) {
+      const end = findClose(chars, i + 1, "*");
+      if (end !== null && isEnd(chars, end)) {
         const inner = chars.slice(i + 1, end).join("");
-        const tag = ch === "*" ? "strong" : ch === "_" ? "em" : "del";
-        result += `<${tag}>${parseInlineSpans(inner)}</${tag}>`;
+        result += `**${convertInline(inner)}**`;
         i = end + 1;
         continue;
       }
     }
 
-    plain += ch;
+    // ~text~ → ~~text~~ (XEP-0393 strikethrough → GFM strikethrough)
+    if (ch === "~" && isStart(chars, i)) {
+      const end = findClose(chars, i + 1, "~");
+      if (end !== null && isEnd(chars, end)) {
+        const inner = chars.slice(i + 1, end).join("");
+        result += `~~${convertInline(inner)}~~`;
+        i = end + 1;
+        continue;
+      }
+    }
+
+    result += ch;
     i++;
   }
-  flush();
   return result;
 }
 
-function findClosing(chars: string[], start: number, ch: string): number | null {
+function findClose(chars: string[], start: number, ch: string): number | null {
   for (let j = start; j < chars.length; j++) {
-    if ((chars[j] ?? "") === ch) return j;
+    if (chars[j] === ch) return j;
   }
   return null;
 }
 
-function isSpanStart(chars: string[], pos: number): boolean {
+function isStart(chars: string[], pos: number): boolean {
   if (pos === 0) return true;
-  const prev = chars[pos - 1] ?? "";
-  return /[\s.,;:!?'"()\[\]{}]/.test(prev);
+  return WB.test(chars[pos - 1]!);
 }
 
-function isSpanEnd(chars: string[], pos: number): boolean {
+function isEnd(chars: string[], pos: number): boolean {
   if (pos + 1 >= chars.length) return true;
-  const next = chars[pos + 1] ?? "";
-  return /[\s.,;:!?'"()\[\]{}]/.test(next);
+  return WB.test(chars[pos + 1]!);
 }
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Tailwind-styled marked instance for XEP-0393 rendering. */
+const md = new Marked({
+  gfm: true,
+  breaks: true,
+  renderer: {
+    code({ text }: { text: string }) {
+      return `<pre class="bg-muted p-2 text-xs font-mono overflow-x-auto my-1"><code>${escapeHtml(text)}</code></pre>`;
+    },
+    codespan({ text }: { text: string }) {
+      return `<code class="px-1 bg-muted font-mono text-xs">${escapeHtml(text)}</code>`;
+    },
+    blockquote({ text }: { text: string }) {
+      return `<blockquote class="border-l-2 border-muted-foreground pl-3 my-1 text-muted-foreground">${text}</blockquote>`;
+    },
+    paragraph({ text }: { text: string }) {
+      return text;
+    },
+    // Features not in XEP-0393 — de-style to plain text (preserve content, strip formatting)
+    heading({ text }: { text: string }) { return text; },
+    hr() { return ""; },
+    list({ body }: { body: string }) { return body; },
+    listitem({ text }: { text: string }) { return `${text}\n`; },
+    image() { return ""; },
+    link({ text }: { text: string }) { return text; },
+    // Drop raw HTML tokens so untrusted input cannot inject markup
+    html() { return ""; },
+  },
+});
 
 /** Render XEP-0393 styled message body to safe HTML. */
 export function renderStyledBody(body: string): string {
-  const lines = body.split("\n");
-  let html = "";
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-
-    // Code block
-    if (line.startsWith("```")) {
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length) {
-        const cl = lines[i] ?? "";
-        if (cl.startsWith("```")) break;
-        codeLines.push(cl);
-        i++;
-      }
-      if (i < lines.length) i++; // skip closing ```
-      html += `<pre class="bg-muted p-2 text-xs font-mono overflow-x-auto my-1"><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`;
-      continue;
-    }
-
-    // Block quote
-    if (line.startsWith("> ") || line === ">") {
-      const quoteLines: string[] = [];
-      while (i < lines.length) {
-        const ql = lines[i] ?? "";
-        if (!ql.startsWith("> ") && ql !== ">") break;
-        quoteLines.push(ql === ">" ? "" : ql.slice(2));
-        i++;
-      }
-      html += `<blockquote class="border-l-2 border-muted-foreground pl-3 my-1 text-muted-foreground">${parseInlineSpans(quoteLines.join("\n"))}</blockquote>`;
-      continue;
-    }
-
-    // Empty line
-    if (!line.trim()) { i++; continue; }
-
-    // Normal line
-    html += parseInlineSpans(line);
-    if (i + 1 < lines.length) html += "<br>";
-    i++;
-  }
-
-  return html;
+  const gfm = xep0393ToGfm(body);
+  return (md.parse(gfm) as string).trim();
 }

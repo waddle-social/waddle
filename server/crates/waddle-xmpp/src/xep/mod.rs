@@ -84,22 +84,22 @@ pub mod xep0004;
 pub mod xep0012;
 pub mod xep0047;
 pub mod xep0048;
-pub mod xep0050;
-pub mod xep0059;
-pub mod xep0085;
 pub mod xep0049;
-pub mod xep0106;
-pub mod xep0172;
-pub mod xep0184;
-pub mod xep0202;
-pub mod xep0203;
+pub mod xep0050;
 pub mod xep0054;
+pub mod xep0059;
 pub mod xep0077;
 pub mod xep0084;
+pub mod xep0085;
+pub mod xep0106;
 pub mod xep0115;
 pub mod xep0153;
+pub mod xep0172;
+pub mod xep0184;
 pub mod xep0191;
 pub mod xep0199;
+pub mod xep0202;
+pub mod xep0203;
 pub mod xep0223;
 pub mod xep0249;
 pub mod xep0297;
@@ -116,9 +116,9 @@ pub mod xep0372;
 pub mod xep0392;
 pub mod xep0393;
 pub mod xep0398;
+pub mod xep0402;
 pub mod xep0421;
 pub mod xep0424;
-pub mod xep0402;
 pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
@@ -137,8 +137,7 @@ pub use xep0047::{
     build_ibb_not_acceptable, build_ibb_open, build_ibb_resource_constraint, build_ibb_result,
     build_ibb_unexpected_request, is_ibb_close, is_ibb_data, is_ibb_open, message_has_ibb_data,
     next_seq, parse_ibb_close, parse_ibb_data_from_iq, parse_ibb_data_from_message, parse_ibb_open,
-    validate_data_size, IbbClose, IbbData, IbbError, IbbOpen, StanzaType as IbbStanzaType,
-    NS_IBB,
+    validate_data_size, IbbClose, IbbData, IbbError, IbbOpen, StanzaType as IbbStanzaType, NS_IBB,
 };
 
 pub use xep0050::{
@@ -149,8 +148,8 @@ pub use xep0050::{
     is_command_node_disco_info, is_command_request, is_commands_disco_info,
     is_commands_disco_items, parse_command_from_iq, Action as CommandAction,
     AllowedActions as CommandAllowedActions, Command, CommandDefinition, CommandError,
-    Note as CommandNote, NoteType as CommandNoteType, Status as CommandStatus,
-    NODE_COMMANDS, NS_COMMANDS,
+    Note as CommandNote, NoteType as CommandNoteType, Status as CommandStatus, NODE_COMMANDS,
+    NS_COMMANDS,
 };
 
 pub use xep0054::{
@@ -196,15 +195,14 @@ pub use xep0085::{
 pub use xep0184::{
     build_receipt_message, build_receipt_received_element, build_receipt_request_element,
     extract_receipt_from_message, extract_received_id, has_receipt_received, has_receipt_request,
-    is_receipt_received_element, is_receipt_request_element, is_standalone_receipt, set_receipt_received,
-    set_receipt_request, strip_receipts, ReceiptCarrier, ReceiptError, ReceiptKind, NS_RECEIPTS,
+    is_receipt_received_element, is_receipt_request_element, is_standalone_receipt,
+    set_receipt_received, set_receipt_request, strip_receipts, ReceiptCarrier, ReceiptError,
+    ReceiptKind, NS_RECEIPTS,
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
 
-pub use xep0106::{
-    escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping,
-};
+pub use xep0106::{escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping};
 
 pub use xep0172::{
     build_nick_element, extract_nickname_from_message, extract_nickname_from_presence, has_nick,
@@ -263,15 +261,14 @@ pub use xep0334::{
 };
 
 pub use xep0372::{
-    add_reference, build_reference_element, extract_mentioned_jids, extract_mention_uris,
-    extract_references_from_message, has_references, is_reference_element,
-    parse_reference_element, strip_references, Reference, ReferenceCarrier, ReferenceError,
-    ReferenceType, NS_REFERENCE,
+    add_reference, build_reference_element, extract_mention_uris, extract_mentioned_jids,
+    extract_references_from_message, has_references, is_reference_element, parse_reference_element,
+    strip_references, Reference, ReferenceCarrier, ReferenceError, ReferenceType, NS_REFERENCE,
 };
 
 pub use xep0392::{
-    apply_cvd_correction, compute_hue, generate_color, generate_color_with_params,
-    ConsistentColor, CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
+    apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
+    CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
 };
 
 pub use xep0393::{
@@ -281,10 +278,10 @@ pub use xep0393::{
 
 pub use xep0359::{
     add_origin_id, add_stanza_id as add_stanza_id_xep0359, build_origin_id_element,
-    build_stanza_id_element, extract_origin_id as extract_origin_id_xep0359,
-    extract_origin_id_str, extract_stanza_id_by, extract_stanza_ids, has_origin_id, has_stanza_id,
-    is_origin_id_element, is_stanza_id_element, remove_stanza_ids_by, strip_all_ids,
-    OriginId as Xep0359OriginId, StanzaId as Xep0359StanzaId, StanzaIdCarrier, NS_SID,
+    build_stanza_id_element, extract_origin_id as extract_origin_id_xep0359, extract_origin_id_str,
+    extract_stanza_id_by, extract_stanza_ids, has_origin_id, has_stanza_id, is_origin_id_element,
+    is_stanza_id_element, remove_stanza_ids_by, strip_all_ids, OriginId as Xep0359OriginId,
+    StanzaId as Xep0359StanzaId, StanzaIdCarrier, NS_SID,
 };
 
 pub use xep0352::{
@@ -309,10 +306,9 @@ pub use xep0424::{
 };
 
 pub use xep0444::{
-    build_reaction_element, build_reaction_message, build_reactions_element,
-    extract_reacted_id, extract_reactions_from_message, is_reaction_message,
-    is_reactions_element, set_reactions, strip_reactions, ReactionCarrier, ReactionError,
-    ReactionSet, NS_REACTIONS,
+    build_reaction_element, build_reaction_message, build_reactions_element, extract_reacted_id,
+    extract_reactions_from_message, is_reaction_message, is_reactions_element, set_reactions,
+    strip_reactions, ReactionCarrier, ReactionError, ReactionSet, NS_REACTIONS,
 };
 
 pub use xep0402::{
@@ -367,8 +363,8 @@ pub use xep0461::{
 
 pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
-    extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response,
-    RsmError, RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+    extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
+    RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
 };
 
 pub use xep0503::{

@@ -183,8 +183,7 @@ pub fn extract_marker_from_message(msg: &Message) -> Option<Marker> {
 
 /// Extract the referenced message id from a status marker.
 pub fn extract_marker_id(msg: &Message) -> Option<String> {
-    extract_marker_from_message(msg)
-        .and_then(|m| m.referenced_id().map(|s| s.to_owned()))
+    extract_marker_from_message(msg).and_then(|m| m.referenced_id().map(|s| s.to_owned()))
 }
 
 // ── Building ─────────────────────────────────────────────────────────

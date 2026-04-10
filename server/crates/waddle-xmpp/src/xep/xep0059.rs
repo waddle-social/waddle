@@ -143,10 +143,7 @@ impl RsmRequest {
 
     /// Returns `true` if this request contains no pagination parameters.
     pub fn is_empty(&self) -> bool {
-        self.max.is_none()
-            && self.after.is_none()
-            && self.before.is_none()
-            && self.index.is_none()
+        self.max.is_none() && self.after.is_none() && self.before.is_none() && self.index.is_none()
     }
 }
 
@@ -458,11 +455,7 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_max_only() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("max", NS_RSM)
-                    .append("10")
-                    .build(),
-            )
+            .append(Element::builder("max", NS_RSM).append("10").build())
             .build();
 
         let request = parse_rsm_request(&elem).expect("valid RSM request");
@@ -475,16 +468,8 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_forward_pagination() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("max", NS_RSM)
-                    .append("20")
-                    .build(),
-            )
-            .append(
-                Element::builder("after", NS_RSM)
-                    .append("item-123")
-                    .build(),
-            )
+            .append(Element::builder("max", NS_RSM).append("20").build())
+            .append(Element::builder("after", NS_RSM).append("item-123").build())
             .build();
 
         let request = parse_rsm_request(&elem).expect("valid RSM request");
@@ -496,11 +481,7 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_backward_pagination() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("max", NS_RSM)
-                    .append("15")
-                    .build(),
-            )
+            .append(Element::builder("max", NS_RSM).append("15").build())
             .append(
                 Element::builder("before", NS_RSM)
                     .append("item-456")
@@ -517,11 +498,7 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_last_page() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("max", NS_RSM)
-                    .append("10")
-                    .build(),
-            )
+            .append(Element::builder("max", NS_RSM).append("10").build())
             .append(Element::builder("before", NS_RSM).build())
             .build();
 
@@ -534,16 +511,8 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_with_index() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("max", NS_RSM)
-                    .append("10")
-                    .build(),
-            )
-            .append(
-                Element::builder("index", NS_RSM)
-                    .append("50")
-                    .build(),
-            )
+            .append(Element::builder("max", NS_RSM).append("10").build())
+            .append(Element::builder("index", NS_RSM).append("50").build())
             .build();
 
         let request = parse_rsm_request(&elem).expect("valid RSM request");
@@ -568,11 +537,7 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_invalid_index() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("index", NS_RSM)
-                    .append("bad")
-                    .build(),
-            )
+            .append(Element::builder("index", NS_RSM).append("bad").build())
             .build();
 
         let err = parse_rsm_request(&elem).unwrap_err();
@@ -595,16 +560,8 @@ mod tests {
                     .append("item-001")
                     .build(),
             )
-            .append(
-                Element::builder("last", NS_RSM)
-                    .append("item-010")
-                    .build(),
-            )
-            .append(
-                Element::builder("count", NS_RSM)
-                    .append("800")
-                    .build(),
-            )
+            .append(Element::builder("last", NS_RSM).append("item-010").build())
+            .append(Element::builder("count", NS_RSM).append("800").build())
             .build();
 
         let response = parse_rsm_response(&elem).expect("valid RSM response");
@@ -617,11 +574,7 @@ mod tests {
     #[test]
     fn test_parse_rsm_response_count_only() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("count", NS_RSM)
-                    .append("0")
-                    .build(),
-            )
+            .append(Element::builder("count", NS_RSM).append("0").build())
             .build();
 
         let response = parse_rsm_response(&elem).expect("valid RSM response");
@@ -633,11 +586,7 @@ mod tests {
     #[test]
     fn test_parse_rsm_response_invalid_count() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("count", NS_RSM)
-                    .append("abc")
-                    .build(),
-            )
+            .append(Element::builder("count", NS_RSM).append("abc").build())
             .build();
 
         let err = parse_rsm_response(&elem).unwrap_err();
@@ -647,16 +596,8 @@ mod tests {
     #[test]
     fn test_parse_rsm_response_first_without_index() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("first", NS_RSM)
-                    .append("item-abc")
-                    .build(),
-            )
-            .append(
-                Element::builder("last", NS_RSM)
-                    .append("item-xyz")
-                    .build(),
-            )
+            .append(Element::builder("first", NS_RSM).append("item-abc").build())
+            .append(Element::builder("last", NS_RSM).append("item-xyz").build())
             .build();
 
         let response = parse_rsm_response(&elem).expect("valid RSM response");
@@ -779,9 +720,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_request() {
-        let original = RsmRequest::new()
-            .with_max(25)
-            .with_after("msg-999");
+        let original = RsmRequest::new().with_max(25).with_after("msg-999");
         let elem = build_rsm_request_element(&original);
         let parsed = parse_rsm_request(&elem).expect("valid roundtrip");
 
@@ -815,11 +754,7 @@ mod tests {
         let parent = Element::builder("query", "urn:xmpp:mam:2")
             .append(
                 Element::builder("set", NS_RSM)
-                    .append(
-                        Element::builder("max", NS_RSM)
-                            .append("10")
-                            .build(),
-                    )
+                    .append(Element::builder("max", NS_RSM).append("10").build())
                     .build(),
             )
             .build();
@@ -841,11 +776,7 @@ mod tests {
         let parent = Element::builder("fin", "urn:xmpp:mam:2")
             .append(
                 Element::builder("set", NS_RSM)
-                    .append(
-                        Element::builder("count", NS_RSM)
-                            .append("42")
-                            .build(),
-                    )
+                    .append(Element::builder("count", NS_RSM).append("42").build())
                     .build(),
             )
             .build();
@@ -891,15 +822,8 @@ mod tests {
     #[test]
     fn test_parse_rsm_request_ignores_unknown_children() {
         let elem = Element::builder("set", NS_RSM)
-            .append(
-                Element::builder("max", NS_RSM)
-                    .append("10")
-                    .build(),
-            )
-            .append(
-                Element::builder("unknown-ext", "urn:example:ext")
-                    .build(),
-            )
+            .append(Element::builder("max", NS_RSM).append("10").build())
+            .append(Element::builder("unknown-ext", "urn:example:ext").build())
             .build();
 
         let request = parse_rsm_request(&elem).expect("valid RSM request");

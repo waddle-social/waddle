@@ -70,6 +70,7 @@ use crate::stream::{PreAuthResult, SaslAuthResult, XmppStream};
 use crate::stream_management::{SmSessionRegistry, StreamManagementState};
 use crate::types::ConnectionState;
 use crate::types::{Affiliation, Role};
+use crate::xep::xep0012::{build_last_activity_response, is_last_activity_query};
 use crate::xep::xep0049::{
     build_private_storage_result, build_private_storage_success, is_private_storage_query,
     parse_private_storage_get, parse_private_storage_set,
@@ -82,7 +83,6 @@ use crate::xep::xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
     build_unblock_push, is_blocking_query, parse_blocking_request, BlockingRequest,
 };
-use crate::xep::xep0012::{build_last_activity_response, is_last_activity_query};
 use crate::xep::xep0199::{build_ping_result, is_ping};
 use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
 use crate::xep::xep0363::{
@@ -4348,10 +4348,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// 2. Bare JID query for online user → returns seconds=0
     /// 3. Bare JID query for offline/unknown user → returns forbidden (no offline tracking yet)
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
-    async fn handle_last_activity(
-        &mut self,
-        iq: xmpp_parsers::iq::Iq,
-    ) -> Result<(), XmppError> {
+    async fn handle_last_activity(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let _sender_jid = match &self.jid {
             Some(jid) => jid.clone(),
             None => {

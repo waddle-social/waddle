@@ -181,9 +181,8 @@ fn parse_destroy_element(destroy: &Element) -> Result<DestroyRequest, XmppError>
 
 /// Parse a room configuration data form (XEP-0004).
 fn parse_config_form(form_elem: &Element) -> Result<ConfigFormData, XmppError> {
-    let form = DataForm::from_element(form_elem).map_err(|e| {
-        XmppError::bad_request(Some(format!("Invalid data form: {}", e)))
-    })?;
+    let form = DataForm::from_element(form_elem)
+        .map_err(|e| XmppError::bad_request(Some(format!("Invalid data form: {}", e))))?;
 
     let mut config = ConfigFormData::default();
 
@@ -195,10 +194,16 @@ fn parse_config_form(form_elem: &Element) -> Result<ConfigFormData, XmppError> {
 
         match var {
             "muc#roomconfig_roomname" => {
-                config.name = field.value().filter(|v| !v.is_empty()).map(|v| v.to_string());
+                config.name = field
+                    .value()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_string());
             }
             "muc#roomconfig_roomdesc" => {
-                config.description = field.value().filter(|v| !v.is_empty()).map(|v| v.to_string());
+                config.description = field
+                    .value()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_string());
             }
             "muc#roomconfig_persistentroom" => {
                 config.persistent = field.value_as_bool();
@@ -287,9 +292,7 @@ fn build_field_text_single(var: &str, label: &str, value: &str) -> Element {
 /// Build a boolean field for data forms (test helper).
 #[cfg(test)]
 fn build_field_boolean(var: &str, label: &str, value: bool) -> Element {
-    Field::boolean(var, value)
-        .with_label(label)
-        .into_element()
+    Field::boolean(var, value).with_label(label).into_element()
 }
 
 /// Build an owner query result response with the config form.

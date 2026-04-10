@@ -305,10 +305,7 @@ mod tests {
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         let kind = extract_retraction_from_message(&msg).expect("has retraction");
-        assert_eq!(
-            kind,
-            RetractionKind::Request(Retraction::new("msg-42"))
-        );
+        assert_eq!(kind, RetractionKind::Request(Retraction::new("msg-42")));
     }
 
     #[test]

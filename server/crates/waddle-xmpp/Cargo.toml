@@ -48,6 +48,9 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
 
+# HTML rendering
+html-escape = "0.2"
+
 # DNS Resolution
 hickory-resolver = { workspace = true }
 

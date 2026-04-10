@@ -255,8 +255,8 @@ pub fn extract_mentioned_jids(msg: &Message) -> Vec<String> {
 
 /// Build a `<reference/>` element from a Reference.
 pub fn build_reference_element(reference: &Reference) -> Element {
-    let mut builder = Element::builder("reference", NS_REFERENCE)
-        .attr("type", reference.ref_type.as_str());
+    let mut builder =
+        Element::builder("reference", NS_REFERENCE).attr("type", reference.ref_type.as_str());
 
     if let Some(begin) = reference.begin {
         builder = builder.attr("begin", begin.to_string());

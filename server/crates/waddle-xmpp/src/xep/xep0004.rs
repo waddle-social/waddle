@@ -161,10 +161,7 @@ impl FieldType {
 
     /// Whether this field type supports multiple values.
     pub fn is_multi(&self) -> bool {
-        matches!(
-            self,
-            Self::JidMulti | Self::ListMulti | Self::TextMulti
-        )
+        matches!(self, Self::JidMulti | Self::ListMulti | Self::TextMulti)
     }
 }
 
@@ -284,7 +281,11 @@ impl Field {
     /// Create a boolean field with a value.
     pub fn boolean(var: impl Into<String>, value: bool) -> Self {
         let mut f = Self::new(var, FieldType::Boolean);
-        f.values.push(if value { "1".to_string() } else { "0".to_string() });
+        f.values.push(if value {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        });
         f
     }
 
@@ -548,8 +549,8 @@ impl FromElement for Field {
 
 impl IntoElement for Field {
     fn into_element(&self) -> Element {
-        let mut builder = Element::builder("field", NS_DATA_FORMS)
-            .attr("type", self.field_type.as_str());
+        let mut builder =
+            Element::builder("field", NS_DATA_FORMS).attr("type", self.field_type.as_str());
 
         if let Some(ref var) = self.var {
             builder = builder.attr("var", var.as_str());
@@ -651,8 +652,8 @@ impl FromElement for DataForm {
 
 impl IntoElement for DataForm {
     fn into_element(&self) -> Element {
-        let mut builder = Element::builder("x", NS_DATA_FORMS)
-            .attr("type", self.form_type.as_str());
+        let mut builder =
+            Element::builder("x", NS_DATA_FORMS).attr("type", self.form_type.as_str());
 
         if let Some(ref title) = self.title {
             builder = builder.append(
@@ -870,10 +871,7 @@ mod tests {
         assert_eq!(form.title.as_deref(), Some("Registration"));
         assert_eq!(form.instructions, vec!["Fill in the fields below."]);
         assert_eq!(form.fields.len(), 3);
-        assert_eq!(
-            form.get_form_type_value(),
-            Some("jabber:iq:register")
-        );
+        assert_eq!(form.get_form_type_value(), Some("jabber:iq:register"));
         assert_eq!(form.get_value("username"), None); // no value set
     }
 
@@ -890,8 +888,7 @@ mod tests {
 
     #[test]
     fn test_data_form_field_mut() {
-        let mut form = DataForm::new(FormType::Form)
-            .add_field(Field::text_single("name", "old"));
+        let mut form = DataForm::new(FormType::Form).add_field(Field::text_single("name", "old"));
 
         if let Some(f) = form.field_mut("name") {
             f.values = vec!["new".to_string()];
@@ -933,10 +930,7 @@ mod tests {
                     .with_label("Bot Name")
                     .with_required(),
             )
-            .add_field(
-                Field::boolean("public", true)
-                    .with_label("Make public?"),
-            );
+            .add_field(Field::boolean("public", true).with_label("Make public?"));
 
         let elem = original.into_element();
         let parsed = DataForm::from_element(&elem).expect("parse");
@@ -966,15 +960,14 @@ mod tests {
 
     #[test]
     fn test_list_field_round_trip() {
-        let original = DataForm::new(FormType::Form)
-            .add_field(
-                Field::new("color", FieldType::ListSingle)
-                    .with_label("Favorite Color")
-                    .with_value("red")
-                    .add_option(FieldOption::with_label("Red", "red"))
-                    .add_option(FieldOption::with_label("Green", "green"))
-                    .add_option(FieldOption::with_label("Blue", "blue")),
-            );
+        let original = DataForm::new(FormType::Form).add_field(
+            Field::new("color", FieldType::ListSingle)
+                .with_label("Favorite Color")
+                .with_value("red")
+                .add_option(FieldOption::with_label("Red", "red"))
+                .add_option(FieldOption::with_label("Green", "green"))
+                .add_option(FieldOption::with_label("Blue", "blue")),
+        );
 
         let elem = original.into_element();
         let parsed = DataForm::from_element(&elem).expect("parse");
@@ -989,13 +982,12 @@ mod tests {
 
     #[test]
     fn test_multi_value_field_round_trip() {
-        let original = DataForm::new(FormType::Submit)
-            .add_field(
-                Field::new("features", FieldType::ListMulti)
-                    .add_value("chat")
-                    .add_value("video")
-                    .add_value("voice"),
-            );
+        let original = DataForm::new(FormType::Submit).add_field(
+            Field::new("features", FieldType::ListMulti)
+                .add_value("chat")
+                .add_value("video")
+                .add_value("voice"),
+        );
 
         let elem = original.into_element();
         let parsed = DataForm::from_element(&elem).expect("parse");
@@ -1008,12 +1000,8 @@ mod tests {
     fn test_tabular_form_round_trip() {
         let original = DataForm::new(FormType::Result)
             .add_field(Field::form_type("jabber:iq:search"))
-            .add_reported(
-                Field::new("jid", FieldType::JidSingle).with_label("JID"),
-            )
-            .add_reported(
-                Field::new("name", FieldType::TextSingle).with_label("Name"),
-            )
+            .add_reported(Field::new("jid", FieldType::JidSingle).with_label("JID"))
+            .add_reported(Field::new("name", FieldType::TextSingle).with_label("Name"))
             .add_item(vec![
                 Field::text_single("jid", "alice@example.com"),
                 Field::text_single("name", "Alice"),
@@ -1035,13 +1023,12 @@ mod tests {
 
     #[test]
     fn test_required_and_desc_round_trip() {
-        let original = DataForm::new(FormType::Form)
-            .add_field(
-                Field::new("email", FieldType::TextSingle)
-                    .with_label("Email")
-                    .with_desc("Your email address")
-                    .with_required(),
-            );
+        let original = DataForm::new(FormType::Form).add_field(
+            Field::new("email", FieldType::TextSingle)
+                .with_label("Email")
+                .with_desc("Your email address")
+                .with_required(),
+        );
 
         let elem = original.into_element();
         let parsed = DataForm::from_element(&elem).expect("parse");
@@ -1115,9 +1102,7 @@ mod tests {
             .append(
                 Element::builder("x", NS_DATA_FORMS)
                     .attr("type", "submit")
-                    .append(
-                        Field::text_single("name", "test").into_element(),
-                    )
+                    .append(Field::text_single("name", "test").into_element())
                     .build(),
             )
             .build();
@@ -1168,10 +1153,7 @@ mod tests {
 
         let form = DataForm::from_element(&elem).expect("parse");
         assert_eq!(form.form_type, FormType::Result);
-        assert_eq!(
-            form.get_form_type_value(),
-            Some("urn:xmpp:serverinfo:0")
-        );
+        assert_eq!(form.get_form_type_value(), Some("urn:xmpp:serverinfo:0"));
         assert_eq!(
             form.get_value("abuse-addresses"),
             Some("mailto:abuse@example.com")
@@ -1207,11 +1189,7 @@ mod tests {
             .append(
                 Element::builder("field", NS_DATA_FORMS)
                     .attr("var", "muc#roomconfig_persistentroom")
-                    .append(
-                        Element::builder("value", NS_DATA_FORMS)
-                            .append("1")
-                            .build(),
-                    )
+                    .append(Element::builder("value", NS_DATA_FORMS).append("1").build())
                     .build(),
             )
             .build();

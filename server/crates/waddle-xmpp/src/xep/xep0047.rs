@@ -234,7 +234,9 @@ fn parse_ibb_data_element(elem: &Element) -> Result<IbbData, IbbError> {
     let data = if trimmed.is_empty() {
         Vec::new()
     } else {
-        BASE64.decode(trimmed).map_err(|_| IbbError::InvalidBase64)?
+        BASE64
+            .decode(trimmed)
+            .map_err(|_| IbbError::InvalidBase64)?
     };
 
     Ok(IbbData { sid, seq, data })
@@ -334,15 +336,8 @@ pub fn build_ibb_data_element(sid: &str, seq: u16, data: &[u8]) -> Element {
 }
 
 /// Build an IBB `<close/>` IQ-set stanza.
-pub fn build_ibb_close(
-    from: Option<jid::Jid>,
-    to: Option<jid::Jid>,
-    id: &str,
-    sid: &str,
-) -> Iq {
-    let close = Element::builder("close", NS_IBB)
-        .attr("sid", sid)
-        .build();
+pub fn build_ibb_close(from: Option<jid::Jid>, to: Option<jid::Jid>, id: &str, sid: &str) -> Iq {
+    let close = Element::builder("close", NS_IBB).attr("sid", sid).build();
 
     Iq {
         from,
@@ -358,40 +353,24 @@ pub fn build_ibb_close(
 
 /// Build a `<not-acceptable/>` error for when the responder rejects an IBB open.
 pub fn build_ibb_not_acceptable(original_iq: &Iq) -> Iq {
-    build_ibb_error(
-        original_iq,
-        "cancel",
-        "not-acceptable",
-    )
+    build_ibb_error(original_iq, "cancel", "not-acceptable")
 }
 
 /// Build a `<resource-constraint/>` error for when the responder prefers a
 /// smaller block-size.
 pub fn build_ibb_resource_constraint(original_iq: &Iq) -> Iq {
-    build_ibb_error(
-        original_iq,
-        "modify",
-        "resource-constraint",
-    )
+    build_ibb_error(original_iq, "modify", "resource-constraint")
 }
 
 /// Build an `<item-not-found/>` error for when the session ID is unknown.
 pub fn build_ibb_item_not_found(original_iq: &Iq) -> Iq {
-    build_ibb_error(
-        original_iq,
-        "cancel",
-        "item-not-found",
-    )
+    build_ibb_error(original_iq, "cancel", "item-not-found")
 }
 
 /// Build a `<not-acceptable/>` error for when received data violates constraints
 /// (e.g., unexpected sequence number).
 pub fn build_ibb_unexpected_request(original_iq: &Iq) -> Iq {
-    build_ibb_error(
-        original_iq,
-        "cancel",
-        "unexpected-request",
-    )
+    build_ibb_error(original_iq, "cancel", "unexpected-request")
 }
 
 /// Build a generic IBB error response.
@@ -453,30 +432,14 @@ pub fn next_seq(current: u16) -> u16 {
 impl From<IbbError> for XmppError {
     fn from(err: IbbError) -> Self {
         match err {
-            IbbError::BlockSizeTooLarge(_) => {
-                XmppError::not_acceptable(Some(err.to_string()))
-            }
-            IbbError::InvalidBlockSize => {
-                XmppError::bad_request(Some(err.to_string()))
-            }
-            IbbError::MissingSid => {
-                XmppError::bad_request(Some(err.to_string()))
-            }
-            IbbError::InvalidSeq => {
-                XmppError::bad_request(Some(err.to_string()))
-            }
-            IbbError::InvalidStanzaType(_) => {
-                XmppError::bad_request(Some(err.to_string()))
-            }
-            IbbError::DataTooLarge { .. } => {
-                XmppError::not_acceptable(Some(err.to_string()))
-            }
-            IbbError::InvalidBase64 => {
-                XmppError::bad_request(Some(err.to_string()))
-            }
-            IbbError::NotIbb => {
-                XmppError::bad_request(Some(err.to_string()))
-            }
+            IbbError::BlockSizeTooLarge(_) => XmppError::not_acceptable(Some(err.to_string())),
+            IbbError::InvalidBlockSize => XmppError::bad_request(Some(err.to_string())),
+            IbbError::MissingSid => XmppError::bad_request(Some(err.to_string())),
+            IbbError::InvalidSeq => XmppError::bad_request(Some(err.to_string())),
+            IbbError::InvalidStanzaType(_) => XmppError::bad_request(Some(err.to_string())),
+            IbbError::DataTooLarge { .. } => XmppError::not_acceptable(Some(err.to_string())),
+            IbbError::InvalidBase64 => XmppError::bad_request(Some(err.to_string())),
+            IbbError::NotIbb => XmppError::bad_request(Some(err.to_string())),
         }
     }
 }
@@ -674,10 +637,7 @@ mod tests {
         let iq = make_iq_set(elem);
 
         let err = parse_ibb_open(&iq).expect_err("should fail");
-        assert_eq!(
-            err,
-            IbbError::InvalidStanzaType("presence".to_string())
-        );
+        assert_eq!(err, IbbError::InvalidStanzaType("presence".to_string()));
     }
 
     #[test]
@@ -727,9 +687,7 @@ mod tests {
 
     #[test]
     fn test_parse_ibb_data_missing_sid() {
-        let data_elem = Element::builder("data", NS_IBB)
-            .attr("seq", "0")
-            .build();
+        let data_elem = Element::builder("data", NS_IBB).attr("seq", "0").build();
         let iq = make_iq_set(data_elem);
 
         let err = parse_ibb_data_from_iq(&iq).expect_err("should fail");
@@ -1026,13 +984,13 @@ mod tests {
 
     #[test]
     fn test_ibb_error_display() {
-        assert!(IbbError::MissingSid.to_string().contains("missing session ID"));
+        assert!(IbbError::MissingSid
+            .to_string()
+            .contains("missing session ID"));
         assert!(IbbError::InvalidBase64.to_string().contains("base64"));
-        assert!(
-            IbbError::BlockSizeTooLarge(70000)
-                .to_string()
-                .contains("70000")
-        );
+        assert!(IbbError::BlockSizeTooLarge(70000)
+            .to_string()
+            .contains("70000"));
     }
 
     #[test]

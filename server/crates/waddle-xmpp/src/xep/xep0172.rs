@@ -220,8 +220,7 @@ mod tests {
     #[test]
     fn test_set_nickname() {
         let mut msg = Message::new(None::<jid::Jid>);
-        msg.bodies
-            .insert(String::new(), Body("Hi".to_string()));
+        msg.bodies.insert(String::new(), Body("Hi".to_string()));
         set_nickname(&mut msg, "Romeo");
 
         assert!(has_nick(&msg));
@@ -236,13 +235,7 @@ mod tests {
             extract_nickname_from_message(&msg).map(|n| n.0),
             Some("Updated Romeo".to_owned())
         );
-        assert_eq!(
-            msg.payloads
-                .iter()
-                .filter(|e| e.ns() == NS_NICK)
-                .count(),
-            1
-        );
+        assert_eq!(msg.payloads.iter().filter(|e| e.ns() == NS_NICK).count(), 1);
     }
 
     #[test]

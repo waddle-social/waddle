@@ -171,9 +171,7 @@ pub fn build_stanza_id_element(id: &str, by: &str) -> Element {
 
 /// Build an `<origin-id xmlns='urn:xmpp:sid:0' id='...'/>` element.
 pub fn build_origin_id_element(id: &str) -> Element {
-    Element::builder("origin-id", NS_SID)
-        .attr("id", id)
-        .build()
+    Element::builder("origin-id", NS_SID).attr("id", id).build()
 }
 
 // ── Mutation ─────────────────────────────────────────────────────────
@@ -195,9 +193,8 @@ pub fn add_origin_id(msg: &mut Message, id: &str) {
 
 /// Remove all stanza-id elements assigned by a specific entity.
 pub fn remove_stanza_ids_by(msg: &mut Message, by: &str) {
-    msg.payloads.retain(|e| {
-        !(is_stanza_id_element(e) && e.attr("by") == Some(by))
-    });
+    msg.payloads
+        .retain(|e| !(is_stanza_id_element(e) && e.attr("by") == Some(by)));
 }
 
 /// Strip all stanza-id and origin-id elements from a message.

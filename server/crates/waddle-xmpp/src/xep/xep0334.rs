@@ -403,8 +403,7 @@ mod tests {
     #[test]
     fn test_hint_carrier_store_overrides() {
         let mut msg = Message::new(None::<jid::Jid>);
-        msg.bodies
-            .insert(String::new(), Body("test".to_string()));
+        msg.bodies.insert(String::new(), Body("test".to_string()));
         add_hint(&mut msg, Hint::NoStore);
         add_hint(&mut msg, Hint::Store);
 

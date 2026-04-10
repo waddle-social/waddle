@@ -402,8 +402,8 @@ impl FromElement for Note {
 
 impl IntoElement for Note {
     fn into_element(&self) -> Element {
-        let mut builder = Element::builder("note", NS_COMMANDS)
-            .attr("type", self.note_type.as_str());
+        let mut builder =
+            Element::builder("note", NS_COMMANDS).attr("type", self.note_type.as_str());
         builder = builder.append(minidom::Node::Text(self.text.clone()));
         builder.build()
     }
@@ -434,8 +434,8 @@ impl FromElement for AllowedActions {
 
 impl IntoElement for AllowedActions {
     fn into_element(&self) -> Element {
-        let mut builder = Element::builder("actions", NS_COMMANDS)
-            .attr("execute", self.execute_default.as_str());
+        let mut builder =
+            Element::builder("actions", NS_COMMANDS).attr("execute", self.execute_default.as_str());
 
         if self.prev {
             builder = builder.append(Element::builder("prev", NS_COMMANDS).build());
@@ -508,8 +508,7 @@ impl FromElement for Command {
 
 impl IntoElement for Command {
     fn into_element(&self) -> Element {
-        let mut builder = Element::builder("command", NS_COMMANDS)
-            .attr("node", &self.node);
+        let mut builder = Element::builder("command", NS_COMMANDS).attr("node", &self.node);
 
         if let Some(ref sid) = self.session_id {
             builder = builder.attr("sessionid", sid);
@@ -636,12 +635,7 @@ pub fn build_item_not_found(original_iq: &Iq) -> Iq {
 
 /// Build a `bad-sessionid` error (invalid or expired session).
 pub fn build_bad_session_id(original_iq: &Iq) -> Iq {
-    build_command_error(
-        original_iq,
-        "modify",
-        "bad-request",
-        Some("bad-sessionid"),
-    )
+    build_command_error(original_iq, "modify", "bad-request", Some("bad-sessionid"))
 }
 
 /// Build a `session-expired` error.
@@ -661,15 +655,10 @@ pub fn build_session_expired(original_iq: &Iq) -> Iq {
 /// Build a disco#items element for the commands node listing.
 ///
 /// Each tuple is `(node, name)` representing an available command.
-pub fn build_command_items(
-    original_iq: &Iq,
-    commands: &[(&str, &str)],
-    responder_jid: &str,
-) -> Iq {
+pub fn build_command_items(original_iq: &Iq, commands: &[(&str, &str)], responder_jid: &str) -> Iq {
     use crate::disco::items::DISCO_ITEMS_NS;
 
-    let mut query = Element::builder("query", DISCO_ITEMS_NS)
-        .attr("node", NODE_COMMANDS);
+    let mut query = Element::builder("query", DISCO_ITEMS_NS).attr("node", NODE_COMMANDS);
 
     for (node, name) in commands {
         let item = Element::builder("item", DISCO_ITEMS_NS)
@@ -722,9 +711,7 @@ pub fn is_command_node_disco_info(iq: &Iq, node: &str) -> bool {
 
     match &iq.payload {
         IqType::Get(elem) => {
-            elem.name() == "query"
-                && elem.ns() == DISCO_INFO_NS
-                && elem.attr("node") == Some(node)
+            elem.name() == "query" && elem.ns() == DISCO_INFO_NS && elem.attr("node") == Some(node)
         }
         _ => false,
     }
@@ -782,14 +769,8 @@ mod tests {
 
     #[test]
     fn test_status_from_str() {
-        assert_eq!(
-            "executing".parse::<Status>().ok(),
-            Some(Status::Executing)
-        );
-        assert_eq!(
-            "completed".parse::<Status>().ok(),
-            Some(Status::Completed)
-        );
+        assert_eq!("executing".parse::<Status>().ok(), Some(Status::Executing));
+        assert_eq!("completed".parse::<Status>().ok(), Some(Status::Completed));
         assert_eq!("canceled".parse::<Status>().ok(), Some(Status::Canceled));
         assert!("bogus".parse::<Status>().is_err());
     }
@@ -898,9 +879,7 @@ mod tests {
             .with_status(Status::Executing)
             .with_note(Note::info("Step 1"))
             .with_actions(AllowedActions::new(Action::Complete).with_complete())
-            .with_form(DataForm::new(FormType::Form).add_field(
-                Field::text_single("name", ""),
-            ));
+            .with_form(DataForm::new(FormType::Form).add_field(Field::text_single("name", "")));
 
         assert_eq!(cmd.node, "http://example.com/cmd");
         assert_eq!(cmd.session_id.as_deref(), Some("sess-1"));
@@ -933,10 +912,7 @@ mod tests {
             .with_status(Status::Executing)
             .with_actions(AllowedActions::new(Action::Next).with_next().with_prev())
             .with_note(Note::info("Please fill this form"))
-            .with_form(
-                DataForm::new(FormType::Form)
-                    .add_field(Field::text_single("username", "")),
-            );
+            .with_form(DataForm::new(FormType::Form).add_field(Field::text_single("username", "")));
 
         let elem = cmd.into_element();
         let parsed = Command::from_element(&elem).expect("parse command");
@@ -1316,10 +1292,7 @@ mod tests {
             payload: IqType::Get(query),
         };
 
-        let commands = vec![
-            ("cmd-1", "First Command"),
-            ("cmd-2", "Second Command"),
-        ];
+        let commands = vec![("cmd-1", "First Command"), ("cmd-2", "Second Command")];
 
         let result = build_command_items(&iq, &commands, "example.com");
         match &result.payload {
@@ -1343,8 +1316,7 @@ mod tests {
     #[test]
     fn test_multi_step_command_flow() {
         // Step 1: Client sends execute
-        let request = Command::new("change-password")
-            .with_action(Action::Execute);
+        let request = Command::new("change-password").with_action(Action::Execute);
         let request_elem = request.into_element();
         let parsed_request = Command::from_element(&request_elem).expect("parse request");
         assert_eq!(parsed_request.action, Some(Action::Execute));
@@ -1355,8 +1327,7 @@ mod tests {
             .with_status(Status::Executing)
             .with_actions(AllowedActions::new(Action::Complete).with_complete())
             .with_form(
-                DataForm::new(FormType::Form)
-                    .add_field(Field::text_single("new-password", "")),
+                DataForm::new(FormType::Form).add_field(Field::text_single("new-password", "")),
             );
         let response_elem = response.into_element();
         let parsed_response = Command::from_element(&response_elem).expect("parse response");
@@ -1385,7 +1356,10 @@ mod tests {
         let parsed_completed = Command::from_element(&completed_elem).expect("parse completed");
         assert_eq!(parsed_completed.status, Some(Status::Completed));
         assert_eq!(parsed_completed.notes.len(), 1);
-        assert_eq!(parsed_completed.notes[0].text, "Password changed successfully");
+        assert_eq!(
+            parsed_completed.notes[0].text,
+            "Password changed successfully"
+        );
     }
 
     // --- Cancel flow ---

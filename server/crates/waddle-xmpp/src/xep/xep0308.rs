@@ -263,10 +263,7 @@ mod tests {
         assert_eq!(msg.from, Some(from));
         assert_eq!(msg.type_, MessageType::Chat);
         assert!(msg.id.is_some());
-        assert_eq!(
-            msg.bodies.get("").map(|b| b.0.as_str()),
-            Some("Fixed text")
-        );
+        assert_eq!(msg.bodies.get("").map(|b| b.0.as_str()), Some("Fixed text"));
         assert_eq!(extract_replaces_id(&msg), Some("orig-1".to_owned()));
     }
 
@@ -315,10 +312,7 @@ mod tests {
 
         assert!(msg.is_correction());
         assert_eq!(msg.replaces_id(), Some("orig-1".to_owned()));
-        assert_eq!(
-            msg.correction(),
-            Some(Correction::new("orig-1"))
-        );
+        assert_eq!(msg.correction(), Some(Correction::new("orig-1")));
 
         // Non-correction
         let plain = Message::new(None::<jid::Jid>);
