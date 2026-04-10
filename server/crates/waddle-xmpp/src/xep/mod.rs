@@ -15,6 +15,8 @@
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
+//! - **XEP-0106**: JID Escaping - Escape/unescape special characters
+//!   in JID local parts using `\HH` sequences.
 //! - **XEP-0172**: User Nickname - Display name via `<nick/>` element
 //!   in messages and presence stanzas.
 //! - **XEP-0202**: Entity Time - Server time query via IQ get/result
@@ -82,6 +84,7 @@ pub mod xep0050;
 pub mod xep0059;
 pub mod xep0085;
 pub mod xep0049;
+pub mod xep0106;
 pub mod xep0172;
 pub mod xep0184;
 pub mod xep0202;
@@ -192,6 +195,10 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0106::{
+    escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping,
+};
 
 pub use xep0172::{
     build_nick_element, extract_nickname_from_message, extract_nickname_from_presence, has_nick,

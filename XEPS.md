@@ -28,7 +28,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0079 | Advanced Message Processing | Draft |
 | **0082** | **XMPP Date and Time Profiles** | Active |
 | **0085** | **Chat State Notifications** | Final | Implemented |
-| **0106** | **JID Escaping** | Draft |
+| **0106** | **JID Escaping** | Draft | Implemented |
 | **0114** | **Jabber Component Protocol** | Active |
 | **0115** | **Entity Capabilities** | Draft |
 | 0122 | Data Forms Validation | Draft |
