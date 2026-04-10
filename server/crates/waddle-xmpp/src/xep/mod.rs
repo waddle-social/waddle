@@ -25,6 +25,8 @@
 //!   `<forwarded/>` with optional delay, used by carbons and MAM.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
 //!   via `<replace/>` element referencing the original message id.
+//! - **XEP-0319**: Last User Interaction in Presence - Idle detection
+//!   via `<idle since='...'/>` in presence stanzas.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
 //!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
 //! - **XEP-0372**: References - Structured @mentions and data references
@@ -91,6 +93,7 @@ pub mod xep0249;
 pub mod xep0297;
 pub mod xep0300;
 pub mod xep0308;
+pub mod xep0319;
 pub mod xep0333;
 pub mod xep0334;
 pub mod xep0352;
@@ -214,6 +217,11 @@ pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,
     extract_replaces_id, is_correction_message, is_replace_element, set_correction,
     strip_correction, Correction, CorrectionCarrier, CorrectionError, NS_MESSAGE_CORRECT,
+};
+
+pub use xep0319::{
+    add_idle, build_idle_element, extract_idle_from_presence, has_idle, is_idle_element,
+    parse_idle_element, strip_idle, IdleCarrier, IdleError, IdleInfo, NS_IDLE,
 };
 
 pub use xep0333::{
