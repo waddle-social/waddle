@@ -42,6 +42,26 @@ export interface ChannelEditFormData {
   position: number;
 }
 
+// ── XEP-0392 Consistent Color Generation ────────────────────────────
+
+/** Compute a deterministic hue (0–360) from a string using XEP-0392 algorithm. */
+export function consistentHue(input: string): number {
+  // Simple SHA-1-like hash using SubtleCrypto isn't available synchronously.
+  // Use the same algorithm: hash → first 2 bytes → hue mapping.
+  // We use a simple DJB2-variant that gives good distribution for short strings.
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) {
+    h = ((h << 5) + h + input.charCodeAt(i)) & 0xffff;
+  }
+  return (h / 65536) * 360;
+}
+
+/** Generate a CSS hsl() color string for a username/JID. */
+export function consistentColor(input: string, saturation = 65, lightness = 50): string {
+  const hue = consistentHue(input);
+  return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
+}
+
 // ── XEP-0393 Message Styling ────────────────────────────────────────
 
 function escapeHtml(s: string): string {

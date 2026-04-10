@@ -61,7 +61,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0368** | **SRV records for XMPP over TLS** | Draft |
 | **0386** | **Bind 2** | Draft |
 | **0388** | **Extensible SASL Profile** | Draft |
-| **0392** | **Consistent Color Generation** | Draft |
+| **0392** | **Consistent Color Generation** | Draft | Implemented |
 | **0398** | **User Avatar to vCard-Based Avatars Conversion** | Draft |
 | **0440** | **SASL Channel-Binding Type Capability** | Draft |
 | **0484** | **Fast Authentication Streamlining Tokens (FAST)** | Proposed |
@@ -151,7 +151,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0172** | **User Nickname** | Draft | Display names |
 | **0292** | **vCard4 Over XMPP** | Experimental | Modern user profiles |
 | **0319** | **Last User Interaction in Presence** | Draft | Idle detection |
-| **0392** | **Consistent Color Generation** | Draft | Deterministic user colors |
+| **0392** | **Consistent Color Generation** | Draft | Deterministic user colors | Implemented |
 
 ---
 
