@@ -148,7 +148,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0107 | User Mood | Draft | Status moods |
 | 0108 | User Activity | Draft | Custom activity status |
 | **0153** | **vCard-Based Avatars** | Active | Avatar via vCard |
-| **0172** | **User Nickname** | Draft | Display names |
+| **0172** | **User Nickname** | Draft | Display names | Implemented |
 | **0292** | **vCard4 Over XMPP** | Experimental | Modern user profiles |
 | **0319** | **Last User Interaction in Presence** | Draft | Idle detection |
 | **0392** | **Consistent Color Generation** | Draft | Deterministic user colors | Implemented |

@@ -12,6 +12,8 @@
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
+//! - **XEP-0172**: User Nickname - Display name via `<nick/>` element
+//!   in messages and presence stanzas.
 //! - **XEP-0202**: Entity Time - Server time query via IQ get/result
 //!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
@@ -67,6 +69,7 @@ pub mod xep0012;
 pub mod xep0048;
 pub mod xep0085;
 pub mod xep0049;
+pub mod xep0172;
 pub mod xep0184;
 pub mod xep0202;
 pub mod xep0203;
@@ -152,6 +155,11 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0172::{
+    build_nick_element, extract_nickname_from_message, extract_nickname_from_presence, has_nick,
+    is_nick_element, set_nickname, strip_nickname, Nickname, NicknameCarrier, NS_NICK,
+};
 
 pub use xep0202::{
     build_time_response, build_time_response_utc, is_time_query, parse_time_response, NS_TIME,
