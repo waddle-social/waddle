@@ -112,7 +112,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0249 | Direct MUC Invitations | Draft | Invite links |
 | 0306 | Extensible Status Conditions for MUC | Deferred | Custom room status |
 | 0307 | Unique Room Names for MUC | Deferred | Prevent room name collisions |
-| **0317** | **Hats** | Experimental | Roles/badges (admin, mod, etc.) |
+| **0317** | **Hats** | Experimental | Roles/badges (admin, mod, etc.) | Implemented |
 | **0369** | **MIX (Mediated Information eXchange)** | Experimental | Next-gen group chat (MUC successor) |
 | 0403 | MIX: Presence Support | Deferred | MIX presence |
 | 0404 | MIX: JID Hidden Channels | Deferred | Anonymous channels |

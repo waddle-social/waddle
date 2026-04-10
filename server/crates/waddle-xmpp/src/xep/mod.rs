@@ -29,6 +29,8 @@
 //!   `<forwarded/>` with optional delay, used by carbons and MAM.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
 //!   via `<replace/>` element referencing the original message id.
+//! - **XEP-0317**: Hats - Role badges (Admin, Moderator, Bot, Owner) for
+//!   MUC occupants via `<hats/>` in presence, with well-known URIs.
 //! - **XEP-0319**: Last User Interaction in Presence - Idle detection
 //!   via `<idle since='...'/>` in presence stanzas.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
@@ -103,6 +105,7 @@ pub mod xep0249;
 pub mod xep0297;
 pub mod xep0300;
 pub mod xep0308;
+pub mod xep0317;
 pub mod xep0319;
 pub mod xep0333;
 pub mod xep0334;
@@ -233,6 +236,12 @@ pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,
     extract_replaces_id, is_correction_message, is_replace_element, set_correction,
     strip_correction, Correction, CorrectionCarrier, CorrectionError, NS_MESSAGE_CORRECT,
+};
+
+pub use xep0317::{
+    build_hats_element, extract_hats_from_presence, has_hats, hats_from_affiliation,
+    is_hats_element, parse_hats_element, set_hats, strip_hats, Hat, HatCarrier, HatSet,
+    NS_HATS,
 };
 
 pub use xep0319::{
