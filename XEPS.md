@@ -43,7 +43,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0182 | Application-Specific Error Conditions | Active |
 | **0198** | **Stream Management** | Draft |
 | **0199** | **XMPP Ping** | Final |
-| **0202** | **Entity Time** | Final |
+| **0202** | **Entity Time** | Final | Implemented |
 | **0203** | **Delayed Delivery** | Final | Implemented |
 | 0206 | XMPP Over BOSH | Draft |
 | **0220** | **Server Dialback** | Draft |

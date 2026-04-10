@@ -12,6 +12,8 @@
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
+//! - **XEP-0202**: Entity Time - Server time query via IQ get/result
+//!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
 //!   messages via `<delay/>` element with stamp and from attributes.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
@@ -62,6 +64,7 @@ pub mod xep0048;
 pub mod xep0085;
 pub mod xep0049;
 pub mod xep0184;
+pub mod xep0202;
 pub mod xep0203;
 pub mod xep0054;
 pub mod xep0077;
@@ -143,6 +146,10 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0202::{
+    build_time_response, build_time_response_utc, is_time_query, parse_time_response, NS_TIME,
+};
 
 pub use xep0203::{
     add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
