@@ -420,32 +420,14 @@ pub fn build_disco_info_response_with_extensions(
 
 /// Build a server-info data form with an abuse contact (XEP-0157/XEP-0485).
 pub fn build_server_info_abuse_form(domain: &str) -> Element {
+    use crate::xep::xep0004::{DataForm, Field, FormType, IntoElement};
+
     let abuse_address = format!("mailto:abuse@{}", domain);
 
-    Element::builder("x", "jabber:x:data")
-        .attr("type", "result")
-        .append(
-            Element::builder("field", "jabber:x:data")
-                .attr("var", "FORM_TYPE")
-                .attr("type", "hidden")
-                .append(
-                    Element::builder("value", "jabber:x:data")
-                        .append("urn:xmpp:serverinfo:0")
-                        .build(),
-                )
-                .build(),
-        )
-        .append(
-            Element::builder("field", "jabber:x:data")
-                .attr("var", "abuse-addresses")
-                .append(
-                    Element::builder("value", "jabber:x:data")
-                        .append(abuse_address)
-                        .build(),
-                )
-                .build(),
-        )
-        .build()
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type("urn:xmpp:serverinfo:0"))
+        .add_field(Field::text_single("abuse-addresses", abuse_address))
+        .into_element()
 }
 
 /// Get the standard server features.

@@ -23,6 +23,7 @@
 
 use minidom::Element;
 
+use super::xep0004::{DataForm, Field, FormType, IntoElement};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::xep::xep0402;
 use crate::{ChannelInfo, WaddleDetails, XmppError};
@@ -58,22 +59,23 @@ pub fn build_channel_item(
 /// Includes all metadata fields specified by XEP-0503: type, title, description,
 /// owner, creation date, and access model.
 pub fn build_spaces_metadata_form(waddle: &WaddleDetails) -> Element {
-    let mut form = Element::builder("x", "jabber:x:data")
-        .attr("type", "result")
-        .append(build_hidden_field(
-            "FORM_TYPE",
+    let mut form = DataForm::new(FormType::Result)
+        .add_field(Field::form_type(
             "http://jabber.org/protocol/pubsub#meta-data",
         ))
-        .append(build_field("pubsub#type", NS_SPACES))
-        .append(build_field("pubsub#title", &waddle.name));
+        .add_field(Field::text_single("pubsub#type", NS_SPACES))
+        .add_field(Field::text_single("pubsub#title", &waddle.name));
 
     if let Some(ref desc) = waddle.description {
-        form = form.append(build_field("pubsub#description", desc));
+        form = form.add_field(Field::text_single("pubsub#description", desc));
     }
 
-    form.append(build_field("pubsub#owner", &waddle.owner_id))
-        .append(build_field("pubsub#creation_date", &waddle.created_at))
-        .append(build_field(
+    form.add_field(Field::text_single("pubsub#owner", &waddle.owner_id))
+        .add_field(Field::text_single(
+            "pubsub#creation_date",
+            &waddle.created_at,
+        ))
+        .add_field(Field::text_single(
             "pubsub#access_model",
             if waddle.is_public {
                 "open"
@@ -81,7 +83,7 @@ pub fn build_spaces_metadata_form(waddle: &WaddleDetails) -> Element {
                 "whitelist"
             },
         ))
-        .build()
+        .into_element()
 }
 
 /// Build a simple `pubsub#type` data form indicating a spaces node.
@@ -89,39 +91,12 @@ pub fn build_spaces_metadata_form(waddle: &WaddleDetails) -> Element {
 /// Lighter-weight alternative to `build_spaces_metadata_form` when only the
 /// node type needs to be advertised.
 pub fn build_spaces_type_form() -> Element {
-    Element::builder("x", "jabber:x:data")
-        .attr("type", "result")
-        .append(build_hidden_field(
-            "FORM_TYPE",
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(
             "http://jabber.org/protocol/pubsub#meta-data",
         ))
-        .append(build_field("pubsub#type", NS_SPACES))
-        .build()
-}
-
-/// Build a data form field with a single value.
-fn build_field(var: &str, value: &str) -> Element {
-    Element::builder("field", "jabber:x:data")
-        .attr("var", var)
-        .append(
-            Element::builder("value", "jabber:x:data")
-                .append(value)
-                .build(),
-        )
-        .build()
-}
-
-/// Build a hidden FORM_TYPE field.
-fn build_hidden_field(var: &str, value: &str) -> Element {
-    Element::builder("field", "jabber:x:data")
-        .attr("var", var)
-        .attr("type", "hidden")
-        .append(
-            Element::builder("value", "jabber:x:data")
-                .append(value)
-                .build(),
-        )
-        .build()
+        .add_field(Field::text_single("pubsub#type", NS_SPACES))
+        .into_element()
 }
 
 #[cfg(test)]

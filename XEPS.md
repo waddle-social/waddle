@@ -12,7 +12,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 
 | XEP | Title | Status |
 |-----|-------|--------|
-| **0004** | **Data Forms** | Final |
+| **0004** | **Data Forms** | Final | Implemented |
 | 0009 | Jabber-RPC | Final |
 | **0012** | **Last Activity** | Final | Implemented |
 | **0030** | **Service Discovery** | Final |

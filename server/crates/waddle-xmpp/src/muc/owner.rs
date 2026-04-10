@@ -16,10 +16,11 @@ use xmpp_parsers::iq::{Iq, IqType};
 use xmpp_parsers::presence::Presence;
 
 use super::{MucRoom, RoomConfig, NS_MUC_OWNER};
+use crate::xep::xep0004::{self, DataForm, Field, FormType, FromElement, IntoElement};
 use crate::XmppError;
 
-/// Namespace for XEP-0004 Data Forms.
-pub const DATA_FORMS_NS: &str = "jabber:x:data";
+/// Namespace for XEP-0004 Data Forms (re-exported for backward compatibility).
+pub const DATA_FORMS_NS: &str = xep0004::NS_DATA_FORMS;
 
 /// Namespace for MUC roomconfig form type.
 pub const MUC_ROOMCONFIG_NS: &str = "http://jabber.org/protocol/muc#roomconfig";
@@ -179,47 +180,45 @@ fn parse_destroy_element(destroy: &Element) -> Result<DestroyRequest, XmppError>
 }
 
 /// Parse a room configuration data form (XEP-0004).
-fn parse_config_form(form: &Element) -> Result<ConfigFormData, XmppError> {
+fn parse_config_form(form_elem: &Element) -> Result<ConfigFormData, XmppError> {
+    let form = DataForm::from_element(form_elem).map_err(|e| {
+        XmppError::bad_request(Some(format!("Invalid data form: {}", e)))
+    })?;
+
     let mut config = ConfigFormData::default();
 
-    for field in form.children() {
-        if field.name() != "field" {
-            continue;
-        }
-
-        let var = field.attr("var").unwrap_or("");
-        let value = field
-            .children()
-            .find(|c| c.name() == "value")
-            .map(|v| v.text());
+    for field in &form.fields {
+        let var = match field.var.as_deref() {
+            Some(v) => v,
+            None => continue,
+        };
 
         match var {
             "muc#roomconfig_roomname" => {
-                config.name = value.filter(|v| !v.is_empty());
+                config.name = field.value().filter(|v| !v.is_empty()).map(|v| v.to_string());
             }
             "muc#roomconfig_roomdesc" => {
-                config.description = value.filter(|v| !v.is_empty());
+                config.description = field.value().filter(|v| !v.is_empty()).map(|v| v.to_string());
             }
             "muc#roomconfig_persistentroom" => {
-                config.persistent = value.map(|v| parse_boolean(&v));
+                config.persistent = field.value_as_bool();
             }
             "muc#roomconfig_membersonly" => {
-                config.members_only = value.map(|v| parse_boolean(&v));
+                config.members_only = field.value_as_bool();
             }
             "muc#roomconfig_moderatedroom" => {
-                config.moderated = value.map(|v| parse_boolean(&v));
+                config.moderated = field.value_as_bool();
             }
             "muc#roomconfig_maxusers" => {
-                config.max_occupants = value.and_then(|v| v.parse().ok());
+                config.max_occupants = field.value().and_then(|v| v.parse().ok());
             }
             "muc#roomconfig_enablelogging" => {
-                config.enable_logging = value.map(|v| parse_boolean(&v));
+                config.enable_logging = field.value_as_bool();
             }
             "FORM_TYPE" => {
                 // Ignore the FORM_TYPE field
             }
             _ => {
-                // Ignore unknown fields
                 debug!(field = var, "Ignoring unknown room config field");
             }
         }
@@ -228,113 +227,69 @@ fn parse_config_form(form: &Element) -> Result<ConfigFormData, XmppError> {
     Ok(config)
 }
 
-/// Parse a boolean value from a data form field.
-///
-/// XEP-0004 boolean values can be: "1", "true", "0", "false"
-fn parse_boolean(s: &str) -> bool {
-    matches!(s, "1" | "true")
-}
-
 /// Build a room configuration form (XEP-0004) for GET requests.
 ///
 /// Creates a data form with the current room settings for the owner to modify.
 pub fn build_config_form(room: &MucRoom) -> Element {
-    let mut form = Element::builder("x", DATA_FORMS_NS).attr("type", "form");
-
-    // FORM_TYPE field (required, hidden)
-    form = form.append(build_field_hidden("FORM_TYPE", MUC_ROOMCONFIG_NS));
-
-    // Room name
-    form = form.append(build_field_text_single(
-        "muc#roomconfig_roomname",
-        "Room Name",
-        &room.config.name,
-    ));
-
-    // Room description
-    form = form.append(build_field_text_single(
-        "muc#roomconfig_roomdesc",
-        "Room Description",
-        room.config.description.as_deref().unwrap_or(""),
-    ));
-
-    // Persistent room
-    form = form.append(build_field_boolean(
-        "muc#roomconfig_persistentroom",
-        "Make Room Persistent",
-        room.config.persistent,
-    ));
-
-    // Members-only room
-    form = form.append(build_field_boolean(
-        "muc#roomconfig_membersonly",
-        "Make Room Members-Only",
-        room.config.members_only,
-    ));
-
-    // Moderated room
-    form = form.append(build_field_boolean(
-        "muc#roomconfig_moderatedroom",
-        "Make Room Moderated",
-        room.config.moderated,
-    ));
-
-    // Max occupants (0 = unlimited)
-    form = form.append(build_field_text_single(
-        "muc#roomconfig_maxusers",
-        "Maximum Number of Occupants",
-        &room.config.max_occupants.to_string(),
-    ));
-
-    // Enable logging
-    form = form.append(build_field_boolean(
-        "muc#roomconfig_enablelogging",
-        "Enable Room Logging",
-        room.config.enable_logging,
-    ));
-
-    form.build()
+    DataForm::new(FormType::Form)
+        .add_field(Field::form_type(MUC_ROOMCONFIG_NS))
+        .add_field(
+            Field::text_single("muc#roomconfig_roomname", &room.config.name)
+                .with_label("Room Name"),
+        )
+        .add_field(
+            Field::text_single(
+                "muc#roomconfig_roomdesc",
+                room.config.description.as_deref().unwrap_or(""),
+            )
+            .with_label("Room Description"),
+        )
+        .add_field(
+            Field::boolean("muc#roomconfig_persistentroom", room.config.persistent)
+                .with_label("Make Room Persistent"),
+        )
+        .add_field(
+            Field::boolean("muc#roomconfig_membersonly", room.config.members_only)
+                .with_label("Make Room Members-Only"),
+        )
+        .add_field(
+            Field::boolean("muc#roomconfig_moderatedroom", room.config.moderated)
+                .with_label("Make Room Moderated"),
+        )
+        .add_field(
+            Field::text_single(
+                "muc#roomconfig_maxusers",
+                room.config.max_occupants.to_string(),
+            )
+            .with_label("Maximum Number of Occupants"),
+        )
+        .add_field(
+            Field::boolean("muc#roomconfig_enablelogging", room.config.enable_logging)
+                .with_label("Enable Room Logging"),
+        )
+        .into_element()
 }
 
-/// Build a hidden field for data forms.
+/// Build a hidden field for data forms (test helper).
+#[cfg(test)]
 fn build_field_hidden(var: &str, value: &str) -> Element {
-    Element::builder("field", DATA_FORMS_NS)
-        .attr("var", var)
-        .attr("type", "hidden")
-        .append(
-            Element::builder("value", DATA_FORMS_NS)
-                .append(value)
-                .build(),
-        )
-        .build()
+    Field::hidden(var, value).into_element()
 }
 
-/// Build a text-single field for data forms.
+/// Build a text-single field for data forms (test helper).
+#[cfg(test)]
 fn build_field_text_single(var: &str, label: &str, value: &str) -> Element {
-    Element::builder("field", DATA_FORMS_NS)
-        .attr("var", var)
-        .attr("type", "text-single")
-        .attr("label", label)
-        .append(
-            Element::builder("value", DATA_FORMS_NS)
-                .append(value)
-                .build(),
-        )
-        .build()
+    Field::text_single(var, value)
+        .with_label(label)
+        .into_element()
 }
 
-/// Build a boolean field for data forms.
+/// Build a boolean field for data forms (test helper).
+#[cfg(test)]
 fn build_field_boolean(var: &str, label: &str, value: bool) -> Element {
-    Element::builder("field", DATA_FORMS_NS)
-        .attr("var", var)
-        .attr("type", "boolean")
-        .attr("label", label)
-        .append(
-            Element::builder("value", DATA_FORMS_NS)
-                .append(if value { "1" } else { "0" })
-                .build(),
-        )
-        .build()
+    Field::boolean(var, value)
+        .with_label(label)
+        .into_element()
 }
 
 /// Build an owner query result response with the config form.
@@ -619,12 +574,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_boolean() {
-        assert!(parse_boolean("1"));
-        assert!(parse_boolean("true"));
-        assert!(!parse_boolean("0"));
-        assert!(!parse_boolean("false"));
-        assert!(!parse_boolean(""));
+    fn test_parse_boolean_via_field() {
+        use crate::xep::xep0004::Field;
+
+        // "1" and "true" should be true
+        assert_eq!(Field::boolean("t", true).value_as_bool(), Some(true));
+        let f = Field::new("t", crate::xep::xep0004::FieldType::Boolean).with_value("true");
+        assert_eq!(f.value_as_bool(), Some(true));
+
+        // "0" and "false" should be false
+        assert_eq!(Field::boolean("t", false).value_as_bool(), Some(false));
+        let f = Field::new("t", crate::xep::xep0004::FieldType::Boolean).with_value("false");
+        assert_eq!(f.value_as_bool(), Some(false));
+
+        // Empty string should be false
+        let f = Field::new("t", crate::xep::xep0004::FieldType::Boolean).with_value("");
+        assert_eq!(f.value_as_bool(), Some(false));
     }
 
     #[test]

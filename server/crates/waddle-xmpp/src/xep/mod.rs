@@ -5,6 +5,8 @@
 //!
 //! ## Implemented XEPs
 //!
+//! - **XEP-0004**: Data Forms - Typed data form exchange for configuration,
+//!   search, and reporting workflows.
 //! - **XEP-0012**: Last Activity - Server uptime and user last activity queries.
 //! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
 //! - **XEP-0049**: Private XML Storage - Arbitrary per-user XML key-value store.
@@ -30,6 +32,7 @@
 //! - **XEP-0461**: Message Replies - Reply references and thread metadata.
 //! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub (read-only Phase A).
 
+pub mod xep0004;
 pub mod xep0012;
 pub mod xep0048;
 pub mod xep0049;
@@ -48,6 +51,11 @@ pub mod xep0398;
 pub mod xep0402;
 pub mod xep0461;
 pub mod xep0503;
+
+pub use xep0004::{
+    find_data_form, is_data_form, DataForm, DataFormError, Field, FieldOption, FieldType, FormType,
+    FromElement, IntoElement, NS_DATA_FORMS,
+};
 
 pub use xep0012::{build_last_activity_response, is_last_activity_query, NS_LAST_ACTIVITY};
 
