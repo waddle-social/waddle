@@ -157,6 +157,11 @@ impl Feature {
         Self::new("http://jabber.org/protocol/bytestreams")
     }
 
+    /// XEP-0012 Last Activity feature
+    pub fn last_activity() -> Self {
+        Self::new("jabber:iq:last")
+    }
+
     /// XEP-0191 Blocking Command feature
     pub fn blocking() -> Self {
         Self::new("urn:xmpp:blocking")
@@ -462,6 +467,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::http_upload(),
         Feature::socks5_bytestreams(),
         Feature::blocking(),
+        Feature::last_activity(),
         Feature::ping(),
         Feature::extdisco(),
         Feature::server_info(),

@@ -82,6 +82,7 @@ use crate::xep::xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
     build_unblock_push, is_blocking_query, parse_blocking_request, BlockingRequest,
 };
+use crate::xep::xep0012::{build_last_activity_response, is_last_activity_query};
 use crate::xep::xep0199::{build_ping_result, is_ping};
 use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
 use crate::xep::xep0363::{
@@ -3625,6 +3626,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_ping(iq).await;
         }
 
+        // Check if this is a last activity query (XEP-0012)
+        if is_last_activity_query(&iq) {
+            return self.handle_last_activity(iq).await;
+        }
+
         // Check if this is an external service discovery request (XEP-0215)
         if matches!(
             &iq.payload,
@@ -4332,6 +4338,95 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Default ping response (server or component)
         let response = build_ping_result(&iq);
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
+        Ok(())
+    }
+
+    /// Handle XEP-0012 Last Activity query.
+    ///
+    /// Handles three cases:
+    /// 1. Server query (to=domain) → returns server uptime
+    /// 2. Bare JID query for online user → returns seconds=0
+    /// 3. Bare JID query for offline/unknown user → returns forbidden (no offline tracking yet)
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_last_activity(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
+        let _sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Last activity query received before JID bound");
+                return Err(XmppError::not_authorized(Some(
+                    "Session not established".to_string(),
+                )));
+            }
+        };
+
+        let target = match &iq.to {
+            Some(to) => to.clone(),
+            None => {
+                // No target → treat as server query
+                let response = build_last_activity_response(&iq, 0, None);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                return Ok(());
+            }
+        };
+
+        // Case 1: Server/component query (bare domain, no node)
+        if target.node().is_none() && target.domain().as_str() == self.domain {
+            // We don't track server start time yet, so return 0
+            // TODO: Pass server_start_time through to connections for accurate uptime
+            let response = build_last_activity_response(&iq, 0, None);
+            self.stream.write_stanza(&Stanza::Iq(response)).await?;
+            return Ok(());
+        }
+
+        // Case 2 & 3: User query (bare JID)
+        if target.node().is_some() && target.domain().as_str() == self.domain {
+            let target_bare = target.to_bare();
+
+            // Check if the target user has any connected resources
+            let resources = self
+                .connection_registry
+                .get_resources_for_user(&target_bare);
+
+            if !resources.is_empty() {
+                // User is online → seconds=0
+                let response = build_last_activity_response(&iq, 0, None);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                return Ok(());
+            }
+
+            // User is offline or doesn't exist → forbidden
+            // Per XEP-0012: server MUST NOT return last activity info if
+            // the requesting entity is not authorized (no presence subscription).
+            // Since we don't track offline last-activity times yet, return forbidden.
+            let error_to = iq.from.as_ref().map(|j| j.to_string());
+            let error_from = iq.to.as_ref().map(|j| j.to_string());
+            let error = crate::generate_iq_error(
+                &iq.id,
+                error_to.as_deref(),
+                error_from.as_deref(),
+                crate::StanzaErrorCondition::Forbidden,
+                crate::StanzaErrorType::Auth,
+                None,
+            );
+            self.stream.write_raw(&error).await?;
+            return Ok(());
+        }
+
+        // Query to a remote domain or full JID → return service-unavailable
+        let error_to = iq.from.as_ref().map(|j| j.to_string());
+        let error_from = iq.to.as_ref().map(|j| j.to_string());
+        let error = crate::generate_iq_error(
+            &iq.id,
+            error_to.as_deref(),
+            error_from.as_deref(),
+            crate::StanzaErrorCondition::ServiceUnavailable,
+            crate::StanzaErrorType::Cancel,
+            None,
+        );
+        self.stream.write_raw(&error).await?;
         Ok(())
     }
 
