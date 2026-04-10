@@ -18,6 +18,8 @@ export interface LiveRoomMessage {
   replacesId?: string;
   /** XEP-0424: ID of the message this retracts, if any */
   retractsId?: string;
+  /** XEP-0372: Mentioned JIDs/nicks */
+  mentions?: string[];
 }
 
 /** XEP-0085 chat state types */
@@ -39,6 +41,8 @@ const REACTIONS_NS = "urn:xmpp:reactions:0";
 
 /** XEP-0333 namespace */
 const CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
+
+
 
 export interface DisplayedEvent {
   roomJid: string;
@@ -245,6 +249,17 @@ export class BrowserXmppClient {
       if (replacesId) {
         liveMsg.replacesId = replacesId;
       }
+
+      // XEP-0372: Extract mention references
+      const mentionUris: string[] = stanza.children
+        .filter((c: XmppElement) => c.is("reference") && c.attrs?.type === "mention")
+        .map((c: XmppElement) => (c.attrs?.uri as string) ?? "")
+        .filter((u: string) => u.length > 0)
+        .map((u: string) => u.replace(/^xmpp:/, ""));
+      if (mentionUris.length > 0) {
+        liveMsg.mentions = mentionUris;
+      }
+
       this.messageHandler?.(liveMsg);
     });
 

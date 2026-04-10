@@ -19,6 +19,7 @@ const props = defineProps<{
   isSending: boolean;
   canManageChannels: boolean;
   typingUsers: string[];
+  currentUser?: string;
 }>();
 
 const emit = defineEmits<{
@@ -101,6 +102,7 @@ watch(
           v-for="msg in messages"
           :key="msg.id"
           :message="msg"
+          :current-user="props.currentUser"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"

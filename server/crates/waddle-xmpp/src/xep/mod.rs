@@ -18,6 +18,8 @@
 //!   via `<replace/>` element referencing the original message id.
 //! - **XEP-0333**: Displayed Markers - Read receipts via `<markable/>`,
 //!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
+//! - **XEP-0372**: References - Structured @mentions and data references
+//!   via `<reference/>` elements with type, position, and URI.
 //! - **XEP-0392**: Consistent Color Generation - Deterministic HSL colors
 //!   from input strings via SHA-1 hue mapping with CVD correction.
 //! - **XEP-0393**: Message Styling - Inline text formatting parser for
@@ -76,6 +78,7 @@ pub mod xep0334;
 pub mod xep0352;
 pub mod xep0359;
 pub mod xep0363;
+pub mod xep0372;
 pub mod xep0392;
 pub mod xep0393;
 pub mod xep0398;
@@ -164,6 +167,13 @@ pub use xep0334::{
     add_hint, build_hint_element, extract_hints_from_message, has_hint, is_hint_element,
     remove_hint, should_skip_carbons, should_skip_storage, strip_hints, Hint, HintCarrier,
     NS_HINTS,
+};
+
+pub use xep0372::{
+    add_reference, build_reference_element, extract_mentioned_jids, extract_mention_uris,
+    extract_references_from_message, has_references, is_reference_element,
+    parse_reference_element, strip_references, Reference, ReferenceCarrier, ReferenceError,
+    ReferenceType, NS_REFERENCE,
 };
 
 pub use xep0392::{

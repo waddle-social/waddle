@@ -21,6 +21,8 @@ export interface TimelineMessage {
   reactions?: Record<string, string[]>;
   /** Users who have seen this message (XEP-0333). */
   readBy?: string[];
+  /** Mentioned JIDs/nicks in this message (XEP-0372). */
+  mentions?: string[];
 }
 
 export interface CommunityFormData {

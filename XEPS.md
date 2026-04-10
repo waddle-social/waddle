@@ -86,7 +86,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references | Implemented |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
-| **0372** | **References** | Experimental | @mentions in messages |
+| **0372** | **References** | Experimental | @mentions in messages | Implemented |
 | 0382 | Spoiler messages | Deferred | Content warnings / spoiler tags |
 | **0393** | **Message Styling** | Draft | Bold, italic, code formatting | Implemented |
 | 0394 | Message Markup | Experimental | Structured text markup |

@@ -21,13 +21,17 @@ function toTimelineMessage(session: WaddleSession, msg: ChannelMessage): Timelin
 }
 
 function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
-  return {
+  const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
     body: msg.body,
     createdAt: msg.createdAt,
     isSelf: msg.nick === session.username,
   };
+  if (msg.mentions && msg.mentions.length > 0) {
+    tm.mentions = msg.mentions;
+  }
+  return tm;
 }
 
 export function formatStamp(value: string) {

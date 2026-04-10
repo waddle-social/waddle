@@ -7,6 +7,7 @@ import { formatStamp } from "@/composables/useMessaging";
 
 const props = defineProps<{
   message: TimelineMessage;
+  currentUser?: string;
 }>();
 
 const emit = defineEmits<{
@@ -18,6 +19,13 @@ const emit = defineEmits<{
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
 const styledHtml = computed(() => renderStyledBody(props.message.body));
+
+const isMentioned = computed(() => {
+  if (!props.currentUser || !props.message.mentions) return false;
+  return props.message.mentions.some(
+    (m) => m === props.currentUser || m.split("@")[0] === props.currentUser,
+  );
+});
 
 const isEditing = ref(false);
 const editDraft = ref("");
@@ -72,8 +80,11 @@ function onEditKeydown(e: KeyboardEvent) {
   <!-- Normal message -->
   <div
     v-else
-    class="group flex gap-4 border border-foreground p-4 transition-colors"
-    :class="message.isSelf ? 'bg-muted/30' : ''"
+    class="group flex gap-4 border p-4 transition-colors"
+    :class="[
+      message.isSelf ? 'bg-muted/30 border-foreground' : 'border-foreground',
+      isMentioned ? 'border-l-4 border-l-yellow-500 bg-yellow-500/5' : '',
+    ]"
   >
     <AppAvatar :name="message.author" size="md" />
     <div class="flex-1 min-w-0">
