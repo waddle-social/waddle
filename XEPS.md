@@ -121,7 +121,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras |
 | 0408 | MIX: Co-existence with MUC | Deferred | MIX/MUC bridge |
 | **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms |
-| **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities |
+| **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented |
 | **0433** | **Extended Channel Search** | Deferred | Channel/room discovery |
 | 0436 | MUC Presence Versioning | Deferred | Efficient presence updates |
 | **0437** | **Room Activity Indicators** | Deferred | Unread / activity badges |

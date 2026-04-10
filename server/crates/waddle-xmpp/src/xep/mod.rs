@@ -40,6 +40,8 @@
 //! - **XEP-0359**: Unique and Stable Stanza IDs - Server-assigned `<stanza-id/>`
 //!   and client-assigned `<origin-id/>` for stable message referencing.
 //! - **XEP-0334**: Message Processing Hints
+//! - **XEP-0421**: Occupant Identifiers - Stable opaque IDs for MUC
+//!   occupants via HMAC-SHA-256, added by server to messages/presence.
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
 //! - **XEP-0444**: Message Reactions
@@ -106,6 +108,7 @@ pub mod xep0372;
 pub mod xep0392;
 pub mod xep0393;
 pub mod xep0398;
+pub mod xep0421;
 pub mod xep0424;
 pub mod xep0402;
 pub mod xep0444;
@@ -269,6 +272,13 @@ pub use xep0352::{
     build_csi_feature, classify_message_urgency, classify_presence_urgency,
     data_contains_csi_active, data_contains_csi_inactive, is_csi_active, is_csi_inactive,
     is_muc_mention, ClientState, StanzaUrgency, MAX_CSI_BUFFER_SIZE, NS_CSI,
+};
+
+pub use xep0421::{
+    build_occupant_id_element, extract_occupant_id_from_message, extract_occupant_id_from_presence,
+    generate_occupant_id, is_occupant_id_element, set_occupant_id_on_message,
+    set_occupant_id_on_presence, strip_occupant_id_from_message, strip_occupant_id_from_presence,
+    OccupantId, OccupantIdCarrier, NS_OCCUPANT_ID,
 };
 
 pub use xep0424::{
