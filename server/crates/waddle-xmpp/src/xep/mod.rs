@@ -16,6 +16,8 @@
 //!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
 //!   messages via `<delay/>` element with stamp and from attributes.
+//! - **XEP-0300**: Cryptographic Hash Functions - Standardized hash algorithm
+//!   references with SHA-1/SHA-256/SHA-512 computation and verification.
 //! - **XEP-0297**: Stanza Forwarding - Wraps forwarded stanzas in
 //!   `<forwarded/>` with optional delay, used by carbons and MAM.
 //! - **XEP-0308**: Last Message Correction - Replace previously sent messages
@@ -78,6 +80,7 @@ pub mod xep0199;
 pub mod xep0223;
 pub mod xep0249;
 pub mod xep0297;
+pub mod xep0300;
 pub mod xep0308;
 pub mod xep0333;
 pub mod xep0334;
@@ -158,6 +161,11 @@ pub use xep0203::{
     add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
     extract_delay_from_message, extract_delay_stamp, has_delay, is_delay_element,
     parse_delay_element, strip_delay, DelayCarrier, DelayError, DelayInfo, NS_DELAY,
+};
+
+pub use xep0300::{
+    build_hash_element, compute_hash, parse_hash_element, sha1_hex, sha256_base64, sha256_hex,
+    verify_hash, HashAlgo, HashError, HashValue, Hashable, NS_HASHES,
 };
 
 pub use xep0297::{
