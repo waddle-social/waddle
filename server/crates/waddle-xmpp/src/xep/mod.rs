@@ -47,6 +47,8 @@
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0447**: Stateless File Sharing - Structured file sharing with
+//!   metadata and download sources, building on XEP-0446 and XEP-0363.
 //! - **XEP-0446**: File Metadata Element - Structured file info (name, size,
 //!   type, dimensions) for file sharing messages. - Emoji reactions via `<reactions/>`
 //!   element containing `<reaction>` children. - Control server-side processing
@@ -116,6 +118,7 @@ pub mod xep0424;
 pub mod xep0402;
 pub mod xep0444;
 pub mod xep0446;
+pub mod xep0447;
 pub mod xep0461;
 pub mod xep0503;
 
@@ -335,6 +338,12 @@ pub use xep0398::{
 };
 
 pub use xep0223::{is_private_storage_node, FEATURE_ACCESS_WHITELIST, FEATURE_PERSISTENT_ITEMS};
+
+pub use xep0447::{
+    build_file_sharing_element, extract_file_sharing_from_message, has_file_sharing,
+    is_file_sharing_element, parse_file_sharing_element, set_file_sharing, strip_file_sharing,
+    Disposition, FileSharing, FileSharingCarrier, Source, NS_SFS, NS_URL_DATA,
+};
 
 pub use xep0446::{
     build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
