@@ -17,10 +17,12 @@ defineProps<{
   isLoadingMessages: boolean;
   isSending: boolean;
   canManageChannels: boolean;
+  typingUsers: string[];
 }>();
 
 const emit = defineEmits<{
   send: [];
+  typing: [];
   editChannel: [];
 }>();
 </script>
@@ -86,6 +88,16 @@ const emit = defineEmits<{
       </div>
     </div>
 
+    <!-- Typing indicator -->
+    <div
+      v-if="typingUsers.length > 0"
+      class="px-6 py-1.5 text-xs font-mono text-muted-foreground flex-shrink-0"
+    >
+      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing...</span>
+      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing...</span>
+      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing...</span>
+    </div>
+
     <!-- Composer -->
     <MessageComposer
       v-if="channel"
@@ -94,6 +106,7 @@ const emit = defineEmits<{
       :is-sending="isSending"
       :disabled="!channel"
       @send="emit('send')"
+      @typing="emit('typing')"
     />
   </div>
 </template>

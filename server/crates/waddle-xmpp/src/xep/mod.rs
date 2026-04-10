@@ -8,6 +8,8 @@
 //! - **XEP-0004**: Data Forms - Typed data form exchange for configuration,
 //!   search, and reporting workflows.
 //! - **XEP-0012**: Last Activity - Server uptime and user last activity queries.
+//! - **XEP-0085**: Chat State Notifications - Typing indicators and
+//!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
 //! - **XEP-0049**: Private XML Storage - Arbitrary per-user XML key-value store.
 //! - **XEP-0054**: vcard-temp - User profile information via vCard format.
@@ -35,6 +37,7 @@
 pub mod xep0004;
 pub mod xep0012;
 pub mod xep0048;
+pub mod xep0085;
 pub mod xep0049;
 pub mod xep0054;
 pub mod xep0077;
@@ -90,6 +93,13 @@ pub use xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
     build_unblock_push, is_block_set, is_blocking_query, is_blocklist_get, is_unblock_set,
     parse_blocking_request, BlockingError, BlockingRequest, NS_BLOCKING,
+};
+
+pub use xep0085::{
+    build_chat_state_element, build_chat_state_message, extract_chat_state_from_message,
+    is_chat_state_element, is_standalone_notification, parse_chat_state, set_chat_state,
+    strip_chat_states, ChatState as Xep0085ChatState, ChatStateCarrier, ChatStateError,
+    NS_CHATSTATES,
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};

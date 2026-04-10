@@ -27,7 +27,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0077** | **In-Band Registration** | Final |
 | 0079 | Advanced Message Processing | Draft |
 | **0082** | **XMPP Date and Time Profiles** | Active |
-| **0085** | **Chat State Notifications** | Final |
+| **0085** | **Chat State Notifications** | Final | Implemented |
 | **0106** | **JID Escaping** | Draft |
 | **0114** | **Jabber Component Protocol** | Active |
 | **0115** | **Entity Capabilities** | Draft |
@@ -77,7 +77,7 @@ XEPs for rich messaging features expected in a modern community app.
 
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
-| **0085** | **Chat State Notifications** | Final | Typing indicators |
+| **0085** | **Chat State Notifications** | Final | Typing indicators | Implemented |
 | **0184** | **Message Delivery Receipts** | Draft | Delivery confirmation |
 | **0280** | **Message Carbons** | Draft | Multi-device message sync |
 | **0308** | **Last Message Correction** | Draft | Edit messages |

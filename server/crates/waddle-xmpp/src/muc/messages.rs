@@ -6,6 +6,7 @@ use jid::{BareJid, FullJid, Jid};
 use tracing::debug;
 use xmpp_parsers::message::{Message, MessageType};
 
+use crate::xep::xep0085::{self, ChatStateCarrier};
 use crate::XmppError;
 
 /// Represents a parsed MUC message ready for routing.
@@ -95,6 +96,23 @@ impl MucMessage {
     /// messages with a <subject/> element but no <body/> element.
     pub fn is_subject_change(&self) -> bool {
         self.has_subject() && !self.has_body()
+    }
+
+    /// Check if this message carries a chat state notification (XEP-0085).
+    pub fn has_chat_state(&self) -> bool {
+        self.message.has_chat_state()
+    }
+
+    /// Extract the chat state from this MUC message (XEP-0085).
+    pub fn chat_state(&self) -> Option<xep0085::ChatState> {
+        self.message.chat_state()
+    }
+
+    /// Returns `true` if this is a standalone chat state notification (no body).
+    ///
+    /// These should be broadcast to occupants but not archived.
+    pub fn is_chat_state_only(&self) -> bool {
+        self.message.is_standalone_chat_state()
     }
 }
 

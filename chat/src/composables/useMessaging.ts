@@ -6,6 +6,7 @@ import {
   roomBareJidFor,
   type LiveRoomMessage,
   type XmppStatusSnapshot,
+  type ChatStateType,
 } from "@/lib/xmpp-client";
 import type { TimelineMessage } from "@/lib/chat-ui";
 
@@ -58,8 +59,12 @@ export function useMessaging(
   const isLoadingMessages = ref(false);
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
+  const typingUsers = ref<string[]>([]);
 
   let messageRequestId = 0;
+  let lastChatState: ChatStateType = "active";
+  let composingTimeout: ReturnType<typeof setTimeout> | null = null;
+  const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeWaddleId.value || !activeChannelId.value) return null;
@@ -75,15 +80,78 @@ export function useMessaging(
           msg.type !== "message"
         )
           return;
+        // When a user sends a real message, clear their typing state
+        removeTypingUser(msg.nick);
         mergeLiveMessage(fromLiveMessage(session.value!, msg));
       });
       client.setStatusHandler((status) => {
         xmppStatus.value = status;
       });
+      client.setChatStateHandler((event) => {
+        if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
+        if (event.state === "composing") {
+          addTypingUser(event.nick);
+        } else {
+          removeTypingUser(event.nick);
+        }
+      });
     } else {
       xmppStatus.value = { state: "offline", detail: "Live room offline" };
+      clearTypingState();
     }
   });
+
+  function addTypingUser(nick: string) {
+    if (!typingUsers.value.includes(nick)) {
+      typingUsers.value = [...typingUsers.value, nick];
+    }
+    // Auto-expire after 5 seconds (in case we miss a "paused" notification)
+    const existing = typingTimers.get(nick);
+    if (existing) clearTimeout(existing);
+    typingTimers.set(
+      nick,
+      setTimeout(() => removeTypingUser(nick), 5000),
+    );
+  }
+
+  function removeTypingUser(nick: string) {
+    const timer = typingTimers.get(nick);
+    if (timer) {
+      clearTimeout(timer);
+      typingTimers.delete(nick);
+    }
+    if (typingUsers.value.includes(nick)) {
+      typingUsers.value = typingUsers.value.filter((n) => n !== nick);
+    }
+  }
+
+  function clearTypingState() {
+    for (const timer of typingTimers.values()) clearTimeout(timer);
+    typingTimers.clear();
+    typingUsers.value = [];
+    lastChatState = "active";
+    if (composingTimeout) {
+      clearTimeout(composingTimeout);
+      composingTimeout = null;
+    }
+  }
+
+  function notifyComposing() {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+
+    if (lastChatState !== "composing") {
+      lastChatState = "composing";
+      xmppClient.value.sendChatState(activeWaddleId.value, activeChannelId.value, "composing");
+    }
+
+    // Reset the pause timer: if user stops typing for 3s, send "paused"
+    if (composingTimeout) clearTimeout(composingTimeout);
+    composingTimeout = setTimeout(() => {
+      if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+      lastChatState = "paused";
+      xmppClient.value.sendChatState(activeWaddleId.value, activeChannelId.value, "paused");
+    }, 3000);
+  }
 
   async function scrollToBottom() {
     await nextTick();
@@ -136,6 +204,7 @@ export function useMessaging(
   async function selectChannel(channelId: string) {
     if (!activeWaddleId.value) return;
     messages.value = [];
+    clearTypingState();
     await loadMessages(activeWaddleId.value, channelId);
   }
 
@@ -158,6 +227,13 @@ export function useMessaging(
         draft.value,
       );
       draft.value = "";
+      // Send "active" state after sending a message (stops composing indicator)
+      if (composingTimeout) {
+        clearTimeout(composingTimeout);
+        composingTimeout = null;
+      }
+      lastChatState = "active";
+      await xmppClient.value.sendChatState(activeWaddleId.value, activeChannelId.value, "active");
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
@@ -167,6 +243,7 @@ export function useMessaging(
 
   function disconnect() {
     xmppStatus.value = { state: "offline", detail: "Live room offline" };
+    clearTypingState();
   }
 
   function clearMessages() {
@@ -181,9 +258,11 @@ export function useMessaging(
     isSending,
     timelineEl,
     currentRoomJid,
+    typingUsers,
     loadMessages,
     selectChannel,
     sendMessage,
+    notifyComposing,
     disconnect,
     clearMessages,
     scrollToBottom,

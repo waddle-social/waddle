@@ -424,7 +424,9 @@ onUnmounted(() => {
         :is-loading-messages="messaging.isLoadingMessages.value"
         :is-sending="messaging.isSending.value"
         :can-manage-channels="waddles.canManageChannels.value"
+        :typing-users="messaging.typingUsers.value"
         @send="messaging.sendMessage"
+        @typing="messaging.notifyComposing"
         @edit-channel="openChannelEdit"
       />
     </div>

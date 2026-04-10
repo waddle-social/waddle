@@ -16,6 +16,17 @@ export interface LiveRoomMessage {
   type: "message" | "subject";
 }
 
+/** XEP-0085 chat state types */
+export type ChatStateType = "active" | "composing" | "paused" | "inactive" | "gone";
+
+const CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
+
+export interface ChatStateEvent {
+  roomJid: string;
+  nick: string;
+  state: ChatStateType;
+}
+
 export interface DiscoveredWaddle {
   id: string;
   name: string;
@@ -55,6 +66,7 @@ export class BrowserXmppClient {
   private readonly session: WaddleSession;
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
+  private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
 
@@ -68,6 +80,10 @@ export class BrowserXmppClient {
 
   setStatusHandler(handler: (status: XmppStatusSnapshot) => void) {
     this.statusHandler = handler;
+  }
+
+  setChatStateHandler(handler: (event: ChatStateEvent) => void) {
+    this.chatStateHandler = handler;
   }
 
   async connect() {
@@ -112,6 +128,17 @@ export class BrowserXmppClient {
       const [roomJid, nick = "unknown"] = from.split("/");
       if (!roomJid || roomJid !== this.currentRoom) {
         return;
+      }
+
+      // XEP-0085: Check for chat state notifications
+      if (nick !== this.session.username) {
+        const chatStateNames: ChatStateType[] = ["active", "composing", "paused", "inactive", "gone"];
+        for (const name of chatStateNames) {
+          if (stanza.getChild(name)) {
+            this.chatStateHandler?.({ roomJid, nick, state: name });
+            break;
+          }
+        }
       }
 
       const body = stanza.getChildText("body");
@@ -309,6 +336,21 @@ export class BrowserXmppClient {
         ),
       );
     }
+  }
+
+  async sendChatState(waddleId: string, channelId: string, state: ChatStateType) {
+    if (!this.xmpp) return;
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml(state, CHATSTATES_NS),
+      ),
+    );
   }
 
   async sendGroupMessage(waddleId: string, channelId: string, body: string) {

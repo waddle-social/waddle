@@ -11,6 +11,7 @@ defineProps<{
 
 const emit = defineEmits<{
   send: [];
+  typing: [];
 }>();
 
 function onKeydown(e: KeyboardEvent) {
@@ -28,7 +29,7 @@ function onKeydown(e: KeyboardEvent) {
       :placeholder="`Message #${channelName}`"
       :disabled="disabled"
       class="flex-1 font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 bg-background text-sm h-9"
-      @input="draft = ($event.target as HTMLInputElement).value"
+      @input="draft = ($event.target as HTMLInputElement).value; emit('typing')"
       @keydown="onKeydown"
     />
     <button
