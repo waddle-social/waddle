@@ -22,6 +22,9 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   if (msg.mentions && msg.mentions.length > 0) {
     tm.mentions = msg.mentions;
   }
+  if (msg.sharedFile) {
+    tm.sharedFile = msg.sharedFile;
+  }
   if (msg.broadcastMention) {
     tm.broadcastMention = msg.broadcastMention;
   }
@@ -316,7 +319,7 @@ export function useMessaging(
             nick: msg.nick,
             emojis: reactionMsg._reactionEmojis,
           });
-        } else if (msg.body || msg.callInvite) {
+        } else if (msg.body || msg.callInvite || msg.sharedFile) {
           regularMessages.push(msg);
         }
       }

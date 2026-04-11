@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video } from "lucide-vue-next";
+import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
 import type { OccupantHat } from "@/lib/xmpp-client";
@@ -30,6 +30,16 @@ const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
 const styledHtml = computed(() => renderStyledBody(props.message.body));
 const isGif = computed(() => isImageUrl(props.message.body));
+const isSharedImage = computed(() => {
+  const f = props.message.sharedFile;
+  return f && f.disposition === "inline" && f.mediaType?.startsWith("image/");
+});
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 const isMentioned = computed(() => {
   // XEP-0513: Broadcast mentions highlight for everyone
@@ -185,6 +195,41 @@ function onEditKeydown(e: KeyboardEvent) {
             class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
           >Join</a>
         </div>
+      </div>
+
+      <!-- XEP-0447: Shared file (image inline) -->
+      <div v-else-if="isSharedImage && message.sharedFile" class="mt-1">
+        <a :href="message.sharedFile.url" target="_blank" rel="noopener noreferrer">
+          <img
+            :src="message.sharedFile.url"
+            :alt="message.sharedFile.name ?? 'Shared image'"
+            class="max-w-xs max-h-64 border border-foreground/20 object-contain"
+            loading="lazy"
+          />
+        </a>
+        <div v-if="message.sharedFile.name" class="text-xs font-mono text-muted-foreground mt-0.5">
+          {{ message.sharedFile.name }}
+          <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
+        </div>
+      </div>
+
+      <!-- XEP-0447: Shared file (non-image download card) -->
+      <div v-else-if="message.sharedFile" class="mt-1">
+        <a
+          :href="message.sharedFile.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-3 border border-foreground p-3 hover:bg-muted transition-colors"
+        >
+          <FileDown class="w-5 h-5 flex-shrink-0" />
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-sm font-bold truncate">{{ message.sharedFile.name ?? "File" }}</div>
+            <div class="text-xs font-mono text-muted-foreground">
+              {{ message.sharedFile.mediaType ?? "file" }}
+              <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
+            </div>
+          </div>
+        </a>
       </div>
 
       <!-- Inline image/GIF -->

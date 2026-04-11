@@ -20,10 +20,24 @@ export interface LiveRoomMessage {
   retractsId?: string;
   /** XEP-0372: Mentioned JIDs/nicks */
   mentions?: string[];
+  /** XEP-0446/0447: Shared file info */
+  sharedFile?: SharedFileInfo;
   /** XEP-0513: Broadcast mention type (everyone/here) */
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483: Call invite or meeting info */
   callInvite?: CallInviteInfo;
+}
+
+/** XEP-0446/0447: Shared file metadata */
+export interface SharedFileInfo {
+  name?: string;
+  mediaType?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  desc?: string;
+  url: string;
+  disposition: "inline" | "attachment";
 }
 
 /** XEP-0482 + XEP-0483: Call invite data extracted from a message */
@@ -134,6 +148,38 @@ function occupantJidFor(
   channelId: string,
 ) {
   return `${roomBareJidFor(session, waddleId, channelId)}/${session.username}`;
+}
+
+/** Parse XEP-0447 <file-sharing> from a stanza/message element. */
+function parseFileSharing(el: XmppElement): SharedFileInfo | undefined {
+  const fsEl = el.getChild("file-sharing");
+  if (!fsEl) return undefined;
+
+  const fileEl = fsEl.getChild("file");
+  const sourcesEl = fsEl.getChild("sources");
+  const urlData = sourcesEl?.children.find((c: XmppElement) => c.is("url-data"));
+  const url = urlData?.attrs?.target as string | undefined;
+  if (!url) return undefined;
+
+  const disposition = ((fsEl.attrs?.disposition as string) ?? "inline") === "attachment" ? "attachment" as const : "inline" as const;
+  const info: SharedFileInfo = { url, disposition };
+
+  if (fileEl) {
+    const name = fileEl.getChildText("name");
+    if (name) info.name = name;
+    const mediaType = fileEl.getChildText("media-type");
+    if (mediaType) info.mediaType = mediaType;
+    const size = fileEl.getChildText("size");
+    if (size) info.size = parseInt(size, 10);
+    const width = fileEl.getChildText("width");
+    if (width) info.width = parseInt(width, 10);
+    const height = fileEl.getChildText("height");
+    if (height) info.height = parseInt(height, 10);
+    const desc = fileEl.getChildText("desc");
+    if (desc) info.desc = desc;
+  }
+
+  return info;
 }
 
 export class BrowserXmppClient {
@@ -463,6 +509,12 @@ export class BrowserXmppClient {
         liveMsg.callInvite = invite;
       }
 
+      // XEP-0447: Parse file sharing
+      const sharedFile = parseFileSharing(stanza);
+      if (sharedFile) {
+        liveMsg.sharedFile = sharedFile;
+      }
+
       this.messageHandler?.(liveMsg);
     });
 
@@ -626,6 +678,12 @@ export class BrowserXmppClient {
                     const desc = meetingEl?.attrs?.desc as string | undefined;
                     if (desc) invite.meetingDesc = desc;
                     msg.callInvite = invite;
+                  }
+
+                  // XEP-0447: Parse file sharing from MAM
+                  const sharedFile = parseFileSharing(innerMsg);
+                  if (sharedFile) {
+                    msg.sharedFile = sharedFile;
                   }
 
                   collected.push(msg);
