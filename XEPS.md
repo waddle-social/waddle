@@ -91,7 +91,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0393** | **Message Styling** | Draft | Bold, italic, code formatting | Implemented |
 | 0394 | Message Markup | Experimental | Structured text markup |
 | **0424** | **Message Retraction** | Proposed | Delete messages | Implemented |
-| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages |
+| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented |
 | 0428 | Fallback Indication | Experimental | Graceful degradation |
 | **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented |
 | **0461** | **Message Replies** | Experimental | Threaded replies |
@@ -210,7 +210,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0133** | **Service Administration** | Active | Server admin |
 | **0191** | **Blocking Command** | Draft | Block users |
 | **0377** | **Blocking Command Reports** | Proposed | Report abuse |
-| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages |
+| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented |
 | **0489** | **Reporting Account Affiliations** | Experimental | Trust signals |
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting |
 | 0158 | CAPTCHA Forms | Draft | Bot prevention |

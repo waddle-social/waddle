@@ -48,6 +48,8 @@
 //!   occupants via HMAC-SHA-256, added by server to messages/presence.
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
+//! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
+//!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
 //! - **XEP-0447**: Stateless File Sharing - Structured file sharing with
 //!   metadata and download sources, building on XEP-0446 and XEP-0363.
@@ -119,6 +121,7 @@ pub mod xep0398;
 pub mod xep0402;
 pub mod xep0421;
 pub mod xep0424;
+pub mod xep0425;
 pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
@@ -303,6 +306,13 @@ pub use xep0424::{
     is_retract_element, is_retracted_element, is_retraction_message, is_tombstone_message,
     set_retraction, strip_retraction, Retracted, Retraction, RetractionCarrier, RetractionError,
     RetractionKind, NS_MESSAGE_RETRACT,
+};
+
+pub use xep0425::{
+    build_moderation_request, build_moderation_request_element, build_moderation_result_element,
+    build_moderation_result_message, extract_moderation_request, extract_moderation_result,
+    is_moderation_request_message, is_moderation_result_message, ModerationCarrier,
+    ModerationRequest, ModerationResult, NS_FASTEN, NS_MESSAGE_MODERATE,
 };
 
 pub use xep0444::{

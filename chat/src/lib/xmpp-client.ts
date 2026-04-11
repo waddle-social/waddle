@@ -36,6 +36,10 @@ const MESSAGE_CORRECT_NS = "urn:xmpp:message-correct:0";
 /** XEP-0424 namespace */
 const MESSAGE_RETRACT_NS = "urn:xmpp:message-retract:1";
 
+/** XEP-0425 namespaces */
+const MESSAGE_MODERATE_NS = "urn:xmpp:message-moderate:1";
+const FASTEN_NS = "urn:xmpp:fasten:0";
+
 /** XEP-0444 namespace */
 const REACTIONS_NS = "urn:xmpp:reactions:0";
 
@@ -183,6 +187,30 @@ export class BrowserXmppClient {
           if (stanza.getChild(name)) {
             this.chatStateHandler?.({ roomJid, nick, state: name });
             break;
+          }
+        }
+      }
+
+      // XEP-0425: Check for moderation result (before retraction check)
+      const applyToEl = stanza.getChild("apply-to");
+      if (applyToEl) {
+        const moderatedEl = applyToEl.children.find(
+          (c: XmppElement) => c.is("moderated"),
+        );
+        if (moderatedEl) {
+          const moderatedId = applyToEl.attrs?.id as string | undefined;
+          if (moderatedId) {
+            const retractMsg: LiveRoomMessage = {
+              id: stanza.attrs.id ?? crypto.randomUUID(),
+              roomJid,
+              nick,
+              body: "",
+              createdAt: new Date().toISOString(),
+              type: "message",
+              retractsId: moderatedId,
+            };
+            this.messageHandler?.(retractMsg);
+            return;
           }
         }
       }
@@ -505,6 +533,31 @@ export class BrowserXmppClient {
         },
         xml("body", {}, "This person attempted to retract a previous message."),
         xml("retract", { xmlns: MESSAGE_RETRACT_NS, id: retractsId }),
+      ),
+    );
+  }
+
+  async sendModeration(waddleId: string, channelId: string, targetId: string, reason?: string) {
+    if (!this.xmpp) return;
+
+    const moderateChildren = [xml("retract", { xmlns: MESSAGE_RETRACT_NS })];
+    if (reason) {
+      moderateChildren.push(xml("reason", MESSAGE_MODERATE_NS, reason));
+    }
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          id: crypto.randomUUID(),
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml(
+          "apply-to",
+          { xmlns: FASTEN_NS, id: targetId },
+          xml("moderate", MESSAGE_MODERATE_NS, ...moderateChildren),
+        ),
       ),
     );
   }

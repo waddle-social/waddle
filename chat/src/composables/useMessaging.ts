@@ -397,6 +397,23 @@ export function useMessaging(
     }
   }
 
+  async function moderateMessage(messageId: string, reason?: string) {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+
+    clearActionError();
+
+    try {
+      await xmppClient.value.sendModeration(
+        activeWaddleId.value,
+        activeChannelId.value,
+        messageId,
+        reason,
+      );
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    }
+  }
+
   async function editMessage(messageId: string, newBody: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !newBody.trim())
       return;
@@ -438,6 +455,7 @@ export function useMessaging(
     sendMessage,
     editMessage,
     retractMessage,
+    moderateMessage,
     toggleReaction,
     markDisplayed,
     notifyComposing,
