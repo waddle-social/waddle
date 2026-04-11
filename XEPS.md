@@ -172,7 +172,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0446** | **File Metadata Element** | Experimental | File metadata (size, type, etc.) | Implemented |
 | **0447** | **Stateless File Sharing** | Experimental | Share files without state | Implemented |
 | 0448 | Encryption for Stateless File Sharing | Experimental | Encrypted file sharing |
-| **0449** | **Stickers** | Experimental | Sticker packs |
+| **0449** | **Stickers** | Experimental | Sticker packs | Implemented |
 | 0498 | Pubsub File Sharing | Experimental | Shared file repositories |
 | 0264 | Jingle Content Thumbnails | Experimental | Image thumbnails |
 

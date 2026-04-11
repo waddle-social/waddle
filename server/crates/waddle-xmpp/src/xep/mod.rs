@@ -55,6 +55,8 @@
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
 //!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0449**: Stickers - Sticker packs and sticker messages with
+//!   pack references, built on XEP-0446/0447 file sharing.
 //! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
 //!   notification elements and per-room unread mention counter.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
@@ -140,6 +142,7 @@ pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
 pub mod xep0461;
+pub mod xep0449;
 pub mod xep0452;
 pub mod xep0469;
 pub mod xep0488;
@@ -403,6 +406,12 @@ pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+};
+
+pub use xep0449::{
+    build_sticker_element, build_sticker_message, extract_sticker_ref, is_sticker_element,
+    is_sticker_message, set_sticker_ref, strip_sticker_ref, Sticker, StickerCarrier, StickerPack,
+    StickerRef, NS_STICKERS,
 };
 
 pub use xep0452::{
