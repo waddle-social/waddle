@@ -39,6 +39,8 @@
 //!   `<displayed/>`, `<received/>`, and `<acknowledged/>` elements.
 //! - **XEP-0372**: References - Structured @mentions and data references
 //!   via `<reference/>` elements with type, position, and URI.
+//! - **XEP-0377**: Spam Reporting - Abuse/spam reports with reasons
+//!   attached to blocking actions, with server-side report storage.
 //! - **XEP-0392**: Consistent Color Generation - Deterministic HSL colors
 //!   from input strings via SHA-1 hue mapping with CVD correction.
 //! - **XEP-0393**: Message Styling - Inline text formatting parser for
@@ -138,6 +140,7 @@ pub mod xep0352;
 pub mod xep0359;
 pub mod xep0363;
 pub mod xep0372;
+pub mod xep0377;
 pub mod xep0392;
 pub mod xep0393;
 pub mod xep0398;
@@ -305,6 +308,11 @@ pub use xep0372::{
     add_reference, build_reference_element, extract_mention_uris, extract_mentioned_jids,
     extract_references_from_message, has_references, is_reference_element, parse_reference_element,
     strip_references, Reference, ReferenceCarrier, ReferenceError, ReferenceType, NS_REFERENCE,
+};
+
+pub use xep0377::{
+    build_report_element, is_report_element, parse_report, Report, ReportReason, ReportRecord,
+    ReportStore, NS_REPORTING,
 };
 
 pub use xep0392::{

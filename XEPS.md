@@ -209,7 +209,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0050** | **Ad-Hoc Commands** | Draft | Admin commands | Implemented |
 | **0133** | **Service Administration** | Active | Server admin |
 | **0191** | **Blocking Command** | Draft | Block users |
-| **0377** | **Blocking Command Reports** | Proposed | Report abuse |
+| **0377** | **Blocking Command Reports** | Proposed | Report abuse | Implemented |
 | **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented |
 | **0489** | **Reporting Account Affiliations** | Experimental | Trust signals |
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting |
