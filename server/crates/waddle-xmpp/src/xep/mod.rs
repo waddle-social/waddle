@@ -23,6 +23,8 @@
 //!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
 //!   messages via `<delay/>` element with stamp and from attributes.
+//! - **XEP-0292**: vCard4 Over XMPP - Modern user profiles via PEP with
+//!   full name, nickname, email, photo, bio, and more.
 //! - **XEP-0300**: Cryptographic Hash Functions - Standardized hash algorithm
 //!   references with SHA-1/SHA-256/SHA-512 computation and verification.
 //! - **XEP-0297**: Stanza Forwarding - Wraps forwarded stanzas in
@@ -114,6 +116,7 @@ pub mod xep0202;
 pub mod xep0203;
 pub mod xep0223;
 pub mod xep0249;
+pub mod xep0292;
 pub mod xep0297;
 pub mod xep0300;
 pub mod xep0308;
@@ -235,6 +238,11 @@ pub use xep0203::{
     add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
     extract_delay_from_message, extract_delay_stamp, has_delay, is_delay_element,
     parse_delay_element, strip_delay, DelayCarrier, DelayError, DelayInfo, NS_DELAY,
+};
+
+pub use xep0292::{
+    build_vcard4_element, is_vcard4_element, parse_vcard4, VCard4, VCard4Error, NS_VCARD4,
+    PEP_NODE_VCARD4,
 };
 
 pub use xep0300::{
