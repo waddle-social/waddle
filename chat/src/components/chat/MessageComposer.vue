@@ -12,6 +12,7 @@ const props = defineProps<{
   disabled: boolean;
   tenorApiKey: string;
   memberNames: string[];
+  slowModeCooldown: number;
 }>();
 
 const emit = defineEmits<{
@@ -216,18 +217,20 @@ function onGifSelected(url: string) {
     <input
       ref="inputEl"
       :value="draft"
-      :placeholder="`Message #${channelName}`"
-      :disabled="disabled"
+      :placeholder="slowModeCooldown > 0 ? `Slow mode — wait ${slowModeCooldown}s` : `Message #${channelName}`"
+      :disabled="disabled || slowModeCooldown > 0"
       class="flex-1 font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 bg-background text-sm h-9"
+      :class="slowModeCooldown > 0 ? 'opacity-50' : ''"
       @input="onInput"
       @keydown="onKeydown"
     />
     <button
       class="h-9 w-9 flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors disabled:opacity-50 flex-shrink-0"
-      :disabled="isSending || disabled || !draft.trim()"
+      :disabled="isSending || disabled || !draft.trim() || slowModeCooldown > 0"
       @click="emit('send')"
     >
-      <Send class="w-3.5 h-3.5" />
+      <span v-if="slowModeCooldown > 0" class="text-[10px] font-mono font-bold">{{ slowModeCooldown }}</span>
+      <Send v-else class="w-3.5 h-3.5" />
     </button>
   </div>
 </template>

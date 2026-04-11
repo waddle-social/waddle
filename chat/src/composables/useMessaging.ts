@@ -66,6 +66,8 @@ export function useMessaging(
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const typingUsers = ref<string[]>([]);
   const roomHats = ref<RoomHats>({});
+  const slowModeCooldown = ref(0);
+  let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let messageRequestId = 0;
   let lastChatState: ChatStateType = "active";
@@ -124,6 +126,20 @@ export function useMessaging(
       });
       client.setHatsHandler((hats) => {
         roomHats.value = hats;
+      });
+      client.setSlowModeHandler((seconds) => {
+        slowModeCooldown.value = seconds;
+        if (slowModeTimer) clearInterval(slowModeTimer);
+        slowModeTimer = setInterval(() => {
+          slowModeCooldown.value--;
+          if (slowModeCooldown.value <= 0) {
+            slowModeCooldown.value = 0;
+            if (slowModeTimer) {
+              clearInterval(slowModeTimer);
+              slowModeTimer = null;
+            }
+          }
+        }, 1000);
       });
     } else {
       xmppStatus.value = { state: "offline", detail: "Live room offline" };
@@ -464,6 +480,7 @@ export function useMessaging(
     currentRoomJid,
     typingUsers,
     roomHats,
+    slowModeCooldown,
     loadMessages,
     selectChannel,
     sendMessage,

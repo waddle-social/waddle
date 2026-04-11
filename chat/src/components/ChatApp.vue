@@ -433,6 +433,7 @@ onUnmounted(() => {
         :tenor-api-key="props.tenorApiKey"
         :member-names="waddles.members.value.map((m) => m.username)"
         :room-hats="messaging.roomHats.value"
+        :slow-mode-cooldown="messaging.slowModeCooldown.value"
         @send="messaging.sendMessage"
         @typing="messaging.notifyComposing"
         @select-gif="sendGif"

@@ -23,6 +23,7 @@ const props = defineProps<{
   tenorApiKey: string;
   memberNames: string[];
   roomHats: RoomHats;
+  slowModeCooldown: number;
 }>();
 
 const emit = defineEmits<{
@@ -134,6 +135,7 @@ watch(
       :disabled="!channel"
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
+      :slow-mode-cooldown="slowModeCooldown"
       @send="emit('send')"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"

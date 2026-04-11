@@ -121,6 +121,7 @@ export class BrowserXmppClient {
   private displayedHandler: ((event: DisplayedEvent) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
+  private slowModeHandler: ((seconds: number) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
@@ -153,6 +154,10 @@ export class BrowserXmppClient {
 
   setHatsHandler(handler: (hats: RoomHats) => void) {
     this.hatsHandler = handler;
+  }
+
+  setSlowModeHandler(handler: (seconds: number) => void) {
+    this.slowModeHandler = handler;
   }
 
   setRoomDisconnectHandler(handler: () => void) {
@@ -248,6 +253,23 @@ export class BrowserXmppClient {
       }
 
       if (!stanza.is("message")) {
+        return;
+      }
+
+      // XEP-0500: Handle slow mode error responses
+      if (stanza.attrs.type === "error") {
+        const errorEl = stanza.getChild("error");
+        if (errorEl) {
+          const policyViolation = errorEl.getChild("policy-violation");
+          if (policyViolation) {
+            const text = errorEl.getChildText("text") ?? "";
+            const waitMatch = text.match(/wait\s+(\d+)/i);
+            const seconds = waitMatch ? parseInt(waitMatch[1]!, 10) : 0;
+            if (seconds > 0) {
+              this.slowModeHandler?.(seconds);
+            }
+          }
+        }
         return;
       }
 
