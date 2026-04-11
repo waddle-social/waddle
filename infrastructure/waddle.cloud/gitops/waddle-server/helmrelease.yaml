@@ -4,6 +4,8 @@ metadata:
   name: waddle-server
   namespace: waddle
 spec:
+  driftDetection:
+    mode: enabled
   interval: 30m
   chart:
     spec:
