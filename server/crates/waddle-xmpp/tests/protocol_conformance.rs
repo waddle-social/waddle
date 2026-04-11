@@ -520,9 +520,7 @@ async fn xep0045_leave_room_sends_unavailable_presence() {
 
     // Alice leaves
     alice
-        .send(
-            "<presence type='unavailable' to='leave@muc.localhost/Alice' xmlns='jabber:client'/>",
-        )
+        .send("<presence type='unavailable' to='leave@muc.localhost/Alice' xmlns='jabber:client'/>")
         .await
         .expect("send leave");
 
@@ -650,10 +648,7 @@ async fn conformance_stream_close_is_graceful() {
         .expect("bind");
 
     // Send stream close
-    client
-        .send("</stream:stream>")
-        .await
-        .expect("send close");
+    client.send("</stream:stream>").await.expect("send close");
 
     // Server should close its side too (or connection drops)
     let result = client.read(DEFAULT_TIMEOUT).await;

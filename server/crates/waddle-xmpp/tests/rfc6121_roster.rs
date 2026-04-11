@@ -7,9 +7,7 @@
 
 mod common;
 
-use common::{
-    establish_bound_session, init_test_env, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
-};
+use common::{establish_bound_session, init_test_env, RawXmppClient, TestServer, DEFAULT_TIMEOUT};
 
 // =========================================================================
 // Roster Get

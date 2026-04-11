@@ -61,8 +61,7 @@ async fn xep0308_correction_broadcast_in_muc() {
         .expect("bob receives correction");
 
     assert!(
-        bob_response.contains("urn:xmpp:message-correct:0")
-            || bob_response.contains("replace"),
+        bob_response.contains("urn:xmpp:message-correct:0") || bob_response.contains("replace"),
         "Expected correction element, got: {}",
         bob_response
     );

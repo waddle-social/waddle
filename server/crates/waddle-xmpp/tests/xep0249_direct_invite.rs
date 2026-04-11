@@ -4,9 +4,7 @@
 
 mod common;
 
-use common::{
-    establish_bound_session, init_test_env, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
-};
+use common::{establish_bound_session, init_test_env, RawXmppClient, TestServer, DEFAULT_TIMEOUT};
 
 #[tokio::test]
 async fn xep0249_direct_invite_delivered_to_recipient() {

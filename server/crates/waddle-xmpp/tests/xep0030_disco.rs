@@ -155,8 +155,10 @@ async fn xep0030_disco_info_to_unknown_host_returns_response() {
 
     // Server may fall back to own disco for unknown subdomains
     assert!(
-        response.contains("type='result'") || response.contains("type=\"result\"")
-            || response.contains("type='error'") || response.contains("type=\"error\""),
+        response.contains("type='result'")
+            || response.contains("type=\"result\"")
+            || response.contains("type='error'")
+            || response.contains("type=\"error\""),
         "Expected result or error for unknown component, got: {}",
         response
     );
