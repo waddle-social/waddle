@@ -133,7 +133,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting in channels | Implemented |
 | **0502** | **MUC Activity Indicator** | Experimental | Active room indicators | Implemented |
 | **0503** | **Server-side Spaces** | Experimental | Discord-like server/space structure |
-| **0508** | **Forums** | Experimental | Forum-style threaded discussions |
+| **0508** | **Forums** | Experimental | Forum-style threaded discussions | Implemented |
 
 ---
 

@@ -104,6 +104,8 @@
 //! - **XEP-0398**: User Avatar Conversion - Bridge between PEP and vCard avatars.
 //! - **XEP-0402**: PEP Native Bookmarks - MUC room bookmarks stored via PEP.
 //! - **XEP-0461**: Message Replies - Reply references and thread metadata.
+//! - **XEP-0508**: Forums - Forum-style threaded discussions with
+//!   thread-create and thread-reply elements for topic-based MUC.
 //! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub (read-only Phase A).
 
 pub mod xep0004;
@@ -163,6 +165,7 @@ pub mod xep0492;
 pub mod xep0500;
 pub mod xep0502;
 pub mod xep0503;
+pub mod xep0508;
 
 pub use xep0004::{
     find_data_form, is_data_form, DataForm, DataFormError, Field, FieldOption, FieldType, FormType,
@@ -479,6 +482,13 @@ pub use xep0488::{
     has_invite_in_message, is_invite_element, is_invite_request, set_invite_on_message,
     strip_invite_from_message, InviteToken, InviteTokenCarrier, InviteTokenError,
     NS_MUC_TOKEN_INVITE,
+};
+
+pub use xep0508::{
+    build_thread_create_element, build_thread_reply_element, extract_forum_action,
+    has_forum_action, is_forum_element, set_thread_create, set_thread_reply, strip_forum,
+    ForumAction, ForumCarrier, ThreadCreate, ThreadReply, ThreadSummary, FIELD_FORUM_MODE,
+    NS_FORUMS,
 };
 
 pub use xep0503::{
