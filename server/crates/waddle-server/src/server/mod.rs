@@ -145,7 +145,16 @@ impl XmppConfig {
         let tls_key_path =
             std::env::var("WADDLE_XMPP_TLS_KEY").unwrap_or_else(|_| "certs/server.key".to_string());
 
-        let mam_db_path = std::env::var("WADDLE_XMPP_MAM_DB").ok().map(PathBuf::from);
+        let mam_db_path = Some(
+            std::env::var("WADDLE_XMPP_MAM_DB")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    // Default: store MAM DB alongside the main DB, or ./mam.db
+                    std::env::var("WADDLE_DB_PATH")
+                        .map(|db| PathBuf::from(db).with_file_name("mam.db"))
+                        .unwrap_or_else(|_| PathBuf::from("mam.db"))
+                }),
+        );
 
         let native_auth_enabled = std::env::var("WADDLE_NATIVE_AUTH_ENABLED")
             .map(|v| v.to_lowercase() != "false" && v != "0")
