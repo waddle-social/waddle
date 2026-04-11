@@ -104,7 +104,7 @@ pub fn is_reactions_element(elem: &Element) -> bool {
 
 /// Check if a message contains a `<reactions/>` element.
 pub fn is_reaction_message(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_reactions_element(e))
+    msg.payloads.iter().any(is_reactions_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

@@ -190,12 +190,7 @@ fn flush_plain(plain: &mut String, spans: &mut Vec<Span>) {
 }
 
 fn find_closing_char(chars: &[char], start: usize, closing: char) -> Option<usize> {
-    for i in start..chars.len() {
-        if chars[i] == closing {
-            return Some(i);
-        }
-    }
-    None
+    (start..chars.len()).find(|&i| chars[i] == closing)
 }
 
 fn is_span_start(chars: &[char], pos: usize) -> bool {

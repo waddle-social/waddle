@@ -188,7 +188,7 @@ pub fn is_mentions_element(elem: &Element) -> bool {
 
 /// Check if a message has explicit mentions.
 pub fn has_explicit_mentions(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_mentions_element(e))
+    msg.payloads.iter().any(is_mentions_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

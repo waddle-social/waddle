@@ -155,7 +155,7 @@ pub fn is_forum_element(elem: &Element) -> bool {
 
 /// Check if a message contains forum elements.
 pub fn has_forum_action(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_forum_element(e))
+    msg.payloads.iter().any(is_forum_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

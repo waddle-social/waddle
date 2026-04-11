@@ -26,11 +26,12 @@ use minidom::Element;
 pub const NS_BOOKMARKS_PINNING: &str = "urn:xmpp:bookmarks-pinning:0";
 
 /// Pin state for a bookmark.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PinState {
     /// Bookmark is pinned (favorite).
     Pinned,
     /// Bookmark is not pinned (normal).
+    #[default]
     Unpinned,
 }
 
@@ -38,12 +39,6 @@ impl PinState {
     /// Returns `true` if pinned.
     pub fn is_pinned(self) -> bool {
         matches!(self, Self::Pinned)
-    }
-}
-
-impl Default for PinState {
-    fn default() -> Self {
-        Self::Unpinned
     }
 }
 
@@ -76,7 +71,7 @@ pub fn is_pinned_element(elem: &Element) -> bool {
 
 /// Check if a bookmark conference element has a `<pinned/>` child.
 pub fn is_bookmark_pinned(conference_elem: &Element) -> bool {
-    conference_elem.children().any(|c| is_pinned_element(c))
+    conference_elem.children().any(is_pinned_element)
 }
 
 // ── Building ─────────────────────────────────────────────────────────

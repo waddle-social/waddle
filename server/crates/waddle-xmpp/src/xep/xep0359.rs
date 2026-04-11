@@ -113,12 +113,12 @@ pub fn is_origin_id_element(elem: &Element) -> bool {
 
 /// Check if a message has any `<stanza-id/>`.
 pub fn has_stanza_id(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_stanza_id_element(e))
+    msg.payloads.iter().any(is_stanza_id_element)
 }
 
 /// Check if a message has an `<origin-id/>`.
 pub fn has_origin_id(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_origin_id_element(e))
+    msg.payloads.iter().any(is_origin_id_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -151,7 +151,7 @@ pub fn extract_origin_id(msg: &Message) -> Option<OriginId> {
         .find(|e| is_origin_id_element(e))
         .and_then(|e| e.attr("id"))
         .filter(|id| !id.is_empty())
-        .map(|id| OriginId::new(id))
+        .map(OriginId::new)
 }
 
 /// Extract the origin ID string from a message.

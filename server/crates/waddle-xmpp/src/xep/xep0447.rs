@@ -42,9 +42,10 @@ pub const NS_SFS: &str = "urn:xmpp:sfs:0";
 pub const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 
 /// Content disposition for shared files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Disposition {
     /// File should be displayed inline (images, videos).
+    #[default]
     Inline,
     /// File should be offered as download (documents, archives).
     Attachment,
@@ -66,12 +67,6 @@ impl Disposition {
             Self::Inline => "inline",
             Self::Attachment => "attachment",
         }
-    }
-}
-
-impl Default for Disposition {
-    fn default() -> Self {
-        Self::Inline
     }
 }
 
@@ -166,7 +161,7 @@ pub fn is_file_sharing_element(elem: &Element) -> bool {
 
 /// Check if a message has file sharing.
 pub fn has_file_sharing(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_file_sharing_element(e))
+    msg.payloads.iter().any(is_file_sharing_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -176,7 +171,7 @@ pub fn extract_file_sharing_from_message(msg: &Message) -> Option<FileSharing> {
     msg.payloads
         .iter()
         .find(|e| is_file_sharing_element(e))
-        .and_then(|e| parse_file_sharing_element(e))
+        .and_then(parse_file_sharing_element)
 }
 
 /// Parse a `<file-sharing/>` element.

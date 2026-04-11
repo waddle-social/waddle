@@ -110,7 +110,7 @@ pub fn is_idle_element(elem: &Element) -> bool {
 
 /// Check if a presence has idle information.
 pub fn has_idle(presence: &Presence) -> bool {
-    presence.payloads.iter().any(|e| is_idle_element(e))
+    presence.payloads.iter().any(is_idle_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

@@ -196,7 +196,7 @@ pub fn strip_chat_states(msg: &mut Message) {
 /// These messages carry only conversational state (e.g., typing indicators)
 /// and should not be archived or counted as real messages.
 pub fn is_standalone_notification(msg: &Message) -> bool {
-    msg.bodies.is_empty() && msg.payloads.iter().any(|elem| is_chat_state_element(elem))
+    msg.bodies.is_empty() && msg.payloads.iter().any(is_chat_state_element)
 }
 
 /// Convert from `xmpp_parsers::chatstates::ChatState` to our local enum.

@@ -123,7 +123,7 @@ fn extract_occupant_id_from_payloads(payloads: &[Element]) -> Option<OccupantId>
         .find(|e| is_occupant_id_element(e))
         .and_then(|e| e.attr("id"))
         .filter(|id| !id.is_empty())
-        .map(|id| OccupantId::new(id))
+        .map(OccupantId::new)
 }
 
 /// Extract occupant ID from a message.

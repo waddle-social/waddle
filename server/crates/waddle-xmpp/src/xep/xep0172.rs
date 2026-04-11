@@ -99,7 +99,7 @@ pub fn is_nick_element(elem: &Element) -> bool {
 
 /// Check if a message contains a nickname element.
 pub fn has_nick(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_nick_element(e))
+    msg.payloads.iter().any(is_nick_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

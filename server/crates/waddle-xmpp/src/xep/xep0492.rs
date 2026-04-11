@@ -35,9 +35,10 @@ pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:0";
 pub const PEP_NODE_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:0";
 
 /// Notification level for a room.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NotificationLevel {
     /// Notify for all messages (default).
+    #[default]
     All,
     /// Notify only when @mentioned.
     MentionsOnly,
@@ -82,12 +83,6 @@ impl NotificationLevel {
             Self::MentionsOnly => is_mention,
             Self::Mute => false,
         }
-    }
-}
-
-impl Default for NotificationLevel {
-    fn default() -> Self {
-        Self::All
     }
 }
 

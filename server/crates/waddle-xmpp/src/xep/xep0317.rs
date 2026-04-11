@@ -174,7 +174,7 @@ pub fn is_hats_element(elem: &Element) -> bool {
 
 /// Check if a presence has hats.
 pub fn has_hats(presence: &Presence) -> bool {
-    presence.payloads.iter().any(|e| is_hats_element(e))
+    presence.payloads.iter().any(is_hats_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

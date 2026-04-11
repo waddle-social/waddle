@@ -162,7 +162,7 @@ pub fn is_sticker_element(elem: &Element) -> bool {
 
 /// Check if a message is a sticker message.
 pub fn is_sticker_message(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_sticker_element(e))
+    msg.payloads.iter().any(is_sticker_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

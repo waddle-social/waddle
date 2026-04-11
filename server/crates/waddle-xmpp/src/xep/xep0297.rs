@@ -161,7 +161,7 @@ pub fn extract_forwarded_from_message(msg: &Message) -> Option<ForwardedMessage>
     msg.payloads
         .iter()
         .find(|e| is_forwarded_element(e))
-        .and_then(|e| parse_forwarded_element(e))
+        .and_then(parse_forwarded_element)
 }
 
 #[cfg(test)]

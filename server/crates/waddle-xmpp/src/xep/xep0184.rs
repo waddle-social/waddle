@@ -110,12 +110,12 @@ pub fn is_receipt_received_element(elem: &Element) -> bool {
 
 /// Check if a message contains a `<request/>` for delivery receipt.
 pub fn has_receipt_request(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_receipt_request_element(e))
+    msg.payloads.iter().any(is_receipt_request_element)
 }
 
 /// Check if a message contains a `<received/>` delivery acknowledgment.
 pub fn has_receipt_received(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_receipt_received_element(e))
+    msg.payloads.iter().any(is_receipt_received_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

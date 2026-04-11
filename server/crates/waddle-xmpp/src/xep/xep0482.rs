@@ -257,7 +257,10 @@ mod tests {
                 assert_eq!(p.session_id, "sess-1");
                 assert!(p.has_video());
                 assert_eq!(p.media.len(), 2);
-                assert_eq!(p.external_uri.as_deref(), Some("https://meet.example.com/room"));
+                assert_eq!(
+                    p.external_uri.as_deref(),
+                    Some("https://meet.example.com/room")
+                );
             }
             _ => panic!("Expected Propose"),
         }
@@ -313,8 +316,7 @@ mod tests {
 
     #[test]
     fn test_build_propose() {
-        let propose = CallPropose::video("s-1")
-            .with_external_uri("https://meet.example.com/room");
+        let propose = CallPropose::video("s-1").with_external_uri("https://meet.example.com/room");
         let elem = build_propose_element(&propose);
 
         assert_eq!(elem.name(), "propose");

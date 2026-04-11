@@ -95,9 +95,7 @@ pub fn is_mention_notification_element(elem: &Element) -> bool {
 
 /// Check if a message contains a mention notification.
 pub fn has_mention_notification(msg: &Message) -> bool {
-    msg.payloads
-        .iter()
-        .any(|e| is_mention_notification_element(e))
+    msg.payloads.iter().any(is_mention_notification_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

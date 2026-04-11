@@ -192,7 +192,7 @@ pub fn is_reference_element(elem: &Element) -> bool {
 
 /// Check if a message has any reference elements.
 pub fn has_references(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_reference_element(e))
+    msg.payloads.iter().any(is_reference_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

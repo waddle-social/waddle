@@ -178,7 +178,7 @@ pub fn is_file_metadata_element(elem: &Element) -> bool {
 
 /// Check if a message has file metadata.
 pub fn has_file_metadata(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_file_metadata_element(e))
+    msg.payloads.iter().any(is_file_metadata_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -188,7 +188,7 @@ pub fn extract_file_metadata_from_message(msg: &Message) -> Option<FileMetadata>
     msg.payloads
         .iter()
         .find(|e| is_file_metadata_element(e))
-        .map(|e| parse_file_metadata_element(e))
+        .map(parse_file_metadata_element)
 }
 
 /// Parse a `<file/>` element into FileMetadata.

@@ -67,6 +67,8 @@
 //!   notification elements and per-room unread mention counter.
 //! - **XEP-0471**: Calendar Events - Community events with scheduling,
 //!   RSVP tracking (going/interested/not-going), and PubSub storage.
+//! - **XEP-0470**: Pubsub Attachments - Reactions/comments on PubSub items
+//!   with attachment target and typed payloads.
 //! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
 //!   via PubSub with title, body, author, and publication metadata.
 //! - **XEP-0482**: Call Invites - Audio/video call proposals with
@@ -174,6 +176,7 @@ pub mod xep0449;
 pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
+pub mod xep0470;
 pub mod xep0471;
 pub mod xep0472;
 pub mod xep0482;
@@ -476,6 +479,11 @@ pub use xep0471::{
     NS_CALENDAR, PUBSUB_NODE_EVENTS,
 };
 
+pub use xep0470::{
+    build_attachments_element, is_attachments_element, parse_attachment_target, Attachment,
+    AttachmentPayload, AttachmentTarget, NS_PUBSUB_ATTACHMENTS,
+};
+
 pub use xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,
@@ -512,8 +520,8 @@ pub use xep0469::{
 };
 
 pub use xep0501::{
-    build_story_element, filter_active, is_story_element, parse_story, Story,
-    DEFAULT_EXPIRY_HOURS, NS_STORIES, PUBSUB_NODE_STORIES,
+    build_story_element, filter_active, is_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS,
+    NS_STORIES, PUBSUB_NODE_STORIES,
 };
 
 pub use xep0502::{

@@ -468,6 +468,7 @@ pub trait FromElement: Sized {
 /// Trait for types that can be serialized to a minidom `Element`.
 pub trait IntoElement {
     /// Serialize into a minidom `Element`.
+    #[allow(clippy::wrong_self_convention)]
     fn into_element(&self) -> Element;
 }
 

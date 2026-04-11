@@ -89,7 +89,7 @@ pub fn is_replace_element(elem: &Element) -> bool {
 
 /// Check if a message contains a `<replace/>` correction.
 pub fn is_correction_message(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_replace_element(e))
+    msg.payloads.iter().any(is_replace_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ pub fn extract_correction_from_message(msg: &Message) -> Option<Correction> {
         .find(|e| is_replace_element(e))
         .and_then(|e| e.attr("id"))
         .filter(|id| !id.is_empty())
-        .map(|id| Correction::new(id))
+        .map(Correction::new)
 }
 
 /// Extract the replaced message id from a correction message.

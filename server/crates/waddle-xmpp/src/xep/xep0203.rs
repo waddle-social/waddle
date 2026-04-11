@@ -110,7 +110,7 @@ pub fn is_delay_element(elem: &Element) -> bool {
 
 /// Check if a message has a delay element.
 pub fn has_delay(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_delay_element(e))
+    msg.payloads.iter().any(is_delay_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

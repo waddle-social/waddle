@@ -131,12 +131,12 @@ pub fn is_retracted_element(elem: &Element) -> bool {
 
 /// Check if a message contains a retraction request.
 pub fn is_retraction_message(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_retract_element(e))
+    msg.payloads.iter().any(is_retract_element)
 }
 
 /// Check if a message is a retraction tombstone.
 pub fn is_tombstone_message(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_retracted_element(e))
+    msg.payloads.iter().any(is_retracted_element)
 }
 
 // ── Extraction ───────────────────────────────────────────────────────

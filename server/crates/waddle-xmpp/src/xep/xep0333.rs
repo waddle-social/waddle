@@ -135,7 +135,7 @@ pub fn is_marker_element(elem: &Element) -> bool {
 
 /// Check if a message contains any chat marker element.
 pub fn has_marker(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| is_marker_element(e))
+    msg.payloads.iter().any(is_marker_element)
 }
 
 /// Check if a message requests markers (`<markable/>`).

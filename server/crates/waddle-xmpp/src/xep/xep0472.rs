@@ -97,7 +97,9 @@ impl FeedEntry {
         if self.body.len() <= max_len {
             &self.body
         } else {
-            let end = self.body.char_indices()
+            let end = self
+                .body
+                .char_indices()
                 .nth(max_len)
                 .map(|(i, _)| i)
                 .unwrap_or(self.body.len());
