@@ -136,4 +136,52 @@ mod tests {
         let result = converter.on_vcard_photo_updated(&base64, "image/png");
         assert!(result.is_some());
     }
+
+    #[test]
+    fn test_namespace_constant() {
+        assert_eq!(NS_PEP_VCARD_CONVERSION, "urn:xmpp:pep-vcard-conversion:0");
+    }
+
+    #[test]
+    fn test_vcard_photo_to_pep_avatar_invalid_base64() {
+        let result = vcard_photo_to_pep_avatar("not valid base64!!!", "image/png");
+        // Should return None for invalid base64
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_vcard_photo_to_pep_avatar_empty_data() {
+        // Empty string is valid base64 (zero bytes)
+        let result = vcard_photo_to_pep_avatar("", "image/png");
+        // May return Some with zero-byte avatar or None depending on impl
+        if let Some((info, _)) = &result {
+            assert_eq!(info.bytes, Some(0));
+        }
+    }
+
+    #[test]
+    fn test_pep_avatar_hash_is_sha1() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let data = b"test";
+        let base64 = STANDARD.encode(data);
+        let result = vcard_photo_to_pep_avatar(&base64, "image/png");
+        assert!(result.is_some());
+        let (info, _) = result.unwrap();
+        // SHA-1 hex is 40 chars
+        assert_eq!(info.id.len(), 40);
+    }
+
+    #[test]
+    fn test_pep_avatar_to_vcard_photo_preserves_mime() {
+        let info = AvatarInfo {
+            id: "hash".to_string(),
+            mime_type: "image/webp".to_string(),
+            width: None,
+            height: None,
+            bytes: None,
+            url: None,
+        };
+        let (_, mime) = pep_avatar_to_vcard_photo("data", &info);
+        assert_eq!(mime, "image/webp");
+    }
 }

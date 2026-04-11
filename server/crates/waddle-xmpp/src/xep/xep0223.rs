@@ -40,4 +40,40 @@ mod tests {
         assert!(!is_private_storage_node("urn:xmpp:avatar:data"));
         assert!(!is_private_storage_node("some:custom:node"));
     }
+
+    #[test]
+    fn test_feature_constants() {
+        assert_eq!(
+            FEATURE_ACCESS_WHITELIST,
+            "http://jabber.org/protocol/pubsub#access-whitelist"
+        );
+        assert_eq!(
+            FEATURE_PERSISTENT_ITEMS,
+            "http://jabber.org/protocol/pubsub#persistent-items"
+        );
+    }
+
+    #[test]
+    fn test_empty_string_not_private() {
+        assert!(!is_private_storage_node(""));
+    }
+
+    #[test]
+    fn test_omemo_bundle_prefix_variations() {
+        assert!(is_private_storage_node(
+            "eu.siacs.conversations.axolotl.bundles"
+        ));
+        assert!(is_private_storage_node(
+            "eu.siacs.conversations.axolotl.bundles:999"
+        ));
+    }
+
+    #[test]
+    fn test_pep_nodes_not_private() {
+        assert!(!is_private_storage_node("urn:xmpp:avatar:data"));
+        assert!(!is_private_storage_node("urn:xmpp:avatar:metadata"));
+        assert!(!is_private_storage_node(
+            "urn:xmpp:notification-settings:0"
+        ));
+    }
 }

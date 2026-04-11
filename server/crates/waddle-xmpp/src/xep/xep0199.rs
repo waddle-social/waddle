@@ -73,4 +73,47 @@ mod tests {
         assert_eq!(result.to, iq.from);
         assert!(matches!(result.payload, IqType::Result(None)));
     }
+
+    #[test]
+    fn test_is_ping_false_for_set() {
+        let ping_elem = Element::builder("ping", NS_PING).build();
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "ping-set".to_string(),
+            payload: IqType::Set(ping_elem),
+        };
+        assert!(!is_ping(&iq));
+    }
+
+    #[test]
+    fn test_is_ping_false_for_result() {
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "ping-res".to_string(),
+            payload: IqType::Result(None),
+        };
+        assert!(!is_ping(&iq));
+    }
+
+    #[test]
+    fn test_build_ping_result_with_none_addresses() {
+        let ping_elem = Element::builder("ping", NS_PING).build();
+        let iq = Iq {
+            from: None,
+            to: None,
+            id: "ping-none".to_string(),
+            payload: IqType::Get(ping_elem),
+        };
+        let result = build_ping_result(&iq);
+        assert!(result.from.is_none());
+        assert!(result.to.is_none());
+        assert_eq!(result.id, "ping-none");
+    }
+
+    #[test]
+    fn test_ns_ping_constant() {
+        assert_eq!(NS_PING, "urn:xmpp:ping");
+    }
 }

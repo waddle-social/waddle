@@ -152,4 +152,52 @@ mod tests {
             Some("thread-root-1")
         );
     }
+
+    #[test]
+    fn test_is_reply_element() {
+        let reply = Element::builder("reply", NS_REPLY).build();
+        assert!(is_reply_element(&reply));
+        let not_reply = Element::builder("other", NS_REPLY).build();
+        assert!(!is_reply_element(&not_reply));
+        let wrong_ns = Element::builder("reply", "wrong:ns").build();
+        assert!(!is_reply_element(&wrong_ns));
+    }
+
+    #[test]
+    fn test_build_reply_element_with_to() {
+        let reply = ReplyReference::new("msg-1").with_to("alice@example.com");
+        let elem = build_reply_element(&reply);
+        assert_eq!(elem.attr("id"), Some("msg-1"));
+        assert_eq!(elem.attr("to"), Some("alice@example.com"));
+        assert_eq!(elem.ns(), NS_REPLY);
+    }
+
+    #[test]
+    fn test_build_reply_element_without_to() {
+        let reply = ReplyReference::new("msg-2");
+        let elem = build_reply_element(&reply);
+        assert_eq!(elem.attr("id"), Some("msg-2"));
+        assert_eq!(elem.attr("to"), None);
+    }
+
+    #[test]
+    fn test_parse_reply_from_message_no_reply() {
+        let msg = Message::new(None::<jid::Jid>);
+        assert!(parse_reply_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_set_thread_id_overwrites() {
+        let mut msg = Message::new(None::<jid::Jid>);
+        set_thread_id(&mut msg, "first");
+        set_thread_id(&mut msg, "second");
+        assert_eq!(thread_id_from_message(&msg).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn test_reply_reference_new() {
+        let r = ReplyReference::new("abc");
+        assert_eq!(r.id, "abc");
+        assert!(r.to.is_none());
+    }
 }
