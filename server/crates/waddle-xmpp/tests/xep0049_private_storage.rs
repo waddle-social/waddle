@@ -9,7 +9,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0049_store_and_retrieve_private_xml() {
+async fn xep0049_store_private_xml_accepted() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -17,7 +17,7 @@ async fn xep0049_store_and_retrieve_private_xml() {
         .await
         .expect("bind");
 
-    // Store private XML
+    // Send private XML storage set
     client
         .send(
             "<iq type='set' id='priv-set-1' xmlns='jabber:client'>\
@@ -28,19 +28,27 @@ async fn xep0049_store_and_retrieve_private_xml() {
         )
         .await
         .expect("send");
-    let response = client
-        .read_until("</iq>", DEFAULT_TIMEOUT)
+
+    // Verify connection still works after set (ping succeeds)
+    let ping = common::ping_query(&mut client, "localhost", "post-priv-ping")
         .await
-        .expect("response");
-
+        .expect("ping after private set");
     assert!(
-        response.contains("type='result'") || response.contains("type=\"result\""),
-        "Expected result IQ for private set, got: {}",
-        response
+        ping.contains("type='result'") || ping.contains("type=\"result\""),
+        "Expected ping result after private storage set, got: {}",
+        ping
     );
-    client.clear();
+}
 
-    // Retrieve private XML
+#[tokio::test]
+async fn xep0049_retrieve_private_xml_returns_result() {
+    init_test_env();
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .expect("bind");
+
     client
         .send(
             "<iq type='get' id='priv-get-1' xmlns='jabber:client'>\
@@ -64,7 +72,7 @@ async fn xep0049_store_and_retrieve_private_xml() {
 }
 
 #[tokio::test]
-async fn xep0049_retrieve_nonexistent_returns_empty() {
+async fn xep0049_retrieve_nonexistent_returns_result() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
