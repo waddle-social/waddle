@@ -55,6 +55,8 @@
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
 //!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0433**: Extended Channel Search - Room discovery by keyword with
+//!   IQ-based search/result and Searchable trait for matching.
 //! - **XEP-0449**: Stickers - Sticker packs and sticker messages with
 //!   pack references, built on XEP-0446/0447 file sharing.
 //! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
@@ -144,6 +146,7 @@ pub mod xep0410;
 pub mod xep0421;
 pub mod xep0424;
 pub mod xep0425;
+pub mod xep0433;
 pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
@@ -415,6 +418,11 @@ pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+};
+
+pub use xep0433::{
+    build_search_request, build_search_response, is_search_request, parse_search_request,
+    parse_search_results, ChannelResult, SearchRequest, Searchable, NS_CHANNEL_SEARCH,
 };
 
 pub use xep0449::{
