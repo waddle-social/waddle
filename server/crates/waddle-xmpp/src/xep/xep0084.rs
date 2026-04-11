@@ -188,4 +188,58 @@ mod tests {
         assert!(parsed.is_some());
         assert_eq!(parsed.unwrap(), base64);
     }
+
+    #[test]
+    fn test_compute_avatar_hash_deterministic() {
+        let data = b"same data";
+        assert_eq!(compute_avatar_hash(data), compute_avatar_hash(data));
+    }
+
+    #[test]
+    fn test_compute_avatar_hash_different_data() {
+        assert_ne!(compute_avatar_hash(b"a"), compute_avatar_hash(b"b"));
+    }
+
+    #[test]
+    fn test_namespace_constants() {
+        assert_eq!(NS_AVATAR_DATA, "urn:xmpp:avatar:data");
+        assert_eq!(NS_AVATAR_METADATA, "urn:xmpp:avatar:metadata");
+        assert_eq!(NODE_AVATAR_DATA, "urn:xmpp:avatar:data");
+        assert_eq!(NODE_AVATAR_METADATA, "urn:xmpp:avatar:metadata");
+    }
+
+    #[test]
+    fn test_build_metadata_with_url() {
+        let info = AvatarInfo {
+            id: "hash1".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            width: None,
+            height: None,
+            bytes: None,
+            url: Some("https://example.com/avatar.jpg".to_string()),
+        };
+        let elem = build_avatar_metadata(&info);
+        let parsed = parse_avatar_metadata(&elem).expect("parse");
+        assert_eq!(parsed.id, "hash1");
+        assert_eq!(parsed.mime_type, "image/jpeg");
+        assert!(parsed.width.is_none());
+    }
+
+    #[test]
+    fn test_parse_avatar_metadata_wrong_element() {
+        let elem = Element::builder("wrong", "wrong:ns").build();
+        assert!(parse_avatar_metadata(&elem).is_none());
+    }
+
+    #[test]
+    fn test_parse_avatar_data_wrong_element() {
+        let elem = Element::builder("wrong", "wrong:ns").build();
+        assert!(parse_avatar_data(&elem).is_none());
+    }
+
+    #[test]
+    fn test_is_avatar_node_false_for_empty() {
+        assert!(!is_avatar_data_node(""));
+        assert!(!is_avatar_metadata_node(""));
+    }
 }

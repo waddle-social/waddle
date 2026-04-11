@@ -228,4 +228,34 @@ mod tests {
         assert_eq!(t.node, "node");
         assert_eq!(t.item_id, "item");
     }
+
+    #[test]
+    fn test_is_attachments_element_negative() {
+        let other = Element::builder("other", NS_PUBSUB_ATTACHMENTS).build();
+        assert!(!is_attachments_element(&other));
+        let wrong_ns = Element::builder("attachments", "wrong:ns").build();
+        assert!(!is_attachments_element(&wrong_ns));
+    }
+
+    #[test]
+    fn test_namespace_constant() {
+        assert_eq!(NS_PUBSUB_ATTACHMENTS, "urn:xmpp:pubsub-attachments:0");
+    }
+
+    #[test]
+    fn test_attachment_with_author() {
+        let target = AttachmentTarget::new("n", "i");
+        let a = Attachment::comment(target, "hi").with_author("bob@example.com");
+        assert_eq!(a.author.as_deref(), Some("bob@example.com"));
+    }
+
+    #[test]
+    fn test_build_and_parse_roundtrip() {
+        let target = AttachmentTarget::new("feed:0", "post-99");
+        let attachment = Attachment::comment(target, "Round trip!");
+        let elem = build_attachments_element(&attachment);
+        let parsed = parse_attachment_target(&elem).expect("parseable");
+        assert_eq!(parsed.node, "feed:0");
+        assert_eq!(parsed.item_id, "post-99");
+    }
 }
