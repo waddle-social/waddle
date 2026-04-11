@@ -22,6 +22,8 @@ export interface LiveRoomMessage {
   mentions?: string[];
   /** XEP-0446/0447: Shared file info */
   sharedFile?: SharedFileInfo;
+  /** XEP-0449: Is this a sticker message? */
+  isSticker?: boolean;
   /** XEP-0513: Broadcast mention type (everyone/here) */
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483: Call invite or meeting info */
@@ -515,6 +517,11 @@ export class BrowserXmppClient {
         liveMsg.sharedFile = sharedFile;
       }
 
+      // XEP-0449: Detect sticker
+      if (stanza.getChild("sticker")) {
+        liveMsg.isSticker = true;
+      }
+
       this.messageHandler?.(liveMsg);
     });
 
@@ -684,6 +691,11 @@ export class BrowserXmppClient {
                   const sharedFile = parseFileSharing(innerMsg);
                   if (sharedFile) {
                     msg.sharedFile = sharedFile;
+                  }
+
+                  // XEP-0449: Detect sticker in MAM
+                  if (innerMsg.getChild("sticker")) {
+                    msg.isSticker = true;
                   }
 
                   collected.push(msg);

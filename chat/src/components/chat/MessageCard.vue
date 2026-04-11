@@ -197,6 +197,16 @@ function onEditKeydown(e: KeyboardEvent) {
         </div>
       </div>
 
+      <!-- XEP-0449: Sticker (large image, no metadata) -->
+      <div v-else-if="message.isSticker && message.sharedFile" class="mt-1">
+        <img
+          :src="message.sharedFile.url"
+          :alt="message.sharedFile.desc ?? message.body ?? 'Sticker'"
+          class="max-w-32 max-h-32 object-contain"
+          loading="lazy"
+        />
+      </div>
+
       <!-- XEP-0447: Shared file (image inline) -->
       <div v-else-if="isSharedImage && message.sharedFile" class="mt-1">
         <a :href="message.sharedFile.url" target="_blank" rel="noopener noreferrer">

@@ -25,6 +25,9 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   if (msg.sharedFile) {
     tm.sharedFile = msg.sharedFile;
   }
+  if (msg.isSticker) {
+    tm.isSticker = true;
+  }
   if (msg.broadcastMention) {
     tm.broadcastMention = msg.broadcastMention;
   }

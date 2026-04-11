@@ -25,6 +25,8 @@ export interface TimelineMessage {
   mentions?: string[];
   /** XEP-0317: Hat badges for the message author. */
   hats?: { title: string; uri: string }[];
+  /** XEP-0449: Is this a sticker message? */
+  isSticker?: boolean;
   /** XEP-0446/0447: Shared file. */
   sharedFile?: { name?: string; mediaType?: string; size?: number; width?: number; height?: number; desc?: string; url: string; disposition: "inline" | "attachment" };
   /** XEP-0513: Broadcast mention (everyone/here). */
