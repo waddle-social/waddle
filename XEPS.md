@@ -2,7 +2,7 @@
 
 This document lists XEPs from the ./xeps directory relevant to Waddle, organized by category. Focus is on **core protocol XEPs** and XEPs important for a **Discord/Slack/Community application**.
 
-Legend: Status shown in parentheses. **Bold** = especially important for Waddle.
+Legend: Status shown in parentheses. **Bold** = especially important for Waddle. **Chat ✓** = integrated in `chat/` frontend.
 
 ---
 
@@ -12,10 +12,10 @@ These are foundational XEPs required for a functioning XMPP implementation.
 
 | XEP | Title | Status |
 |-----|-------|--------|
-| **0004** | **Data Forms** | Final | Implemented |
+| **0004** | **Data Forms** | Final | Implemented | Chat ✓ |
 | 0009 | Jabber-RPC | Final |
 | **0012** | **Last Activity** | Final | Implemented |
-| **0030** | **Service Discovery** | Final | Implemented |
+| **0030** | **Service Discovery** | Final | Implemented | Chat ✓ |
 | 0033 | Extended Stanza Addressing | Draft |
 | **0047** | **In-Band Bytestreams** | Final | Implemented |
 | **0050** | **Ad-Hoc Commands** | Draft | Implemented |
@@ -27,7 +27,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0077** | **In-Band Registration** | Final |
 | 0079 | Advanced Message Processing | Draft |
 | **0082** | **XMPP Date and Time Profiles** | Active |
-| **0085** | **Chat State Notifications** | Final | Implemented |
+| **0085** | **Chat State Notifications** | Final | Implemented | Chat ✓ |
 | **0106** | **JID Escaping** | Draft | Implemented |
 | **0114** | **Jabber Component Protocol** | Active |
 | **0115** | **Entity Capabilities** | Draft |
@@ -61,7 +61,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0368** | **SRV records for XMPP over TLS** | Draft |
 | **0386** | **Bind 2** | Draft |
 | **0388** | **Extensible SASL Profile** | Draft |
-| **0392** | **Consistent Color Generation** | Draft | Implemented |
+| **0392** | **Consistent Color Generation** | Draft | Implemented | Chat ✓ |
 | **0398** | **User Avatar to vCard-Based Avatars Conversion** | Draft |
 | **0440** | **SASL Channel-Binding Type Capability** | Draft |
 | **0484** | **Fast Authentication Streamlining Tokens (FAST)** | Proposed |
@@ -77,21 +77,21 @@ XEPs for rich messaging features expected in a modern community app.
 
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
-| **0085** | **Chat State Notifications** | Final | Typing indicators | Implemented |
-| **0184** | **Message Delivery Receipts** | Draft | Delivery confirmation | Implemented |
+| **0085** | **Chat State Notifications** | Final | Typing indicators | Implemented | Chat ✓ |
+| **0184** | **Message Delivery Receipts** | Draft | Delivery confirmation | Implemented | Chat ✓ |
 | **0280** | **Message Carbons** | Draft | Multi-device message sync |
-| **0308** | **Last Message Correction** | Draft | Edit messages | Implemented |
+| **0308** | **Last Message Correction** | Draft | Edit messages | Implemented | Chat ✓ |
 | **0313** | **Message Archive Management (MAM)** | Draft | Message history / scrollback |
-| **0333** | **Displayed Markers** | Draft | Read receipts | Implemented |
+| **0333** | **Displayed Markers** | Draft | Read receipts | Implemented | Chat ✓ |
 | **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references | Implemented |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
-| **0372** | **References** | Experimental | @mentions in messages | Implemented |
+| **0372** | **References** | Experimental | @mentions in messages | Implemented | Chat ✓ |
 | 0382 | Spoiler messages | Deferred | Content warnings / spoiler tags |
-| **0393** | **Message Styling** | Draft | Bold, italic, code formatting | Implemented |
+| **0393** | **Message Styling** | Draft | Bold, italic, code formatting | Implemented | Chat ✓ |
 | 0394 | Message Markup | Experimental | Structured text markup |
-| **0424** | **Message Retraction** | Proposed | Delete messages | Implemented |
-| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented |
+| **0424** | **Message Retraction** | Proposed | Delete messages | Implemented | Chat ✓ |
+| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented | Chat ✓ |
 | 0428 | Fallback Indication | Experimental | Graceful degradation |
 | **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented | Chat ✓ |
 | **0461** | **Message Replies** | Experimental | Threaded replies |
@@ -120,7 +120,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0406 | MIX: Administration | Deferred | MIX admin |
 | 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras |
 | 0408 | MIX: Co-existence with MUC | Deferred | MIX/MUC bridge |
-| **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms | Implemented |
+| **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms | Implemented | Chat ✓ |
 | **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented |
 | **0433** | **Extended Channel Search** | Deferred | Channel/room discovery | Implemented |
 | 0436 | MUC Presence Versioning | Deferred | Efficient presence updates |
@@ -210,7 +210,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0133** | **Service Administration** | Active | Server admin |
 | **0191** | **Blocking Command** | Draft | Block users |
 | **0377** | **Blocking Command Reports** | Proposed | Report abuse | Implemented |
-| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented |
+| **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented | Chat ✓ |
 | **0489** | **Reporting Account Affiliations** | Experimental | Trust signals |
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting |
 | 0158 | CAPTCHA Forms | Draft | Bot prevention |
