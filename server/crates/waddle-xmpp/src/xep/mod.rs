@@ -23,6 +23,8 @@
 //!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
 //!   messages via `<delay/>` element with stamp and from attributes.
+//! - **XEP-0215**: External Service Discovery - STUN/TURN server discovery
+//!   for WebRTC NAT traversal with credentials and transport config.
 //! - **XEP-0292**: vCard4 Over XMPP - Modern user profiles via PEP with
 //!   full name, nickname, email, photo, bio, and more.
 //! - **XEP-0300**: Cryptographic Hash Functions - Standardized hash algorithm
@@ -146,6 +148,7 @@ pub mod xep0191;
 pub mod xep0199;
 pub mod xep0202;
 pub mod xep0203;
+pub mod xep0215;
 pub mod xep0223;
 pub mod xep0249;
 pub mod xep0292;
@@ -286,6 +289,11 @@ pub use xep0203::{
     add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
     extract_delay_from_message, extract_delay_stamp, has_delay, is_delay_element,
     parse_delay_element, strip_delay, DelayCarrier, DelayError, DelayInfo, NS_DELAY,
+};
+
+pub use xep0215::{
+    build_services_response, is_extdisco_request, parse_services_response, ExternalService,
+    ServiceType, Transport as ExtDiscoTransport, NS_EXTDISCO,
 };
 
 pub use xep0292::{
