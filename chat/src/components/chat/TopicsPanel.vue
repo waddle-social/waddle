@@ -2,7 +2,7 @@
 import { Hash, Plus, Settings, Users, UserPlus } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 
-defineProps<{
+const props = defineProps<{
   waddle: WaddleSummary | null;
   channels: ChannelSummary[];
   activeChannelId: string | null;
@@ -10,7 +10,18 @@ defineProps<{
   canManageCommunity: boolean;
   isLoading: boolean;
   memberCount: number;
+  activeChannelJids: Set<string>;
 }>();
+
+function hasActivity(channelId: string): boolean {
+  // Check if any JID in the active set contains this channel ID
+  for (const jid of props.activeChannelJids) {
+    if (jid.startsWith(channelId + "@") || jid.includes(channelId)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 const emit = defineEmits<{
   selectChannel: [id: string];
@@ -68,10 +79,14 @@ const emit = defineEmits<{
         >
           <div class="flex items-center gap-2 flex-1 min-w-0">
             <Hash class="w-3 h-3 flex-shrink-0" />
-            <span class="text-sm font-mono truncate">{{ channel.name }}</span>
+            <span class="text-sm font-mono truncate" :class="hasActivity(channel.id) && activeChannelId !== channel.id ? 'font-bold' : ''">{{ channel.name }}</span>
           </div>
           <span
-            v-if="channel.is_default"
+            v-if="hasActivity(channel.id) && activeChannelId !== channel.id"
+            class="w-2 h-2 bg-blue-500 rounded-full flex-shrink-0"
+          />
+          <span
+            v-else-if="channel.is_default"
             class="text-[10px] font-mono uppercase tracking-wider opacity-60"
           >
             default

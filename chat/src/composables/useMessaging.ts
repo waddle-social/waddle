@@ -73,6 +73,7 @@ export function useMessaging(
   const typingUsers = ref<string[]>([]);
   const roomHats = ref<RoomHats>({});
   const slowModeCooldown = ref(0);
+  const activeChannels = ref<Set<string>>(new Set());
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let messageRequestId = 0;
@@ -132,6 +133,9 @@ export function useMessaging(
       });
       client.setHatsHandler((hats) => {
         roomHats.value = hats;
+      });
+      client.setActivityHandler((roomJid) => {
+        activeChannels.value = new Set([...activeChannels.value, roomJid]);
       });
       client.setSlowModeHandler((seconds) => {
         slowModeCooldown.value = seconds;
@@ -476,6 +480,12 @@ export function useMessaging(
     messages.value = [];
   }
 
+  function clearChannelActivity(roomJid: string) {
+    const next = new Set(activeChannels.value);
+    next.delete(roomJid);
+    activeChannels.value = next;
+  }
+
   return {
     xmppStatus,
     messages,
@@ -498,6 +508,8 @@ export function useMessaging(
     notifyComposing,
     disconnect,
     clearMessages,
+    activeChannels,
+    clearChannelActivity,
     scrollToBottom,
   };
 }

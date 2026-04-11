@@ -145,6 +145,7 @@ export class BrowserXmppClient {
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private slowModeHandler: ((seconds: number) => void) | null = null;
+  private activityHandler: ((roomJid: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
@@ -181,6 +182,11 @@ export class BrowserXmppClient {
 
   setSlowModeHandler(handler: (seconds: number) => void) {
     this.slowModeHandler = handler;
+  }
+
+  /** XEP-0502: Handler for activity in rooms other than the current one. */
+  setActivityHandler(handler: (roomJid: string) => void) {
+    this.activityHandler = handler;
   }
 
   setRoomDisconnectHandler(handler: () => void) {
@@ -298,7 +304,13 @@ export class BrowserXmppClient {
 
       const from = stanza.attrs.from ?? "";
       const [roomJid, nick = "unknown"] = from.split("/");
-      if (!roomJid || roomJid !== this.currentRoom) {
+      if (!roomJid) return;
+
+      // XEP-0502: If message is for a different room, emit activity indicator
+      if (roomJid !== this.currentRoom) {
+        if (stanza.getChildText("body")) {
+          this.activityHandler?.(roomJid);
+        }
         return;
       }
 

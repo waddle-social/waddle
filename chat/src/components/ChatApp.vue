@@ -161,6 +161,11 @@ async function selectWaddle(waddleId: string, preferredChannelId?: string | null
 async function selectChannel(channelId: string) {
   waddles.activeChannelId.value = channelId;
   messaging.clearMessages();
+  // XEP-0502: Clear activity indicator for this channel
+  if (waddles.activeWaddleId.value && auth.session.value) {
+    const roomJid = `${channelId}@conference.${auth.session.value.xmpp_domain}`;
+    messaging.clearChannelActivity(roomJid);
+  }
   if (waddles.activeWaddleId.value) {
     await messaging.loadMessages(waddles.activeWaddleId.value, channelId);
   }
@@ -340,6 +345,7 @@ onUnmounted(() => {
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
+          :active-channel-jids="messaging.activeChannels.value"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
@@ -410,6 +416,7 @@ onUnmounted(() => {
           :can-manage-community="waddles.canManageCommunity.value"
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
+          :active-channel-jids="messaging.activeChannels.value"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
