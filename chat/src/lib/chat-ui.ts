@@ -208,3 +208,14 @@ export function renderStyledBody(body: string): string {
   const gfm = xep0393ToGfm(body);
   return (md.parse(gfm) as string).trim();
 }
+
+// ── Image / GIF URL detection ────────────────────────────────────────
+
+const IMAGE_URL_RE = /^https?:\/\/\S+\.(?:gif|png|jpe?g|webp)(?:\?\S*)?$/i;
+const GIPHY_URL_RE = /^https?:\/\/(?:media\d*\.giphy\.com|i\.giphy\.com)\//i;
+
+/** Check if a message body is a single image/GIF URL that should render inline. */
+export function isImageUrl(body: string): boolean {
+  const trimmed = body.trim();
+  return IMAGE_URL_RE.test(trimmed) || GIPHY_URL_RE.test(trimmed);
+}

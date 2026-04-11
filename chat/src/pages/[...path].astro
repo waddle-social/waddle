@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import ChatApp from "../components/ChatApp.vue";
 import "../styles/global.css";
 const serverBaseUrl = env.SERVER_BASE_URL;
+const tenorApiKey = (env as unknown as Record<string, string>).GIPHY_API_KEY ?? "";
 ---
 
 <html lang="en">
@@ -17,6 +18,6 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <title>Waddle Chat</title>
   </head>
   <body>
-    <ChatApp client:only="vue" serverBaseUrl={serverBaseUrl} />
+    <ChatApp client:only="vue" serverBaseUrl={serverBaseUrl} tenorApiKey={tenorApiKey} />
   </body>
 </html>

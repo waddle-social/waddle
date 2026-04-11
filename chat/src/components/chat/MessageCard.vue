@@ -2,7 +2,7 @@
 import { ref, computed } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import { renderStyledBody, type TimelineMessage } from "@/lib/chat-ui";
+import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
 import { formatStamp } from "@/composables/useMessaging";
 
 const props = defineProps<{
@@ -19,6 +19,7 @@ const emit = defineEmits<{
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
 const styledHtml = computed(() => renderStyledBody(props.message.body));
+const isGif = computed(() => isImageUrl(props.message.body));
 
 const isMentioned = computed(() => {
   if (!props.currentUser || !props.message.mentions) return false;
@@ -141,6 +142,16 @@ function onEditKeydown(e: KeyboardEvent) {
           class="text-xs font-mono px-2 h-8 text-muted-foreground hover:text-foreground transition-colors"
           @click="cancelEdit"
         >Cancel</button>
+      </div>
+
+      <!-- Inline image/GIF -->
+      <div v-else-if="isGif" class="mt-1">
+        <img
+          :src="message.body.trim()"
+          alt="GIF"
+          class="max-w-xs max-h-64 border border-foreground/20 object-contain"
+          loading="lazy"
+        />
       </div>
 
       <!-- Normal display (XEP-0393 styled) -->

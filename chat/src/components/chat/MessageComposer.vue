@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { Send } from "lucide-vue-next";
+import { ref } from "vue";
+import { Send, Image } from "lucide-vue-next";
+import GifPicker from "@/components/chat/GifPicker.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 
@@ -7,12 +9,16 @@ defineProps<{
   channelName: string;
   isSending: boolean;
   disabled: boolean;
+  tenorApiKey: string;
 }>();
 
 const emit = defineEmits<{
   send: [];
   typing: [];
+  selectGif: [url: string];
 }>();
+
+const showGifPicker = ref(false);
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -20,10 +26,30 @@ function onKeydown(e: KeyboardEvent) {
     emit("send");
   }
 }
+
+function onGifSelected(url: string) {
+  showGifPicker.value = false;
+  emit("selectGif", url);
+}
 </script>
 
 <template>
-  <div class="h-16 border-t border-foreground bg-background px-6 flex items-center gap-3 flex-shrink-0">
+  <div class="relative h-16 border-t border-foreground bg-background px-6 flex items-center gap-3 flex-shrink-0">
+    <GifPicker
+      v-if="showGifPicker"
+      :api-key="tenorApiKey"
+      @select="onGifSelected"
+      @close="showGifPicker = false"
+    />
+    <button
+      class="h-9 w-9 flex items-center justify-center hover:bg-muted transition-colors flex-shrink-0"
+      :class="showGifPicker ? 'bg-muted' : ''"
+      title="GIF"
+      :disabled="disabled"
+      @click="showGifPicker = !showGifPicker"
+    >
+      <Image class="w-3.5 h-3.5" />
+    </button>
     <input
       :value="draft"
       :placeholder="`Message #${channelName}`"

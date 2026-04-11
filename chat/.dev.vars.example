@@ -1,2 +1,3 @@
 # Local Cloudflare-compatible vars used by Astro dev.
 SERVER_BASE_URL=http://localhost:3000
+GIPHY_API_KEY=your-giphy-api-key-here

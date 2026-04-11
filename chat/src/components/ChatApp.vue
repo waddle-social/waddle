@@ -24,7 +24,7 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/waddle-api";
 
-const props = defineProps<{ serverBaseUrl: string }>();
+const props = defineProps<{ serverBaseUrl: string; tenorApiKey: string }>();
 
 const ui = useUiState();
 const auth = useAuth(props.serverBaseUrl);
@@ -64,6 +64,11 @@ const messaging = useMessaging(
 );
 
 const publicBrowseQuery = ref("");
+
+async function sendGif(url: string) {
+  messaging.draft.value = url;
+  await messaging.sendMessage();
+}
 
 // --- Deep linking ---
 
@@ -426,8 +431,10 @@ onUnmounted(() => {
         :can-manage-channels="waddles.canManageChannels.value"
         :typing-users="messaging.typingUsers.value"
         :current-user="auth.session.value?.username"
+        :tenor-api-key="props.tenorApiKey"
         @send="messaging.sendMessage"
         @typing="messaging.notifyComposing"
+        @select-gif="sendGif"
         @edit-message="messaging.editMessage"
         @retract-message="messaging.retractMessage"
         @react-message="messaging.toggleReaction"

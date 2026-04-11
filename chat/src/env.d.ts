@@ -3,5 +3,6 @@
 declare module "cloudflare:workers" {
   export const env: {
     SERVER_BASE_URL: string;
+    GIPHY_API_KEY?: string;
   };
 }

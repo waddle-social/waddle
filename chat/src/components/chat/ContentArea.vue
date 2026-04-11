@@ -20,11 +20,13 @@ const props = defineProps<{
   canManageChannels: boolean;
   typingUsers: string[];
   currentUser?: string;
+  tenorApiKey: string;
 }>();
 
 const emit = defineEmits<{
   send: [];
   typing: [];
+  selectGif: [url: string];
   editMessage: [messageId: string, newBody: string];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
@@ -127,8 +129,10 @@ watch(
       :channel-name="channel.name"
       :is-sending="isSending"
       :disabled="!channel"
+      :tenor-api-key="tenorApiKey"
       @send="emit('send')"
       @typing="emit('typing')"
+      @select-gif="(url) => emit('selectGif', url)"
     />
   </div>
 </template>
