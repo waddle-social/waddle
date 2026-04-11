@@ -109,8 +109,10 @@ export class BrowserXmppClient {
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
   private displayedHandler: ((event: DisplayedEvent) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
+  private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
+  private selfPingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(session: WaddleSession) {
     this.session = session;
@@ -134,6 +136,36 @@ export class BrowserXmppClient {
 
   setDisplayedHandler(handler: (event: DisplayedEvent) => void) {
     this.displayedHandler = handler;
+  }
+
+  setRoomDisconnectHandler(handler: () => void) {
+    this.roomDisconnectHandler = handler;
+  }
+
+  private startSelfPing() {
+    this.stopSelfPing();
+    this.selfPingTimer = setInterval(() => {
+      void this.doSelfPing();
+    }, 60_000);
+  }
+
+  private stopSelfPing() {
+    if (this.selfPingTimer) {
+      clearInterval(this.selfPingTimer);
+      this.selfPingTimer = null;
+    }
+  }
+
+  private async doSelfPing() {
+    if (!this.xmpp || !this.currentRoom) return;
+
+    const occupantJid = `${this.currentRoom}/${this.session.username}`;
+    try {
+      await this.sendIq(xml("ping", "urn:xmpp:ping"), occupantJid);
+    } catch {
+      // Error response or timeout → disconnected from room
+      this.roomDisconnectHandler?.();
+    }
   }
 
   async connect() {
@@ -469,6 +501,8 @@ export class BrowserXmppClient {
           xml("x", "http://jabber.org/protocol/muc"),
         ),
       );
+      // XEP-0410: Start periodic self-ping to detect disconnection
+      this.startSelfPing();
     }
   }
 
@@ -635,6 +669,7 @@ export class BrowserXmppClient {
       );
     }
 
+    this.stopSelfPing();
     const xmpp = this.xmpp;
     this.xmpp = null;
     this.currentRoom = null;

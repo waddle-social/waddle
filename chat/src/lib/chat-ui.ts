@@ -194,7 +194,7 @@ const md = new Marked({
     // Features not in XEP-0393 — de-style to plain text (preserve content, strip formatting)
     heading({ text }: { text: string }) { return text; },
     hr() { return ""; },
-    list({ body }: { body: string }) { return body; },
+    list(token) { return token.items.map((i) => i.text).join("\n"); },
     listitem({ text }: { text: string }) { return `${text}\n`; },
     image() { return ""; },
     link({ text }: { text: string }) { return text; },

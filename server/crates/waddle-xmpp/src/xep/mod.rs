@@ -44,6 +44,8 @@
 //! - **XEP-0359**: Unique and Stable Stanza IDs - Server-assigned `<stanza-id/>`
 //!   and client-assigned `<origin-id/>` for stable message referencing.
 //! - **XEP-0334**: Message Processing Hints
+//! - **XEP-0410**: MUC Self-Ping - Detect room disconnection by pinging
+//!   own occupant JID; error response triggers rejoin.
 //! - **XEP-0421**: Occupant Identifiers - Stable opaque IDs for MUC
 //!   occupants via HMAC-SHA-256, added by server to messages/presence.
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
@@ -119,6 +121,7 @@ pub mod xep0392;
 pub mod xep0393;
 pub mod xep0398;
 pub mod xep0402;
+pub mod xep0410;
 pub mod xep0421;
 pub mod xep0424;
 pub mod xep0425;
@@ -291,6 +294,11 @@ pub use xep0352::{
     build_csi_feature, classify_message_urgency, classify_presence_urgency,
     data_contains_csi_active, data_contains_csi_inactive, is_csi_active, is_csi_inactive,
     is_muc_mention, ClientState, StanzaUrgency, MAX_CSI_BUFFER_SIZE, NS_CSI,
+};
+
+pub use xep0410::{
+    build_self_ping, interpret_self_ping_response, is_self_ping, SelfPingResult,
+    FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
 };
 
 pub use xep0421::{
