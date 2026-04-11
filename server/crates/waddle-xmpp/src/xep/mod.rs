@@ -67,6 +67,8 @@
 //!   notification elements and per-room unread mention counter.
 //! - **XEP-0471**: Calendar Events - Community events with scheduling,
 //!   RSVP tracking (going/interested/not-going), and PubSub storage.
+//! - **XEP-0483**: HTTP Online Meetings - Jitsi/BBB meeting links via
+//!   IQ request/response and shareable meeting elements in messages.
 //! - **XEP-0490**: Message Displayed Synchronization - Cross-device read
 //!   state sync via PEP with stanza-id references.
 //! - **XEP-0492**: Chat Notification Settings - Per-room notification levels
@@ -168,6 +170,7 @@ pub mod xep0452;
 pub mod xep0469;
 pub mod xep0471;
 pub mod xep0488;
+pub mod xep0483;
 pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
@@ -465,6 +468,13 @@ pub use xep0452::{
 pub use xep0471::{
     build_event_element, is_event_element, parse_event, CalendarEvent, Rsvp, RsvpStatus,
     NS_CALENDAR, PUBSUB_NODE_EVENTS,
+};
+
+pub use xep0483::{
+    build_meeting_message_element, build_meeting_request, build_meeting_response,
+    extract_meeting_from_iq, extract_meeting_from_message, is_meeting_element,
+    is_meeting_request, set_meeting, strip_meeting, Meeting, MeetingCarrier, MeetingType,
+    NS_ONLINE_MEETINGS,
 };
 
 pub use xep0490::{
