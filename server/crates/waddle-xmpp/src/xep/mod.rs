@@ -169,8 +169,8 @@ pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
 pub mod xep0471;
-pub mod xep0488;
 pub mod xep0483;
+pub mod xep0488;
 pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
@@ -469,9 +469,8 @@ pub use xep0471::{
 
 pub use xep0483::{
     build_meeting_message_element, build_meeting_request, build_meeting_response,
-    extract_meeting_from_iq, extract_meeting_from_message, is_meeting_element,
-    is_meeting_request, set_meeting, strip_meeting, Meeting, MeetingCarrier, MeetingType,
-    NS_ONLINE_MEETINGS,
+    extract_meeting_from_iq, extract_meeting_from_message, is_meeting_element, is_meeting_request,
+    set_meeting, strip_meeting, Meeting, MeetingCarrier, MeetingType, NS_ONLINE_MEETINGS,
 };
 
 pub use xep0490::{

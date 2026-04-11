@@ -136,8 +136,7 @@ impl MeetingCarrier for Message {
 
 /// Check if an element is a meeting element.
 pub fn is_meeting_element(elem: &Element) -> bool {
-    elem.ns() == NS_ONLINE_MEETINGS
-        && matches!(elem.name(), "meeting" | "request")
+    elem.ns() == NS_ONLINE_MEETINGS && matches!(elem.name(), "meeting" | "request")
 }
 
 /// Check if an IQ is a meeting request.
@@ -150,9 +149,10 @@ pub fn is_meeting_request(iq: &Iq) -> bool {
 
 /// Extract a meeting from a message.
 pub fn extract_meeting_from_message(msg: &Message) -> Option<Meeting> {
-    let elem = msg.payloads.iter().find(|e| {
-        e.ns() == NS_ONLINE_MEETINGS && e.name() == "meeting"
-    })?;
+    let elem = msg
+        .payloads
+        .iter()
+        .find(|e| e.ns() == NS_ONLINE_MEETINGS && e.name() == "meeting")?;
     parse_meeting_element(elem)
 }
 
@@ -173,7 +173,10 @@ pub fn extract_meeting_from_iq(iq: &Iq) -> Option<Meeting> {
 fn parse_meeting_element(elem: &Element) -> Option<Meeting> {
     let mt = elem.attr("type").map(MeetingType::from_str_attr)?;
     let url = elem.attr("url").filter(|u| !u.is_empty())?.to_owned();
-    let desc = elem.attr("desc").filter(|d| !d.is_empty()).map(|d| d.to_owned());
+    let desc = elem
+        .attr("desc")
+        .filter(|d| !d.is_empty())
+        .map(|d| d.to_owned());
 
     Some(Meeting {
         meeting_type: mt,
@@ -280,8 +283,7 @@ mod tests {
             &MeetingType::Jitsi,
             "m-1",
         );
-        let meeting = Meeting::jitsi("https://meet.example.com/room-1")
-            .with_desc("Team Call");
+        let meeting = Meeting::jitsi("https://meet.example.com/room-1").with_desc("Team Call");
         let response = build_meeting_response(&request, &meeting);
 
         let extracted = extract_meeting_from_iq(&response).expect("has meeting");
@@ -342,7 +344,10 @@ mod tests {
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         assert!(msg.has_meeting());
-        assert_eq!(msg.meeting().expect("meeting").url, "https://example.com/room");
+        assert_eq!(
+            msg.meeting().expect("meeting").url,
+            "https://example.com/room"
+        );
     }
 
     #[test]
