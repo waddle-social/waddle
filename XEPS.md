@@ -122,18 +122,18 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0408 | MIX: Co-existence with MUC | Deferred | MIX/MUC bridge |
 | **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms | Implemented | Chat ✓ |
 | **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented | Chat N/A |
-| **0433** | **Extended Channel Search** | Deferred | Channel/room discovery | Implemented |
+| **0433** | **Extended Channel Search** | Deferred | Channel/room discovery | Implemented | Chat N/A |
 | 0436 | MUC Presence Versioning | Deferred | Efficient presence updates |
-| **0437** | **Room Activity Indicators** | Deferred | Unread / activity badges | Implemented |
-| **0452** | **MUC Mention Notifications** | Experimental | @mention alerts | Implemented |
+| **0437** | **Room Activity Indicators** | Deferred | Unread / activity badges | Implemented | Chat ✓ |
+| **0452** | **MUC Mention Notifications** | Experimental | @mention alerts | Implemented | Chat N/A |
 | 0463 | MUC Affiliations Versioning | Experimental | Efficient role sync |
 | **0486** | **MUC Avatars** | Experimental | Room/channel icons |
-| **0488** | **MUC Token Invite** | Experimental | Invite links with tokens | Implemented |
-| **0492** | **Chat Notification Settings** | Experimental | Per-channel notification prefs | Implemented |
+| **0488** | **MUC Token Invite** | Experimental | Invite links with tokens | Implemented | Chat N/A |
+| **0492** | **Chat Notification Settings** | Experimental | Per-channel notification prefs | Implemented | Chat N/A |
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting in channels | Implemented | Chat ✓ |
-| **0502** | **MUC Activity Indicator** | Experimental | Active room indicators | Implemented |
+| **0502** | **MUC Activity Indicator** | Experimental | Active room indicators | Implemented | Chat ✓ |
 | **0503** | **Server-side Spaces** | Experimental | Discord-like server/space structure |
-| **0508** | **Forums** | Experimental | Forum-style threaded discussions | Implemented |
+| **0508** | **Forums** | Experimental | Forum-style threaded discussions | Implemented | Chat N/A |
 
 ---
 
@@ -160,7 +160,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | **0402** | **PEP Native Bookmarks** | Draft | Channel/room bookmarks |
-| **0469** | **Bookmark Pinning** | Experimental | Pin favorite channels | Implemented |
+| **0469** | **Bookmark Pinning** | Experimental | Pin favorite channels | Implemented | Chat N/A |
 
 ---
 
@@ -254,10 +254,10 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | 0277 | Microblogging over XMPP | Deferred | Social feed posts |
-| **0470** | **Pubsub Attachments** | Experimental | Reactions/comments on posts | Implemented |
-| **0471** | **Calendar Events** | Experimental | Community events | Implemented |
-| **0472** | **Pubsub Social Feed** | Experimental | Activity feeds | Implemented |
-| **0501** | **Pubsub Stories** | Experimental | Ephemeral stories | Implemented |
+| **0470** | **Pubsub Attachments** | Experimental | Reactions/comments on posts | Implemented | Chat N/A |
+| **0471** | **Calendar Events** | Experimental | Community events | Implemented | Chat N/A |
+| **0472** | **Pubsub Social Feed** | Experimental | Activity feeds | Implemented | Chat N/A |
+| **0501** | **Pubsub Stories** | Experimental | Ephemeral stories | Implemented | Chat N/A |
 
 ---
 
