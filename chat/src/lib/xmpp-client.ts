@@ -20,6 +20,18 @@ export interface LiveRoomMessage {
   retractsId?: string;
   /** XEP-0372: Mentioned JIDs/nicks */
   mentions?: string[];
+  /** XEP-0482/0483: Call invite or meeting info */
+  callInvite?: CallInviteInfo;
+}
+
+/** XEP-0482 + XEP-0483: Call invite data extracted from a message */
+export interface CallInviteInfo {
+  sessionId: string;
+  audio: boolean;
+  video: boolean;
+  externalUri?: string;
+  /** XEP-0483: Meeting description */
+  meetingDesc?: string;
 }
 
 /** XEP-0085 chat state types */
@@ -48,6 +60,12 @@ const CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 
 /** XEP-0372 namespace */
 const REFERENCES_NS = "urn:xmpp:reference:0";
+
+/** XEP-0482 namespace */
+const CALL_INVITES_NS = "urn:xmpp:call-invites:0";
+
+/** XEP-0483 namespace */
+const ONLINE_MEETINGS_NS = "urn:xmpp:http:online-meetings:invite:0";
 
 /** XEP-0317: Hat badge for an occupant */
 export interface OccupantHat {
@@ -385,6 +403,28 @@ export class BrowserXmppClient {
         .map((u: string) => u.replace(/^xmpp:/, ""));
       if (mentionUris.length > 0) {
         liveMsg.mentions = mentionUris;
+      }
+
+      // XEP-0482: Extract call invite (propose)
+      const proposeEl = stanza.getChild("propose");
+      if (proposeEl) {
+        const sessionId = (proposeEl.attrs?.id as string) ?? crypto.randomUUID();
+        const hasAudio = proposeEl.children.some((c: XmppElement) => c.is("audio"));
+        const hasVideo = proposeEl.children.some((c: XmppElement) => c.is("video"));
+        const externalEl = proposeEl.children.find((c: XmppElement) => c.is("external"));
+        const externalUri = externalEl?.attrs?.uri as string | undefined;
+        // XEP-0483: Check for meeting element
+        const meetingEl = stanza.getChild("meeting");
+        const invite: CallInviteInfo = {
+          sessionId,
+          audio: hasAudio || !hasVideo,
+          video: hasVideo,
+        };
+        const resolvedUri = externalUri ?? (meetingEl?.attrs?.url as string | undefined);
+        if (resolvedUri) invite.externalUri = resolvedUri;
+        const desc = meetingEl?.attrs?.desc as string | undefined;
+        if (desc) invite.meetingDesc = desc;
+        liveMsg.callInvite = invite;
       }
 
       this.messageHandler?.(liveMsg);
@@ -735,6 +775,47 @@ export class BrowserXmppClient {
         xml("request", RECEIPTS_NS),
         xml("markable", CHAT_MARKERS_NS),
         ...references,
+      ),
+    );
+
+    return msgId;
+  }
+
+  /** XEP-0482 + XEP-0483: Send a call invite to the current room. */
+  async sendCallInvite(
+    waddleId: string,
+    channelId: string,
+    meetingUrl: string,
+    video: boolean,
+  ): Promise<string | null> {
+    await this.connect();
+    await this.switchRoom(waddleId, channelId);
+    if (!this.xmpp) return null;
+
+    const msgId = crypto.randomUUID();
+    const sessionId = crypto.randomUUID();
+    const mediaChildren = [xml("audio", {})];
+    if (video) mediaChildren.push(xml("video", {}));
+    mediaChildren.push(xml("external", { uri: meetingUrl }));
+
+    const label = video ? "Video call" : "Audio call";
+
+    await this.xmpp.send(
+      xml(
+        "message",
+        {
+          id: msgId,
+          to: roomBareJidFor(this.session, waddleId, channelId),
+          type: "groupchat",
+        },
+        xml("body", {}, `${label}: ${meetingUrl}`),
+        xml("propose", { xmlns: CALL_INVITES_NS, id: sessionId }, ...mediaChildren),
+        xml("meeting", {
+          xmlns: ONLINE_MEETINGS_NS,
+          type: "jitsi",
+          url: meetingUrl,
+          desc: label,
+        }),
       ),
     );
 

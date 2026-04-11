@@ -32,6 +32,9 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   if (msg.mentions && msg.mentions.length > 0) {
     tm.mentions = msg.mentions;
   }
+  if (msg.callInvite) {
+    tm.callInvite = msg.callInvite;
+  }
   return tm;
 }
 

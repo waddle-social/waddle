@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { Check, CheckCheck, Pencil, SmilePlus, Trash2 } from "lucide-vue-next";
+import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
 import type { OccupantHat } from "@/lib/xmpp-client";
@@ -158,6 +158,31 @@ function onEditKeydown(e: KeyboardEvent) {
           class="text-xs font-mono px-2 h-8 text-muted-foreground hover:text-foreground transition-colors"
           @click="cancelEdit"
         >Cancel</button>
+      </div>
+
+      <!-- XEP-0482/0483: Call invite card -->
+      <div v-else-if="message.callInvite" class="mt-1">
+        <div class="inline-flex items-center gap-3 border border-foreground p-3">
+          <div class="flex items-center justify-center w-8 h-8 bg-foreground text-background">
+            <Video v-if="message.callInvite.video" class="w-4 h-4" />
+            <Phone v-else class="w-4 h-4" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-sm font-bold">
+              {{ message.callInvite.meetingDesc ?? (message.callInvite.video ? "Video Call" : "Audio Call") }}
+            </div>
+            <div v-if="message.callInvite.externalUri" class="text-xs font-mono text-muted-foreground truncate">
+              {{ message.callInvite.externalUri }}
+            </div>
+          </div>
+          <a
+            v-if="message.callInvite.externalUri"
+            :href="message.callInvite.externalUri"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
+          >Join</a>
+        </div>
       </div>
 
       <!-- Inline image/GIF -->

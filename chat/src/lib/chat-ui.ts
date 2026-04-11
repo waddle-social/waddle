@@ -25,6 +25,8 @@ export interface TimelineMessage {
   mentions?: string[];
   /** XEP-0317: Hat badges for the message author. */
   hats?: { title: string; uri: string }[];
+  /** XEP-0482/0483: Call invite info. */
+  callInvite?: { sessionId: string; audio: boolean; video: boolean; externalUri?: string; meetingDesc?: string };
 }
 
 export interface CommunityFormData {

@@ -66,7 +66,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0440** | **SASL Channel-Binding Type Capability** | Draft |
 | **0484** | **Fast Authentication Streamlining Tokens (FAST)** | Proposed |
 | **0485** | **PubSub Server Information** | Draft |
-| **0490** | **Message Displayed Synchronization** | Draft | Implemented |
+| **0490** | **Message Displayed Synchronization** | Draft | Implemented | Chat N/A |
 | 0509 | Initial Authentication Pipelining | Experimental |
 
 ---
@@ -84,7 +84,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0313** | **Message Archive Management (MAM)** | Draft | Message history / scrollback |
 | **0333** | **Displayed Markers** | Draft | Read receipts | Implemented | Chat ✓ |
 | **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented | Chat N/A |
-| **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references | Implemented |
+| **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references | Implemented | Chat N/A |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
 | **0372** | **References** | Experimental | @mentions in messages | Implemented | Chat ✓ |
 | 0382 | Spoiler messages | Deferred | Content warnings / spoiler tags |
@@ -95,7 +95,7 @@ XEPs for rich messaging features expected in a modern community app.
 | 0428 | Fallback Indication | Experimental | Graceful degradation |
 | **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented | Chat ✓ |
 | **0461** | **Message Replies** | Experimental | Threaded replies |
-| **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state | Implemented |
+| **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state | Implemented | Chat N/A |
 | **0513** | **Explicit Mentions** | Experimental | @user / @role mentions | Implemented |
 | 0511 | Link Metadata | Experimental | Link previews / unfurling |
 | 0481 | Content Types in Messages | Experimental | Rich content types |
@@ -121,7 +121,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras |
 | 0408 | MIX: Co-existence with MUC | Deferred | MIX/MUC bridge |
 | **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms | Implemented | Chat ✓ |
-| **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented |
+| **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented | Chat N/A |
 | **0433** | **Extended Channel Search** | Deferred | Channel/room discovery | Implemented |
 | 0436 | MUC Presence Versioning | Deferred | Efficient presence updates |
 | **0437** | **Room Activity Indicators** | Deferred | Unread / activity badges |
@@ -151,7 +151,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0172** | **User Nickname** | Draft | Display names | Implemented | Chat N/A |
 | **0292** | **vCard4 Over XMPP** | Experimental | Modern user profiles | Implemented | Chat N/A |
 | **0319** | **Last User Interaction in Presence** | Draft | Idle detection | Implemented | Chat N/A |
-| **0392** | **Consistent Color Generation** | Draft | Deterministic user colors | Implemented |
+| **0392** | **Consistent Color Generation** | Draft | Deterministic user colors | Implemented | Chat ✓ |
 
 ---
 
@@ -243,8 +243,8 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0location338 | Jingle Grouping Framework | Draft | Media bundling |
 | 0location339 | Source-Specific Media Attributes in Jingle | Draft | Simulcast |
 | 0320 | Use of DTLS-SRTP in Jingle Sessions | Draft | Encrypted media |
-| **0482** | **Call Invites** | Experimental | Call invitation UX | Implemented |
-| **0483** | **HTTP Online Meetings** | Experimental | Meeting links (Jitsi-style) | Implemented |
+| **0482** | **Call Invites** | Experimental | Call invitation UX | Implemented | Chat ✓ |
+| **0483** | **HTTP Online Meetings** | Experimental | Meeting links (Jitsi-style) | Implemented | Chat ✓ |
 | 0location353 | Jingle Message Initiation | Experimental | Call ringing |
 
 ---
@@ -266,7 +266,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | 0055 | Jabber Search | Active | User/entity search |
-| **0215** | **External Service Discovery** | Draft | External services | Implemented |
+| **0215** | **External Service Discovery** | Draft | External services | Implemented | Chat N/A |
 | **0433** | **Extended Channel Search** | Deferred | Room/channel search |
 | **0431** | **Full Text Search in MAM** | Deferred | Message search |
 | 0499 | Pubsub Extended Discovery | Experimental | Pubsub node search |
