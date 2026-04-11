@@ -2,7 +2,7 @@
 import { ref, computed } from "vue";
 import { Send, Image } from "lucide-vue-next";
 import GifPicker from "@/components/chat/GifPicker.vue";
-import { EMOJI_SHORTCODES } from "@/lib/emoji";
+import { searchEmoji } from "@/lib/emoji";
 
 const draft = defineModel<string>("draft", { required: true });
 
@@ -34,16 +34,7 @@ const mentionResults = computed(() => {
   return props.memberNames.filter((n) => n.toLowerCase().includes(q)).slice(0, 8);
 });
 
-const emojiResults = computed(() => {
-  const q = emojiQuery.value.toLowerCase();
-  if (!q || q.length < 2) return [];
-  const matches: { name: string; emoji: string }[] = [];
-  for (const [name, emoji] of Object.entries(EMOJI_SHORTCODES)) {
-    if (name.includes(q)) matches.push({ name, emoji });
-    if (matches.length >= 8) break;
-  }
-  return matches;
-});
+const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 
 // Unified autocomplete results for keyboard nav
 const activeResults = computed(() => {
