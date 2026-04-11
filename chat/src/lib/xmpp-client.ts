@@ -516,6 +516,159 @@ export class BrowserXmppClient {
     });
   }
 
+  /**
+   * XEP-0313: Query the Message Archive (MAM) for a room.
+   *
+   * MAM results arrive as individual <message> stanzas with
+   * <result><forwarded><delay/><message/></forwarded></result>
+   * followed by a <fin> IQ response.
+   */
+  async queryMam(
+    waddleId: string,
+    channelId: string,
+    max = 50,
+  ): Promise<LiveRoomMessage[]> {
+    await this.connect();
+    await this.switchRoom(waddleId, channelId);
+    if (!this.xmpp) return [];
+
+    const roomJid = roomBareJidFor(this.session, waddleId, channelId);
+    const queryId = crypto.randomUUID();
+    const iqId = crypto.randomUUID();
+
+    const collected: LiveRoomMessage[] = [];
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.xmpp?.off("stanza", handler);
+        // Return whatever we collected even on timeout
+        resolve(collected);
+      }, 15000);
+
+      const handler = (stanza: XmppElement) => {
+        // Collect MAM result messages
+        if (stanza.is("message")) {
+          const resultEl = stanza.getChild("result");
+          if (resultEl?.attrs?.queryid === queryId) {
+            const forwarded = resultEl.getChild("forwarded");
+            if (forwarded) {
+              const delayEl = forwarded.getChild("delay");
+              const innerMsg = forwarded.getChild("message");
+              if (innerMsg) {
+                const from = (innerMsg.attrs?.from as string) ?? "";
+                const nick = from.split("/")[1] ?? "unknown";
+                const body = innerMsg.getChildText("body");
+
+                if (body) {
+                  const archiveId = (resultEl.attrs?.id as string) ?? crypto.randomUUID();
+                  const timestamp = (delayEl?.attrs?.stamp as string) ?? new Date().toISOString();
+
+                  const msg: LiveRoomMessage = {
+                    id: archiveId,
+                    roomJid,
+                    nick,
+                    body,
+                    createdAt: timestamp,
+                    type: "message",
+                  };
+
+                  // Parse reactions from archived messages (XEP-0444)
+                  const reactionsEl = innerMsg.getChild("reactions");
+                  if (reactionsEl) {
+                    // Reactions in MAM are full reaction sets — handle in caller
+                    const reactedId = reactionsEl.attrs?.id as string | undefined;
+                    if (reactedId) {
+                      msg.body = "";
+                      msg.type = "subject"; // marker type — not displayed
+                      // Store reaction data on the message for caller to process
+                      (msg as LiveRoomMessage & { _reactionTarget?: string; _reactionEmojis?: string[] })._reactionTarget = reactedId;
+                      (msg as LiveRoomMessage & { _reactionEmojis?: string[] })._reactionEmojis = reactionsEl.children
+                        .filter((c: XmppElement) => c.is("reaction"))
+                        .map((c: XmppElement) => c.text())
+                        .filter((t: string) => t.length > 0);
+                    }
+                  }
+
+                  // Parse mention references (XEP-0372)
+                  const mentionUris: string[] = innerMsg.children
+                    .filter((c: XmppElement) => c.is("reference") && c.attrs?.type === "mention")
+                    .map((c: XmppElement) => (c.attrs?.uri as string) ?? "")
+                    .filter((u: string) => u.length > 0)
+                    .map((u: string) => u.replace(/^xmpp:/, ""));
+                  if (mentionUris.length > 0) {
+                    msg.mentions = mentionUris;
+                  }
+
+                  // Parse broadcast mentions (XEP-0513)
+                  const mentionsEl = innerMsg.getChild("mentions");
+                  if (mentionsEl) {
+                    for (const mc of mentionsEl.children.filter((c: XmppElement) => c.is("mention"))) {
+                      const mt = mc.attrs?.type as string | undefined;
+                      if (mt === "everyone") { msg.broadcastMention = "everyone"; break; }
+                      if (mt === "here") { msg.broadcastMention = "here"; break; }
+                    }
+                  }
+
+                  // Parse call invites (XEP-0482)
+                  const proposeEl = innerMsg.getChild("propose");
+                  if (proposeEl) {
+                    const sessionId = (proposeEl.attrs?.id as string) ?? crypto.randomUUID();
+                    const hasVideo = proposeEl.children.some((c: XmppElement) => c.is("video"));
+                    const externalEl = proposeEl.children.find((c: XmppElement) => c.is("external"));
+                    const meetingEl = innerMsg.getChild("meeting");
+                    const invite: CallInviteInfo = {
+                      sessionId,
+                      audio: true,
+                      video: hasVideo,
+                    };
+                    const uri = (externalEl?.attrs?.uri as string) ?? (meetingEl?.attrs?.url as string);
+                    if (uri) invite.externalUri = uri;
+                    const desc = meetingEl?.attrs?.desc as string | undefined;
+                    if (desc) invite.meetingDesc = desc;
+                    msg.callInvite = invite;
+                  }
+
+                  collected.push(msg);
+                }
+              }
+            }
+            return;
+          }
+        }
+
+        // Wait for the <fin> IQ response
+        if (stanza.is("iq") && stanza.attrs.id === iqId) {
+          clearTimeout(timer);
+          this.xmpp?.off("stanza", handler);
+          resolve(collected);
+          return;
+        }
+      };
+
+      this.xmpp!.on("stanza", handler);
+
+      // Send MAM query (type="set" per XEP-0313)
+      const queryEl = xml(
+        "query",
+        { xmlns: "urn:xmpp:mam:2", queryid: queryId },
+        xml(
+          "x",
+          { xmlns: "jabber:x:data", type: "submit" },
+          xml("field", { var: "FORM_TYPE", type: "hidden" }, xml("value", {}, "urn:xmpp:mam:2")),
+        ),
+        xml("set", { xmlns: "http://jabber.org/protocol/rsm" }, xml("max", {}, String(max))),
+      );
+
+      this.xmpp!
+        .send(xml("iq", { type: "set", to: roomJid, id: iqId }, queryEl))
+        .catch((err: unknown) => {
+          clearTimeout(timer);
+          this.xmpp?.off("stanza", handler);
+          reject(err);
+        });
+    });
+  }
+
   private parseAccessModel(response: XmppElement): "open" | "whitelist" | null {
     const query = response.getChild("query");
     if (!query) return null;

@@ -1,5 +1,5 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
-import type { WaddleApi, ChannelMessage } from "@/lib/waddle-api";
+import type { WaddleApi } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
@@ -10,16 +10,6 @@ import {
   type RoomHats,
 } from "@/lib/xmpp-client";
 import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
-
-function toTimelineMessage(session: WaddleSession, msg: ChannelMessage): TimelineMessage {
-  return {
-    id: msg.id,
-    author: msg.author.display_name || msg.author.username,
-    body: msg.content ?? "",
-    createdAt: msg.created_at,
-    isSelf: msg.author.user_id === session.user_id,
-  };
-}
 
 function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -52,7 +42,7 @@ export function formatStamp(value: string) {
 
 export function useMessaging(
   session: Ref<WaddleSession | null>,
-  api: Ref<WaddleApi | null>,
+  _api: Ref<WaddleApi | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
   activeWaddleId: Ref<string | null>,
   activeChannelId: Ref<string | null>,
@@ -294,17 +284,17 @@ export function useMessaging(
   }
 
   async function loadMessages(waddleId: string, channelId: string) {
-    if (!api.value || !session.value) return;
+    if (!session.value) return;
 
     const requestId = ++messageRequestId;
     isLoadingMessages.value = true;
     clearActionError();
 
     try {
-      const [history] = await Promise.all([
-        api.value.listMessages(waddleId, channelId),
-        xmppClient.value?.switchRoom(waddleId, channelId),
-      ]);
+      // XEP-0313: Load message history via MAM (XMPP-native)
+      const mamResults = xmppClient.value
+        ? await xmppClient.value.queryMam(waddleId, channelId, 100)
+        : [];
 
       if (
         requestId !== messageRequestId ||
@@ -314,7 +304,42 @@ export function useMessaging(
         return;
       }
 
-      messages.value = history.messages.reverse().map((m) => toTimelineMessage(session.value!, m));
+      // Separate regular messages from reaction updates
+      const regularMessages: LiveRoomMessage[] = [];
+      const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+
+      for (const msg of mamResults) {
+        const reactionMsg = msg as LiveRoomMessage & { _reactionTarget?: string; _reactionEmojis?: string[] };
+        if (reactionMsg._reactionTarget && reactionMsg._reactionEmojis) {
+          reactionUpdates.push({
+            targetId: reactionMsg._reactionTarget,
+            nick: msg.nick,
+            emojis: reactionMsg._reactionEmojis,
+          });
+        } else if (msg.body || msg.callInvite) {
+          regularMessages.push(msg);
+        }
+      }
+
+      // Convert to timeline messages
+      const timeline = regularMessages.map((m) => fromLiveMessage(session.value!, m));
+
+      // Apply reactions from MAM history
+      for (const update of reactionUpdates) {
+        const target = timeline.find((m) => m.id === update.targetId);
+        if (target) {
+          const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
+          for (const emoji of update.emojis) {
+            if (!reactions[emoji]) reactions[emoji] = [];
+            if (!reactions[emoji].includes(update.nick)) {
+              reactions[emoji].push(update.nick);
+            }
+          }
+          target.reactions = reactions;
+        }
+      }
+
+      messages.value = timeline;
       await scrollToBottom();
     } catch (e) {
       if (requestId === messageRequestId) {
