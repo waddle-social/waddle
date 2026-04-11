@@ -1,5 +1,7 @@
 # waddle Development Guidelines
 
+- XMPP Native, Never use out of band/XMPP APIs.
+
 ## Active Technologies
 
 - TypeScript 5.8.x, Bun 1.3.x + Astro 5.x, `@astrojs/vue` 5.x, Vue 3.5.x, Tailwind CSS 4.x with `@tailwindcss/vite`, `@astrojs/cloudflare` 12.x (Pages adapter), `@ark-ui/vue` lates (001-waddle-chat-clickdummy)
