@@ -61,6 +61,8 @@
 //! - **XEP-0444**: Message Reactions
 //! - **XEP-0433**: Extended Channel Search - Room discovery by keyword with
 //!   IQ-based search/result and Searchable trait for matching.
+//! - **XEP-0445**: Pre-Authenticated In-Band Registration - Invite token
+//!   validation during account registration with preauth element.
 //! - **XEP-0449**: Stickers - Sticker packs and sticker messages with
 //!   pack references, built on XEP-0446/0447 file sharing.
 //! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
@@ -170,6 +172,7 @@ pub mod xep0424;
 pub mod xep0425;
 pub mod xep0433;
 pub mod xep0444;
+pub mod xep0445;
 pub mod xep0446;
 pub mod xep0447;
 pub mod xep0449;
@@ -437,6 +440,11 @@ pub use xep0447::{
     build_file_sharing_element, extract_file_sharing_from_message, has_file_sharing,
     is_file_sharing_element, parse_file_sharing_element, set_file_sharing, strip_file_sharing,
     Disposition, FileSharing, FileSharingCarrier, Source, NS_SFS, NS_URL_DATA,
+};
+
+pub use xep0445::{
+    build_preauth_element, extract_preauth, has_preauth, is_preauth_element, PreauthToken,
+    PreauthValidation, NS_PARS,
 };
 
 pub use xep0446::{
