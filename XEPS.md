@@ -96,7 +96,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented |
 | **0461** | **Message Replies** | Experimental | Threaded replies |
 | **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state | Implemented |
-| **0513** | **Explicit Mentions** | Experimental | @user / @role mentions |
+| **0513** | **Explicit Mentions** | Experimental | @user / @role mentions | Implemented |
 | 0511 | Link Metadata | Experimental | Link previews / unfurling |
 | 0481 | Content Types in Messages | Experimental | Rich content types |
 
