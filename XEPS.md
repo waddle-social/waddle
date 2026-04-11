@@ -66,7 +66,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | **0440** | **SASL Channel-Binding Type Capability** | Draft |
 | **0484** | **Fast Authentication Streamlining Tokens (FAST)** | Proposed |
 | **0485** | **PubSub Server Information** | Draft |
-| **0490** | **Message Displayed Synchronization** | Draft |
+| **0490** | **Message Displayed Synchronization** | Draft | Implemented |
 | 0509 | Initial Authentication Pipelining | Experimental |
 
 ---
@@ -95,7 +95,7 @@ XEPs for rich messaging features expected in a modern community app.
 | 0428 | Fallback Indication | Experimental | Graceful degradation |
 | **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented |
 | **0461** | **Message Replies** | Experimental | Threaded replies |
-| **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state |
+| **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state | Implemented |
 | **0513** | **Explicit Mentions** | Experimental | @user / @role mentions |
 | 0511 | Link Metadata | Experimental | Link previews / unfurling |
 | 0481 | Content Types in Messages | Experimental | Rich content types |

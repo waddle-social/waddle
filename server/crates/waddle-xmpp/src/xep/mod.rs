@@ -59,6 +59,8 @@
 //!   pack references, built on XEP-0446/0447 file sharing.
 //! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
 //!   notification elements and per-room unread mention counter.
+//! - **XEP-0490**: Message Displayed Synchronization - Cross-device read
+//!   state sync via PEP with stanza-id references.
 //! - **XEP-0492**: Chat Notification Settings - Per-room notification levels
 //!   (all, mentions-only, mute) with PEP storage and decision logic.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
@@ -148,6 +150,7 @@ pub mod xep0449;
 pub mod xep0452;
 pub mod xep0469;
 pub mod xep0488;
+pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
 pub mod xep0503;
@@ -422,6 +425,11 @@ pub use xep0452::{
     extract_mention_notification, has_mention_notification, is_mention_notification_element,
     set_mention_notification, strip_mention_notification, MentionCounter, MentionNotification,
     MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
+};
+
+pub use xep0490::{
+    build_displayed_sync_element, is_displayed_sync_element, parse_displayed_sync, DisplayedSync,
+    DisplayedSyncState, NS_MDS_DISPLAYED, PEP_NODE_MDS,
 };
 
 pub use xep0492::{
