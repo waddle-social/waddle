@@ -268,7 +268,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0055 | Jabber Search | Active | User/entity search |
 | **0215** | **External Service Discovery** | Draft | External services | Implemented | Chat N/A |
 | **0433** | **Extended Channel Search** | Deferred | Room/channel search |
-| **0431** | **Full Text Search in MAM** | Deferred | Message search |
+| **0431** | **Full Text Search in MAM** | Deferred | Message search | Implemented |
 | 0499 | Pubsub Extended Discovery | Experimental | Pubsub node search |
 
 ---

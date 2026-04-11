@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { watch } from "vue";
-import { Hash, Settings } from "lucide-vue-next";
+import { ref, watch } from "vue";
+import { Hash, Settings, Search, X } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-client";
+import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 
@@ -24,6 +25,8 @@ const props = defineProps<{
   memberNames: string[];
   roomHats: RoomHats;
   slowModeCooldown: number;
+  searchResults: { id: string; nick: string; body: string; createdAt: string }[];
+  isSearching: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -35,7 +38,22 @@ const emit = defineEmits<{
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
   editChannel: [];
+  search: [query: string];
+  clearSearch: [];
 }>();
+
+const showSearch = ref(false);
+const searchInput = ref("");
+
+function doSearch() {
+  emit("search", searchInput.value);
+}
+
+function closeSearch() {
+  showSearch.value = false;
+  searchInput.value = "";
+  emit("clearSearch");
+}
 
 // XEP-0333: Send displayed marker for the latest non-self message
 watch(
@@ -70,14 +88,63 @@ watch(
           {{ xmppStatus.state }}
         </div>
       </div>
+      <div class="flex gap-1">
+        <button
+          v-if="channel"
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          :class="showSearch ? 'bg-muted' : ''"
+          title="Search messages"
+          @click="showSearch = !showSearch"
+        >
+          <Search class="w-3.5 h-3.5" />
+        </button>
+        <button
+          v-if="canManageChannels && channel"
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          title="Channel settings"
+          @click="emit('editChannel')"
+        >
+          <Settings class="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+
+    <!-- XEP-0431: Search bar -->
+    <div v-if="showSearch" class="px-6 py-2 border-b border-foreground bg-background flex items-center gap-2 flex-shrink-0">
+      <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+      <input
+        v-model="searchInput"
+        placeholder="Search messages..."
+        class="flex-1 font-mono text-sm bg-transparent focus:outline-none"
+        @keydown.enter="doSearch"
+      />
       <button
-        v-if="canManageChannels && channel"
-        class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
-        title="Channel settings"
-        @click="emit('editChannel')"
+        v-if="searchInput"
+        class="text-muted-foreground hover:text-foreground"
+        @click="closeSearch"
       >
-        <Settings class="w-3.5 h-3.5" />
+        <X class="w-3.5 h-3.5" />
       </button>
+    </div>
+
+    <!-- Search results -->
+    <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-foreground bg-muted/30 max-h-64 overflow-auto flex-shrink-0">
+      <div v-if="isSearching" class="px-6 py-4 text-sm font-mono text-muted-foreground">
+        Searching...
+      </div>
+      <div v-else class="divide-y divide-foreground/10">
+        <div
+          v-for="result in searchResults"
+          :key="result.id"
+          class="px-6 py-2 hover:bg-muted/50 transition-colors"
+        >
+          <div class="flex items-baseline gap-2">
+            <span class="font-mono font-bold text-xs">{{ result.nick }}</span>
+            <span class="text-[10px] font-mono text-muted-foreground">{{ formatStamp(result.createdAt) }}</span>
+          </div>
+          <p class="text-xs font-mono text-muted-foreground truncate">{{ result.body }}</p>
+        </div>
+      </div>
     </div>
 
     <!-- Error banner -->

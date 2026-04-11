@@ -441,6 +441,8 @@ onUnmounted(() => {
         :member-names="waddles.members.value.map((m) => m.username)"
         :room-hats="messaging.roomHats.value"
         :slow-mode-cooldown="messaging.slowModeCooldown.value"
+        :search-results="messaging.searchResults.value"
+        :is-searching="messaging.isSearching.value"
         @send="messaging.sendMessage"
         @typing="messaging.notifyComposing"
         @select-gif="sendGif"
@@ -448,6 +450,8 @@ onUnmounted(() => {
         @retract-message="messaging.retractMessage"
         @react-message="messaging.toggleReaction"
         @displayed="messaging.markDisplayed"
+        @search="messaging.searchMessages"
+        @clear-search="messaging.clearSearch"
         @edit-channel="openChannelEdit"
       />
     </div>

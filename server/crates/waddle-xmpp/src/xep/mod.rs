@@ -173,6 +173,7 @@ pub mod xep0410;
 pub mod xep0421;
 pub mod xep0424;
 pub mod xep0425;
+pub mod xep0431;
 pub mod xep0433;
 pub mod xep0437;
 pub mod xep0444;
@@ -472,6 +473,8 @@ pub use xep0059::{
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
 };
+
+pub use xep0431::{matches_fulltext, MamSearchQuery, SearchResult, FIELD_FULLTEXT};
 
 pub use xep0437::UnreadTracker;
 

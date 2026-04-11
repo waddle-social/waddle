@@ -70,6 +70,9 @@ export function useMessaging(
   const roomHats = ref<RoomHats>({});
   const slowModeCooldown = ref(0);
   const activeChannels = ref<Set<string>>(new Set());
+  const searchQuery = ref("");
+  const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
+  const isSearching = ref(false);
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let messageRequestId = 0;
@@ -511,6 +514,33 @@ export function useMessaging(
     messages.value = [];
   }
 
+  async function searchMessages(query: string) {
+    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    const trimmed = query.trim();
+    searchQuery.value = trimmed;
+    if (!trimmed) {
+      searchResults.value = [];
+      return;
+    }
+    isSearching.value = true;
+    try {
+      searchResults.value = await xmppClient.value.searchMessages(
+        activeWaddleId.value,
+        activeChannelId.value,
+        trimmed,
+      );
+    } catch {
+      searchResults.value = [];
+    } finally {
+      isSearching.value = false;
+    }
+  }
+
+  function clearSearch() {
+    searchQuery.value = "";
+    searchResults.value = [];
+  }
+
   function clearChannelActivity(roomJid: string) {
     const next = new Set(activeChannels.value);
     next.delete(roomJid);
@@ -540,6 +570,11 @@ export function useMessaging(
     disconnect,
     clearMessages,
     activeChannels,
+    searchQuery,
+    searchResults,
+    isSearching,
+    searchMessages,
+    clearSearch,
     clearChannelActivity,
     scrollToBottom,
   };

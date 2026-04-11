@@ -739,6 +739,84 @@ export class BrowserXmppClient {
     });
   }
 
+  /** XEP-0431: Search messages in MAM by full-text query. */
+  async searchMessages(
+    waddleId: string,
+    channelId: string,
+    query: string,
+    max = 20,
+  ): Promise<{ id: string; nick: string; body: string; createdAt: string }[]> {
+    await this.connect();
+    if (!this.xmpp || !query.trim()) return [];
+
+    const roomJid = roomBareJidFor(this.session, waddleId, channelId);
+    const queryId = crypto.randomUUID();
+    const iqId = crypto.randomUUID();
+
+    const results: { id: string; nick: string; body: string; createdAt: string }[] = [];
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.xmpp?.off("stanza", handler);
+        resolve(results);
+      }, 10000);
+
+      const handler = (stanza: XmppElement) => {
+        if (stanza.is("message")) {
+          const resultEl = stanza.getChild("result");
+          if (resultEl?.attrs?.queryid === queryId) {
+            const forwarded = resultEl.getChild("forwarded");
+            if (forwarded) {
+              const delayEl = forwarded.getChild("delay");
+              const innerMsg = forwarded.getChild("message");
+              if (innerMsg) {
+                const from = (innerMsg.attrs?.from as string) ?? "";
+                const nick = from.split("/")[1] ?? "unknown";
+                const body = innerMsg.getChildText("body");
+                if (body) {
+                  results.push({
+                    id: (resultEl.attrs?.id as string) ?? crypto.randomUUID(),
+                    nick,
+                    body,
+                    createdAt: (delayEl?.attrs?.stamp as string) ?? new Date().toISOString(),
+                  });
+                }
+              }
+            }
+          }
+          return;
+        }
+        if (stanza.is("iq") && stanza.attrs.id === iqId) {
+          clearTimeout(timer);
+          this.xmpp?.off("stanza", handler);
+          resolve(results);
+        }
+      };
+
+      this.xmpp!.on("stanza", handler);
+
+      const queryEl = xml(
+        "query",
+        { xmlns: "urn:xmpp:mam:2", queryid: queryId },
+        xml(
+          "x",
+          { xmlns: "jabber:x:data", type: "submit" },
+          xml("field", { var: "FORM_TYPE", type: "hidden" }, xml("value", {}, "urn:xmpp:mam:2")),
+          xml("field", { var: "fulltext" }, xml("value", {}, query.trim())),
+        ),
+        xml("set", { xmlns: "http://jabber.org/protocol/rsm" }, xml("max", {}, String(max))),
+      );
+
+      this.xmpp!
+        .send(xml("iq", { type: "set", to: roomJid, id: iqId }, queryEl))
+        .catch(() => {
+          clearTimeout(timer);
+          this.xmpp?.off("stanza", handler);
+          resolve(results);
+        });
+    });
+  }
+
   private parseAccessModel(response: XmppElement): "open" | "whitelist" | null {
     const query = response.getChild("query");
     if (!query) return null;
