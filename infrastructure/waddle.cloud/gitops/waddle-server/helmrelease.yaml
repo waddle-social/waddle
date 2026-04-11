@@ -23,6 +23,7 @@ spec:
       corsOrigins: https://api.waddle.social,https://chat.waddle.social,http://localhost:4321
     xmpp:
       domain: api.waddle.social
+      mamDbPath: /data/mam.db
     persistence:
       storageClassName: openebs-mayastor
     service:
