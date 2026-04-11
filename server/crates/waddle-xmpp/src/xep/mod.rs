@@ -50,6 +50,8 @@
 //! - **XEP-0334**: Message Processing Hints
 //! - **XEP-0410**: MUC Self-Ping - Detect room disconnection by pinging
 //!   own occupant JID; error response triggers rejoin.
+//! - **XEP-0401**: Ad-hoc Account Invitation - Platform invite tokens
+//!   with expiry, redemption, and invite store for onboarding.
 //! - **XEP-0421**: Occupant Identifiers - Stable opaque IDs for MUC
 //!   occupants via HMAC-SHA-256, added by server to messages/presence.
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
@@ -150,6 +152,7 @@ pub mod xep0377;
 pub mod xep0392;
 pub mod xep0393;
 pub mod xep0398;
+pub mod xep0401;
 pub mod xep0402;
 pub mod xep0410;
 pub mod xep0421;
@@ -351,6 +354,10 @@ pub use xep0352::{
 pub use xep0410::{
     build_self_ping, interpret_self_ping_response, is_self_ping, SelfPingResult,
     FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
+};
+
+pub use xep0401::{
+    AccountInvite, InviteRedeemError, InviteStore, COMMAND_NODE_INVITE,
 };
 
 pub use xep0421::{

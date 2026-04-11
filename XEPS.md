@@ -223,7 +223,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | **0379** | **Pre-Authenticated Roster Subscription** | Proposed | Easy contact adding |
-| **0401** | **Ad-hoc Account Invitation Generation** | Experimental | Generate invite links |
+| **0401** | **Ad-hoc Account Invitation Generation** | Experimental | Generate invite links | Implemented |
 | **0445** | **Pre-Authenticated In-Band Registration** | Proposed | Register via invite |
 | **0488** | **MUC Token Invite** | Experimental | Room invite tokens |
 | 0493 | OAuth Client Login | Experimental | OAuth-based auth |
