@@ -65,6 +65,8 @@
 //!   (all, mentions-only, mute) with PEP storage and decision logic.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
 //!   extension on XEP-0402 bookmark elements, with sort helper.
+//! - **XEP-0502**: MUC Activity Indicator - Lightweight room activity tracking
+//!   with subscribe/notify pattern and per-room activity state.
 //! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
 //!   cooldown interval, moderator exemption, and per-occupant tracking.
 //! - **XEP-0488**: MUC Token Invite - Shareable invite tokens for MUC rooms
@@ -153,6 +155,7 @@ pub mod xep0488;
 pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
+pub mod xep0502;
 pub mod xep0503;
 
 pub use xep0004::{
@@ -442,6 +445,11 @@ pub use xep0469::{
     build_pinned_element, get_pin_state, is_bookmark_pinned, is_pinned_element, pin_bookmark,
     set_pin_state, sort_bookmarks_pinned_first, unpin_bookmark, PinState, Pinnable,
     NS_BOOKMARKS_PINNING,
+};
+
+pub use xep0502::{
+    build_activity_notification, build_subscribe_element, is_activity_element,
+    parse_activity_notifications, ActivityTracker, RoomActivity, NS_MUC_ACTIVITY,
 };
 
 pub use xep0500::{
