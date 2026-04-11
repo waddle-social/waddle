@@ -5921,7 +5921,6 @@ dependencies = [
  "sha1",
  "sha2",
  "tempfile",
- "testcontainers",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls 0.26.4",
