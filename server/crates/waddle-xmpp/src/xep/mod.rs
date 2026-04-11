@@ -67,6 +67,8 @@
 //!   notification elements and per-room unread mention counter.
 //! - **XEP-0471**: Calendar Events - Community events with scheduling,
 //!   RSVP tracking (going/interested/not-going), and PubSub storage.
+//! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
+//!   via PubSub with title, body, author, and publication metadata.
 //! - **XEP-0482**: Call Invites - Audio/video call proposals with
 //!   accept/reject/retract flow and external meeting URI support.
 //! - **XEP-0483**: HTTP Online Meetings - Jitsi/BBB meeting links via
@@ -171,6 +173,7 @@ pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
 pub mod xep0471;
+pub mod xep0472;
 pub mod xep0482;
 pub mod xep0483;
 pub mod xep0488;
@@ -468,6 +471,11 @@ pub use xep0452::{
 pub use xep0471::{
     build_event_element, is_event_element, parse_event, CalendarEvent, Rsvp, RsvpStatus,
     NS_CALENDAR, PUBSUB_NODE_EVENTS,
+};
+
+pub use xep0472::{
+    build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
+    PUBSUB_NODE_FEED,
 };
 
 pub use xep0482::{
