@@ -32,6 +32,8 @@ const styledHtml = computed(() => renderStyledBody(props.message.body));
 const isGif = computed(() => isImageUrl(props.message.body));
 
 const isMentioned = computed(() => {
+  // XEP-0513: Broadcast mentions highlight for everyone
+  if (props.message.broadcastMention) return true;
   if (!props.currentUser || !props.message.mentions) return false;
   return props.message.mentions.some(
     (m) => m === props.currentUser || m.split("@")[0] === props.currentUser,

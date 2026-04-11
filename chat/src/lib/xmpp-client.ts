@@ -20,6 +20,8 @@ export interface LiveRoomMessage {
   retractsId?: string;
   /** XEP-0372: Mentioned JIDs/nicks */
   mentions?: string[];
+  /** XEP-0513: Broadcast mention type (everyone/here) */
+  broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483: Call invite or meeting info */
   callInvite?: CallInviteInfo;
 }
@@ -60,6 +62,9 @@ const CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 
 /** XEP-0372 namespace */
 const REFERENCES_NS = "urn:xmpp:reference:0";
+
+/** XEP-0513 namespace */
+const EXPLICIT_MENTIONS_NS = "urn:xmpp:emn:0";
 
 /** XEP-0482 namespace */
 const CALL_INVITES_NS = "urn:xmpp:call-invites:0";
@@ -403,6 +408,25 @@ export class BrowserXmppClient {
         .map((u: string) => u.replace(/^xmpp:/, ""));
       if (mentionUris.length > 0) {
         liveMsg.mentions = mentionUris;
+      }
+
+      // XEP-0513: Extract explicit mentions (broadcast)
+      const mentionsEl = stanza.getChild("mentions");
+      if (mentionsEl) {
+        const mentionChildren = mentionsEl.children.filter(
+          (c: XmppElement) => c.is("mention"),
+        );
+        for (const mc of mentionChildren) {
+          const mt = mc.attrs?.type as string | undefined;
+          if (mt === "everyone") {
+            liveMsg.broadcastMention = "everyone";
+            break;
+          }
+          if (mt === "here") {
+            liveMsg.broadcastMention = "here";
+            break;
+          }
+        }
       }
 
       // XEP-0482: Extract call invite (propose)
@@ -763,6 +787,19 @@ export class BrowserXmppClient {
       );
     }
 
+    // XEP-0513: Build <mentions> element for @everyone / @here
+    const explicitMentionChildren: ReturnType<typeof xml>[] = [];
+    if (/(?:^|\s)@everyone(?:\s|$)/i.test(text)) {
+      explicitMentionChildren.push(xml("mention", { type: "everyone" }));
+    }
+    if (/(?:^|\s)@here(?:\s|$)/i.test(text)) {
+      explicitMentionChildren.push(xml("mention", { type: "here" }));
+    }
+    const extras: ReturnType<typeof xml>[] = [...references];
+    if (explicitMentionChildren.length > 0) {
+      extras.push(xml("mentions", { xmlns: EXPLICIT_MENTIONS_NS }, ...explicitMentionChildren));
+    }
+
     await this.xmpp.send(
       xml(
         "message",
@@ -774,7 +811,7 @@ export class BrowserXmppClient {
         xml("body", {}, text),
         xml("request", RECEIPTS_NS),
         xml("markable", CHAT_MARKERS_NS),
-        ...references,
+        ...extras,
       ),
     );
 

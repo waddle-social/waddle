@@ -29,10 +29,22 @@ const emojiQuery = ref("");
 const selectedIndex = ref(0);
 const inputEl = ref<HTMLInputElement | null>(null);
 
+/** Strip diacritics for fuzzy matching (ø→o, ü→u, etc.) */
+function stripDiacritics(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+const BROADCAST_MENTIONS = ["everyone", "here"];
+
 const mentionResults = computed(() => {
   const q = mentionQuery.value.toLowerCase();
-  if (!q) return props.memberNames.slice(0, 8);
-  return props.memberNames.filter((n) => n.toLowerCase().includes(q)).slice(0, 8);
+  const qNorm = stripDiacritics(mentionQuery.value);
+  const allNames = [...BROADCAST_MENTIONS, ...props.memberNames];
+  if (!q) return allNames.slice(0, 8);
+  return allNames.filter((n) => {
+    const lower = n.toLowerCase();
+    return lower.includes(q) || stripDiacritics(n).includes(qNorm);
+  }).slice(0, 8);
 });
 
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
