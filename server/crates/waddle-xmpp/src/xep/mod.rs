@@ -79,6 +79,8 @@
 //!   (all, mentions-only, mute) with PEP storage and decision logic.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
 //!   extension on XEP-0402 bookmark elements, with sort helper.
+//! - **XEP-0501**: Pubsub Stories - Ephemeral posts with auto-expiry
+//!   (default 24h), media support, and active/expired filtering.
 //! - **XEP-0502**: MUC Activity Indicator - Lightweight room activity tracking
 //!   with subscribe/notify pattern and per-room activity state.
 //! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
@@ -180,6 +182,7 @@ pub mod xep0488;
 pub mod xep0490;
 pub mod xep0492;
 pub mod xep0500;
+pub mod xep0501;
 pub mod xep0502;
 pub mod xep0503;
 pub mod xep0508;
@@ -506,6 +509,11 @@ pub use xep0469::{
     build_pinned_element, get_pin_state, is_bookmark_pinned, is_pinned_element, pin_bookmark,
     set_pin_state, sort_bookmarks_pinned_first, unpin_bookmark, PinState, Pinnable,
     NS_BOOKMARKS_PINNING,
+};
+
+pub use xep0501::{
+    build_story_element, filter_active, is_story_element, parse_story, Story,
+    DEFAULT_EXPIRY_HOURS, NS_STORIES, PUBSUB_NODE_STORIES,
 };
 
 pub use xep0502::{
