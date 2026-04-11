@@ -108,9 +108,9 @@ impl ChannelResult {
 
     /// Returns the display name (name or JID localpart).
     pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or_else(|| {
-            self.jid.split('@').next().unwrap_or(&self.jid)
-        })
+        self.name
+            .as_deref()
+            .unwrap_or_else(|| self.jid.split('@').next().unwrap_or(&self.jid))
     }
 }
 
@@ -124,8 +124,14 @@ impl Searchable for ChannelResult {
     fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
         self.jid.to_lowercase().contains(&q)
-            || self.name.as_deref().is_some_and(|n| n.to_lowercase().contains(&q))
-            || self.description.as_deref().is_some_and(|d| d.to_lowercase().contains(&q))
+            || self
+                .name
+                .as_deref()
+                .is_some_and(|n| n.to_lowercase().contains(&q))
+            || self
+                .description
+                .as_deref()
+                .is_some_and(|d| d.to_lowercase().contains(&q))
     }
 }
 
@@ -163,9 +169,7 @@ pub fn parse_search_request(iq: &Iq) -> Option<SearchRequest> {
 /// Parse search results from an IQ response.
 pub fn parse_search_results(iq: &Iq) -> Vec<ChannelResult> {
     let elem = match &iq.payload {
-        IqType::Result(Some(elem))
-            if elem.name() == "result" && elem.ns() == NS_CHANNEL_SEARCH =>
-        {
+        IqType::Result(Some(elem)) if elem.name() == "result" && elem.ns() == NS_CHANNEL_SEARCH => {
             elem
         }
         _ => return Vec::new(),
@@ -175,8 +179,14 @@ pub fn parse_search_results(iq: &Iq) -> Vec<ChannelResult> {
         .filter(|c| c.name() == "channel" && c.ns() == NS_CHANNEL_SEARCH)
         .filter_map(|c| {
             let jid = c.attr("jid").filter(|s| !s.is_empty())?.to_owned();
-            let name = c.attr("name").filter(|s| !s.is_empty()).map(|s| s.to_owned());
-            let description = c.attr("description").filter(|s| !s.is_empty()).map(|s| s.to_owned());
+            let name = c
+                .attr("name")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_owned());
+            let description = c
+                .attr("description")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_owned());
             let occupants = c.attr("occupants").and_then(|s| s.parse().ok());
             Some(ChannelResult {
                 jid,
@@ -286,8 +296,7 @@ mod tests {
                 .with_name("General")
                 .with_description("Main chat")
                 .with_occupants(42),
-            ChannelResult::new("random@muc.example.com")
-                .with_name("Random"),
+            ChannelResult::new("random@muc.example.com").with_name("Random"),
         ];
 
         let response = build_search_response(&request_iq, &results);

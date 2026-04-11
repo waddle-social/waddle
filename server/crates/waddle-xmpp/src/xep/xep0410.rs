@@ -78,11 +78,7 @@ impl std::fmt::Display for SelfPingResult {
 /// Build a self-ping IQ to check room membership.
 ///
 /// `occupant_jid` should be the full MUC JID: `room@muc.domain/nick`
-pub fn build_self_ping(
-    from: impl Into<Option<jid::Jid>>,
-    occupant_jid: jid::Jid,
-    id: &str,
-) -> Iq {
+pub fn build_self_ping(from: impl Into<Option<jid::Jid>>, occupant_jid: jid::Jid, id: &str) -> Iq {
     let ping_elem = minidom::Element::builder("ping", NS_PING).build();
     Iq {
         from: from.into(),
@@ -190,7 +186,8 @@ mod tests {
 
     #[test]
     fn test_interpret_error_disconnected() {
-        let xml = "<iq xmlns='jabber:client' type='error' from='room@muc.example.com/mynick' id='sp-1'>\
+        let xml =
+            "<iq xmlns='jabber:client' type='error' from='room@muc.example.com/mynick' id='sp-1'>\
                     <error type='cancel'>\
                       <not-acceptable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>\
                     </error>\

@@ -290,8 +290,11 @@ mod tests {
         assert_eq!(msg.type_, MessageType::Groupchat);
         assert!(is_sticker_message(&msg));
         assert!(!msg.bodies.is_empty()); // Has fallback body
-        // Has file-sharing element too
-        assert!(msg.payloads.iter().any(|e| e.ns() == super::super::xep0447::NS_SFS));
+                                         // Has file-sharing element too
+        assert!(msg
+            .payloads
+            .iter()
+            .any(|e| e.ns() == super::super::xep0447::NS_SFS));
     }
 
     #[test]

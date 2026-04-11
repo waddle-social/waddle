@@ -82,9 +82,9 @@ impl InviteToken {
     ///
     /// Format: `xmpp:room@muc.example.com?join;password=TOKEN`
     pub fn to_uri(&self) -> Option<String> {
-        self.room_jid.as_ref().map(|jid| {
-            format!("xmpp:{}?join;password={}", jid, self.token)
-        })
+        self.room_jid
+            .as_ref()
+            .map(|jid| format!("xmpp:{}?join;password={}", jid, self.token))
     }
 }
 
@@ -115,8 +115,7 @@ impl InviteTokenCarrier for Message {
 
 /// Check if an element is an invite token element.
 pub fn is_invite_element(elem: &Element) -> bool {
-    elem.ns() == NS_MUC_TOKEN_INVITE
-        && matches!(elem.name(), "invite" | "request")
+    elem.ns() == NS_MUC_TOKEN_INVITE && matches!(elem.name(), "invite" | "request")
 }
 
 /// Check if an IQ is an invite token request.
@@ -127,9 +126,9 @@ pub fn is_invite_request(iq: &Iq) -> bool {
 
 /// Check if a message contains an invite token.
 pub fn has_invite_in_message(msg: &Message) -> bool {
-    msg.payloads.iter().any(|e| {
-        e.ns() == NS_MUC_TOKEN_INVITE && e.name() == "invite"
-    })
+    msg.payloads
+        .iter()
+        .any(|e| e.ns() == NS_MUC_TOKEN_INVITE && e.name() == "invite")
 }
 
 // ── Extraction ───────────────────────────────────────────────────────
@@ -148,17 +147,15 @@ pub fn extract_invite_from_iq(iq: &Iq) -> Option<InviteToken> {
     let token = elem.attr("token").filter(|t| !t.is_empty())?.to_owned();
     let room_jid = iq.from.as_ref().map(|j| j.to_string());
 
-    Some(InviteToken {
-        token,
-        room_jid,
-    })
+    Some(InviteToken { token, room_jid })
 }
 
 /// Extract an invite token from a message.
 pub fn extract_invite_from_message(msg: &Message) -> Option<InviteToken> {
-    let elem = msg.payloads.iter().find(|e| {
-        e.ns() == NS_MUC_TOKEN_INVITE && e.name() == "invite"
-    })?;
+    let elem = msg
+        .payloads
+        .iter()
+        .find(|e| e.ns() == NS_MUC_TOKEN_INVITE && e.name() == "invite")?;
 
     let token = elem.attr("token").filter(|t| !t.is_empty())?.to_owned();
     let room_jid = elem
@@ -228,16 +225,14 @@ pub fn build_invite_share_message(
 
 /// Add an invite token to a message.
 pub fn set_invite_on_message(msg: &mut Message, token: &str, room_jid: &str) {
-    msg.payloads
-        .retain(|e| e.ns() != NS_MUC_TOKEN_INVITE);
+    msg.payloads.retain(|e| e.ns() != NS_MUC_TOKEN_INVITE);
     msg.payloads
         .push(build_invite_message_element(token, room_jid));
 }
 
 /// Remove invite token from a message.
 pub fn strip_invite_from_message(msg: &mut Message) {
-    msg.payloads
-        .retain(|e| e.ns() != NS_MUC_TOKEN_INVITE);
+    msg.payloads.retain(|e| e.ns() != NS_MUC_TOKEN_INVITE);
 }
 
 #[cfg(test)]
@@ -272,10 +267,7 @@ mod tests {
 
         let token = extract_invite_from_iq(&response).expect("has token");
         assert_eq!(token.token, "abc123");
-        assert_eq!(
-            token.room_jid.as_deref(),
-            Some("room@muc.example.com")
-        );
+        assert_eq!(token.room_jid.as_deref(), Some("room@muc.example.com"));
     }
 
     #[test]
@@ -289,10 +281,7 @@ mod tests {
 
         let token = extract_invite_from_message(&msg).expect("has token");
         assert_eq!(token.token, "xyz789");
-        assert_eq!(
-            token.room_jid.as_deref(),
-            Some("room@muc.example.com")
-        );
+        assert_eq!(token.room_jid.as_deref(), Some("room@muc.example.com"));
     }
 
     #[test]
@@ -317,8 +306,8 @@ mod tests {
     fn test_build_invite_share_message() {
         let to: jid::Jid = "friend@example.com".parse().expect("valid jid");
         let token = InviteToken::new("tok123").with_room("room@muc.example.com");
-        let msg = build_invite_share_message(to.clone(), None::<jid::Jid>, &token)
-            .expect("has room jid");
+        let msg =
+            build_invite_share_message(to.clone(), None::<jid::Jid>, &token).expect("has room jid");
 
         assert_eq!(msg.to, Some(to));
         assert_eq!(msg.type_, MessageType::Chat);

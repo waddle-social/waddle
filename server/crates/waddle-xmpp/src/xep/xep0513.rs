@@ -122,7 +122,9 @@ impl ExplicitMentions {
 
     /// Returns `true` if @everyone is mentioned.
     pub fn mentions_everyone(&self) -> bool {
-        self.mentions.iter().any(|m| matches!(m, MentionType::Everyone))
+        self.mentions
+            .iter()
+            .any(|m| matches!(m, MentionType::Everyone))
     }
 
     /// Returns `true` if @here is mentioned.
@@ -137,12 +139,16 @@ impl ExplicitMentions {
 
     /// Check if a specific JID is mentioned.
     pub fn mentions_jid(&self, jid: &str) -> bool {
-        self.mentions.iter().any(|m| matches!(m, MentionType::Jid(j) if j == jid))
+        self.mentions
+            .iter()
+            .any(|m| matches!(m, MentionType::Jid(j) if j == jid))
     }
 
     /// Check if a specific nick is mentioned.
     pub fn mentions_nick(&self, nick: &str) -> bool {
-        self.mentions.iter().any(|m| matches!(m, MentionType::Nick(n) if n == nick))
+        self.mentions
+            .iter()
+            .any(|m| matches!(m, MentionType::Nick(n) if n == nick))
     }
 
     /// Returns `true` if empty.
@@ -152,9 +158,7 @@ impl ExplicitMentions {
 
     /// Should a given user be notified? Checks JID, nick, and broadcast.
     pub fn should_notify(&self, user_jid: &str, user_nick: &str) -> bool {
-        self.has_broadcast()
-            || self.mentions_jid(user_jid)
-            || self.mentions_nick(user_nick)
+        self.has_broadcast() || self.mentions_jid(user_jid) || self.mentions_nick(user_nick)
     }
 }
 
@@ -202,7 +206,10 @@ pub fn parse_mentions_element(elem: &Element) -> ExplicitMentions {
         .filter(|c| c.name() == "mention" && c.ns() == NS_EXPLICIT_MENTIONS)
         .filter_map(|c| {
             let mt = c.attr("type")?;
-            let value = c.attr("value").filter(|v| !v.is_empty()).map(|v| v.to_owned());
+            let value = c
+                .attr("value")
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_owned());
             match mt {
                 "jid" => Some(MentionType::Jid(value?)),
                 "nick" => Some(MentionType::Nick(value?)),
@@ -367,8 +374,7 @@ mod tests {
 
     #[test]
     fn test_role_mention() {
-        let m = ExplicitMentions::new()
-            .with_mention(MentionType::Role("moderator".into()));
+        let m = ExplicitMentions::new().with_mention(MentionType::Role("moderator".into()));
         assert!(!m.is_empty());
         assert_eq!(m.mentions[0].type_str(), "role");
         assert_eq!(m.mentions[0].value(), Some("moderator"));

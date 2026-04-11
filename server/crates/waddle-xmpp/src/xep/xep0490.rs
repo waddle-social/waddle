@@ -178,18 +178,13 @@ mod tests {
 
     #[test]
     fn test_build_and_parse() {
-        let sync = DisplayedSync::new(
-            "room@muc.example.com",
-            "msg-id-42",
-            "room@muc.example.com",
-        );
+        let sync = DisplayedSync::new("room@muc.example.com", "msg-id-42", "room@muc.example.com");
         let elem = build_displayed_sync_element(&sync);
 
         assert_eq!(elem.name(), "displayed");
         assert_eq!(elem.ns(), NS_MDS_DISPLAYED);
 
-        let parsed =
-            parse_displayed_sync("room@muc.example.com", &elem).expect("parseable");
+        let parsed = parse_displayed_sync("room@muc.example.com", &elem).expect("parseable");
         assert_eq!(parsed.jid, "room@muc.example.com");
         assert_eq!(parsed.stanza_id, "msg-id-42");
         assert_eq!(parsed.stanza_id_by, "room@muc.example.com");

@@ -152,7 +152,10 @@ impl InviteStore {
 
     /// Get all invites by a specific user.
     pub fn by_inviter(&self, jid: &str) -> Vec<&AccountInvite> {
-        self.invites.iter().filter(|i| i.inviter_jid == jid).collect()
+        self.invites
+            .iter()
+            .filter(|i| i.inviter_jid == jid)
+            .collect()
     }
 
     /// Get all valid (unused, not expired) invites.
@@ -209,13 +212,11 @@ mod tests {
 
     #[test]
     fn test_invite_expiry() {
-        let expired = AccountInvite::new("tok", "a@b")
-            .with_expiry(Duration::seconds(-1));
+        let expired = AccountInvite::new("tok", "a@b").with_expiry(Duration::seconds(-1));
         assert!(expired.is_expired());
         assert!(!expired.is_valid());
 
-        let valid = AccountInvite::new("tok", "a@b")
-            .with_expiry(Duration::hours(24));
+        let valid = AccountInvite::new("tok", "a@b").with_expiry(Duration::hours(24));
         assert!(!valid.is_expired());
         assert!(valid.is_valid());
     }
@@ -239,8 +240,8 @@ mod tests {
 
     #[test]
     fn test_invite_landing_url() {
-        let inv = AccountInvite::new("tok", "a@b")
-            .with_landing_url("https://example.com/invite/tok");
+        let inv =
+            AccountInvite::new("tok", "a@b").with_landing_url("https://example.com/invite/tok");
         assert_eq!(
             inv.landing_url.as_deref(),
             Some("https://example.com/invite/tok")
@@ -278,9 +279,7 @@ mod tests {
     #[test]
     fn test_store_redeem_expired() {
         let mut store = InviteStore::new();
-        store.add(
-            AccountInvite::new("tok-exp", "a@b").with_expiry(Duration::seconds(-10)),
-        );
+        store.add(AccountInvite::new("tok-exp", "a@b").with_expiry(Duration::seconds(-10)));
 
         let result = store.redeem("tok-exp");
         assert_eq!(result.unwrap_err(), InviteRedeemError::Expired);
@@ -311,7 +310,10 @@ mod tests {
     #[test]
     fn test_invite_redeem_error_display() {
         assert_eq!(InviteRedeemError::NotFound.to_string(), "invite not found");
-        assert_eq!(InviteRedeemError::AlreadyUsed.to_string(), "invite already used");
+        assert_eq!(
+            InviteRedeemError::AlreadyUsed.to_string(),
+            "invite already used"
+        );
         assert_eq!(InviteRedeemError::Expired.to_string(), "invite expired");
     }
 

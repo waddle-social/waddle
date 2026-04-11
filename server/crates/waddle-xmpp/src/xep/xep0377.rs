@@ -197,9 +197,7 @@ pub fn parse_report(elem: &Element) -> Option<Report> {
         return None;
     }
 
-    let reason = elem
-        .attr("reason")
-        .and_then(ReportReason::from_str_attr)?;
+    let reason = elem.attr("reason").and_then(ReportReason::from_str_attr)?;
 
     let text = elem
         .children()
@@ -321,8 +319,8 @@ mod tests {
 
     #[test]
     fn test_report_record_builder() {
-        let record = ReportRecord::new("a@b", "c@d", Report::spam())
-            .with_timestamp("2024-06-01T12:00:00Z");
+        let record =
+            ReportRecord::new("a@b", "c@d", Report::spam()).with_timestamp("2024-06-01T12:00:00Z");
         assert_eq!(record.reporter_jid, "a@b");
         assert_eq!(record.reported_jid, "c@d");
         assert_eq!(record.timestamp.as_deref(), Some("2024-06-01T12:00:00Z"));

@@ -164,9 +164,9 @@ pub mod xep0433;
 pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
-pub mod xep0461;
 pub mod xep0449;
 pub mod xep0452;
+pub mod xep0461;
 pub mod xep0469;
 pub mod xep0471;
 pub mod xep0488;
@@ -297,8 +297,7 @@ pub use xep0308::{
 
 pub use xep0317::{
     build_hats_element, extract_hats_from_presence, has_hats, hats_from_affiliation,
-    is_hats_element, parse_hats_element, set_hats, strip_hats, Hat, HatCarrier, HatSet,
-    NS_HATS,
+    is_hats_element, parse_hats_element, set_hats, strip_hats, Hat, HatCarrier, HatSet, NS_HATS,
 };
 
 pub use xep0319::{
@@ -359,9 +358,7 @@ pub use xep0410::{
     FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
 };
 
-pub use xep0401::{
-    AccountInvite, InviteRedeemError, InviteStore, COMMAND_NODE_INVITE,
-};
+pub use xep0401::{AccountInvite, InviteRedeemError, InviteStore, COMMAND_NODE_INVITE};
 
 pub use xep0421::{
     build_occupant_id_element, extract_occupant_id_from_message, extract_occupant_id_from_presence,

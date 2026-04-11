@@ -155,10 +155,7 @@ pub fn extract_moderation_request(msg: &Message) -> Option<ModerationRequest> {
         .map(|c| c.text())
         .filter(|t| !t.is_empty());
 
-    Some(ModerationRequest {
-        target_id,
-        reason,
-    })
+    Some(ModerationRequest { target_id, reason })
 }
 
 /// Extract a moderation result from a message.
@@ -267,8 +264,12 @@ pub fn build_moderation_result_message(
     msg.from = from_room.into();
     msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
     msg.id = Some(uuid::Uuid::new_v4().to_string());
-    msg.payloads
-        .push(build_moderation_result_element(target_id, moderated_by, stamp, reason));
+    msg.payloads.push(build_moderation_result_element(
+        target_id,
+        moderated_by,
+        stamp,
+        reason,
+    ));
     msg
 }
 
@@ -342,10 +343,7 @@ mod tests {
     #[test]
     fn test_build_moderation_request() {
         let req = ModerationRequest::new("msg-42").with_reason("Off-topic");
-        let msg = build_moderation_request(
-            "room@muc.example.com".parse::<jid::Jid>().ok(),
-            &req,
-        );
+        let msg = build_moderation_request("room@muc.example.com".parse::<jid::Jid>().ok(), &req);
 
         assert_eq!(msg.type_, MessageType::Groupchat);
         let parsed = extract_moderation_request(&msg).expect("parseable");

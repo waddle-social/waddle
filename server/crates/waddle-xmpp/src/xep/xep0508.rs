@@ -150,8 +150,7 @@ impl ThreadSummary {
 
 /// Check if an element is a forum element.
 pub fn is_forum_element(elem: &Element) -> bool {
-    elem.ns() == NS_FORUMS
-        && matches!(elem.name(), "thread-create" | "thread-reply")
+    elem.ns() == NS_FORUMS && matches!(elem.name(), "thread-create" | "thread-reply")
 }
 
 /// Check if a message contains forum elements.
@@ -169,17 +168,11 @@ pub fn extract_forum_action(msg: &Message) -> Option<ForumAction> {
         }
         match elem.name() {
             "thread-create" => {
-                let title = elem
-                    .attr("title")
-                    .filter(|t| !t.is_empty())?
-                    .to_owned();
+                let title = elem.attr("title").filter(|t| !t.is_empty())?.to_owned();
                 return Some(ForumAction::CreateThread(ThreadCreate::new(title)));
             }
             "thread-reply" => {
-                let thread_id = elem
-                    .attr("thread-id")
-                    .filter(|t| !t.is_empty())?
-                    .to_owned();
+                let thread_id = elem.attr("thread-id").filter(|t| !t.is_empty())?.to_owned();
                 return Some(ForumAction::Reply(ThreadReply::new(thread_id)));
             }
             _ => {}
@@ -250,7 +243,9 @@ mod tests {
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         let action = extract_forum_action(&msg).expect("has action");
-        assert!(matches!(action, ForumAction::CreateThread(ref tc) if tc.title == "Getting Started"));
+        assert!(
+            matches!(action, ForumAction::CreateThread(ref tc) if tc.title == "Getting Started")
+        );
     }
 
     #[test]

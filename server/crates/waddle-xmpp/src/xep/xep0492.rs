@@ -140,10 +140,7 @@ impl NotificationSettings {
 
     /// Get the notification level for a room.
     pub fn get(&self, room_jid: &str) -> NotificationLevel {
-        self.settings
-            .get(room_jid)
-            .copied()
-            .unwrap_or_default()
+        self.settings.get(room_jid).copied().unwrap_or_default()
     }
 
     /// Remove the setting for a room (reverts to default).
@@ -188,7 +185,8 @@ pub fn parse_notification_setting(elem: &Element) -> Option<NotificationLevel> {
     if !is_notification_settings_element(elem) {
         return None;
     }
-    elem.attr("level").and_then(NotificationLevel::from_str_attr)
+    elem.attr("level")
+        .and_then(NotificationLevel::from_str_attr)
 }
 
 // ── Building ─────────────────────────────────────────────────────────

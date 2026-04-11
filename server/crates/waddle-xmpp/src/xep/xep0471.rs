@@ -183,9 +183,8 @@ pub fn parse_event(item_id: &str, elem: &Element) -> Option<CalendarEvent> {
             .filter(|t| !t.is_empty())
     };
 
-    let dt_child = |name: &str| -> Option<DateTime<Utc>> {
-        text_child(name).and_then(|t| t.parse().ok())
-    };
+    let dt_child =
+        |name: &str| -> Option<DateTime<Utc>> { text_child(name).and_then(|t| t.parse().ok()) };
 
     let title = text_child("title")?;
 
@@ -304,13 +303,16 @@ mod tests {
 
     #[test]
     fn test_is_upcoming() {
-        let future = CalendarEvent::new("e", "Future")
-            .with_times(test_start(), test_end());
+        let future = CalendarEvent::new("e", "Future").with_times(test_start(), test_end());
         assert!(future.is_upcoming());
 
         let past = CalendarEvent::new("e", "Past").with_times(
-            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).single().expect("valid"),
-            Utc.with_ymd_and_hms(2020, 1, 1, 1, 0, 0).single().expect("valid"),
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            Utc.with_ymd_and_hms(2020, 1, 1, 1, 0, 0)
+                .single()
+                .expect("valid"),
         );
         assert!(!past.is_upcoming());
     }

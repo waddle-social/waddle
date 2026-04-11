@@ -372,9 +372,7 @@ mod tests {
 
     #[test]
     fn test_titles() {
-        let set = HatSet::new()
-            .with_hat(Hat::admin())
-            .with_hat(Hat::bot());
+        let set = HatSet::new().with_hat(Hat::admin()).with_hat(Hat::bot());
         assert_eq!(set.titles(), vec!["Admin", "Bot"]);
     }
 

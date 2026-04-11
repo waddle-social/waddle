@@ -155,8 +155,7 @@ pub fn build_mention_notification_message(
         .push(build_mention_notification_element(notification));
 
     if let Some(preview) = body_preview {
-        msg.bodies
-            .insert(String::new(), Body(preview.to_owned()));
+        msg.bodies.insert(String::new(), Body(preview.to_owned()));
     }
 
     msg
@@ -166,16 +165,14 @@ pub fn build_mention_notification_message(
 
 /// Add a mention notification to a message.
 pub fn set_mention_notification(msg: &mut Message, notification: &MentionNotification) {
-    msg.payloads
-        .retain(|e| e.ns() != NS_MENTION_NOTIFICATION);
+    msg.payloads.retain(|e| e.ns() != NS_MENTION_NOTIFICATION);
     msg.payloads
         .push(build_mention_notification_element(notification));
 }
 
 /// Remove mention notification from a message.
 pub fn strip_mention_notification(msg: &mut Message) {
-    msg.payloads
-        .retain(|e| e.ns() != NS_MENTION_NOTIFICATION);
+    msg.payloads.retain(|e| e.ns() != NS_MENTION_NOTIFICATION);
 }
 
 // ── Mention tracking ─────────────────────────────────────────────────
@@ -259,10 +256,7 @@ mod tests {
             notif.mentioned_by.as_deref(),
             Some("room@muc.example.com/bob")
         );
-        assert_eq!(
-            notif.room_jid.as_deref(),
-            Some("room@muc.example.com")
-        );
+        assert_eq!(notif.room_jid.as_deref(), Some("room@muc.example.com"));
     }
 
     #[test]
@@ -290,8 +284,12 @@ mod tests {
         let room: jid::Jid = "room@muc.example.com".parse().expect("valid");
         let notif = MentionNotification::new("msg-1").with_by("room@muc.example.com/bob");
 
-        let msg =
-            build_mention_notification_message(to.clone(), room.clone(), &notif, Some("@alice hey!"));
+        let msg = build_mention_notification_message(
+            to.clone(),
+            room.clone(),
+            &notif,
+            Some("@alice hey!"),
+        );
 
         assert_eq!(msg.to, Some(to));
         assert_eq!(msg.from, Some(room));

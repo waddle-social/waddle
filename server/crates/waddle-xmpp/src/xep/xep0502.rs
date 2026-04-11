@@ -108,17 +108,12 @@ impl ActivityTracker {
 
     /// Check if a room has new messages.
     pub fn has_activity(&self, room_jid: &str) -> bool {
-        self.rooms
-            .get(room_jid)
-            .is_some_and(|r| r.has_new_messages)
+        self.rooms.get(room_jid).is_some_and(|r| r.has_new_messages)
     }
 
     /// Get all rooms with new activity.
     pub fn active_rooms(&self) -> Vec<&RoomActivity> {
-        self.rooms
-            .values()
-            .filter(|r| r.has_new_messages)
-            .collect()
+        self.rooms.values().filter(|r| r.has_new_messages).collect()
     }
 
     /// Get the activity state for a room.

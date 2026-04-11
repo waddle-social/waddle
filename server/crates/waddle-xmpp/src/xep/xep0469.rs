@@ -76,9 +76,7 @@ pub fn is_pinned_element(elem: &Element) -> bool {
 
 /// Check if a bookmark conference element has a `<pinned/>` child.
 pub fn is_bookmark_pinned(conference_elem: &Element) -> bool {
-    conference_elem
-        .children()
-        .any(|c| is_pinned_element(c))
+    conference_elem.children().any(|c| is_pinned_element(c))
 }
 
 // ── Building ─────────────────────────────────────────────────────────
@@ -175,12 +173,7 @@ mod tests {
 
         // Pinning again is idempotent
         pin_bookmark(&mut elem);
-        assert_eq!(
-            elem.children()
-                .filter(|c| is_pinned_element(c))
-                .count(),
-            1
-        );
+        assert_eq!(elem.children().filter(|c| is_pinned_element(c)).count(), 1);
     }
 
     #[test]

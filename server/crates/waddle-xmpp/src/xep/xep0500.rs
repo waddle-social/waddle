@@ -57,7 +57,9 @@ impl SlowModeConfig {
 
     /// Slow mode disabled.
     pub fn disabled() -> Self {
-        Self { interval_secs: SLOW_MODE_DISABLED }
+        Self {
+            interval_secs: SLOW_MODE_DISABLED,
+        }
     }
 
     /// Returns `true` if slow mode is active.
@@ -216,19 +218,13 @@ mod tests {
     #[test]
     fn test_tracker_disabled() {
         let tracker = SlowModeTracker::disabled();
-        assert_eq!(
-            tracker.check("alice", false),
-            SlowModeCheck::Disabled
-        );
+        assert_eq!(tracker.check("alice", false), SlowModeCheck::Disabled);
     }
 
     #[test]
     fn test_tracker_first_message_allowed() {
         let tracker = SlowModeTracker::new(SlowModeConfig::new(30));
-        assert_eq!(
-            tracker.check("alice", false),
-            SlowModeCheck::Allowed
-        );
+        assert_eq!(tracker.check("alice", false), SlowModeCheck::Allowed);
     }
 
     #[test]
@@ -247,10 +243,7 @@ mod tests {
         let mut tracker = SlowModeTracker::new(SlowModeConfig::new(30));
         tracker.record_message("mod_user");
 
-        assert_eq!(
-            tracker.check("mod_user", true),
-            SlowModeCheck::Allowed
-        );
+        assert_eq!(tracker.check("mod_user", true), SlowModeCheck::Allowed);
     }
 
     #[test]
@@ -259,10 +252,7 @@ mod tests {
         tracker.record_message("alice");
 
         // Bob hasn't sent yet, should be allowed
-        assert_eq!(
-            tracker.check("bob", false),
-            SlowModeCheck::Allowed
-        );
+        assert_eq!(tracker.check("bob", false), SlowModeCheck::Allowed);
     }
 
     #[test]
@@ -274,10 +264,7 @@ mod tests {
 
         // Wait just over 1 second
         thread::sleep(Duration::from_millis(1100));
-        assert_eq!(
-            tracker.check("alice", false),
-            SlowModeCheck::Allowed
-        );
+        assert_eq!(tracker.check("alice", false), SlowModeCheck::Allowed);
     }
 
     #[test]
@@ -286,10 +273,7 @@ mod tests {
         tracker.record_message("alice");
         tracker.remove_occupant("alice");
 
-        assert_eq!(
-            tracker.check("alice", false),
-            SlowModeCheck::Allowed
-        );
+        assert_eq!(tracker.check("alice", false), SlowModeCheck::Allowed);
     }
 
     #[test]

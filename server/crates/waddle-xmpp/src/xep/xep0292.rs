@@ -123,9 +123,7 @@ impl VCard4 {
 
     /// Returns the best display name (full_name > nickname > None).
     pub fn display_name(&self) -> Option<&str> {
-        self.full_name
-            .as_deref()
-            .or(self.nickname.as_deref())
+        self.full_name.as_deref().or(self.nickname.as_deref())
     }
 
     /// Returns `true` if the vCard has no data.
@@ -273,7 +271,10 @@ mod tests {
         assert_eq!(vcard.org.as_deref(), Some("Montague Inc"));
         assert_eq!(vcard.title.as_deref(), Some("Heir"));
         assert_eq!(vcard.url.as_deref(), Some("https://romeo.example.com"));
-        assert_eq!(vcard.photo_uri.as_deref(), Some("https://example.com/romeo.jpg"));
+        assert_eq!(
+            vcard.photo_uri.as_deref(),
+            Some("https://example.com/romeo.jpg")
+        );
         assert!(!vcard.is_empty());
     }
 
@@ -319,7 +320,10 @@ mod tests {
         assert_eq!(parsed.email.as_deref(), Some("juliet@example.com"));
         assert_eq!(parsed.note.as_deref(), Some("Also star-crossed"));
         assert_eq!(parsed.url.as_deref(), Some("https://juliet.example.com"));
-        assert_eq!(parsed.photo_uri.as_deref(), Some("https://example.com/juliet.jpg"));
+        assert_eq!(
+            parsed.photo_uri.as_deref(),
+            Some("https://example.com/juliet.jpg")
+        );
     }
 
     #[test]
