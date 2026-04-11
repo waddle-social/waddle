@@ -5,10 +5,6 @@ import (
   xNode "github.com/cuenv/cuenv/contrib/node"
 )
 
-schema.#Project
-
-name: "waddle-colony"
-
 let _t = tasks
 
 runtime: schema.#ToolsRuntime & {

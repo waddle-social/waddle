@@ -2,10 +2,6 @@ package cuenv
 
 import "github.com/cuenv/cuenv/schema"
 
-schema.#Project
-
-name: "waddle-chat"
-
 let _t = tasks
 
 env: {

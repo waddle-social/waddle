@@ -6,7 +6,45 @@ import (
 	c "github.com/cuenv/cuenv/contrib/contributors"
 )
 
-schema.#Base
+schema.#Project
+
+name: "waddle"
+
+let _s = services
+
+services: {
+	server: {
+		dir:         "server"
+		description: "Waddle XMPP server"
+		script: """
+			set -a
+			. ./local/waddle.env
+			set +a
+			cargo run --bin waddle-server
+			"""
+		readiness: {
+			kind: "port"
+			port: 5222
+		}
+		logs: color: "magenta"
+	}
+	chat: {
+		dir:         "chat"
+		command:     "bun"
+		args: ["x", "wrangler", "dev", "--local", "--port", "4321"]
+		description: "Astro chat frontend (Wrangler local dev)"
+		dependsOn: [_s.server]
+		readiness: {
+			kind: "port"
+			port: 4321
+		}
+		watch: {
+			paths: ["src/**", "public/**"]
+			ignore: ["node_modules/**", "dist/**"]
+		}
+		logs: color: "cyan"
+	}
+}
 
 runtime: schema.#ToolsRuntime & {
 	platforms: ["darwin-arm64", "darwin-x86_64", "linux-x86_64", "linux-arm64"]

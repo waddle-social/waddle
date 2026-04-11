@@ -2,9 +2,7 @@ package cuenv
 
 import "github.com/cuenv/cuenv/schema"
 
-schema.#Project & {
-	name: "waddle-cloud"
-
+{
 	tasks: {
 		"helm-push": {
 			command: "bash"

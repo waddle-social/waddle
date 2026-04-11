@@ -1,11 +1,5 @@
 package cuenv
 
-import "github.com/cuenv/cuenv/schema"
-
-schema.#Project
-
-name: "waddle-server"
-
 let _t = tasks
 
 tasks: {
