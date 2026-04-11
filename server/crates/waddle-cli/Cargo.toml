@@ -48,8 +48,6 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
-testcontainers = { workspace = true }
-
 # Markdown/Syntax
 pulldown-cmark = { workspace = true }
 syntect = { workspace = true }
@@ -58,6 +56,3 @@ syntect = { workspace = true }
 name = "waddle"
 path = "src/main.rs"
 
-[[bin]]
-name = "compliance-quick"
-path = "src/bin/compliance_quick.rs"

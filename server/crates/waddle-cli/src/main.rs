@@ -5,8 +5,8 @@
 //!
 //! A decentralized social platform built on XMPP federation.
 
-use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -14,7 +14,6 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Level};
@@ -69,40 +68,6 @@ enum Commands {
         #[arg(long)]
         private: bool,
     },
-    /// Run XMPP compliance suite via the managed testcontainers harness
-    Compliance(Box<ComplianceArgs>),
-}
-
-#[derive(Args)]
-struct ComplianceArgs {
-    #[arg(long, default_value = "best_effort_full")]
-    profile: String,
-    #[arg(short = 'd', long, default_value = "localhost")]
-    domain: String,
-    #[arg(short = 'H', long, default_value = "host.docker.internal")]
-    host: String,
-    #[arg(short = 't', long, default_value_t = 10_000)]
-    timeout_ms: u32,
-    #[arg(short = 'u', long, default_value = "")]
-    admin_username: String,
-    #[arg(short = 'P', long, default_value = "")]
-    admin_password: String,
-    #[arg(short = 'e', long)]
-    enabled_specs: Option<String>,
-    #[arg(short = 'D', long)]
-    disabled_specs: Option<String>,
-    #[arg(long)]
-    enabled_tests: Option<String>,
-    #[arg(long)]
-    disabled_tests: Option<String>,
-    #[arg(short = 'l', long, default_value = "./test-logs")]
-    artifact_dir: String,
-    #[arg(long)]
-    keep_containers: bool,
-    #[arg(long)]
-    server_bin: Option<String>,
-    #[arg(long)]
-    skip_server_build: bool,
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -488,7 +453,6 @@ async fn main() -> Result<()> {
             description,
             private,
         }) => return run_create(&name, description.as_deref(), !private).await,
-        Some(Commands::Compliance(args)) => return run_compliance(&args),
         None => {}
     }
 
@@ -558,110 +522,6 @@ async fn main() -> Result<()> {
 
     info!("Waddle CLI exiting normally");
     Ok(())
-}
-
-fn run_compliance(args: &ComplianceArgs) -> Result<()> {
-    let workspace = workspace_root();
-    let resolved_artifact_dir = resolve_artifact_dir(&args.artifact_dir)?;
-    let container_timeout_secs = std::env::var("WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS")
-        .unwrap_or_else(|_| "0".to_string());
-
-    println!("Running XMPP compliance harness...");
-    println!("  Profile:      {}", args.profile);
-    println!("  Domain:       {}", args.domain);
-    println!("  Host:         {}", args.host);
-    println!("  Timeout (ms): {}", args.timeout_ms);
-    println!("  Artifacts:    {}", resolved_artifact_dir.display());
-
-    let mut command = std::process::Command::new("cargo");
-    command
-        .current_dir(&workspace)
-        .arg("test")
-        .arg("--package")
-        .arg("waddle-xmpp")
-        .arg("--test")
-        .arg("xep0479_compliance")
-        .arg("--")
-        .arg("--ignored")
-        .arg("--nocapture")
-        .env("WADDLE_COMPLIANCE_PROFILE", &args.profile)
-        .env("WADDLE_COMPLIANCE_DOMAIN", &args.domain)
-        .env("WADDLE_COMPLIANCE_HOST", &args.host)
-        .env("WADDLE_COMPLIANCE_TIMEOUT_MS", args.timeout_ms.to_string())
-        .env(
-            "WADDLE_COMPLIANCE_CONTAINER_TIMEOUT_SECS",
-            container_timeout_secs.trim(),
-        )
-        .env(
-            "WADDLE_COMPLIANCE_ARTIFACT_DIR",
-            resolved_artifact_dir.to_string_lossy().to_string(),
-        )
-        .env(
-            "WADDLE_COMPLIANCE_KEEP_CONTAINERS",
-            if args.keep_containers {
-                "true"
-            } else {
-                "false"
-            },
-        )
-        .env(
-            "WADDLE_COMPLIANCE_SKIP_SERVER_BUILD",
-            if args.skip_server_build {
-                "true"
-            } else {
-                "false"
-            },
-        );
-
-    if !args.admin_username.trim().is_empty() {
-        command.env("WADDLE_COMPLIANCE_ADMIN_USERNAME", &args.admin_username);
-    }
-    if !args.admin_password.trim().is_empty() {
-        command.env("WADDLE_COMPLIANCE_ADMIN_PASSWORD", &args.admin_password);
-    }
-    if let Some(v) = args.enabled_specs.as_deref() {
-        command.env("WADDLE_COMPLIANCE_ENABLED_SPECS", v);
-    }
-    if let Some(v) = args.disabled_specs.as_deref() {
-        command.env("WADDLE_COMPLIANCE_DISABLED_SPECS", v);
-    }
-    if let Some(v) = args.enabled_tests.as_deref() {
-        command.env("WADDLE_COMPLIANCE_ENABLED_TESTS", v);
-    }
-    if let Some(v) = args.disabled_tests.as_deref() {
-        command.env("WADDLE_COMPLIANCE_DISABLED_TESTS", v);
-    }
-    if let Some(v) = args.server_bin.as_deref() {
-        command.env("WADDLE_SERVER_BIN", v);
-    }
-
-    let status = command
-        .status()
-        .context("Running compliance harness command")?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "Compliance harness exited with status {status}"
-        ))
-    }
-}
-
-fn resolve_artifact_dir(path: &str) -> Result<PathBuf> {
-    let candidate = PathBuf::from(path);
-    if candidate.is_absolute() {
-        return Ok(candidate);
-    }
-    let cwd = std::env::current_dir().context("Resolving current working directory")?;
-    Ok(cwd.join(candidate))
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf()
 }
 
 async fn run_status() -> Result<()> {

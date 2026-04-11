@@ -60,8 +60,7 @@ async fn xep0424_retraction_broadcast_in_muc() {
         .expect("bob receives retraction");
 
     assert!(
-        bob_response.contains("urn:xmpp:message-retract:1")
-            || bob_response.contains("retract"),
+        bob_response.contains("urn:xmpp:message-retract:1") || bob_response.contains("retract"),
         "Expected retraction element, got: {}",
         bob_response
     );

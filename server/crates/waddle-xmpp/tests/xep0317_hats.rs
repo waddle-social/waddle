@@ -48,11 +48,7 @@ async fn xep0317_presence_with_hats_broadcast_in_muc() {
         Ok(data) => {
             // If server forwards hats, verify structure
             if data.contains("urn:xmpp:hats:0") {
-                assert!(
-                    data.contains("hat"),
-                    "Expected hat element, got: {}",
-                    data
-                );
+                assert!(data.contains("hat"), "Expected hat element, got: {}", data);
             }
         }
         Err(_) => {
