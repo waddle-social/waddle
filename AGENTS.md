@@ -1,5 +1,6 @@
 # waddle Development Guidelines
 
+- use jj when .jj exists, git otherwise
 - XMPP Native, Never use out of band/XMPP APIs.
 
 ## Active Technologies

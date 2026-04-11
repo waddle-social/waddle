@@ -6,7 +6,7 @@ pub fn username_to_localpart(username: &str) -> String {
     let mut out = String::with_capacity(lower.len());
 
     for ch in lower.chars() {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '_' || ch == '-' {
+        if ch.is_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
             out.push(ch);
         }
     }
@@ -55,6 +55,9 @@ mod tests {
     fn slug_normalization() {
         assert_eq!(username_to_localpart("Alice+Dev"), "alicedev");
         assert_eq!(username_to_localpart("FOO.BAR"), "foo.bar");
+        assert_eq!(username_to_localpart("Øyvind"), "øyvind");
+        assert_eq!(username_to_localpart("Ünter"), "ünter");
+        assert_eq!(username_to_localpart("José"), "josé");
     }
 
     #[test]
