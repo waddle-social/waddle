@@ -1,3 +1,0 @@
-<message from='waddle@conference.localhost/alice' to='charlie@localhost/waddle' type='groupchat' id='muc-1'>
-  <body>Hello from the room</body>
-</message>

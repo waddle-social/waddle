@@ -1,3 +1,0 @@
-<presence from='charlie@localhost' to='alice@localhost' type='subscribe'>
-  <status>Please add me</status>
-</presence>
