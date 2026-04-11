@@ -14,13 +14,13 @@ These are foundational XEPs required for a functioning XMPP implementation.
 |-----|-------|--------|
 | **0004** | **Data Forms** | Final | Implemented | Chat ✓ |
 | 0009 | Jabber-RPC | Final |
-| **0012** | **Last Activity** | Final | Implemented |
+| **0012** | **Last Activity** | Final | Implemented | Chat N/A |
 | **0030** | **Service Discovery** | Final | Implemented | Chat ✓ |
 | 0033 | Extended Stanza Addressing | Draft |
-| **0047** | **In-Band Bytestreams** | Final | Implemented |
-| **0050** | **Ad-Hoc Commands** | Draft | Implemented |
+| **0047** | **In-Band Bytestreams** | Final | Implemented | Chat N/A |
+| **0050** | **Ad-Hoc Commands** | Draft | Implemented | Chat N/A |
 | 0053 | XMPP Registrar Function | Active |
-| **0059** | **Result Set Management** | Draft | Implemented |
+| **0059** | **Result Set Management** | Draft | Implemented | Chat N/A |
 | **0060** | **Publish-Subscribe** | Draft |
 | 0065 | SOCKS5 Bytestreams | Draft |
 | 0066 | Out of Band Data | Draft |
@@ -28,7 +28,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0079 | Advanced Message Processing | Draft |
 | **0082** | **XMPP Date and Time Profiles** | Active |
 | **0085** | **Chat State Notifications** | Final | Implemented | Chat ✓ |
-| **0106** | **JID Escaping** | Draft | Implemented |
+| **0106** | **JID Escaping** | Draft | Implemented | Chat N/A |
 | **0114** | **Jabber Component Protocol** | Active |
 | **0115** | **Entity Capabilities** | Draft |
 | 0122 | Data Forms Validation | Draft |
@@ -43,8 +43,8 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0182 | Application-Specific Error Conditions | Active |
 | **0198** | **Stream Management** | Draft |
 | **0199** | **XMPP Ping** | Final |
-| **0202** | **Entity Time** | Final | Implemented |
-| **0203** | **Delayed Delivery** | Final | Implemented |
+| **0202** | **Entity Time** | Final | Implemented | Chat N/A |
+| **0203** | **Delayed Delivery** | Final | Implemented | Chat N/A |
 | 0206 | XMPP Over BOSH | Draft |
 | **0220** | **Server Dialback** | Draft |
 | 0227 | Portable Import/Export Format | Draft |
@@ -52,9 +52,9 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0249 | Direct MUC Invitations | Draft |
 | 0258 | Security Labels in XMPP | Draft |
 | **0288** | **Bidirectional S2S Connections** | Draft |
-| **0297** | **Stanza Forwarding** | Draft | Implemented |
-| **0300** | **Cryptographic Hash Functions** | Draft | Implemented |
-| **0334** | **Message Processing Hints** | Draft | Implemented |
+| **0297** | **Stanza Forwarding** | Draft | Implemented | Chat N/A |
+| **0300** | **Cryptographic Hash Functions** | Draft | Implemented | Chat N/A |
+| **0334** | **Message Processing Hints** | Draft | Implemented | Chat N/A |
 | **0352** | **Client State Indication** | Draft |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental |
 | **0363** | **HTTP File Upload** | Draft |
@@ -83,7 +83,7 @@ XEPs for rich messaging features expected in a modern community app.
 | **0308** | **Last Message Correction** | Draft | Edit messages | Implemented | Chat ✓ |
 | **0313** | **Message Archive Management (MAM)** | Draft | Message history / scrollback |
 | **0333** | **Displayed Markers** | Draft | Read receipts | Implemented | Chat ✓ |
-| **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented |
+| **0334** | **Message Processing Hints** | Draft | Control server-side processing | Implemented | Chat N/A |
 | **0359** | **Unique and Stable Stanza IDs** | Experimental | Stable message references | Implemented |
 | **0363** | **HTTP File Upload** | Draft | File/image uploads |
 | **0372** | **References** | Experimental | @mentions in messages | Implemented | Chat ✓ |
@@ -141,16 +141,16 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
-| **0012** | **Last Activity** | Final | "Last seen" | Implemented |
+| **0012** | **Last Activity** | Final | "Last seen" | Implemented | Chat N/A |
 | **0054** | **vcard-temp** | Active | User profiles (legacy) |
 | **0084** | **User Avatar** | Draft | Profile pictures |
 | 0092 | Software Version | Draft | Client identification |
 | 0107 | User Mood | Draft | Status moods |
 | 0108 | User Activity | Draft | Custom activity status |
 | **0153** | **vCard-Based Avatars** | Active | Avatar via vCard |
-| **0172** | **User Nickname** | Draft | Display names | Implemented |
-| **0292** | **vCard4 Over XMPP** | Experimental | Modern user profiles | Implemented |
-| **0319** | **Last User Interaction in Presence** | Draft | Idle detection | Implemented |
+| **0172** | **User Nickname** | Draft | Display names | Implemented | Chat N/A |
+| **0292** | **vCard4 Over XMPP** | Experimental | Modern user profiles | Implemented | Chat N/A |
+| **0319** | **Last User Interaction in Presence** | Draft | Idle detection | Implemented | Chat N/A |
 | **0392** | **Consistent Color Generation** | Draft | Deterministic user colors | Implemented |
 
 ---
@@ -206,10 +206,10 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
-| **0050** | **Ad-Hoc Commands** | Draft | Admin commands | Implemented |
+| **0050** | **Ad-Hoc Commands** | Draft | Admin commands | Implemented | Chat N/A |
 | **0133** | **Service Administration** | Active | Server admin |
 | **0191** | **Blocking Command** | Draft | Block users |
-| **0377** | **Blocking Command Reports** | Proposed | Report abuse | Implemented |
+| **0377** | **Blocking Command Reports** | Proposed | Report abuse | Implemented | Chat N/A |
 | **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented | Chat ✓ |
 | **0489** | **Reporting Account Affiliations** | Experimental | Trust signals |
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting |
@@ -223,8 +223,8 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | **0379** | **Pre-Authenticated Roster Subscription** | Proposed | Easy contact adding |
-| **0401** | **Ad-hoc Account Invitation Generation** | Experimental | Generate invite links | Implemented |
-| **0445** | **Pre-Authenticated In-Band Registration** | Proposed | Register via invite | Implemented |
+| **0401** | **Ad-hoc Account Invitation Generation** | Experimental | Generate invite links | Implemented | Chat N/A |
+| **0445** | **Pre-Authenticated In-Band Registration** | Proposed | Register via invite | Implemented | Chat N/A |
 | **0488** | **MUC Token Invite** | Experimental | Room invite tokens |
 | 0493 | OAuth Client Login | Experimental | OAuth-based auth |
 | 0494 | Client Access Management | Experimental | Session management |
