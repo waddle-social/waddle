@@ -21,6 +21,7 @@ const props = defineProps<{
   typingUsers: string[];
   currentUser?: string;
   tenorApiKey: string;
+  memberNames: string[];
 }>();
 
 const emit = defineEmits<{
@@ -130,6 +131,7 @@ watch(
       :is-sending="isSending"
       :disabled="!channel"
       :tenor-api-key="tenorApiKey"
+      :member-names="memberNames"
       @send="emit('send')"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"

@@ -46,6 +46,8 @@ const REACTIONS_NS = "urn:xmpp:reactions:0";
 /** XEP-0333 namespace */
 const CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 
+/** XEP-0372 namespace */
+const REFERENCES_NS = "urn:xmpp:reference:0";
 
 
 export interface DisplayedEvent {
@@ -634,6 +636,25 @@ export class BrowserXmppClient {
 
     const msgId = crypto.randomUUID();
 
+    // XEP-0372: Build <reference> elements for @mentions in the body
+    const references: ReturnType<typeof xml>[] = [];
+    const mentionRe = /(?:^|\s)@(\w+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = mentionRe.exec(text)) !== null) {
+      const nick = match[1]!;
+      const begin = match.index + (match[0].length - nick.length - 1); // position of '@'
+      const end = begin + nick.length + 1; // after the username
+      references.push(
+        xml("reference", {
+          xmlns: REFERENCES_NS,
+          type: "mention",
+          begin: String(begin),
+          end: String(end),
+          uri: `xmpp:${nick}`,
+        }),
+      );
+    }
+
     await this.xmpp.send(
       xml(
         "message",
@@ -645,6 +666,7 @@ export class BrowserXmppClient {
         xml("body", {}, text),
         xml("request", RECEIPTS_NS),
         xml("markable", CHAT_MARKERS_NS),
+        ...references,
       ),
     );
 
