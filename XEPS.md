@@ -130,7 +130,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0486** | **MUC Avatars** | Experimental | Room/channel icons |
 | **0488** | **MUC Token Invite** | Experimental | Invite links with tokens | Implemented |
 | **0492** | **Chat Notification Settings** | Experimental | Per-channel notification prefs |
-| **0500** | **MUC Slow Mode** | Experimental | Rate limiting in channels |
+| **0500** | **MUC Slow Mode** | Experimental | Rate limiting in channels | Implemented |
 | **0502** | **MUC Activity Indicator** | Experimental | Active room indicators |
 | **0503** | **Server-side Spaces** | Experimental | Discord-like server/space structure |
 | **0508** | **Forums** | Experimental | Forum-style threaded discussions |

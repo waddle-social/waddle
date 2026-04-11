@@ -53,6 +53,8 @@
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
 //!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
+//!   cooldown interval, moderator exemption, and per-occupant tracking.
 //! - **XEP-0488**: MUC Token Invite - Shareable invite tokens for MUC rooms
 //!   with URI generation and IQ-based token request/response.
 //! - **XEP-0447**: Stateless File Sharing - Structured file sharing with
@@ -132,6 +134,7 @@ pub mod xep0446;
 pub mod xep0447;
 pub mod xep0461;
 pub mod xep0488;
+pub mod xep0500;
 pub mod xep0503;
 
 pub use xep0004::{
@@ -386,6 +389,11 @@ pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+};
+
+pub use xep0500::{
+    parse_slow_mode_interval, SlowModeCheck, SlowModeConfig, SlowModeTracker,
+    FIELD_SLOW_MODE_INTERVAL, SLOW_MODE_DISABLED,
 };
 
 pub use xep0488::{
