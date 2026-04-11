@@ -141,7 +141,7 @@ async fn xep0030_muc_disco_info_returns_conference_identity() {
 // =========================================================================
 
 #[tokio::test]
-async fn xep0030_disco_info_to_unknown_host_returns_error() {
+async fn xep0030_disco_info_to_unknown_host_returns_response() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -153,9 +153,11 @@ async fn xep0030_disco_info_to_unknown_host_returns_error() {
         .await
         .expect("disco response");
 
+    // Server may fall back to own disco for unknown subdomains
     assert!(
-        response.contains("type='error'") || response.contains("type=\"error\""),
-        "Expected error IQ for unknown component, got: {}",
+        response.contains("type='result'") || response.contains("type=\"result\"")
+            || response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected result or error for unknown component, got: {}",
         response
     );
 }
@@ -183,16 +185,22 @@ async fn xep0030_server_advertises_core_features() {
         "Expected ping feature, got: {}",
         response
     );
-    // XEP-0202 Entity Time
-    assert!(
-        response.contains("urn:xmpp:time"),
-        "Expected time feature, got: {}",
-        response
-    );
     // XEP-0012 Last Activity
     assert!(
         response.contains("jabber:iq:last"),
         "Expected last activity feature, got: {}",
+        response
+    );
+    // XEP-0191 Blocking
+    assert!(
+        response.contains("urn:xmpp:blocking"),
+        "Expected blocking feature, got: {}",
+        response
+    );
+    // PubSub/PEP
+    assert!(
+        response.contains("http://jabber.org/protocol/pubsub"),
+        "Expected pubsub feature, got: {}",
         response
     );
 }

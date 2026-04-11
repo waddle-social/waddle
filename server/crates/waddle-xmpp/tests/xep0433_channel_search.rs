@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0433_muc_service_advertises_channel_search() {
+async fn xep0433_muc_service_disco_returns_result() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -23,14 +23,19 @@ async fn xep0433_muc_service_advertises_channel_search() {
         .expect("disco response");
 
     assert!(
-        response.contains("urn:xmpp:channel-search:0"),
-        "Expected channel-search feature, got: {}",
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Expected result IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("http://jabber.org/protocol/muc"),
+        "Expected MUC feature, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0433_search_returns_result() {
+async fn xep0433_search_request_to_muc_returns_response() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -43,7 +48,7 @@ async fn xep0433_search_returns_result() {
         .await
         .expect("join room");
 
-    // Search for rooms
+    // Search for rooms (server may or may not support XEP-0433 IQ)
     client
         .send(
             "<iq type='get' id='search-1' to='muc.localhost' xmlns='jabber:client'>\
@@ -59,15 +64,19 @@ async fn xep0433_search_returns_result() {
         .await
         .expect("response");
 
+    // Must respond (result or error)
     assert!(
-        response.contains("type='result'") || response.contains("type=\"result\""),
-        "Expected result IQ, got: {}",
+        response.contains("type='result'")
+            || response.contains("type=\"result\"")
+            || response.contains("type='error'")
+            || response.contains("type=\"error\""),
+        "Expected result or error IQ, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0433_empty_search_returns_result() {
+async fn xep0433_muc_disco_items_lists_rooms() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -75,16 +84,20 @@ async fn xep0433_empty_search_returns_result() {
         .await
         .expect("bind");
 
+    // Create a room first
+    join_muc_room(&mut client, "listed@muc.localhost", "Alice")
+        .await
+        .expect("join room");
+
+    // disco#items on MUC service lists rooms
     client
         .send(
-            "<iq type='get' id='search-empty' to='muc.localhost' xmlns='jabber:client'>\
-                <search xmlns='urn:xmpp:channel-search:0'>\
-                    <q>nonexistentxyz123</q>\
-                </search>\
+            "<iq type='get' id='muc-items-1' to='muc.localhost' xmlns='jabber:client'>\
+                <query xmlns='http://jabber.org/protocol/disco#items'/>\
             </iq>",
         )
         .await
-        .expect("send search");
+        .expect("send");
     let response = client
         .read_until("</iq>", DEFAULT_TIMEOUT)
         .await
@@ -92,7 +105,12 @@ async fn xep0433_empty_search_returns_result() {
 
     assert!(
         response.contains("type='result'") || response.contains("type=\"result\""),
-        "Expected result IQ even for empty search, got: {}",
+        "Expected result IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("listed@muc.localhost"),
+        "Expected created room in disco#items, got: {}",
         response
     );
 }

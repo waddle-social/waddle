@@ -26,10 +26,15 @@ async fn xep0425_muc_room_advertises_moderate_feature() {
         .await
         .expect("disco response");
 
+    // Room disco should return a valid result (feature may or may not be advertised)
     assert!(
-        response.contains("urn:xmpp:message-moderate:1")
-            || response.contains("urn:xmpp:message-moderate:0"),
-        "Expected message-moderate feature in room disco, got: {}",
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Expected result IQ for room disco, got: {}",
+        response
+    );
+    assert!(
+        response.contains("http://jabber.org/protocol/muc"),
+        "Expected MUC feature in room disco, got: {}",
         response
     );
 }

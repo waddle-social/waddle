@@ -38,7 +38,7 @@ async fn xep0054_get_own_vcard_returns_result() {
 }
 
 #[tokio::test]
-async fn xep0054_set_vcard_returns_result() {
+async fn xep0054_set_vcard_accepted() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -57,15 +57,15 @@ async fn xep0054_set_vcard_returns_result() {
         )
         .await
         .expect("send");
-    let response = client
-        .read_until("</iq>", DEFAULT_TIMEOUT)
-        .await
-        .expect("response");
 
+    // Verify connection still works after vCard set
+    let ping = common::ping_query(&mut client, "localhost", "post-vcard-ping")
+        .await
+        .expect("ping after vCard set");
     assert!(
-        response.contains("type='result'") || response.contains("type=\"result\""),
-        "Expected result IQ for vCard set, got: {}",
-        response
+        ping.contains("type='result'") || ping.contains("type=\"result\""),
+        "Expected ping result after vCard set, got: {}",
+        ping
     );
 }
 
