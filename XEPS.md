@@ -160,7 +160,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | **0402** | **PEP Native Bookmarks** | Draft | Channel/room bookmarks |
-| **0469** | **Bookmark Pinning** | Experimental | Pin favorite channels |
+| **0469** | **Bookmark Pinning** | Experimental | Pin favorite channels | Implemented |
 
 ---
 

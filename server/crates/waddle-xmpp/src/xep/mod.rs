@@ -53,6 +53,8 @@
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
 //!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
+//!   extension on XEP-0402 bookmark elements, with sort helper.
 //! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
 //!   cooldown interval, moderator exemption, and per-occupant tracking.
 //! - **XEP-0488**: MUC Token Invite - Shareable invite tokens for MUC rooms
@@ -133,6 +135,7 @@ pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
 pub mod xep0461;
+pub mod xep0469;
 pub mod xep0488;
 pub mod xep0500;
 pub mod xep0503;
@@ -389,6 +392,12 @@ pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+};
+
+pub use xep0469::{
+    build_pinned_element, get_pin_state, is_bookmark_pinned, is_pinned_element, pin_bookmark,
+    set_pin_state, sort_bookmarks_pinned_first, unpin_bookmark, PinState, Pinnable,
+    NS_BOOKMARKS_PINNING,
 };
 
 pub use xep0500::{
