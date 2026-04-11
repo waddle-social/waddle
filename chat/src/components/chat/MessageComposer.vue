@@ -2,6 +2,7 @@
 import { ref, computed } from "vue";
 import { Send, Image } from "lucide-vue-next";
 import GifPicker from "@/components/chat/GifPicker.vue";
+import { EMOJI_SHORTCODES } from "@/lib/emoji";
 
 const draft = defineModel<string>("draft", { required: true });
 
@@ -21,8 +22,10 @@ const emit = defineEmits<{
 
 const showGifPicker = ref(false);
 const showMentions = ref(false);
+const showEmoji = ref(false);
 const mentionQuery = ref("");
-const selectedMentionIndex = ref(0);
+const emojiQuery = ref("");
+const selectedIndex = ref(0);
 const inputEl = ref<HTMLInputElement | null>(null);
 
 const mentionResults = computed(() => {
@@ -31,25 +34,55 @@ const mentionResults = computed(() => {
   return props.memberNames.filter((n) => n.toLowerCase().includes(q)).slice(0, 8);
 });
 
+const emojiResults = computed(() => {
+  const q = emojiQuery.value.toLowerCase();
+  if (!q || q.length < 2) return [];
+  const matches: { name: string; emoji: string }[] = [];
+  for (const [name, emoji] of Object.entries(EMOJI_SHORTCODES)) {
+    if (name.includes(q)) matches.push({ name, emoji });
+    if (matches.length >= 8) break;
+  }
+  return matches;
+});
+
+// Unified autocomplete results for keyboard nav
+const activeResults = computed(() => {
+  if (showMentions.value) return mentionResults.value;
+  if (showEmoji.value) return emojiResults.value;
+  return [];
+});
+
 function onInput(e: Event) {
   const input = e.target as HTMLInputElement;
   draft.value = input.value;
   emit("typing");
-  checkMentionTrigger(input);
+  checkAutocomplete(input);
 }
 
-function checkMentionTrigger(input: HTMLInputElement) {
+function checkAutocomplete(input: HTMLInputElement) {
   const pos = input.selectionStart ?? 0;
   const textBefore = input.value.slice(0, pos);
-  // Find the last @ that starts a mention (preceded by start-of-string or whitespace)
-  const match = textBefore.match(/(?:^|\s)@(\w*)$/);
-  if (match) {
-    mentionQuery.value = match[1];
-    selectedMentionIndex.value = 0;
+
+  // Check for @mention — unicode-aware: match @ followed by any non-whitespace chars
+  const mentionMatch = textBefore.match(/(?:^|\s)@(\S*)$/);
+  if (mentionMatch) {
+    mentionQuery.value = mentionMatch[1];
+    selectedIndex.value = 0;
     showMentions.value = true;
-  } else {
-    showMentions.value = false;
+    showEmoji.value = false;
+    return;
   }
+  showMentions.value = false;
+
+  // Check for :emoji shortcode
+  const emojiMatch = textBefore.match(/(?:^|\s):([a-z0-9_+-]*)$/i);
+  if (emojiMatch && emojiMatch[1].length >= 2) {
+    emojiQuery.value = emojiMatch[1];
+    selectedIndex.value = 0;
+    showEmoji.value = true;
+    return;
+  }
+  showEmoji.value = false;
 }
 
 function insertMention(username: string) {
@@ -60,15 +93,35 @@ function insertMention(username: string) {
   const textBefore = draft.value.slice(0, pos);
   const textAfter = draft.value.slice(pos);
 
-  // Replace the @query with @username
-  const replaced = textBefore.replace(/(?:^|\s)@\w*$/, (m) => {
-    const prefix = m.startsWith(" ") ? " " : "";
+  const replaced = textBefore.replace(/(?:^|\s)@\S*$/, (m) => {
+    const prefix = m.match(/^\s/) ? m[0] : "";
     return `${prefix}@${username} `;
   });
   draft.value = replaced + textAfter;
   showMentions.value = false;
 
-  // Restore cursor position after Vue updates the input
+  const newPos = replaced.length;
+  requestAnimationFrame(() => {
+    input.focus();
+    input.setSelectionRange(newPos, newPos);
+  });
+}
+
+function insertEmoji(emoji: string) {
+  const input = inputEl.value;
+  if (!input) return;
+
+  const pos = input.selectionStart ?? 0;
+  const textBefore = draft.value.slice(0, pos);
+  const textAfter = draft.value.slice(pos);
+
+  const replaced = textBefore.replace(/(?:^|\s):[a-z0-9_+-]*$/i, (m) => {
+    const prefix = m.match(/^\s/) ? m[0] : "";
+    return `${prefix}${emoji} `;
+  });
+  draft.value = replaced + textAfter;
+  showEmoji.value = false;
+
   const newPos = replaced.length;
   requestAnimationFrame(() => {
     input.focus();
@@ -77,26 +130,31 @@ function insertMention(username: string) {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (showMentions.value && mentionResults.value.length > 0) {
+  if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value)) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      selectedMentionIndex.value = (selectedMentionIndex.value + 1) % mentionResults.value.length;
+      selectedIndex.value = (selectedIndex.value + 1) % activeResults.value.length;
       return;
     }
     if (e.key === "ArrowUp") {
       e.preventDefault();
-      selectedMentionIndex.value =
-        (selectedMentionIndex.value - 1 + mentionResults.value.length) % mentionResults.value.length;
+      selectedIndex.value =
+        (selectedIndex.value - 1 + activeResults.value.length) % activeResults.value.length;
       return;
     }
     if (e.key === "Tab" || e.key === "Enter") {
       e.preventDefault();
-      insertMention(mentionResults.value[selectedMentionIndex.value]);
+      if (showMentions.value) {
+        insertMention(mentionResults.value[selectedIndex.value]);
+      } else if (showEmoji.value) {
+        insertEmoji(emojiResults.value[selectedIndex.value].emoji);
+      }
       return;
     }
     if (e.key === "Escape") {
       e.preventDefault();
       showMentions.value = false;
+      showEmoji.value = false;
       return;
     }
   }
@@ -131,10 +189,27 @@ function onGifSelected(url: string) {
         v-for="(name, i) in mentionResults"
         :key="name"
         class="w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-muted transition-colors flex items-center gap-2"
-        :class="i === selectedMentionIndex ? 'bg-muted' : ''"
+        :class="i === selectedIndex ? 'bg-muted' : ''"
         @mousedown.prevent="insertMention(name)"
       >
         <span class="text-muted-foreground">@</span>{{ name }}
+      </button>
+    </div>
+
+    <!-- :emoji autocomplete -->
+    <div
+      v-if="showEmoji && emojiResults.length > 0"
+      class="absolute bottom-full left-6 mb-1 bg-background border border-foreground max-h-48 overflow-auto z-50 min-w-48"
+    >
+      <button
+        v-for="(entry, i) in emojiResults"
+        :key="entry.name"
+        class="w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-muted transition-colors flex items-center gap-2"
+        :class="i === selectedIndex ? 'bg-muted' : ''"
+        @mousedown.prevent="insertEmoji(entry.emoji)"
+      >
+        <span class="text-base">{{ entry.emoji }}</span>
+        <span class="text-muted-foreground">:{{ entry.name }}:</span>
       </button>
     </div>
 

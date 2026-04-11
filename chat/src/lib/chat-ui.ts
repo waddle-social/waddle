@@ -208,7 +208,12 @@ const md = new Marked({
 /** Render XEP-0393 styled message body to safe HTML. */
 export function renderStyledBody(body: string): string {
   const gfm = xep0393ToGfm(body);
-  return (md.parse(gfm) as string).trim();
+  const html = (md.parse(gfm) as string).trim();
+  // Style @mentions — match @non-whitespace after rendered HTML
+  return html.replace(
+    /(?:^|(?<=\s|>))@(\S+?)(?=[\s<.,;:!?'")\]}&]|$)/g,
+    '<span class="text-blue-500 font-bold">@$1</span>',
+  );
 }
 
 // ── Image / GIF URL detection ────────────────────────────────────────

@@ -682,8 +682,9 @@ export class BrowserXmppClient {
     const msgId = crypto.randomUUID();
 
     // XEP-0372: Build <reference> elements for @mentions in the body
+    // Use \S+ to match any non-whitespace (supports unicode chars like ø, ü, etc.)
     const references: ReturnType<typeof xml>[] = [];
-    const mentionRe = /(?:^|\s)@(\w+)/g;
+    const mentionRe = /(?:^|\s)@(\S+)/g;
     let match: RegExpExecArray | null;
     while ((match = mentionRe.exec(text)) !== null) {
       const nick = match[1]!;
