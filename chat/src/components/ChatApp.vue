@@ -66,8 +66,7 @@ const messaging = useMessaging(
 const publicBrowseQuery = ref("");
 
 async function sendGif(url: string) {
-  messaging.draft.value = url;
-  await messaging.sendMessage();
+  await messaging.sendMessage(url);
 }
 
 // --- Deep linking ---

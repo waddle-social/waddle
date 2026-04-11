@@ -241,13 +241,19 @@ export function useMessaging(
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {
-    // Check if this is a self-echo confirming delivery of an optimistic message
-    const existing = messages.value.find((m) => m.id === msg.id);
+    // Check if this is a self-echo confirming delivery of an optimistic message.
+    // Match by ID first, then fall back to matching by body + author for cases
+    // where the MUC server assigns a different stanza ID on reflection.
+    const existing = messages.value.find(
+      (m) =>
+        m.id === msg.id ||
+        (m.deliveryStatus === "sending" && m.isSelf && msg.isSelf && m.body === msg.body),
+    );
     if (existing) {
       if (existing.deliveryStatus === "sending") {
         // Self-echo received: upgrade from "sending" to "delivered"
         messages.value = messages.value.map((m) =>
-          m.id === msg.id ? { ...m, deliveryStatus: "delivered" as DeliveryStatus } : m,
+          m.id === existing.id ? { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus } : m,
         );
       }
       return;
@@ -297,19 +303,18 @@ export function useMessaging(
     await loadMessages(activeWaddleId.value, channelId);
   }
 
-  async function sendMessage() {
+  async function sendMessage(explicitBody?: string) {
+    const bodyText = explicitBody ?? draft.value;
     if (
       !xmppClient.value ||
       !activeWaddleId.value ||
       !activeChannelId.value ||
-      !draft.value.trim()
+      !bodyText.trim()
     )
       return;
 
     isSending.value = true;
     clearActionError();
-
-    const bodyText = draft.value;
 
     try {
       const msgId = await xmppClient.value.sendGroupMessage(
@@ -332,7 +337,10 @@ export function useMessaging(
         void scrollToBottom();
       }
 
-      draft.value = "";
+      // Only clear draft when sending from the composer (not explicit body)
+      if (!explicitBody) {
+        draft.value = "";
+      }
       // Send "active" state after sending a message (stops composing indicator)
       if (composingTimeout) {
         clearTimeout(composingTimeout);
