@@ -194,6 +194,7 @@ export class BrowserXmppClient {
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private slowModeHandler: ((seconds: number) => void) | null = null;
   private activityHandler: ((roomJid: string) => void) | null = null;
+  private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
@@ -235,6 +236,10 @@ export class BrowserXmppClient {
   /** XEP-0502: Handler for activity in rooms other than the current one. */
   setActivityHandler(handler: (roomJid: string) => void) {
     this.activityHandler = handler;
+  }
+
+  setRoomAvatarHandler(handler: (roomJid: string, hash: string) => void) {
+    this.roomAvatarHandler = handler;
   }
 
   setRoomDisconnectHandler(handler: () => void) {
@@ -325,6 +330,21 @@ export class BrowserXmppClient {
             }
           }
           this.hatsHandler?.({ ...this.roomHats });
+        }
+
+        // XEP-0486: Extract room avatar hash from vCard update in presence
+        if (presenceRoom && !presenceNick) {
+          // Bare room JID presence = room's own presence (avatar update)
+          const vcardUpdate = stanza.getChild("x");
+          if (vcardUpdate) {
+            const photoEl = vcardUpdate.getChild("photo");
+            if (photoEl) {
+              const hash = photoEl.text();
+              if (hash) {
+                this.roomAvatarHandler?.(presenceRoom, hash);
+              }
+            }
+          }
         }
         return;
       }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Hash, Plus, Settings, Users, UserPlus } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
+import { consistentColor } from "@/lib/chat-ui";
 
 const props = defineProps<{
   waddle: WaddleSummary | null;
@@ -11,7 +12,19 @@ const props = defineProps<{
   isLoading: boolean;
   memberCount: number;
   activeChannelJids: Set<string>;
+  /** XEP-0486: Map of room JID → avatar hash */
+  roomAvatarHashes?: Record<string, string>;
 }>();
+
+/** Get avatar color for a channel that has a room avatar. */
+function channelAvatarColor(channelName: string): string {
+  return consistentColor(channelName, 55, 40);
+}
+
+/** Get initial letter for channel avatar. */
+function channelInitial(name: string): string {
+  return (name[0] ?? "#").toUpperCase();
+}
 
 function hasActivity(channelId: string): boolean {
   // Check if any JID in the active set contains this channel ID
@@ -78,7 +91,11 @@ const emit = defineEmits<{
           @click="emit('selectChannel', channel.id)"
         >
           <div class="flex items-center gap-2 flex-1 min-w-0">
-            <Hash class="w-3 h-3 flex-shrink-0" />
+            <!-- XEP-0486: Channel avatar (colored initial) or Hash icon -->
+            <span
+              class="w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center flex-shrink-0 text-white"
+              :style="{ backgroundColor: channelAvatarColor(channel.name) }"
+            >{{ channelInitial(channel.name) }}</span>
             <span class="text-sm font-mono truncate" :class="hasActivity(channel.id) && activeChannelId !== channel.id ? 'font-bold' : ''">{{ channel.name }}</span>
           </div>
           <span

@@ -70,6 +70,7 @@ export function useMessaging(
   const roomHats = ref<RoomHats>({});
   const slowModeCooldown = ref(0);
   const activeChannels = ref<Set<string>>(new Set());
+  const roomAvatarHashes = ref<Record<string, string>>({});
   const searchQuery = ref("");
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
@@ -135,6 +136,10 @@ export function useMessaging(
       });
       client.setActivityHandler((roomJid) => {
         activeChannels.value = new Set([...activeChannels.value, roomJid]);
+      });
+      // XEP-0486: Track room avatar hashes from presence
+      client.setRoomAvatarHandler((roomJid, hash) => {
+        roomAvatarHashes.value = { ...roomAvatarHashes.value, [roomJid]: hash };
       });
       client.setSlowModeHandler((seconds) => {
         slowModeCooldown.value = seconds;
@@ -570,6 +575,7 @@ export function useMessaging(
     disconnect,
     clearMessages,
     activeChannels,
+    roomAvatarHashes,
     searchQuery,
     searchResults,
     isSearching,

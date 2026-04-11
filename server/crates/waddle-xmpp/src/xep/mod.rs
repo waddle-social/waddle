@@ -189,6 +189,7 @@ pub mod xep0471;
 pub mod xep0472;
 pub mod xep0482;
 pub mod xep0483;
+pub mod xep0486;
 pub mod xep0488;
 pub mod xep0490;
 pub mod xep0492;
@@ -555,6 +556,8 @@ pub use xep0500::{
     parse_slow_mode_interval, SlowModeCheck, SlowModeConfig, SlowModeTracker,
     FIELD_SLOW_MODE_INTERVAL, SLOW_MODE_DISABLED,
 };
+
+pub use xep0486::{extract_avatar_hash_from_presence, MucAvatar, MucAvatarCache};
 
 pub use xep0488::{
     build_invite_message_element, build_invite_request, build_invite_response,
