@@ -11,6 +11,7 @@ use axum::{
     routing::get,
     Router,
 };
+use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use jid::{BareJid, FullJid};
 use std::{str::FromStr, sync::Arc};
@@ -23,9 +24,13 @@ use waddle_xmpp::{
         build_disco_items_response, parse_disco_info_query, parse_disco_items_query,
         spaces_service_features, DiscoItem, Feature, Identity,
     },
+    mam::{
+        add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
+        parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
+    },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
     registry::{ConnectionRegistry, OutboundStanza},
-    xep::build_spaces_metadata_form,
+    xep::{build_spaces_metadata_form, NS_REPLY},
     Affiliation, Role, WaddleDetails,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
@@ -35,7 +40,6 @@ use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
 use crate::auth::Session;
-use crate::messages::{MessageCreate, MessageRepository};
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
@@ -52,6 +56,8 @@ pub struct WebSocketState {
     pub connection_registry: Arc<ConnectionRegistry>,
     /// Registry for MUC rooms
     pub muc_registry: Arc<MucRoomRegistry>,
+    /// Shared XMPP MAM storage for archived message history.
+    pub mam_storage: Arc<LibSqlMamStorage>,
     /// GitHub link enricher for message embeds
     pub github_enricher: Arc<MessageEnricher>,
 }
@@ -1118,12 +1124,68 @@ async fn handle_iq(
     }
 
     // MAM (Message Archive Management) query
-    if frame.contains("urn:xmpp:mam:") {
-        debug!("MAM query");
-        return vec![format!(
-            r#"<iq id="{}" type="result"><fin xmlns="urn:xmpp:mam:2" complete="true"><set xmlns="http://jabber.org/protocol/rsm"><count>0</count></set></fin></iq>"#,
-            id
-        )];
+    if let Some(request_iq) = parsed_iq.as_ref() {
+        if is_mam_query(request_iq) {
+            let Some(target) = request_iq.to.as_ref().map(|jid| jid.to_string()) else {
+                return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+            };
+
+            let room_target = target.split('/').next().unwrap_or(target.as_str());
+            let Ok(room_jid) = room_target.parse::<BareJid>() else {
+                return vec![build_iq_error_xml(&id, "modify", "jid-malformed")];
+            };
+
+            if !muc_registry.is_muc_jid(&room_jid) {
+                return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+            }
+
+            let (query_id, query) = match parse_mam_query(request_iq) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(error = %err, room = %room_jid, "Invalid MAM query");
+                    return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                }
+            };
+
+            let archive_jid = room_jid.to_string();
+            let mut result = match state
+                .mam_storage
+                .query_messages(archive_jid.as_str(), &query)
+                .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!(error = %err, room = %room_jid, "MAM query failed");
+                    return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                }
+            };
+
+            result.count = state
+                .mam_storage
+                .count_messages(archive_jid.as_str())
+                .await
+                .ok();
+
+            let recipient_jid = request_iq
+                .from
+                .as_ref()
+                .map(|jid| jid.to_string())
+                .or_else(|| extract_attr(frame, "from"))
+                .or_else(|| {
+                    authenticated_session
+                        .as_ref()
+                        .map(|session| format!("{}@{}", session.xmpp_localpart, domain))
+                })
+                .unwrap_or_else(|| "unknown@localhost".to_string());
+
+            let mut responses: Vec<String> =
+                build_result_messages(&query_id, recipient_jid.as_str(), &result.messages)
+                    .into_iter()
+                    .map(|message| stanza_to_xml(&Stanza::Message(message)))
+                    .collect();
+            responses.push(iq_to_xml(build_fin_iq(request_iq, &result)));
+            return responses;
+        }
     }
 
     // Carbons enable
@@ -1146,7 +1208,7 @@ async fn handle_message(
     muc_domain: &str,
     state: &WebSocketState,
     session_jid: &Option<FullJid>,
-    authenticated_session: &Option<Session>,
+    _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let Some(ref sender_jid) = session_jid else {
         warn!("Message received without authenticated session");
@@ -1205,31 +1267,12 @@ async fn handle_message(
 
         drop(room);
 
-        let persisted_message_id = if let Some(session) = authenticated_session {
-            match persist_groupchat_message(state, &room_jid, &prototype_body(&incoming), session)
-                .await
-            {
-                Ok(message_id) => message_id,
-                Err(err) => {
-                    warn!(
-                        room = %room_jid,
-                        sender = %sender_jid,
-                        error = %err,
-                        "Failed to persist groupchat message"
-                    );
-                    return vec![];
-                }
-            }
-        } else {
-            warn!(sender = %sender_jid, "Authenticated XMPP message missing HTTP session context");
-            return vec![];
-        };
-
         // Build a prototype message, enrich once, then fan out to all occupants.
         let from_room_jid = format!("{}/{}", room_jid, sender_nick);
         let mut prototype = incoming.clone();
-        prototype.id = persisted_message_id
-            .or_else(|| prototype.id.clone())
+        prototype.id = prototype
+            .id
+            .clone()
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
             prototype.from = Some(jid::Jid::from(from_jid));
@@ -1241,6 +1284,11 @@ async fn handle_message(
 
         // Enrich: detect GitHub links and append embed XML elements (fail-open)
         let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
+
+        // Archive body-bearing room messages in XMPP MAM storage.
+        if let Some(archive_id) = archive_groupchat_message(state, &room_jid, &prototype).await {
+            add_mam_stanza_id(&mut prototype, archive_id.as_str(), &room_jid.to_string());
+        }
 
         // Send to all occupants
         let mut echo_response = None;
@@ -1329,45 +1377,90 @@ async fn handle_message(
     vec![]
 }
 
-async fn persist_groupchat_message(
+async fn archive_groupchat_message(
     state: &WebSocketState,
     room_jid: &BareJid,
-    body: &Option<String>,
-    session: &Session,
-) -> Result<Option<String>, String> {
-    let Some(content) = body
-        .as_ref()
-        .map(|value| value.trim())
+    message: &xmpp_parsers::message::Message,
+) -> Option<String> {
+    let Some(body) = prototype_body(message)
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
-        return Ok(None);
+        return None;
     };
 
-    let (waddle_id, channel_id) = parse_room_jid_context(room_jid);
-    if waddle_id == "default" && channel_id == "default" {
-        return Err(format!(
-            "could not derive waddle/channel context from room JID '{}'",
-            room_jid
-        ));
+    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
+    let origin_id = extract_origin_id(message);
+
+    let archived = ArchivedMessage {
+        id: String::new(),
+        timestamp: Utc::now(),
+        from: message
+            .from
+            .as_ref()
+            .map(|jid| jid.to_string())
+            .unwrap_or_default(),
+        to: room_jid.to_string(),
+        body,
+        stanza_id: message.id.clone(),
+        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
+        reply_to_id,
+        reply_to_jid,
+        origin_id,
+        message_type: mam_message_type(&message.type_),
+    };
+
+    let archive_jid = room_jid.to_string();
+    match state
+        .mam_storage
+        .store_message(archive_jid.as_str(), &archived)
+        .await
+    {
+        Ok(archive_id) => Some(archive_id),
+        Err(err) => {
+            warn!(
+                room = %room_jid,
+                error = %err,
+                "Failed to archive groupchat message to MAM"
+            );
+            None
+        }
     }
+}
 
-    let waddle_db = state
-        .app_state
-        .db_pool
-        .get_waddle_db(&waddle_id)
-        .await
-        .map_err(|e| format!("Failed to access waddle database: {}", e))?;
+fn mam_message_type(message_type: &XmppMessageType) -> String {
+    match message_type {
+        XmppMessageType::Chat => "chat".to_string(),
+        XmppMessageType::Error => "error".to_string(),
+        XmppMessageType::Groupchat => "groupchat".to_string(),
+        XmppMessageType::Headline => "headline".to_string(),
+        XmppMessageType::Normal => "normal".to_string(),
+    }
+}
 
-    let repository = MessageRepository::new(Arc::new(waddle_db));
-    repository
-        .create(MessageCreate::new(
-            channel_id,
-            session.user_id.clone(),
-            content.to_string(),
-        ))
-        .await
-        .map(|message| Some(message.id))
-        .map_err(|e| e.to_string())
+fn extract_reply_reference(
+    message: &xmpp_parsers::message::Message,
+) -> (Option<String>, Option<String>) {
+    let Some(reply) = message
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)
+    else {
+        return (None, None);
+    };
+
+    (
+        reply.attr("id").map(ToOwned::to_owned),
+        reply.attr("to").map(ToOwned::to_owned),
+    )
+}
+
+fn extract_origin_id(message: &xmpp_parsers::message::Message) -> Option<String> {
+    message
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "origin-id" && payload.ns() == STANZA_ID_NS)
+        .and_then(|origin| origin.attr("id").map(ToOwned::to_owned))
 }
 
 fn prototype_body(message: &xmpp_parsers::message::Message) -> Option<String> {
@@ -1550,12 +1643,20 @@ mod tests {
             &server_config,
             Some(b"test-encryption-key-32-bytes!!!"),
         ));
+        let mam_db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .expect("mam db");
+        let mam_conn = mam_db.connect().expect("mam conn");
+        let mam_storage = Arc::new(LibSqlMamStorage::new(mam_conn));
+        mam_storage.initialize().await.expect("mam init");
 
         Arc::new(WebSocketState {
             app_state,
             auth_state,
             connection_registry: Arc::new(ConnectionRegistry::new()),
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
+            mam_storage,
             github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
         })
     }
@@ -1924,60 +2025,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_groupchat_message_writes_to_waddle_history() {
+    async fn groupchat_messages_are_archived_and_returned_via_mam() {
         let state = create_test_websocket_state().await;
         let session = create_test_session(state.as_ref(), "alice").await;
         let waddle_id = "waddle-alpha";
         let channel_id = "channel-bravo";
-
-        let waddle_db = state
-            .app_state
-            .db_pool
-            .create_waddle_db(waddle_id)
-            .await
-            .expect("create waddle db");
-        MigrationRunner::waddle()
-            .run(&waddle_db)
-            .await
-            .expect("waddle migrations");
-
-        let conn = waddle_db
-            .persistent_connection()
-            .expect("persistent connection");
-        let conn = conn.lock().await;
-        conn.execute(
-            "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
-            libsql::params![channel_id, "General"],
-        )
-        .await
-        .expect("insert channel");
-        drop(conn);
-
         let room_jid: BareJid = format!("{waddle_id}_{channel_id}@muc.example.com")
             .parse()
             .expect("room jid");
+        let sender_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
+            .parse()
+            .expect("sender jid");
+        state
+            .muc_registry
+            .get_or_create_room(
+                room_jid.clone(),
+                waddle_id.to_string(),
+                channel_id.to_string(),
+                RoomConfig::default(),
+            )
+            .expect("create room");
+        let room_data = state
+            .muc_registry
+            .get_room_data(&room_jid)
+            .expect("room data");
+        let mut room = room_data.write().await;
+        room.add_occupant(Occupant {
+            real_jid: sender_jid.clone(),
+            nick: "alice".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+        drop(room);
 
-        let persisted_id = persist_groupchat_message(
+        let message_xml = format!(
+            "<message xmlns='jabber:client' to='{room_jid}' type='groupchat' id='client-msg-1'>\
+                <body>Hello from WebSocket</body>\
+             </message>"
+        );
+        let message_responses = handle_message(
+            message_xml.as_str(),
+            "muc.example.com",
             state.as_ref(),
-            &room_jid,
-            &Some("Hello from WebSocket".to_string()),
-            &session,
+            &Some(sender_jid),
+            &Some(session.clone()),
         )
-        .await
-        .expect("persist message")
-        .expect("message id");
+        .await;
+        assert_eq!(
+            message_responses.len(),
+            1,
+            "sender should receive reflected echo"
+        );
 
-        let repository = MessageRepository::new(Arc::new(waddle_db));
-        let (messages, cursor) = repository
-            .get_by_channel(channel_id, 10, None)
-            .await
-            .expect("read messages");
+        let mam_query = format!(
+            "<iq xmlns='jabber:client' type='set' to='{room_jid}' id='mam-1'>\
+                <query xmlns='urn:xmpp:mam:2' queryid='q1'>\
+                    <x xmlns='jabber:x:data' type='submit'>\
+                        <field var='FORM_TYPE' type='hidden'><value>urn:xmpp:mam:2</value></field>\
+                    </x>\
+                    <set xmlns='http://jabber.org/protocol/rsm'><max>50</max></set>\
+                </query>\
+             </iq>"
+        );
+        let mam_responses = handle_iq(
+            mam_query.as_str(),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+        )
+        .await;
 
-        assert!(cursor.is_none());
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].id, persisted_id);
-        assert_eq!(messages[0].author_user_id, session.user_id);
-        assert_eq!(messages[0].content.as_deref(), Some("Hello from WebSocket"));
+        assert!(
+            mam_responses
+                .iter()
+                .any(|stanza| stanza.contains("urn:xmpp:mam:2") && stanza.contains("<result")),
+            "expected at least one MAM result stanza, got: {:?}",
+            mam_responses
+        );
+        assert!(
+            mam_responses
+                .iter()
+                .any(|stanza| stanza.contains("Hello from WebSocket")),
+            "expected archived body in MAM replay, got: {:?}",
+            mam_responses
+        );
+        assert!(
+            mam_responses
+                .iter()
+                .any(|stanza| stanza.contains("<fin") && stanza.contains("urn:xmpp:mam:2")),
+            "expected MAM fin stanza, got: {:?}",
+            mam_responses
+        );
     }
 
     #[test]

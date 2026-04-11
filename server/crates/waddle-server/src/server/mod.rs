@@ -29,7 +29,7 @@ use tower_http::{
 };
 use tracing::{info, warn, Level};
 use waddle_xmpp::XmppServerConfig;
-use waddle_xmpp::{muc::MucRoomRegistry, registry::ConnectionRegistry};
+use waddle_xmpp::{mam::LibSqlMamStorage, muc::MucRoomRegistry, registry::ConnectionRegistry};
 
 mod routes;
 pub mod xmpp_state;
@@ -420,11 +420,14 @@ pub async fn start_with_config(
 
     // Create HTTP state (shares db_pool via Arc)
     let state = Arc::new(AppState::new(Arc::clone(&db_pool)));
+    let websocket_mam_storage =
+        create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
     let http_state = state.clone();
+    let http_mam_storage = websocket_mam_storage.clone();
     let http_server_config = server_config.clone();
     let http_stop = stop_token.clone();
     let acme_http01_challenge_service = acme_runtime
@@ -435,6 +438,7 @@ pub async fn start_with_config(
             http_state,
             http_server_config,
             xmpp_native_auth_enabled,
+            http_mam_storage,
             acme_http01_challenge_service,
             http_listener,
             http_stop,
@@ -523,6 +527,7 @@ async fn start_http_server(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
+    mam_storage: Arc<LibSqlMamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
@@ -531,6 +536,7 @@ async fn start_http_server(
         state,
         server_config,
         xmpp_native_auth_enabled,
+        mam_storage,
         acme_http01_challenge_service,
     );
 
@@ -570,6 +576,24 @@ async fn start_xmpp_server(
         .map_err(|e| anyhow::anyhow!("XMPP server error: {}", e))?;
 
     Ok(())
+}
+
+async fn create_websocket_mam_storage(
+    mam_db_path: Option<PathBuf>,
+) -> Result<Arc<LibSqlMamStorage>> {
+    let db_path = mam_db_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| ":memory:".to_string());
+    let db = libsql::Builder::new_local(db_path.as_str()).build().await?;
+    let conn = db.connect()?;
+    let storage = Arc::new(LibSqlMamStorage::new(conn));
+    storage
+        .initialize()
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {}", err))?;
+    info!(db_path = %db_path, "WebSocket MAM storage initialized");
+    Ok(storage)
 }
 
 /// State for the server-info endpoint
@@ -630,6 +654,7 @@ fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
+    mam_storage: Arc<LibSqlMamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
     // Create auth broker state
@@ -662,6 +687,7 @@ fn create_router(
         auth_state: auth_state.clone(),
         connection_registry,
         muc_registry,
+        mam_storage,
         github_enricher,
     });
     let websocket_router = routes::websocket::router(websocket_state);
@@ -684,7 +710,6 @@ fn create_router(
         encryption_key.as_ref().map(|s| s.as_bytes()),
     ));
     let channels_router = routes::channels::router(channel_state.clone());
-    let messages_router = routes::messages::router(channel_state.clone());
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
@@ -739,8 +764,6 @@ fn create_router(
         .merge(waddles_router)
         // Merge channels routes
         .merge(channels_router)
-        // Merge message history routes
-        .merge(messages_router)
         // Merge authenticated user search
         .merge(users_router)
         // Merge well-known endpoints for XMPP service discovery
@@ -972,7 +995,8 @@ mod tests {
     async fn test_health_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true, None);
+        let mam_storage = create_websocket_mam_storage(None).await.unwrap();
+        let app = create_router(state, server_config, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -998,7 +1022,8 @@ mod tests {
     async fn test_healthz_alias_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true, None);
+        let mam_storage = create_websocket_mam_storage(None).await.unwrap();
+        let app = create_router(state, server_config, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1017,7 +1042,8 @@ mod tests {
     async fn test_detailed_health_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true, None);
+        let mam_storage = create_websocket_mam_storage(None).await.unwrap();
+        let app = create_router(state, server_config, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1044,7 +1070,8 @@ mod tests {
     async fn test_ready_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true, None);
+        let mam_storage = create_websocket_mam_storage(None).await.unwrap();
+        let app = create_router(state, server_config, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1068,7 +1095,8 @@ mod tests {
     async fn test_readyz_alias_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true, None);
+        let mam_storage = create_websocket_mam_storage(None).await.unwrap();
+        let app = create_router(state, server_config, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1087,7 +1115,8 @@ mod tests {
     async fn test_metrics_endpoint() {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
-        let app = create_router(state, server_config, true, None);
+        let mam_storage = create_websocket_mam_storage(None).await.unwrap();
+        let app = create_router(state, server_config, true, mam_storage, None);
 
         let response = app
             .oneshot(
