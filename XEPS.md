@@ -124,7 +124,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented | Chat N/A |
 | **0433** | **Extended Channel Search** | Deferred | Channel/room discovery | Implemented |
 | 0436 | MUC Presence Versioning | Deferred | Efficient presence updates |
-| **0437** | **Room Activity Indicators** | Deferred | Unread / activity badges |
+| **0437** | **Room Activity Indicators** | Deferred | Unread / activity badges | Implemented |
 | **0452** | **MUC Mention Notifications** | Experimental | @mention alerts | Implemented |
 | 0463 | MUC Affiliations Versioning | Experimental | Efficient role sync |
 | **0486** | **MUC Avatars** | Experimental | Room/channel icons |
