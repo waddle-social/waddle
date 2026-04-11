@@ -325,4 +325,23 @@ mod tests {
         assert_eq!(record.reported_jid, "c@d");
         assert_eq!(record.timestamp.as_deref(), Some("2024-06-01T12:00:00Z"));
     }
+
+    #[test]
+    fn test_namespace_constant() {
+        assert_eq!(NS_REPORTING, "urn:xmpp:reporting:1");
+    }
+
+    #[test]
+    fn test_report_store_empty() {
+        let store = ReportStore::new();
+        assert_eq!(store.total(), 0);
+        assert!(store.spam_reports().is_empty());
+        assert!(store.reports_for("anyone").is_empty());
+    }
+
+    #[test]
+    fn test_report_constructors() {
+        assert_eq!(Report::spam().reason, ReportReason::Spam);
+        assert_eq!(Report::abuse().reason, ReportReason::Abuse);
+    }
 }
