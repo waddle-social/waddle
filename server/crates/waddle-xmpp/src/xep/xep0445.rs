@@ -194,4 +194,23 @@ mod tests {
             Some("An invitation token is required to register")
         );
     }
+
+    #[test]
+    fn test_is_preauth_element_negative() {
+        let wrong = Element::builder("other", NS_PARS).build();
+        assert!(!is_preauth_element(&wrong));
+        let wrong_ns = Element::builder("preauth", "wrong:ns").build();
+        assert!(!is_preauth_element(&wrong_ns));
+    }
+
+    #[test]
+    fn test_namespace_constant() {
+        assert_eq!(NS_PARS, "urn:xmpp:pars:0");
+    }
+
+    #[test]
+    fn test_preauth_token_new() {
+        let t = PreauthToken::new("abc");
+        assert_eq!(t.token, "abc");
+    }
 }

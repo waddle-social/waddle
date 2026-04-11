@@ -378,5 +378,31 @@ mod tests {
     fn test_is_bookmarks_node() {
         assert!(is_bookmarks_node("urn:xmpp:bookmarks:1"));
         assert!(!is_bookmarks_node("some:other:node"));
+        assert!(!is_bookmarks_node(""));
+    }
+
+    #[test]
+    fn test_namespace_constants() {
+        assert_eq!(NS_BOOKMARKS2, "urn:xmpp:bookmarks:1");
+        assert_eq!(PEP_NODE, "urn:xmpp:bookmarks:1");
+    }
+
+    #[test]
+    fn test_bookmark_new_defaults() {
+        let jid: BareJid = "room@conference.example.com".parse().expect("valid jid");
+        let b = Bookmark::new(jid);
+        assert!(!b.autojoin);
+        assert!(b.name.is_none());
+        assert!(b.nick.is_none());
+        assert!(b.password.is_none());
+    }
+
+    #[test]
+    fn test_build_bookmark_minimal() {
+        let jid: BareJid = "room@muc.example.com".parse().expect("valid jid");
+        let bookmark = Bookmark::new(jid);
+        let elem = build_bookmark_element(&bookmark);
+        assert_eq!(elem.attr("autojoin"), None);
+        assert!(elem.get_child("nick", NS_BOOKMARKS2).is_none());
     }
 }

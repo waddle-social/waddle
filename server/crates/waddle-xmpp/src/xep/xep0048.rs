@@ -201,4 +201,60 @@ mod tests {
         assert_eq!(conferences.len(), 1);
         assert_eq!(conferences[0].attr("jid"), Some("room@muc.example.com"));
     }
+
+    #[test]
+    fn test_parse_empty_storage() {
+        let xml = "<storage xmlns='storage:bookmarks'/>";
+        let elem: Element = xml.parse().expect("valid");
+        let bookmarks = parse_legacy_bookmarks(&elem);
+        assert!(bookmarks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_multiple_conferences() {
+        let xml = r#"<storage xmlns='storage:bookmarks'>
+            <conference jid='a@muc.example.com' name='A'/>
+            <conference jid='b@muc.example.com' name='B' autojoin='true'/>
+        </storage>"#;
+        let elem: Element = xml.parse().expect("valid");
+        let bookmarks = parse_legacy_bookmarks(&elem);
+        assert_eq!(bookmarks.len(), 2);
+        assert_eq!(bookmarks[0].jid, "a@muc.example.com");
+        assert!(!bookmarks[0].autojoin);
+        assert!(bookmarks[1].autojoin);
+    }
+
+    #[test]
+    fn test_from_native_bookmark_minimal() {
+        let native = Bookmark::new("room@muc.example.com".parse().expect("valid"));
+        let legacy = from_native_bookmark(&native);
+        assert_eq!(legacy.jid, "room@muc.example.com");
+        assert!(!legacy.autojoin);
+        assert!(legacy.name.is_none());
+        assert!(legacy.nick.is_none());
+    }
+
+    #[test]
+    fn test_to_native_bookmark_invalid_jid() {
+        let legacy = LegacyBookmark {
+            jid: "not a valid jid @@@".to_string(),
+            name: None,
+            autojoin: false,
+            nick: None,
+            password: None,
+        };
+        assert!(to_native_bookmark(&legacy).is_none());
+    }
+
+    #[test]
+    fn test_build_empty_bookmarks() {
+        let elem = build_legacy_bookmarks_element(&[]);
+        assert_eq!(elem.name(), "storage");
+        assert_eq!(elem.children().count(), 0);
+    }
+
+    #[test]
+    fn test_namespace_constant() {
+        assert_eq!(NS_BOOKMARKS_LEGACY, "storage:bookmarks");
+    }
 }

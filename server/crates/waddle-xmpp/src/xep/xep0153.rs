@@ -141,4 +141,35 @@ mod tests {
         assert!(hash.is_some());
         assert_eq!(hash.unwrap(), compute_photo_hash(data));
     }
+
+    #[test]
+    fn test_compute_photo_hash_from_invalid_base64() {
+        let hash = compute_photo_hash_from_base64("not valid base64!!!");
+        assert!(hash.is_none());
+    }
+
+    #[test]
+    fn test_compute_photo_hash_deterministic() {
+        let data = b"same";
+        assert_eq!(compute_photo_hash(data), compute_photo_hash(data));
+    }
+
+    #[test]
+    fn test_namespace_constant() {
+        assert_eq!(NS_VCARD_UPDATE, "vcard-temp:x:update");
+    }
+
+    #[test]
+    fn test_parse_vcard_update_wrong_namespace() {
+        let elem = Element::builder("x", "wrong:ns").build();
+        assert!(!has_vcard_update(&elem));
+    }
+
+    #[test]
+    fn test_build_and_parse_roundtrip() {
+        let hash_in = "deadbeef01234567890abcdef012345678901234";
+        let elem = build_vcard_update_element(Some(hash_in));
+        let hash_out = parse_vcard_update(&elem);
+        assert_eq!(hash_out.as_deref(), Some(hash_in));
+    }
 }

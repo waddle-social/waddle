@@ -289,4 +289,41 @@ mod tests {
     fn test_pubsub_node() {
         assert_eq!(PUBSUB_NODE_STORIES, "urn:xmpp:stories:0");
     }
+
+    #[test]
+    fn test_is_story_element_negative() {
+        let wrong = Element::builder("other", NS_STORIES).build();
+        assert!(!is_story_element(&wrong));
+        let wrong_ns = Element::builder("story", "wrong:ns").build();
+        assert!(!is_story_element(&wrong_ns));
+    }
+
+    #[test]
+    fn test_default_expiry_hours() {
+        assert_eq!(DEFAULT_EXPIRY_HOURS, 24);
+    }
+
+    #[test]
+    fn test_story_builder_chain() {
+        let s = Story::new("id")
+            .with_body("hello")
+            .with_media("https://example.com/img.jpg")
+            .with_author("alice@example.com");
+        assert_eq!(s.body.as_deref(), Some("hello"));
+        assert_eq!(s.media_url.as_deref(), Some("https://example.com/img.jpg"));
+        assert_eq!(s.author.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn test_filter_active_all_expired() {
+        let e1 = Story::new("a").with_expires_at(past_time());
+        let e2 = Story::new("b").with_expires_at(past_time());
+        assert!(filter_active(&[e1, e2]).is_empty());
+    }
+
+    #[test]
+    fn test_filter_active_empty() {
+        let empty: Vec<Story> = vec![];
+        assert!(filter_active(&empty).is_empty());
+    }
 }
