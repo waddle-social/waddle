@@ -53,6 +53,8 @@
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
 //!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
+//!   notification elements and per-room unread mention counter.
 //! - **XEP-0469**: Bookmark Pinning - Pin favorite channels via `<pinned/>`
 //!   extension on XEP-0402 bookmark elements, with sort helper.
 //! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
@@ -135,6 +137,7 @@ pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
 pub mod xep0461;
+pub mod xep0452;
 pub mod xep0469;
 pub mod xep0488;
 pub mod xep0500;
@@ -392,6 +395,13 @@ pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+};
+
+pub use xep0452::{
+    build_mention_notification_element, build_mention_notification_message,
+    extract_mention_notification, has_mention_notification, is_mention_notification_element,
+    set_mention_notification, strip_mention_notification, MentionCounter, MentionNotification,
+    MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
 };
 
 pub use xep0469::{
