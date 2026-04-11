@@ -243,7 +243,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0location338 | Jingle Grouping Framework | Draft | Media bundling |
 | 0location339 | Source-Specific Media Attributes in Jingle | Draft | Simulcast |
 | 0320 | Use of DTLS-SRTP in Jingle Sessions | Draft | Encrypted media |
-| **0482** | **Call Invites** | Experimental | Call invitation UX |
+| **0482** | **Call Invites** | Experimental | Call invitation UX | Implemented |
 | **0483** | **HTTP Online Meetings** | Experimental | Meeting links (Jitsi-style) | Implemented |
 | 0location353 | Jingle Message Initiation | Experimental | Call ringing |
 
