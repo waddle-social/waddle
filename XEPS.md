@@ -255,7 +255,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 |-----|-------|--------|--------------|
 | 0277 | Microblogging over XMPP | Deferred | Social feed posts |
 | **0470** | **Pubsub Attachments** | Experimental | Reactions/comments on posts |
-| **0471** | **Calendar Events** | Experimental | Community events |
+| **0471** | **Calendar Events** | Experimental | Community events | Implemented |
 | **0472** | **Pubsub Social Feed** | Experimental | Activity feeds |
 | **0501** | **Pubsub Stories** | Experimental | Ephemeral stories |
 
