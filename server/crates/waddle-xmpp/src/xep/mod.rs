@@ -53,6 +53,8 @@
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
 //!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
 //! - **XEP-0444**: Message Reactions
+//! - **XEP-0488**: MUC Token Invite - Shareable invite tokens for MUC rooms
+//!   with URI generation and IQ-based token request/response.
 //! - **XEP-0447**: Stateless File Sharing - Structured file sharing with
 //!   metadata and download sources, building on XEP-0446 and XEP-0363.
 //! - **XEP-0446**: File Metadata Element - Structured file info (name, size,
@@ -129,6 +131,7 @@ pub mod xep0444;
 pub mod xep0446;
 pub mod xep0447;
 pub mod xep0461;
+pub mod xep0488;
 pub mod xep0503;
 
 pub use xep0004::{
@@ -383,6 +386,14 @@ pub use xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, RsmError,
     RsmPaginated, RsmRequest, RsmResponse, NS_RSM,
+};
+
+pub use xep0488::{
+    build_invite_message_element, build_invite_request, build_invite_response,
+    build_invite_share_message, extract_invite_from_iq, extract_invite_from_message,
+    has_invite_in_message, is_invite_element, is_invite_request, set_invite_on_message,
+    strip_invite_from_message, InviteToken, InviteTokenCarrier, InviteTokenError,
+    NS_MUC_TOKEN_INVITE,
 };
 
 pub use xep0503::{

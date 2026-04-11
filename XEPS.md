@@ -128,7 +128,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0452** | **MUC Mention Notifications** | Experimental | @mention alerts |
 | 0463 | MUC Affiliations Versioning | Experimental | Efficient role sync |
 | **0486** | **MUC Avatars** | Experimental | Room/channel icons |
-| **0488** | **MUC Token Invite** | Experimental | Invite links with tokens |
+| **0488** | **MUC Token Invite** | Experimental | Invite links with tokens | Implemented |
 | **0492** | **Chat Notification Settings** | Experimental | Per-channel notification prefs |
 | **0500** | **MUC Slow Mode** | Experimental | Rate limiting in channels |
 | **0502** | **MUC Activity Indicator** | Experimental | Active room indicators |
