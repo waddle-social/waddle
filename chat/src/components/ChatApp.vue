@@ -432,6 +432,7 @@ onUnmounted(() => {
         :current-user="auth.session.value?.username"
         :tenor-api-key="props.tenorApiKey"
         :member-names="waddles.members.value.map((m) => m.username)"
+        :room-hats="messaging.roomHats.value"
         @send="messaging.sendMessage"
         @typing="messaging.notifyComposing"
         @select-gif="sendGif"

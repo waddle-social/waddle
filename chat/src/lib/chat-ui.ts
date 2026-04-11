@@ -23,6 +23,8 @@ export interface TimelineMessage {
   readBy?: string[];
   /** Mentioned JIDs/nicks in this message (XEP-0372). */
   mentions?: string[];
+  /** XEP-0317: Hat badges for the message author. */
+  hats?: { title: string; uri: string }[];
 }
 
 export interface CommunityFormData {

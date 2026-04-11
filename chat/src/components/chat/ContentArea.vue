@@ -3,7 +3,7 @@ import { watch } from "vue";
 import { Hash, Settings } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
-import type { XmppStatusSnapshot } from "@/lib/xmpp-client";
+import type { XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-client";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 
@@ -22,6 +22,7 @@ const props = defineProps<{
   currentUser?: string;
   tenorApiKey: string;
   memberNames: string[];
+  roomHats: RoomHats;
 }>();
 
 const emit = defineEmits<{
@@ -106,6 +107,7 @@ watch(
           :key="msg.id"
           :message="msg"
           :current-user="props.currentUser"
+          :hats="roomHats[msg.author] ?? []"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"

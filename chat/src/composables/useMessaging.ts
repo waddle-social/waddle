@@ -7,6 +7,7 @@ import {
   type LiveRoomMessage,
   type XmppStatusSnapshot,
   type ChatStateType,
+  type RoomHats,
 } from "@/lib/xmpp-client";
 import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
 
@@ -64,6 +65,7 @@ export function useMessaging(
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const typingUsers = ref<string[]>([]);
+  const roomHats = ref<RoomHats>({});
 
   let messageRequestId = 0;
   let lastChatState: ChatStateType = "active";
@@ -119,6 +121,9 @@ export function useMessaging(
       client.setDisplayedHandler((event) => {
         if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
         applyDisplayed(event.messageId, event.nick);
+      });
+      client.setHatsHandler((hats) => {
+        roomHats.value = hats;
       });
     } else {
       xmppStatus.value = { state: "offline", detail: "Live room offline" };
@@ -458,6 +463,7 @@ export function useMessaging(
     timelineEl,
     currentRoomJid,
     typingUsers,
+    roomHats,
     loadMessages,
     selectChannel,
     sendMessage,

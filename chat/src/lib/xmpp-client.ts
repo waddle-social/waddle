@@ -49,6 +49,15 @@ const CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0";
 /** XEP-0372 namespace */
 const REFERENCES_NS = "urn:xmpp:reference:0";
 
+/** XEP-0317: Hat badge for an occupant */
+export interface OccupantHat {
+  title: string;
+  uri: string;
+}
+
+/** XEP-0317: Map of nick -> hats for the current room */
+export type RoomHats = Record<string, OccupantHat[]>;
+
 
 export interface DisplayedEvent {
   roomJid: string;
@@ -111,10 +120,12 @@ export class BrowserXmppClient {
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
   private displayedHandler: ((event: DisplayedEvent) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
+  private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: ReturnType<typeof client> | null = null;
   private currentRoom: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
+  private roomHats: RoomHats = {};
 
   constructor(session: WaddleSession) {
     this.session = session;
@@ -138,6 +149,10 @@ export class BrowserXmppClient {
 
   setDisplayedHandler(handler: (event: DisplayedEvent) => void) {
     this.displayedHandler = handler;
+  }
+
+  setHatsHandler(handler: (hats: RoomHats) => void) {
+    this.hatsHandler = handler;
   }
 
   setRoomDisconnectHandler(handler: () => void) {
@@ -204,6 +219,34 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("stanza", (stanza: XmppElement) => {
+      // XEP-0317: Parse hats from presence stanzas
+      if (stanza.is("presence")) {
+        const from = stanza.attrs.from ?? "";
+        const [presenceRoom, presenceNick] = from.split("/");
+        if (presenceRoom && presenceRoom === this.currentRoom && presenceNick) {
+          const isUnavailable = stanza.attrs.type === "unavailable";
+          if (isUnavailable) {
+            delete this.roomHats[presenceNick];
+          } else {
+            const hatsEl = stanza.getChild("hats");
+            if (hatsEl) {
+              const hats: OccupantHat[] = hatsEl.children
+                .filter((c: XmppElement) => c.is("hat"))
+                .map((c: XmppElement) => ({
+                  title: (c.attrs?.title as string) ?? "",
+                  uri: (c.attrs?.uri as string) ?? "",
+                }))
+                .filter((h: OccupantHat) => h.title && h.uri);
+              this.roomHats[presenceNick] = hats;
+            } else {
+              this.roomHats[presenceNick] = [];
+            }
+          }
+          this.hatsHandler?.({ ...this.roomHats });
+        }
+        return;
+      }
+
       if (!stanza.is("message")) {
         return;
       }
@@ -492,6 +535,8 @@ export class BrowserXmppClient {
     }
 
     this.currentRoom = nextRoom;
+    this.roomHats = {};
+    this.hatsHandler?.({});
 
     if (this.xmpp) {
       await this.xmpp.send(

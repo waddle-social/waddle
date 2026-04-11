@@ -3,11 +3,21 @@ import { ref, computed } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2 } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
+import type { OccupantHat } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
+
+const HAT_LABELS: Record<string, string> = {
+  "urn:xmpp:hats:owner": "OWNER",
+  "urn:xmpp:hats:admin": "ADMIN",
+  "urn:xmpp:hats:moderator": "MOD",
+  "urn:xmpp:hats:bot": "BOT",
+  "urn:xmpp:hats:verified": "VERIFIED",
+};
 
 const props = defineProps<{
   message: TimelineMessage;
   currentUser?: string;
+  hats: OccupantHat[];
 }>();
 
 const emit = defineEmits<{
@@ -91,6 +101,12 @@ function onEditKeydown(e: KeyboardEvent) {
     <div class="flex-1 min-w-0">
       <div class="flex items-baseline gap-3 mb-1">
         <span class="font-mono font-bold text-sm">{{ message.author }}</span>
+        <span
+          v-for="hat in hats"
+          :key="hat.uri"
+          class="inline-block px-1 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider border border-foreground/40 text-muted-foreground leading-none"
+          :title="hat.title"
+        >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
         <span class="text-xs font-mono text-muted-foreground">
           {{ formatStamp(message.createdAt) }}
         </span>
