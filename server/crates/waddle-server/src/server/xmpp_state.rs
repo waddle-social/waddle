@@ -11,11 +11,13 @@ use waddle_xmpp::{Session as XmppSession, XmppError};
 use crate::auth::{
     jid_to_localpart, localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager,
 };
+use crate::db::actor::DbActor;
 use crate::db::{Database, DatabasePool, MigrationRunner};
 use crate::permissions::{Object, PermissionService, Subject};
 use crate::server::routes::channels::list_channels_from_db as list_channels_for_waddle_from_db;
 use crate::server::routes::waddles::list_user_waddles as list_user_waddles_from_db;
 use crate::vcard::VCardStore;
+use kameo::actor::ActorRef;
 
 /// XMPP application state that bridges to waddle-server services.
 ///
@@ -50,8 +52,13 @@ impl XmppAppState {
     /// * `domain` - The XMPP server domain (e.g., "waddle.social")
     /// * `db` - The global database for session and permission storage
     /// * `encryption_key` - Optional encryption key for session token encryption
-    pub fn new(domain: String, db: Arc<Database>, encryption_key: Option<&[u8]>) -> Self {
-        let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
+    pub fn new(
+        domain: String,
+        db: Arc<Database>,
+        db_actor: ActorRef<DbActor>,
+        encryption_key: Option<&[u8]>,
+    ) -> Self {
+        let session_manager = SessionManager::new(db_actor, encryption_key);
         let permission_service = PermissionService::new(Arc::clone(&db));
         let native_user_store = NativeUserStore::new(Arc::clone(&db));
         let vcard_store = VCardStore::new(Arc::clone(&db));
@@ -1212,7 +1219,7 @@ mod tests {
     use crate::permissions::ObjectType;
     use waddle_xmpp::AppState;
 
-    async fn create_test_db() -> Arc<Database> {
+    async fn create_test_db() -> (Arc<Database>, ActorRef<DbActor>) {
         let db = Database::in_memory("test-xmpp-state")
             .await
             .expect("Failed to create test database");
@@ -1222,13 +1229,14 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(&db).await.expect("Failed to run migrations");
 
-        db
+        let actor = kameo::spawn(DbActor::new((*db).clone()));
+        (db, actor)
     }
 
     #[tokio::test]
     async fn test_xmpp_state_creation() {
-        let db = create_test_db().await;
-        let state = XmppAppState::new("waddle.social".to_string(), db, None);
+        let (db, actor) = create_test_db().await;
+        let state = XmppAppState::new("waddle.social".to_string(), db, actor, None);
 
         assert_eq!(state.domain(), "waddle.social");
     }

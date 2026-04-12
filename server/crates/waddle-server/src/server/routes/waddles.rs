@@ -52,7 +52,8 @@ impl WaddleState {
     ) -> Self {
         let db = Arc::new(app_state.db_pool.global().clone());
         let permission_service = PermissionService::new(Arc::clone(&db));
-        let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
+        let session_manager =
+            SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         Self {
             app_state,
             permission_service,

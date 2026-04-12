@@ -53,7 +53,8 @@ impl AuthState {
         encryption_key: Option<&[u8]>,
     ) -> Self {
         let db = Arc::new(app_state.db_pool.global().clone());
-        let session_manager = SessionManager::new(Arc::clone(&db), encryption_key);
+        let session_manager =
+            SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         let identity_service = IdentityService::new(Arc::clone(&db));
         let providers = ProviderRegistry::new(server_config.auth.providers.clone())
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));

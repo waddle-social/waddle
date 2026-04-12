@@ -56,9 +56,67 @@ impl Deref for ConnectionGuard<'_> {
     }
 }
 
+pub use actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
 pub use migrations::MigrationRunner;
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 // ConnectionGuard is public via the enum definition above
+
+/// Extension trait for extracting typed values from `libsql::Value`.
+///
+/// Used when parsing `RowValues` returned by `DbActor` messages, which return
+/// `Vec<libsql::Value>` rather than borrowed `libsql::Row` references.
+pub trait ValueExt {
+    fn as_string(&self) -> Result<String, DatabaseError>;
+    fn as_optional_string(&self) -> Result<Option<String>, DatabaseError>;
+    fn as_i64(&self) -> Result<i64, DatabaseError>;
+}
+
+impl ValueExt for libsql::Value {
+    fn as_string(&self) -> Result<String, DatabaseError> {
+        match self {
+            libsql::Value::Text(s) => Ok(s.clone()),
+            libsql::Value::Null => {
+                Err(DatabaseError::QueryFailed("expected text, got null".into()))
+            }
+            other => Err(DatabaseError::QueryFailed(format!(
+                "expected text, got {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn as_optional_string(&self) -> Result<Option<String>, DatabaseError> {
+        match self {
+            libsql::Value::Null => Ok(None),
+            libsql::Value::Text(s) => Ok(Some(s.clone())),
+            other => Err(DatabaseError::QueryFailed(format!(
+                "expected text or null, got {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn as_i64(&self) -> Result<i64, DatabaseError> {
+        match self {
+            libsql::Value::Integer(i) => Ok(*i),
+            other => Err(DatabaseError::QueryFailed(format!(
+                "expected integer, got {:?}",
+                other
+            ))),
+        }
+    }
+}
+
+/// Get a value from a row by index with bounds checking.
+pub fn row_value(row: &[libsql::Value], idx: usize) -> Result<&libsql::Value, DatabaseError> {
+    row.get(idx).ok_or_else(|| {
+        DatabaseError::QueryFailed(format!(
+            "column index {} out of bounds (row has {} columns)",
+            idx,
+            row.len()
+        ))
+    })
+}
 
 /// Database-specific errors
 #[derive(Error, Debug)]
