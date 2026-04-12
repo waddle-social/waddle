@@ -215,17 +215,22 @@ impl DatabasePool {
 
     /// Evict the most idle waddle actor (by idle time), skipping the given id.
     async fn evict_most_idle(&self, skip_id: &str) {
+        // Snapshot actor refs to avoid holding DashMap shard locks across .await
+        let actors: Vec<(String, ActorRef<DbActor>)> = self
+            .waddle_actors
+            .iter()
+            .filter(|e| e.key() != skip_id)
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
         let mut most_idle_key: Option<String> = None;
         let mut most_idle_ms: u64 = 0;
 
-        for entry in self.waddle_actors.iter() {
-            if entry.key() == skip_id {
-                continue;
-            }
-            if let Ok(idle) = entry.value().ask(GetIdleMs).await {
+        for (key, actor) in actors {
+            if let Ok(idle) = actor.ask(GetIdleMs).await {
                 if idle > most_idle_ms {
                     most_idle_ms = idle;
-                    most_idle_key = Some(entry.key().clone());
+                    most_idle_key = Some(key);
                 }
             }
         }
@@ -267,23 +272,35 @@ impl DatabasePool {
     /// Perform a health check on the pool
     #[instrument(skip_all)]
     pub async fn health_check(&self) -> Result<PoolHealth, DatabaseError> {
-        let global_healthy = self
-            .global_actor
-            .ask(DbHealthCheck)
-            .await
-            .unwrap_or(false);
+        let global_healthy = match self.global_actor.ask(DbHealthCheck).await {
+            Ok(healthy) => healthy,
+            Err(e) => {
+                tracing::warn!("Global DB health check failed: {}", e);
+                false
+            }
+        };
 
-        // Check a sample of loaded waddle actors
+        // Snapshot actor refs to avoid holding DashMap shard locks across .await
+        let sample: Vec<ActorRef<DbActor>> = self
+            .waddle_actors
+            .iter()
+            .take(5)
+            .map(|e| e.value().clone())
+            .collect();
+
         let mut waddle_healthy = true;
-        for entry in self.waddle_actors.iter().take(5) {
-            if let Ok(healthy) = entry.value().ask(DbHealthCheck).await {
-                if !healthy {
+        for actor in sample {
+            match actor.ask(DbHealthCheck).await {
+                Ok(healthy) if !healthy => {
                     waddle_healthy = false;
                     break;
                 }
-            } else {
-                waddle_healthy = false;
-                break;
+                Err(e) => {
+                    tracing::warn!("Waddle DB health check failed: {}", e);
+                    waddle_healthy = false;
+                    break;
+                }
+                _ => {}
             }
         }
 
@@ -300,8 +317,14 @@ impl DatabasePool {
     pub async fn sync_all(&self) -> Result<(), DatabaseError> {
         if self.config.turso_url.is_some() {
             self.global_db.sync().await?;
-            for entry in self.waddle_actors.iter() {
-                if let Ok(db) = entry.value().ask(GetDatabase).await {
+            // Snapshot actor refs to avoid holding DashMap shard locks across .await
+            let actors: Vec<ActorRef<DbActor>> = self
+                .waddle_actors
+                .iter()
+                .map(|e| e.value().clone())
+                .collect();
+            for actor in actors {
+                if let Ok(db) = actor.ask(GetDatabase).await {
                     db.sync().await?;
                 }
             }
