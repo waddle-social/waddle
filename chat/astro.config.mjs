@@ -25,7 +25,11 @@ export default defineConfig({
     resolve: {
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
+        events: "events",
       },
+    },
+    optimizeDeps: {
+      include: ["events", "stanza"],
     },
   },
 
