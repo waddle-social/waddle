@@ -50,10 +50,18 @@ export class BrowserXmppClient {
   async connect() {
     if (this.xmpp) return;
     const xmpp = createClient({
-      jid: this.session.jid, password: this.session.session_id, resource: "web",
+      jid: this.session.jid,
+      // The session_id is a bearer token — use OAUTHBEARER (RFC 7628)
+      credentials: { token: this.session.session_id },
+      resource: "web",
       transports: { websocket: this.session.xmpp_websocket_url, bosh: false },
+      useStreamManagement: false,
       sendReceipts: false, chatMarkers: false,
     });
+    // Only keep OAUTHBEARER; session tokens aren't SCRAM/PLAIN passwords
+    for (const mech of ["EXTERNAL", "SCRAM-SHA-256-PLUS", "SCRAM-SHA-256", "SCRAM-SHA-1-PLUS", "SCRAM-SHA-1", "DIGEST-MD5", "X-OAUTH2", "PLAIN", "ANONYMOUS"]) {
+      xmpp.sasl.disable(mech);
+    }
     registerWaddleExtensions(xmpp);
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
