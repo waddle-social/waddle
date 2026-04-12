@@ -82,43 +82,22 @@ impl SessionManager {
             VALUES (?, ?, ?, ?, ?)
         "#;
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
-                query,
-                libsql::params![
-                    session.user_id.as_str(),
-                    session.username.as_str(),
-                    session.xmpp_localpart.as_str(),
-                    session.created_at.to_rfc3339(),
-                    session.created_at.to_rfc3339()
-                ],
-            )
-            .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to ensure user exists: {}", e))
-            })?;
-            Ok(())
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
-            })?;
-            conn.execute(
-                query,
-                libsql::params![
-                    session.user_id.as_str(),
-                    session.username.as_str(),
-                    session.xmpp_localpart.as_str(),
-                    session.created_at.to_rfc3339(),
-                    session.created_at.to_rfc3339()
-                ],
-            )
-            .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to ensure user exists: {}", e))
-            })?;
-            Ok(())
-        }
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            query,
+            libsql::params![
+                session.user_id.as_str(),
+                session.username.as_str(),
+                session.xmpp_localpart.as_str(),
+                session.created_at.to_rfc3339(),
+                session.created_at.to_rfc3339()
+            ],
+        )
+        .await
+        .map_err(|e| {
+            AuthError::DatabaseError(format!("Failed to ensure user exists: {}", e))
+        })?;
+        Ok(())
     }
 
     #[instrument(skip(self, session))]
@@ -133,39 +112,20 @@ impl SessionManager {
             VALUES (?, ?, ?, ?, ?, ?)
         "#;
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
-                query,
-                libsql::params![
-                    session.id.as_str(),
-                    session.user_id.as_str(),
-                    token_hash,
-                    expires_at,
-                    session.created_at.to_rfc3339(),
-                    session.last_used_at.to_rfc3339()
-                ],
-            )
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to insert session: {}", e)))?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
-            })?;
-            conn.execute(
-                query,
-                libsql::params![
-                    session.id.as_str(),
-                    session.user_id.as_str(),
-                    token_hash,
-                    expires_at,
-                    session.created_at.to_rfc3339(),
-                    session.last_used_at.to_rfc3339()
-                ],
-            )
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to insert session: {}", e)))?;
-        }
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            query,
+            libsql::params![
+                session.id.as_str(),
+                session.user_id.as_str(),
+                token_hash,
+                expires_at,
+                session.created_at.to_rfc3339(),
+                session.last_used_at.to_rfc3339()
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to insert session: {}", e)))?;
 
         debug!(session_id = %session.id, user_id = %session.user_id, "Session created");
         Ok(())
@@ -244,27 +204,14 @@ impl SessionManager {
             LIMIT 1
         "#;
 
-        let row = if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn
-                .query(query, libsql::params![session_id])
-                .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
-            rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read session row: {}", e))
-            })?
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
-            })?;
-            let mut rows = conn
-                .query(query, libsql::params![session_id])
-                .await
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
-            rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read session row: {}", e))
-            })?
-        };
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let mut rows = conn
+            .query(query, libsql::params![session_id])
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
+        let row = rows.next().await.map_err(|e| {
+            AuthError::DatabaseError(format!("Failed to read session row: {}", e))
+        })?;
 
         match row {
             Some(row) => Ok(Some(self.row_to_session(&row)?)),
@@ -277,46 +224,24 @@ impl SessionManager {
         let now = Utc::now().to_rfc3339();
         let query = "UPDATE sessions SET last_used_at = ? WHERE id = ?";
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(query, libsql::params![now, session_id])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to update session: {}", e))
-                })?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        conn.execute(query, libsql::params![now, session_id])
+            .await
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to update session: {}", e))
             })?;
-            conn.execute(query, libsql::params![now, session_id])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to update session: {}", e))
-                })?;
-        }
         Ok(())
     }
 
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         let query = "DELETE FROM sessions WHERE id = ?";
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(query, libsql::params![session_id])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to delete session: {}", e))
-                })?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        conn.execute(query, libsql::params![session_id])
+            .await
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to delete session: {}", e))
             })?;
-            conn.execute(query, libsql::params![session_id])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to delete session: {}", e))
-                })?;
-        }
         Ok(())
     }
 
@@ -340,23 +265,13 @@ impl SessionManager {
     pub async fn cleanup_expired_sessions(&self) -> Result<usize, AuthError> {
         let now = Utc::now().to_rfc3339();
         let query = "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?";
-        let deleted = if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(query, libsql::params![now])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed cleanup expired sessions: {}", e))
-                })?
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let deleted = conn
+            .execute(query, libsql::params![now])
+            .await
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed cleanup expired sessions: {}", e))
             })?;
-            conn.execute(query, libsql::params![now])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed cleanup expired sessions: {}", e))
-                })?
-        };
         Ok(deleted as usize)
     }
 }

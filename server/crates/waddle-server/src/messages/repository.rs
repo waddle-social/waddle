@@ -41,55 +41,30 @@ impl MessageRepository {
         let expires_at_str = create.expires_at.map(|dt| dt.to_rfc3339());
         let created_at_str = created_at.to_rfc3339();
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
-                r#"
+        let conn = self.db.guard().await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
+        })?;
+        conn.execute(
+            r#"
                 INSERT INTO messages (
                     id, channel_id, author_user_id, content, reply_to_id, thread_id,
                     flags, edited_at, created_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 "#,
-                libsql::params![
-                    id.clone(),
-                    create.channel_id.clone(),
-                    create.author_user_id.clone(),
-                    content.clone(),
-                    create.reply_to_id.clone(),
-                    create.thread_id.clone(),
-                    flags_bits,
-                    created_at_str.clone(),
-                    expires_at_str.clone()
-                ],
-            )
-            .await
-            .map_err(|e| MessageError::DatabaseError(format!("Failed to insert message: {}", e)))?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-            })?;
-            conn.execute(
-                r#"
-                INSERT INTO messages (
-                    id, channel_id, author_user_id, content, reply_to_id, thread_id,
-                    flags, edited_at, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-                "#,
-                libsql::params![
-                    id.clone(),
-                    create.channel_id.clone(),
-                    create.author_user_id.clone(),
-                    content.clone(),
-                    create.reply_to_id.clone(),
-                    create.thread_id.clone(),
-                    flags_bits,
-                    created_at_str,
-                    expires_at_str
-                ],
-            )
-            .await
-            .map_err(|e| MessageError::DatabaseError(format!("Failed to insert message: {}", e)))?;
-        }
+            libsql::params![
+                id.clone(),
+                create.channel_id.clone(),
+                create.author_user_id.clone(),
+                content.clone(),
+                create.reply_to_id.clone(),
+                create.thread_id.clone(),
+                flags_bits,
+                created_at_str,
+                expires_at_str
+            ],
+        )
+        .await
+        .map_err(|e| MessageError::DatabaseError(format!("Failed to insert message: {}", e)))?;
 
         debug!("Created message: {}", id);
 
@@ -117,27 +92,16 @@ impl MessageRepository {
             WHERE id = ?
         "#;
 
-        let row = if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn.query(query, libsql::params![id]).await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to query message: {}", e))
-            })?;
+        let conn = self.db.guard().await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
+        })?;
+        let mut rows = conn.query(query, libsql::params![id]).await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to query message: {}", e))
+        })?;
 
-            rows.next().await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to read message row: {}", e))
-            })?
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-            })?;
-            let mut rows = conn.query(query, libsql::params![id]).await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to query message: {}", e))
-            })?;
-
-            rows.next().await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to read message row: {}", e))
-            })?
-        };
+        let row = rows.next().await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to read message row: {}", e))
+        })?;
 
         match row {
             Some(row) => {
@@ -175,37 +139,12 @@ impl MessageRepository {
             Some(cursor) => {
                 // Get the created_at of the cursor message for proper pagination
                 let cursor_query = "SELECT created_at FROM messages WHERE id = ?";
-                let cursor_created_at = if let Some(persistent) = self.db.persistent_connection() {
-                    let conn = persistent.lock().await;
-                    let mut rows = conn
-                        .query(cursor_query, libsql::params![cursor])
-                        .await
-                        .map_err(|e| {
-                            MessageError::DatabaseError(format!("Failed to query cursor: {}", e))
-                        })?;
-
-                    match rows.next().await.map_err(|e| {
-                        MessageError::DatabaseError(format!("Failed to read cursor row: {}", e))
-                    })? {
-                        Some(row) => {
-                            let created_at: String = row.get(0).map_err(|e| {
-                                MessageError::DatabaseError(format!(
-                                    "Failed to get cursor created_at: {}",
-                                    e
-                                ))
-                            })?;
-                            created_at
-                        }
-                        None => {
-                            return Err(MessageError::InvalidId(format!(
-                                "Cursor message not found: {}",
-                                cursor
-                            )))
-                        }
-                    }
-                } else {
-                    let conn = self.db.connect().map_err(|e| {
-                        MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
+                let cursor_created_at = {
+                    let conn = self.db.guard().await.map_err(|e| {
+                        MessageError::DatabaseError(format!(
+                            "Failed to connect to database: {}",
+                            e
+                        ))
                     })?;
                     let mut rows = conn
                         .query(cursor_query, libsql::params![cursor])
@@ -266,30 +205,17 @@ impl MessageRepository {
 
         let mut messages = Vec::new();
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn.query(query, params).await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to query messages: {}", e))
-            })?;
+        let conn = self.db.guard().await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
+        })?;
+        let mut rows = conn.query(query, params).await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to query messages: {}", e))
+        })?;
 
-            while let Some(row) = rows.next().await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to read message row: {}", e))
-            })? {
-                messages.push(self.row_to_message(&row)?);
-            }
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
-            })?;
-            let mut rows = conn.query(query, params).await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to query messages: {}", e))
-            })?;
-
-            while let Some(row) = rows.next().await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to read message row: {}", e))
-            })? {
-                messages.push(self.row_to_message(&row)?);
-            }
+        while let Some(row) = rows.next().await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to read message row: {}", e))
+        })? {
+            messages.push(self.row_to_message(&row)?);
         }
 
         // Check if there are more messages
@@ -350,13 +276,8 @@ impl MessageRepository {
             set_clauses.join(", ")
         );
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(&query, params).await.map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to update message: {}", e))
-            })?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
+        {
+            let conn = self.db.guard().await.map_err(|e| {
                 MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
             })?;
             conn.execute(&query, params).await.map_err(|e| {
@@ -375,32 +296,18 @@ impl MessageRepository {
     /// Delete a message
     #[instrument(skip(self))]
     pub async fn delete(&self, id: &str) -> Result<(), MessageError> {
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let rows_affected = conn
-                .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
-                .await
-                .map_err(|e| {
-                    MessageError::DatabaseError(format!("Failed to delete message: {}", e))
-                })?;
-
-            if rows_affected == 0 {
-                return Err(MessageError::NotFound(id.to_string()));
-            }
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
+        let conn = self.db.guard().await.map_err(|e| {
+            MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
+        })?;
+        let rows_affected = conn
+            .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
+            .await
+            .map_err(|e| {
+                MessageError::DatabaseError(format!("Failed to delete message: {}", e))
             })?;
-            let rows_affected = conn
-                .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
-                .await
-                .map_err(|e| {
-                    MessageError::DatabaseError(format!("Failed to delete message: {}", e))
-                })?;
 
-            if rows_affected == 0 {
-                return Err(MessageError::NotFound(id.to_string()));
-            }
+        if rows_affected == 0 {
+            return Err(MessageError::NotFound(id.to_string()));
         }
 
         debug!("Deleted message: {}", id);

@@ -155,37 +155,23 @@ async fn search_users(
         LIMIT ?2
     "#;
 
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| e.to_string())?;
+
     let mut users = Vec::new();
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(sql, libsql::params![query, limit])
-            .await
-            .map_err(|e| format!("Failed to query users: {}", e))?;
+    let mut rows = conn
+        .query(sql, libsql::params![query, limit])
+        .await
+        .map_err(|e| format!("Failed to query users: {}", e))?;
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read user row: {}", e))?
-        {
-            users.push(parse_user_row(&row, xmpp_domain)?);
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-        let mut rows = conn
-            .query(sql, libsql::params![query, limit])
-            .await
-            .map_err(|e| format!("Failed to query users: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read user row: {}", e))?
-        {
-            users.push(parse_user_row(&row, xmpp_domain)?);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read user row: {}", e))?
+    {
+        users.push(parse_user_row(&row, xmpp_domain)?);
     }
 
     Ok(users)
