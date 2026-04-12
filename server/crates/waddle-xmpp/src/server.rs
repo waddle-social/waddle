@@ -17,6 +17,7 @@ use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
 use crate::muc::MucRoomRegistry;
 use crate::pubsub::{InMemoryPubSubStorage, PubSubStorage};
+use crate::push::{HttpWebPushSender, InMemoryPushStore, PushSubscriptionStore, WebPushSender};
 use crate::registry::ConnectionRegistry;
 use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
@@ -90,6 +91,10 @@ pub struct XmppServer<S: AppState> {
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
     /// GitHub link enricher shared across all connections
     github_enricher: Option<Arc<waddle_xmpp_xep_github::MessageEnricher>>,
+    /// XEP-0357 Push subscription store
+    push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
+    /// XEP-0357 Push notification sender
+    push_sender: Arc<dyn WebPushSender + Send + Sync>,
     /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
     c2s_listener: TcpListener,
     /// S2S listener — passed in if S2S federation is enabled.
@@ -137,6 +142,13 @@ impl<S: AppState> XmppServer<S> {
             Arc::new(InMemoryPubSubStorage::new());
         info!("PubSub storage initialized");
 
+        // Create the push subscription store and sender (XEP-0357)
+        let push_store: Arc<dyn PushSubscriptionStore + Send + Sync> =
+            Arc::new(InMemoryPushStore::new());
+        let push_sender: Arc<dyn WebPushSender + Send + Sync> =
+            Arc::new(HttpWebPushSender::new());
+        info!("Push notification store initialized");
+
         // Create the GitHub link enricher from environment
         let github_enricher = {
             let enricher = waddle_xmpp_xep_github::MessageEnricher::from_env();
@@ -160,6 +172,8 @@ impl<S: AppState> XmppServer<S> {
             sm_session_registry,
             pubsub_storage,
             github_enricher,
+            push_store,
+            push_sender,
             c2s_listener,
             s2s_listener,
             shutdown_token,
@@ -312,6 +326,8 @@ impl<S: AppState> XmppServer<S> {
             let isr_token_store = self.isr_token_store;
             let sm_session_registry = self.sm_session_registry;
             let pubsub_storage = self.pubsub_storage;
+            let push_store = self.push_store;
+            let push_sender = self.push_sender;
             let registration_enabled = self.config.registration_enabled;
             let single_tenant = self.config.single_tenant;
             let github_enricher = self.github_enricher;
@@ -343,6 +359,8 @@ impl<S: AppState> XmppServer<S> {
                     let isr_token_store = Arc::clone(&isr_token_store);
                     let sm_session_registry = Arc::clone(&sm_session_registry);
                     let pubsub_storage = Arc::clone(&pubsub_storage);
+                    let push_store = Arc::clone(&push_store);
+                    let push_sender = Arc::clone(&push_sender);
                     let github_enricher = github_enricher.clone();
 
                     tokio::spawn(
@@ -362,6 +380,8 @@ impl<S: AppState> XmppServer<S> {
                                 pubsub_storage,
                                 github_enricher,
                                 single_tenant,
+                                push_store,
+                                push_sender,
                             )
                             .await
                             {

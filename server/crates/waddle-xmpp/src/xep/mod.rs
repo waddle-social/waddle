@@ -160,6 +160,7 @@ pub mod xep0319;
 pub mod xep0333;
 pub mod xep0334;
 pub mod xep0352;
+pub mod xep0357;
 pub mod xep0359;
 pub mod xep0363;
 pub mod xep0372;
@@ -377,6 +378,11 @@ pub use xep0352::{
     build_csi_feature, classify_message_urgency, classify_presence_urgency,
     data_contains_csi_active, data_contains_csi_inactive, is_csi_active, is_csi_inactive,
     is_muc_mention, ClientState, StanzaUrgency, MAX_CSI_BUFFER_SIZE, NS_CSI,
+};
+
+pub use xep0357::{
+    build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
+    parse_push_disable, parse_push_enable, PushDisable, PushEnable, NS_PUSH,
 };
 
 pub use xep0410::{
