@@ -62,11 +62,7 @@ pub struct WaddleActor {
 
 impl WaddleActor {
     /// Create a new `WaddleActor`.
-    pub fn new(
-        waddle_id: String,
-        db_actor: ActorRef<DbActor>,
-        config: WaddleConfig,
-    ) -> Self {
+    pub fn new(waddle_id: String, db_actor: ActorRef<DbActor>, config: WaddleConfig) -> Self {
         Self {
             waddle_id,
             db_actor,
@@ -201,9 +197,7 @@ mod tests {
     use crate::db::{Database, MigrationRunner};
 
     async fn spawn_test_waddle() -> ActorRef<WaddleActor> {
-        let db = Database::in_memory("test-waddle-actor")
-            .await
-            .expect("db");
+        let db = Database::in_memory("test-waddle-actor").await.expect("db");
         let runner = MigrationRunner::global();
         runner.run(&db).await.expect("migrations");
 
@@ -215,11 +209,7 @@ mod tests {
             is_public: true,
         };
 
-        kameo::spawn(WaddleActor::new(
-            "waddle-123".to_string(),
-            db_actor,
-            config,
-        ))
+        kameo::spawn(WaddleActor::new("waddle-123".to_string(), db_actor, config))
     }
 
     #[tokio::test]
@@ -248,9 +238,7 @@ mod tests {
             is_public: false,
         };
         actor
-            .ask(UpdateConfig {
-                config: new_config,
-            })
+            .ask(UpdateConfig { config: new_config })
             .await
             .expect("ask");
 

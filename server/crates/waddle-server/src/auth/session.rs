@@ -82,7 +82,11 @@ impl SessionManager {
             VALUES (?, ?, ?, ?, ?)
         "#;
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(
             query,
             libsql::params![
@@ -94,9 +98,7 @@ impl SessionManager {
             ],
         )
         .await
-        .map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to ensure user exists: {}", e))
-        })?;
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to ensure user exists: {}", e)))?;
         Ok(())
     }
 
@@ -112,7 +114,11 @@ impl SessionManager {
             VALUES (?, ?, ?, ?, ?, ?)
         "#;
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(
             query,
             libsql::params![
@@ -204,14 +210,19 @@ impl SessionManager {
             LIMIT 1
         "#;
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         let mut rows = conn
             .query(query, libsql::params![session_id])
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
-        let row = rows.next().await.map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to read session row: {}", e))
-        })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to read session row: {}", e)))?;
 
         match row {
             Some(row) => Ok(Some(self.row_to_session(&row)?)),
@@ -224,24 +235,28 @@ impl SessionManager {
         let now = Utc::now().to_rfc3339();
         let query = "UPDATE sessions SET last_used_at = ? WHERE id = ?";
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(query, libsql::params![now, session_id])
             .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to update session: {}", e))
-            })?;
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to update session: {}", e)))?;
         Ok(())
     }
 
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
         let query = "DELETE FROM sessions WHERE id = ?";
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(query, libsql::params![session_id])
             .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to delete session: {}", e))
-            })?;
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
         Ok(())
     }
 
@@ -265,7 +280,11 @@ impl SessionManager {
     pub async fn cleanup_expired_sessions(&self) -> Result<usize, AuthError> {
         let now = Utc::now().to_rfc3339();
         let query = "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?";
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         let deleted = conn
             .execute(query, libsql::params![now])
             .await

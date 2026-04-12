@@ -237,7 +237,10 @@ impl DatabasePool {
 
         if let Some(key) = most_idle_key {
             self.waddle_actors.remove(&key);
-            debug!("Evicted most idle waddle actor from cache: {} (idle {}ms)", key, most_idle_ms);
+            debug!(
+                "Evicted most idle waddle actor from cache: {} (idle {}ms)",
+                key, most_idle_ms
+            );
         }
     }
 

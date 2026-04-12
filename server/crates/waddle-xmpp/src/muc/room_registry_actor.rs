@@ -64,11 +64,7 @@ pub struct GetRoom {
 impl kameo::message::Message<GetRoom> for RoomRegistryActor {
     type Reply = Result<Option<ActorRef<RoomActor>>, String>;
 
-    async fn handle(
-        &mut self,
-        msg: GetRoom,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+    async fn handle(&mut self, msg: GetRoom, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         Ok(self.rooms.get(&msg.room_jid).cloned())
     }
 }

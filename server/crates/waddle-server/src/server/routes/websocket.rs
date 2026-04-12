@@ -1860,10 +1860,7 @@ mod tests {
             .run(&waddle_db)
             .await
             .expect("waddle migrations");
-        let conn = waddle_db
-            .guard()
-            .await
-            .expect("persistent connection");
+        let conn = waddle_db.guard().await.expect("persistent connection");
         conn.execute(
             "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
             libsql::params!["general", "General"],

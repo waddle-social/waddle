@@ -703,7 +703,10 @@ impl TupleStore {
 
     /// Get database connection, using persistent connection for in-memory databases
     async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, PermissionError> {
-        self.db.guard().await.map_err(|e| PermissionError::DatabaseError(e.to_string()))
+        self.db
+            .guard()
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))
     }
 }
 

@@ -612,8 +612,7 @@ mod tests {
             .await
             .expect("clear");
 
-        let state: Option<PresenceState> =
-            actor.ask(GetPresenceState { jid }).await.expect("get");
+        let state: Option<PresenceState> = actor.ask(GetPresenceState { jid }).await.expect("get");
         assert!(state.is_none());
     }
 
@@ -630,17 +629,11 @@ mod tests {
             .await
             .expect("queue");
 
-        let drained: Vec<Stanza> = actor
-            .ask(DrainPendingSubscriptions)
-            .await
-            .expect("drain");
+        let drained: Vec<Stanza> = actor.ask(DrainPendingSubscriptions).await.expect("drain");
         assert_eq!(drained.len(), 1);
 
         // Second drain should be empty
-        let drained: Vec<Stanza> = actor
-            .ask(DrainPendingSubscriptions)
-            .await
-            .expect("drain");
+        let drained: Vec<Stanza> = actor.ask(DrainPendingSubscriptions).await.expect("drain");
         assert!(drained.is_empty());
     }
 
@@ -674,10 +667,7 @@ mod tests {
             .await
             .expect("set");
 
-        let enabled: bool = actor
-            .ask(IsCarbonsEnabled { jid })
-            .await
-            .expect("check");
+        let enabled: bool = actor.ask(IsCarbonsEnabled { jid }).await.expect("check");
         assert!(enabled);
     }
 

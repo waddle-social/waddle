@@ -8,8 +8,8 @@ use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
 
-use super::{MucRoom, RoomConfig};
 use super::room_registry::RoomInfo;
+use super::{MucRoom, RoomConfig};
 use crate::types::{Affiliation, Role};
 
 // ---------------------------------------------------------------------------
@@ -71,11 +71,7 @@ pub struct Join {
 impl kameo::message::Message<Join> for RoomActor {
     type Reply = Result<(), String>;
 
-    async fn handle(
-        &mut self,
-        msg: Join,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+    async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if self.room.is_full() {
             return Err("Room is full".to_string());
         }
@@ -102,11 +98,7 @@ pub struct Leave {
 impl kameo::message::Message<Leave> for RoomActor {
     type Reply = Result<(), String>;
 
-    async fn handle(
-        &mut self,
-        msg: Leave,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+    async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.room
             .remove_occupant(&msg.nick)
             .map(|_| ())
@@ -458,10 +450,7 @@ mod tests {
             .await
             .expect("join");
 
-        let info = actor
-            .ask(GetOccupantByJid { jid })
-            .await
-            .expect("ask");
+        let info = actor.ask(GetOccupantByJid { jid }).await.expect("ask");
         assert!(info.is_some());
     }
 
@@ -487,9 +476,7 @@ mod tests {
         let mut new_config = config;
         new_config.members_only = false;
         actor
-            .ask(UpdateConfig {
-                config: new_config,
-            })
+            .ask(UpdateConfig { config: new_config })
             .await
             .expect("ask");
 
@@ -516,10 +503,7 @@ mod tests {
             .await
             .expect("ask");
 
-        let aff = actor
-            .ask(GetAffiliation { jid })
-            .await
-            .expect("ask");
+        let aff = actor.ask(GetAffiliation { jid }).await.expect("ask");
         assert_eq!(aff, Affiliation::Admin);
     }
 

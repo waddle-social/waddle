@@ -95,9 +95,10 @@ impl MessageRepository {
         let conn = self.db.guard().await.map_err(|e| {
             MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
         })?;
-        let mut rows = conn.query(query, libsql::params![id]).await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to query message: {}", e))
-        })?;
+        let mut rows = conn
+            .query(query, libsql::params![id])
+            .await
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to query message: {}", e)))?;
 
         let row = rows.next().await.map_err(|e| {
             MessageError::DatabaseError(format!("Failed to read message row: {}", e))
@@ -141,10 +142,7 @@ impl MessageRepository {
                 let cursor_query = "SELECT created_at FROM messages WHERE id = ?";
                 let cursor_created_at = {
                     let conn = self.db.guard().await.map_err(|e| {
-                        MessageError::DatabaseError(format!(
-                            "Failed to connect to database: {}",
-                            e
-                        ))
+                        MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
                     })?;
                     let mut rows = conn
                         .query(cursor_query, libsql::params![cursor])
@@ -208,9 +206,10 @@ impl MessageRepository {
         let conn = self.db.guard().await.map_err(|e| {
             MessageError::DatabaseError(format!("Failed to connect to database: {}", e))
         })?;
-        let mut rows = conn.query(query, params).await.map_err(|e| {
-            MessageError::DatabaseError(format!("Failed to query messages: {}", e))
-        })?;
+        let mut rows = conn
+            .query(query, params)
+            .await
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to query messages: {}", e)))?;
 
         while let Some(row) = rows.next().await.map_err(|e| {
             MessageError::DatabaseError(format!("Failed to read message row: {}", e))
@@ -302,9 +301,7 @@ impl MessageRepository {
         let rows_affected = conn
             .execute("DELETE FROM messages WHERE id = ?", libsql::params![id])
             .await
-            .map_err(|e| {
-                MessageError::DatabaseError(format!("Failed to delete message: {}", e))
-            })?;
+            .map_err(|e| MessageError::DatabaseError(format!("Failed to delete message: {}", e)))?;
 
         if rows_affected == 0 {
             return Err(MessageError::NotFound(id.to_string()));
