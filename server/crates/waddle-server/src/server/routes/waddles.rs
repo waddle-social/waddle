@@ -1370,44 +1370,22 @@ async fn insert_waddle(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(
-            query,
-            libsql::params![
-                id,
-                name,
-                description,
-                owner_id,
-                icon_url,
-                is_public as i32,
-                now,
-                now
-            ],
-        )
-        .await
-        .map_err(|e| format!("Failed to insert waddle: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(
-            query,
-            libsql::params![
-                id,
-                name,
-                description,
-                owner_id,
-                icon_url,
-                is_public as i32,
-                now,
-                now
-            ],
-        )
-        .await
-        .map_err(|e| format!("Failed to insert waddle: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(
+        query,
+        libsql::params![
+            id,
+            name,
+            description,
+            owner_id,
+            icon_url,
+            is_public as i32,
+            now,
+            now
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to insert waddle: {}", e))?;
 
     Ok(())
 }
@@ -1424,20 +1402,10 @@ async fn add_waddle_member(
         VALUES (?, ?, ?)
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(query, libsql::params![waddle_id, user_id, role])
-            .await
-            .map_err(|e| format!("Failed to add waddle member: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(query, libsql::params![waddle_id, user_id, role])
-            .await
-            .map_err(|e| format!("Failed to add waddle member: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(query, libsql::params![waddle_id, user_id, role])
+        .await
+        .map_err(|e| format!("Failed to add waddle member: {}", e))?;
 
     Ok(())
 }
@@ -1454,30 +1422,16 @@ async fn get_waddle_from_db(
         WHERE w.id = ?
     "#;
 
-    let row = if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to query waddle: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![waddle_id])
+        .await
+        .map_err(|e| format!("Failed to query waddle: {}", e))?;
 
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to query waddle: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-    };
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read waddle row: {}", e))?;
 
     match row {
         Some(row) => {
@@ -1526,32 +1480,17 @@ async fn get_user_role(
         WHERE wm.waddle_id = ? AND wm.user_id = ?
     "#;
 
-    let row = if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to query role: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![waddle_id, user_id])
+        .await
+        .map_err(|e| format!("Failed to query role: {}", e))?;
 
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read role row: {}", e))?
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to query role: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read role row: {}", e))?
-    };
-
-    match row {
+    match rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read role row: {}", e))?
+    {
         Some(row) => {
             let role: String = row
                 .get(0)
@@ -1597,20 +1536,10 @@ async fn update_waddle_in_db(
 
     let query = format!("UPDATE waddles SET {} WHERE id = ?", updates.join(", "));
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(&query, params)
-            .await
-            .map_err(|e| format!("Failed to update waddle: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(&query, params)
-            .await
-            .map_err(|e| format!("Failed to update waddle: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(&query, params)
+        .await
+        .map_err(|e| format!("Failed to update waddle: {}", e))?;
 
     Ok(())
 }
@@ -1621,26 +1550,13 @@ async fn delete_waddle_from_db(db: &Database, waddle_id: &str) -> Result<(), Str
     let delete_members_query = "DELETE FROM waddle_members WHERE waddle_id = ?";
     let delete_waddle_query = "DELETE FROM waddles WHERE id = ?";
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(delete_members_query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to delete waddle members: {}", e))?;
-        conn.execute(delete_waddle_query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to delete waddle: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(delete_members_query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to delete waddle members: {}", e))?;
-        conn.execute(delete_waddle_query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to delete waddle: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(delete_members_query, libsql::params![waddle_id])
+        .await
+        .map_err(|e| format!("Failed to delete waddle members: {}", e))?;
+    conn.execute(delete_waddle_query, libsql::params![waddle_id])
+        .await
+        .map_err(|e| format!("Failed to delete waddle: {}", e))?;
 
     Ok(())
 }
@@ -1664,39 +1580,19 @@ pub(crate) async fn list_user_waddles(
 
     let mut waddles = Vec::new();
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![user_id, limit as i64, offset as i64])
-            .await
-            .map_err(|e| format!("Failed to query waddles: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![user_id, limit as i64, offset as i64])
+        .await
+        .map_err(|e| format!("Failed to query waddles: {}", e))?;
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-        {
-            let waddle = parse_waddle_row(&row)?;
-            waddles.push(waddle);
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![user_id, limit as i64, offset as i64])
-            .await
-            .map_err(|e| format!("Failed to query waddles: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-        {
-            let waddle = parse_waddle_row(&row)?;
-            waddles.push(waddle);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read waddle row: {}", e))?
+    {
+        let waddle = parse_waddle_row(&row)?;
+        waddles.push(waddle);
     }
 
     Ok(waddles)
@@ -1757,41 +1653,20 @@ pub(crate) async fn get_waddle_by_id(
         WHERE w.id = ?
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to query waddle: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![waddle_id])
+        .await
+        .map_err(|e| format!("Failed to query waddle: {}", e))?;
 
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-        {
-            Ok(Some(parse_waddle_row_base(&row)?))
-        } else {
-            Ok(None)
-        }
+    if let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read waddle row: {}", e))?
+    {
+        Ok(Some(parse_waddle_row_base(&row)?))
     } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id])
-            .await
-            .map_err(|e| format!("Failed to query waddle: {}", e))?;
-
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-        {
-            Ok(Some(parse_waddle_row_base(&row)?))
-        } else {
-            Ok(None)
-        }
+        Ok(None)
     }
 }
 
@@ -1813,39 +1688,19 @@ pub(crate) async fn list_all_waddles_from_db(
 
     let mut waddles = Vec::new();
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![limit as i64, offset as i64])
-            .await
-            .map_err(|e| format!("Failed to query waddles: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![limit as i64, offset as i64])
+        .await
+        .map_err(|e| format!("Failed to query waddles: {}", e))?;
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-        {
-            let waddle = parse_waddle_row_base(&row)?;
-            waddles.push(waddle);
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![limit as i64, offset as i64])
-            .await
-            .map_err(|e| format!("Failed to query waddles: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read waddle row: {}", e))?
-        {
-            let waddle = parse_waddle_row_base(&row)?;
-            waddles.push(waddle);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read waddle row: {}", e))?
+    {
+        let waddle = parse_waddle_row_base(&row)?;
+        waddles.push(waddle);
     }
 
     Ok(waddles)
@@ -1900,39 +1755,19 @@ pub(crate) async fn list_public_waddles_from_db(
 
     let mut waddles = Vec::new();
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(sql, params.clone())
-            .await
-            .map_err(|e| format!("Failed to query public waddles: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(sql, params)
+        .await
+        .map_err(|e| format!("Failed to query public waddles: {}", e))?;
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read public waddle row: {}", e))?
-        {
-            let waddle = parse_waddle_row_base(&row)?;
-            waddles.push(waddle);
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(sql, params)
-            .await
-            .map_err(|e| format!("Failed to query public waddles: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read public waddle row: {}", e))?
-        {
-            let waddle = parse_waddle_row_base(&row)?;
-            waddles.push(waddle);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read public waddle row: {}", e))?
+    {
+        let waddle = parse_waddle_row_base(&row)?;
+        waddles.push(waddle);
     }
 
     Ok(waddles)
@@ -1965,45 +1800,22 @@ async fn list_waddle_members(
 
     let mut members = Vec::new();
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(
-                query,
-                libsql::params![waddle_id, limit as i64, offset as i64],
-            )
-            .await
-            .map_err(|e| format!("Failed to query members: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(
+            query,
+            libsql::params![waddle_id, limit as i64, offset as i64],
+        )
+        .await
+        .map_err(|e| format!("Failed to query members: {}", e))?;
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read member row: {}", e))?
-        {
-            let member = parse_member_row(&row)?;
-            members.push(member);
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(
-                query,
-                libsql::params![waddle_id, limit as i64, offset as i64],
-            )
-            .await
-            .map_err(|e| format!("Failed to query members: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read member row: {}", e))?
-        {
-            let member = parse_member_row(&row)?;
-            members.push(member);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read member row: {}", e))?
+    {
+        let member = parse_member_row(&row)?;
+        members.push(member);
     }
 
     Ok(members)
@@ -2046,29 +1858,16 @@ async fn get_waddle_member(
         LIMIT 1
     "#;
 
-    let row = if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to query member: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![waddle_id, user_id])
+        .await
+        .map_err(|e| format!("Failed to query member: {}", e))?;
 
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read member row: {}", e))?
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to query member: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read member row: {}", e))?
-    };
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read member row: {}", e))?;
 
     row.map(|row| parse_member_row(&row)).transpose()
 }
@@ -2085,32 +1884,17 @@ async fn get_member_role(
         WHERE wm.waddle_id = ? AND wm.user_id = ?
     "#;
 
-    let row = if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to query member role: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![waddle_id, user_id])
+        .await
+        .map_err(|e| format!("Failed to query member role: {}", e))?;
 
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read member role row: {}", e))?
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to query member role: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read member role row: {}", e))?
-    };
-
-    match row {
+    match rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read member role row: {}", e))?
+    {
         Some(row) => {
             let role: String = row
                 .get(0)
@@ -2134,19 +1918,10 @@ async fn update_waddle_member_role(
         WHERE waddle_id = ? AND user_id = ?
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(query, libsql::params![role, waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to update waddle member role: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-        conn.execute(query, libsql::params![role, waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to update waddle member role: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(query, libsql::params![role, waddle_id, user_id])
+        .await
+        .map_err(|e| format!("Failed to update waddle member role: {}", e))?;
 
     Ok(())
 }
@@ -2164,20 +1939,10 @@ async fn add_waddle_member_with_timestamp(
         VALUES (?, ?, ?, ?)
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(query, libsql::params![waddle_id, user_id, role, joined_at])
-            .await
-            .map_err(|e| format!("Failed to add waddle member: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(query, libsql::params![waddle_id, user_id, role, joined_at])
-            .await
-            .map_err(|e| format!("Failed to add waddle member: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(query, libsql::params![waddle_id, user_id, role, joined_at])
+        .await
+        .map_err(|e| format!("Failed to add waddle member: {}", e))?;
 
     Ok(())
 }
@@ -2188,20 +1953,10 @@ async fn remove_waddle_member(db: &Database, waddle_id: &str, user_id: &str) -> 
         DELETE FROM waddle_members WHERE waddle_id = ? AND user_id = ?
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to remove waddle member: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(query, libsql::params![waddle_id, user_id])
-            .await
-            .map_err(|e| format!("Failed to remove waddle member: {}", e))?;
-    }
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    conn.execute(query, libsql::params![waddle_id, user_id])
+        .await
+        .map_err(|e| format!("Failed to remove waddle member: {}", e))?;
 
     Ok(())
 }
@@ -2210,45 +1965,22 @@ async fn remove_waddle_member(db: &Database, waddle_id: &str, user_id: &str) -> 
 async fn get_username_by_user_id(db: &Database, user_id: &str) -> Result<Option<String>, String> {
     let query = "SELECT username FROM users WHERE id = ?";
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![user_id])
-            .await
-            .map_err(|e| format!("Failed to query username: {}", e))?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(query, libsql::params![user_id])
+        .await
+        .map_err(|e| format!("Failed to query username: {}", e))?;
 
-        match rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read username row: {}", e))?
-        {
-            Some(row) => row
-                .get(0)
-                .map(Some)
-                .map_err(|e| format!("Failed to get username: {}", e)),
-            None => Ok(None),
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![user_id])
-            .await
-            .map_err(|e| format!("Failed to query username: {}", e))?;
-
-        match rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read username row: {}", e))?
-        {
-            Some(row) => row
-                .get(0)
-                .map(Some)
-                .map_err(|e| format!("Failed to get username: {}", e)),
-            None => Ok(None),
-        }
+    match rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read username row: {}", e))?
+    {
+        Some(row) => row
+            .get(0)
+            .map(Some)
+            .map_err(|e| format!("Failed to get username: {}", e)),
+        None => Ok(None),
     }
 }
 
@@ -2266,28 +1998,8 @@ async fn create_default_channel(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     "#;
 
-    if let Some(persistent) = waddle_db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(
-            query,
-            libsql::params![
-                channel_id.as_str(),
-                "general",
-                "General discussion",
-                "text",
-                0,
-                1,
-                now.clone(),
-                now
-            ],
-        )
-        .await
-        .map_err(|e| format!("Failed to create default channel: {}", e))?;
-    } else {
-        let conn = waddle_db
-            .connect()
-            .map_err(|e| format!("Failed to connect to waddle database: {}", e))?;
-
+    {
+        let conn = waddle_db.guard().await.map_err(|e| e.to_string())?;
         conn.execute(
             query,
             libsql::params![
@@ -2318,13 +2030,7 @@ async fn create_default_channel(
     if let Err(err) = permission_service.write_tuple(parent_tuple).await {
         let delete_query = "DELETE FROM channels WHERE id = ?";
 
-        if let Some(persistent) = waddle_db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let _ = conn.execute(delete_query, [channel_id.as_str()]).await;
-        } else {
-            let conn = waddle_db
-                .connect()
-                .map_err(|e| format!("Failed to connect to waddle database: {}", e))?;
+        if let Ok(conn) = waddle_db.guard().await {
             let _ = conn.execute(delete_query, [channel_id.as_str()]).await;
         }
 
@@ -2386,21 +2092,12 @@ mod tests {
             .await
             .unwrap();
 
-        let row = if let Some(persistent) = waddle_db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn
-                .query("SELECT id FROM channels WHERE is_default = 1 LIMIT 1", ())
-                .await
-                .unwrap();
-            rows.next().await.unwrap().unwrap()
-        } else {
-            let conn = waddle_db.connect().unwrap();
-            let mut rows = conn
-                .query("SELECT id FROM channels WHERE is_default = 1 LIMIT 1", ())
-                .await
-                .unwrap();
-            rows.next().await.unwrap().unwrap()
-        };
+        let conn = waddle_db.guard().await.unwrap();
+        let mut rows = conn
+            .query("SELECT id FROM channels WHERE is_default = 1 LIMIT 1", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
 
         row.get(0).unwrap()
     }

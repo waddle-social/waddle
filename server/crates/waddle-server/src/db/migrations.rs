@@ -357,17 +357,8 @@ impl MigrationRunner {
     /// Run all pending migrations on the database
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn run(&self, db: &Database) -> Result<Vec<i64>, DatabaseError> {
-        // Use persistent connection for in-memory databases to ensure data persists
-        // We need to handle both cases: in-memory (with persistent conn) and file-based
-        if let Some(persistent) = db.persistent_connection() {
-            // For in-memory databases, use the persistent connection
-            let conn = persistent.lock().await;
-            self.run_with_connection(&conn).await
-        } else {
-            // For file-based databases, create a new connection
-            let conn = db.connect()?;
-            self.run_with_connection(&conn).await
-        }
+        let conn = db.guard().await?;
+        self.run_with_connection(&conn).await
     }
 
     /// Internal method to run migrations with a given connection
@@ -515,14 +506,8 @@ impl MigrationRunner {
     #[allow(dead_code)]
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn current_version(&self, db: &Database) -> Result<Option<i64>, DatabaseError> {
-        // Use persistent connection for in-memory databases to ensure we see the same data
-        if let Some(persistent) = db.persistent_connection() {
-            let conn = persistent.lock().await;
-            self.current_version_with_connection(&conn).await
-        } else {
-            let conn = db.connect()?;
-            self.current_version_with_connection(&conn).await
-        }
+        let conn = db.guard().await?;
+        self.current_version_with_connection(&conn).await
     }
 
     /// Internal method to get current version with a given connection
@@ -612,9 +597,8 @@ mod tests {
         let applied = runner.run(&db).await.unwrap();
         assert!(!applied.is_empty());
 
-        // Verify tables exist - use persistent connection for in-memory database
-        let conn = db.persistent_connection().unwrap();
-        let conn = conn.lock().await;
+        // Verify tables exist
+        let conn = db.guard().await.unwrap();
         let mut rows = conn
             .query(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
@@ -655,8 +639,7 @@ mod tests {
         let db = Database::in_memory("test-incompatible-history")
             .await
             .unwrap();
-        let conn = db.persistent_connection().unwrap();
-        let conn = conn.lock().await;
+        let conn = db.guard().await.unwrap();
 
         conn.execute(
             r#"

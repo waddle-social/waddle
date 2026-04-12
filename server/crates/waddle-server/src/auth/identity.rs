@@ -114,31 +114,16 @@ impl IdentityService {
             LIMIT 1
         "#;
 
-        let row = if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn
-                .query(query, libsql::params![issuer, subject])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to query identity: {}", e))
-                })?;
-            rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read identity row: {}", e))
-            })?
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let mut rows = conn
+            .query(query, libsql::params![issuer, subject])
+            .await
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to query identity: {}", e))
             })?;
-            let mut rows = conn
-                .query(query, libsql::params![issuer, subject])
-                .await
-                .map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to query identity: {}", e))
-                })?;
-            rows.next().await.map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to read identity row: {}", e))
-            })?
-        };
+        let row = rows.next().await.map_err(|e| {
+            AuthError::DatabaseError(format!("Failed to read identity row: {}", e))
+        })?;
 
         match row {
             Some(row) => Ok(Some(UserRecord {
@@ -225,9 +210,9 @@ impl IdentityService {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#;
 
-            let result = if let Some(persistent) = self.db.persistent_connection() {
-                let conn = persistent.lock().await;
-                conn.execute(
+            let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+            let result = conn
+                .execute(
                     insert,
                     libsql::params![
                         user_id.clone(),
@@ -240,26 +225,7 @@ impl IdentityService {
                         now.clone()
                     ],
                 )
-                .await
-            } else {
-                let conn = self.db.connect().map_err(|e| {
-                    AuthError::DatabaseError(format!("Failed to connect database: {}", e))
-                })?;
-                conn.execute(
-                    insert,
-                    libsql::params![
-                        user_id.clone(),
-                        username.clone(),
-                        xmpp_localpart.clone(),
-                        claims.name.clone(),
-                        claims.avatar_url.clone(),
-                        claims.email.clone(),
-                        now.clone(),
-                        now.clone()
-                    ],
-                )
-                .await
-            };
+                .await;
 
             match result {
                 Ok(_) => {
@@ -302,57 +268,29 @@ impl IdentityService {
         let raw = serde_json::to_string(&claims.raw_claims)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to serialize claims: {}", e)))?;
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
-                r#"
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            r#"
                 INSERT INTO auth_identities (
                     id, user_id, provider_id, issuer, subject, email, email_verified,
                     raw_claims_json, created_at, last_login_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-                libsql::params![
-                    identity_id.as_str(),
-                    user_id,
-                    provider.id.as_str(),
-                    issuer,
-                    claims.subject.as_str(),
-                    claims.email.clone(),
-                    claims.email_verified.map(|v| if v { 1 } else { 0 }),
-                    raw.as_str(),
-                    now.as_str(),
-                    now.as_str()
-                ],
-            )
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to insert identity: {}", e)))?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
-            })?;
-            conn.execute(
-                r#"
-                INSERT INTO auth_identities (
-                    id, user_id, provider_id, issuer, subject, email, email_verified,
-                    raw_claims_json, created_at, last_login_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-                libsql::params![
-                    identity_id.as_str(),
-                    user_id,
-                    provider.id.as_str(),
-                    issuer,
-                    claims.subject.as_str(),
-                    claims.email.clone(),
-                    claims.email_verified.map(|v| if v { 1 } else { 0 }),
-                    raw.as_str(),
-                    now.as_str(),
-                    now.as_str()
-                ],
-            )
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to insert identity: {}", e)))?;
-        }
+            libsql::params![
+                identity_id.as_str(),
+                user_id,
+                provider.id.as_str(),
+                issuer,
+                claims.subject.as_str(),
+                claims.email.clone(),
+                claims.email_verified.map(|v| if v { 1 } else { 0 }),
+                raw.as_str(),
+                now.as_str(),
+                now.as_str()
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to insert identity: {}", e)))?;
 
         Ok(())
     }
@@ -365,29 +303,15 @@ impl IdentityService {
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
-                "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
-                libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],
-            )
-            .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to update identity login timestamp: {}", e))
-            })?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to connect database: {}", e))
-            })?;
-            conn.execute(
-                "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
-                libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],
-            )
-            .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to update identity login timestamp: {}", e))
-            })?;
-        }
+        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        conn.execute(
+            "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
+            libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],
+        )
+        .await
+        .map_err(|e| {
+            AuthError::DatabaseError(format!("Failed to update identity login timestamp: {}", e))
+        })?;
 
         Ok(())
     }

@@ -1198,8 +1198,7 @@ mod tests {
         runner.run(&waddle_db).await.unwrap();
 
         // Verify tables exist - use persistent connection for in-memory database
-        let conn = waddle_db.persistent_connection().unwrap();
-        let conn = conn.lock().await;
+        let conn = waddle_db.guard().await.unwrap();
         let mut rows = conn
             .query(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='channels'",

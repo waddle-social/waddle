@@ -381,8 +381,7 @@ impl TupleStore {
 
         let subject_relation = tuple.subject.relation.as_deref();
 
-        conn.as_ref()
-            .execute(
+        conn.execute(
             r#"
             INSERT INTO permission_tuples (id, object_type, object_id, relation, subject_type, subject_id, subject_relation)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -419,7 +418,6 @@ impl TupleStore {
         let subject_relation = tuple.subject.relation.as_deref();
 
         let rows = conn
-            .as_ref()
             .execute(
                 r#"
                 DELETE FROM permission_tuples
@@ -460,7 +458,6 @@ impl TupleStore {
         let subject_relation = subject.relation.as_deref();
 
         let mut rows = conn
-            .as_ref()
             .query(
                 r#"
                 SELECT 1 FROM permission_tuples
@@ -501,7 +498,6 @@ impl TupleStore {
         let subject_relation = subject.relation.as_deref();
 
         let mut rows = conn
-            .as_ref()
             .query(
                 r#"
                 SELECT DISTINCT relation FROM permission_tuples
@@ -546,7 +542,6 @@ impl TupleStore {
         let conn = self.get_connection().await?;
 
         let mut rows = conn
-            .as_ref()
             .query(
                 r#"
                 SELECT subject_type, subject_id, subject_relation FROM permission_tuples
@@ -597,7 +592,6 @@ impl TupleStore {
         let conn = self.get_connection().await?;
 
         let mut rows = conn
-            .as_ref()
             .query(
                 r#"
                 SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
@@ -628,8 +622,7 @@ impl TupleStore {
         let conn = self.get_connection().await?;
 
         let mut rows = if let Some(rel) = relation {
-            conn.as_ref()
-                .query(
+            conn.query(
                 r#"
                 SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
                 FROM permission_tuples
@@ -640,8 +633,7 @@ impl TupleStore {
             .await
             .map_err(|e| PermissionError::DatabaseError(e.to_string()))?
         } else {
-            conn.as_ref()
-                .query(
+            conn.query(
                 r#"
                 SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
                 FROM permission_tuples
@@ -710,36 +702,8 @@ impl TupleStore {
     }
 
     /// Get database connection, using persistent connection for in-memory databases
-    async fn get_connection(&self) -> Result<ConnectionGuard<'_>, PermissionError> {
-        if let Some(persistent) = self.db.persistent_connection() {
-            let guard = persistent.lock().await;
-            Ok(ConnectionGuard::Persistent(guard))
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
-            Ok(ConnectionGuard::Owned(conn))
-        }
-    }
-}
-
-/// A guard that wraps either a persistent connection (for in-memory databases)
-/// or an owned connection (for file-based databases).
-enum ConnectionGuard<'a> {
-    /// Persistent connection guard for in-memory databases
-    Persistent(tokio::sync::MutexGuard<'a, libsql::Connection>),
-    /// Owned connection for file-based databases
-    Owned(libsql::Connection),
-}
-
-impl<'a> ConnectionGuard<'a> {
-    /// Get a reference to the underlying connection.
-    fn as_ref(&self) -> &libsql::Connection {
-        match self {
-            ConnectionGuard::Persistent(guard) => guard,
-            ConnectionGuard::Owned(conn) => conn,
-        }
+    async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, PermissionError> {
+        self.db.guard().await.map_err(|e| PermissionError::DatabaseError(e.to_string()))
     }
 }
 
