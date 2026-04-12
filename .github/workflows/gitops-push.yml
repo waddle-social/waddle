@@ -32,6 +32,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Pin image tag to commit SHA
+        working-directory: infrastructure/waddle.cloud
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          sed -i "s/tag: main/tag: sha-${SHORT_SHA}/" ./gitops/waddle-server/helmrelease.yaml
+
       - name: Push gitops artifact
         working-directory: infrastructure/waddle.cloud
         run: |
