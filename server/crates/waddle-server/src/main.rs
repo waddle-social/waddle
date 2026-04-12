@@ -11,6 +11,7 @@ mod permissions;
 mod server;
 mod telemetry;
 mod vcard;
+mod waddle;
 
 pub use config::{ServerConfig, ServerMode};
 
