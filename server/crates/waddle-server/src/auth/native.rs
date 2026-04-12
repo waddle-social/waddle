@@ -55,24 +55,6 @@ impl NativeUserStore {
         Self { db }
     }
 
-    /// Get a database connection.
-    ///
-    /// For in-memory databases, this returns a guard to the persistent connection
-    /// to ensure data consistency (libSQL creates isolated databases for each `:memory:` connection).
-    /// For file-based databases, we create new connections.
-    async fn get_connection(&self) -> Result<ConnectionGuard<'_>, AuthError> {
-        if let Some(persistent) = self.db.persistent_connection() {
-            let guard = persistent.lock().await;
-            Ok(ConnectionGuard::Persistent(guard))
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-            Ok(ConnectionGuard::Owned(conn))
-        }
-    }
-
     /// Register a new native user.
     ///
     /// This creates the user with:
@@ -108,10 +90,10 @@ impl NativeUserStore {
         );
 
         // Insert into database
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let email_str = request.email.as_deref();
-        conn.as_ref()
+        conn
             .execute(
                 r#"
                 INSERT INTO native_users (username, domain, password_hash, salt, iterations, stored_key, server_key, email)
@@ -131,7 +113,7 @@ impl NativeUserStore {
             .await
             .map_err(db_err)?;
 
-        let user_id = conn.as_ref().last_insert_rowid();
+        let user_id = conn.last_insert_rowid();
 
         debug!(
             username = %request.username,
@@ -145,10 +127,9 @@ impl NativeUserStore {
 
     /// Check if a username exists in the given domain.
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let mut rows = conn
-            .as_ref()
             .query(
                 "SELECT 1 FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
@@ -165,10 +146,9 @@ impl NativeUserStore {
         username: &str,
         domain: &str,
     ) -> Result<Option<ScramCredentials>, AuthError> {
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let mut rows = conn
-            .as_ref()
             .query(
                 r#"
                 SELECT salt, iterations, stored_key, server_key
@@ -204,10 +184,9 @@ impl NativeUserStore {
     ) -> Result<bool, AuthError> {
         use argon2::password_hash::PasswordVerifier;
 
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let mut rows = conn
-            .as_ref()
             .query(
                 "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
@@ -255,9 +234,9 @@ impl NativeUserStore {
             DEFAULT_SCRAM_ITERATIONS,
         );
 
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
-        let affected = conn.as_ref()
+        let affected = conn
             .execute(
                 r#"
                 UPDATE native_users
@@ -287,10 +266,9 @@ impl NativeUserStore {
     /// Delete a native user.
     #[cfg(test)]
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let affected = conn
-            .as_ref()
             .execute(
                 "DELETE FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
@@ -303,28 +281,6 @@ impl NativeUserStore {
             Ok(true)
         } else {
             Ok(false)
-        }
-    }
-}
-
-/// A guard that wraps either a persistent connection (for in-memory databases)
-/// or an owned connection (for file-based databases).
-///
-/// This ensures that in-memory databases always use the persistent connection
-/// to maintain data across operations.
-enum ConnectionGuard<'a> {
-    /// Persistent connection guard for in-memory databases
-    Persistent(tokio::sync::MutexGuard<'a, libsql::Connection>),
-    /// Owned connection for file-based databases
-    Owned(libsql::Connection),
-}
-
-impl<'a> ConnectionGuard<'a> {
-    /// Get a reference to the underlying connection
-    fn as_ref(&self) -> &libsql::Connection {
-        match self {
-            ConnectionGuard::Persistent(guard) => guard,
-            ConnectionGuard::Owned(conn) => conn,
         }
     }
 }

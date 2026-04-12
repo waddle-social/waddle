@@ -357,49 +357,36 @@ impl DatabaseRosterStorage {
         Ok(jids)
     }
 
-    /// Execute a query using the persistent connection for in-memory databases.
-    /// This ensures data written by migrations is visible to queries.
+    /// Execute a query using a connection guard.
     async fn query_with_persistent(
         &self,
         sql: &str,
-        params: impl IntoParams,
+        params: impl libsql::params::IntoParams,
     ) -> Result<libsql::Rows, RosterStorageError> {
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.query(sql, params)
-                .await
-                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
-            conn.query(sql, params)
-                .await
-                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
-        }
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
     }
 
-    /// Execute a statement using the persistent connection for in-memory databases.
+    /// Execute a statement using a connection guard.
     async fn execute_with_persistent(
         &self,
         sql: &str,
-        params: impl IntoParams,
+        params: impl libsql::params::IntoParams,
     ) -> Result<u64, RosterStorageError> {
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(sql, params)
-                .await
-                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
-            conn.execute(sql, params)
-                .await
-                .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
-        }
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| RosterStorageError::ConnectionFailed(e.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|e| RosterStorageError::QueryFailed(e.to_string()))
     }
 
     /// Execute a statement with retries for transient sqlite lock contention.

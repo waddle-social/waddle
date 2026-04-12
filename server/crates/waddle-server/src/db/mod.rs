@@ -22,6 +22,7 @@ mod pool;
 pub mod roster;
 
 use libsql::{Connection, Database as LibSqlDatabase};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -30,6 +31,37 @@ use tracing::{debug, info, instrument};
 
 pub use migrations::MigrationRunner;
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
+
+/// A guard that wraps either a persistent connection (for in-memory databases)
+/// or an owned connection (for file-based databases).
+///
+/// In-memory databases (`:memory:`) create an isolated database per connection,
+/// so we must reuse the same `Connection` via a shared `Mutex`. File-based
+/// databases can create fresh connections freely.
+///
+/// Implements [`Deref<Target = Connection>`] so callers can use the connection
+/// directly without calling `.as_ref()`.
+///
+/// ⚠️ **Deadlock risk**: Do not hold a `ConnectionGuard` across a call to any
+/// method that also acquires a guard on the same database. Use a `{ }` block to
+/// scope the guard and ensure it is dropped before the next acquisition.
+pub enum ConnectionGuard<'a> {
+    /// Holds the shared mutex lock for in-memory databases.
+    Persistent(tokio::sync::MutexGuard<'a, Connection>),
+    /// Owns a fresh connection for file-based databases.
+    Owned(Connection),
+}
+
+impl<'a> Deref for ConnectionGuard<'a> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            ConnectionGuard::Persistent(guard) => guard,
+            ConnectionGuard::Owned(conn) => conn,
+        }
+    }
+}
 
 /// Database-specific errors
 #[derive(Error, Debug)]
@@ -259,6 +291,26 @@ impl Database {
         self.persistent_conn.as_ref()
     }
 
+    /// Acquire a [`ConnectionGuard`] for this database.
+    ///
+    /// For in-memory databases this locks the shared `Mutex<Connection>` and
+    /// returns a `ConnectionGuard::Persistent` that releases the lock on drop.
+    /// For file-based databases this opens a fresh connection and returns a
+    /// `ConnectionGuard::Owned`.
+    ///
+    /// ⚠️ **Deadlock risk**: Do not hold the returned guard across any call that
+    /// itself calls `guard()` on the same database. Use a `{ }` block to limit
+    /// the guard's scope.
+    pub async fn guard(&self) -> Result<ConnectionGuard<'_>, DatabaseError> {
+        if let Some(ref persistent) = self.persistent_conn {
+            let guard = persistent.lock().await;
+            Ok(ConnectionGuard::Persistent(guard))
+        } else {
+            let conn = self.connect()?;
+            Ok(ConnectionGuard::Owned(conn))
+        }
+    }
+
     /// Get the database name
     pub fn name(&self) -> &str {
         &self.name
@@ -276,24 +328,12 @@ impl Database {
     /// Check if the database is healthy by executing a simple query
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
-        // Use persistent connection for in-memory databases
-        if let Some(ref persistent) = self.persistent_conn {
-            let conn = persistent.lock().await;
-            match conn.query("SELECT 1", ()).await {
-                Ok(_) => Ok(true),
-                Err(e) => {
-                    tracing::warn!("Database health check failed: {}", e);
-                    Ok(false)
-                }
-            }
-        } else {
-            let conn = self.connect()?;
-            match conn.query("SELECT 1", ()).await {
-                Ok(_) => Ok(true),
-                Err(e) => {
-                    tracing::warn!("Database health check failed: {}", e);
-                    Ok(false)
-                }
+        let conn = self.guard().await?;
+        match conn.query("SELECT 1", ()).await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                tracing::warn!("Database health check failed: {}", e);
+                Ok(false)
             }
         }
     }
@@ -302,16 +342,9 @@ impl Database {
     #[allow(dead_code)]
     #[instrument(skip_all, fields(name = %self.name))]
     pub async fn execute(&self, sql: &str) -> Result<u64, DatabaseError> {
-        // Use persistent connection for in-memory databases
-        if let Some(ref persistent) = self.persistent_conn {
-            let conn = persistent.lock().await;
-            let rows = conn.execute(sql, ()).await?;
-            Ok(rows)
-        } else {
-            let conn = self.connect()?;
-            let rows = conn.execute(sql, ()).await?;
-            Ok(rows)
-        }
+        let conn = self.guard().await?;
+        let rows = conn.execute(sql, ()).await?;
+        Ok(rows)
     }
 }
 

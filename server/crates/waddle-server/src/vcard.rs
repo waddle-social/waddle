@@ -35,24 +35,6 @@ impl VCardStore {
         Self { db }
     }
 
-    /// Get a database connection.
-    ///
-    /// For in-memory databases, this returns a guard to the persistent connection
-    /// to ensure data consistency (libSQL creates isolated databases for each `:memory:` connection).
-    /// For file-based databases, we create new connections.
-    async fn get_connection(&self) -> Result<ConnectionGuard<'_>, VCardError> {
-        if let Some(persistent) = self.db.persistent_connection() {
-            let guard = persistent.lock().await;
-            Ok(ConnectionGuard::Persistent(guard))
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| VCardError::DatabaseError(e.to_string()))?;
-            Ok(ConnectionGuard::Owned(conn))
-        }
-    }
-
     /// Get the vCard for a user.
     ///
     /// Returns the vCard XML if found, None otherwise.
@@ -60,10 +42,9 @@ impl VCardStore {
         let jid_str = jid.to_string();
         debug!(jid = %jid_str, "Getting vCard from storage");
 
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let mut rows = conn
-            .as_ref()
             .query(
                 "SELECT vcard_xml FROM vcard_storage WHERE jid = ?",
                 [jid_str.as_str()],
@@ -91,9 +72,9 @@ impl VCardStore {
         let jid_str = jid.to_string();
         debug!(jid = %jid_str, "Storing vCard");
 
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
-        conn.as_ref()
+        conn
             .execute(
                 r#"
                 INSERT INTO vcard_storage (jid, vcard_xml, created_at, updated_at)
@@ -119,10 +100,9 @@ impl VCardStore {
         let jid_str = jid.to_string();
         debug!(jid = %jid_str, "Deleting vCard");
 
-        let conn = self.get_connection().await?;
+        let conn = self.db.guard().await.map_err(db_err)?;
 
         let affected = conn
-            .as_ref()
             .execute(
                 "DELETE FROM vcard_storage WHERE jid = ?",
                 [jid_str.as_str()],
@@ -136,28 +116,6 @@ impl VCardStore {
         } else {
             debug!(jid = %jid_str, "No vCard to delete");
             Ok(false)
-        }
-    }
-}
-
-/// A guard that wraps either a persistent connection (for in-memory databases)
-/// or an owned connection (for file-based databases).
-///
-/// This ensures that in-memory databases always use the persistent connection
-/// to maintain data across operations.
-enum ConnectionGuard<'a> {
-    /// Persistent connection guard for in-memory databases
-    Persistent(tokio::sync::MutexGuard<'a, libsql::Connection>),
-    /// Owned connection for file-based databases
-    Owned(libsql::Connection),
-}
-
-impl<'a> ConnectionGuard<'a> {
-    /// Get a reference to the underlying connection
-    fn as_ref(&self) -> &libsql::Connection {
-        match self {
-            ConnectionGuard::Persistent(guard) => guard,
-            ConnectionGuard::Owned(conn) => conn,
         }
     }
 }
