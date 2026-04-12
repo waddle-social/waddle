@@ -41,7 +41,10 @@ impl VCardStore {
     /// to ensure data consistency (libSQL creates isolated databases for each `:memory:` connection).
     /// For file-based databases, we create new connections.
     async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, VCardError> {
-        self.db.guard().await.map_err(|e| VCardError::DatabaseError(e.to_string()))
+        self.db
+            .guard()
+            .await
+            .map_err(|e| VCardError::DatabaseError(e.to_string()))
     }
 
     /// Get the vCard for a user.
@@ -84,17 +87,17 @@ impl VCardStore {
         let conn = self.get_connection().await?;
 
         conn.execute(
-                r#"
+            r#"
                 INSERT INTO vcard_storage (jid, vcard_xml, created_at, updated_at)
                 VALUES (?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(jid) DO UPDATE SET
                     vcard_xml = excluded.vcard_xml,
                     updated_at = datetime('now')
                 "#,
-                (jid_str.as_str(), vcard_xml),
-            )
-            .await
-            .map_err(db_err)?;
+            (jid_str.as_str(), vcard_xml),
+        )
+        .await
+        .map_err(db_err)?;
 
         debug!(jid = %jid_str, "vCard stored successfully");
         Ok(())

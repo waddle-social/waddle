@@ -79,11 +79,7 @@ pub struct GetUser {
 impl kameo::message::Message<GetUser> for UserRegistryActor {
     type Reply = Result<Option<ActorRef<UserActor>>, String>;
 
-    async fn handle(
-        &mut self,
-        msg: GetUser,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+    async fn handle(&mut self, msg: GetUser, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         Ok(self.users.get(&msg.bare_jid).cloned())
     }
 }
@@ -263,10 +259,7 @@ mod tests {
             .await
             .expect("ask failed");
 
-        let mut users = registry
-            .ask(ListUsers)
-            .await
-            .expect("ask failed");
+        let mut users = registry.ask(ListUsers).await.expect("ask failed");
 
         users.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 

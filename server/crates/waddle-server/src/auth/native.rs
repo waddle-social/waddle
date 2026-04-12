@@ -61,7 +61,10 @@ impl NativeUserStore {
     /// to ensure data consistency (libSQL creates isolated databases for each `:memory:` connection).
     /// For file-based databases, we create new connections.
     async fn get_connection(&self) -> Result<crate::db::ConnectionGuard<'_>, AuthError> {
-        self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))
+        self.db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))
     }
 
     /// Register a new native user.
@@ -137,7 +140,8 @@ impl NativeUserStore {
     pub async fn user_exists(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.query(
+        let mut rows = conn
+            .query(
                 "SELECT 1 FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
             )
@@ -155,7 +159,8 @@ impl NativeUserStore {
     ) -> Result<Option<ScramCredentials>, AuthError> {
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.query(
+        let mut rows = conn
+            .query(
                 r#"
                 SELECT salt, iterations, stored_key, server_key
                 FROM native_users
@@ -192,7 +197,8 @@ impl NativeUserStore {
 
         let conn = self.get_connection().await?;
 
-        let mut rows = conn.query(
+        let mut rows = conn
+            .query(
                 "SELECT password_hash FROM native_users WHERE username = ? AND domain = ?",
                 (username, domain),
             )

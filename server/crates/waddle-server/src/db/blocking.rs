@@ -156,8 +156,14 @@ impl DatabaseBlockingStorage {
         sql: &str,
         params: impl IntoParams,
     ) -> Result<libsql::Rows, BlockingStorageError> {
-        let conn = self.db.guard().await.map_err(|e| BlockingStorageError::ConnectionFailed(e.to_string()))?;
-        conn.query(sql, params).await.map_err(|e| BlockingStorageError::QueryFailed(e.to_string()))
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| BlockingStorageError::ConnectionFailed(e.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|e| BlockingStorageError::QueryFailed(e.to_string()))
     }
 
     /// Execute a statement using a connection guard.
@@ -166,8 +172,14 @@ impl DatabaseBlockingStorage {
         sql: &str,
         params: impl IntoParams,
     ) -> Result<u64, BlockingStorageError> {
-        let conn = self.db.guard().await.map_err(|e| BlockingStorageError::ConnectionFailed(e.to_string()))?;
-        conn.execute(sql, params).await.map_err(|e| BlockingStorageError::QueryFailed(e.to_string()))
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| BlockingStorageError::ConnectionFailed(e.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|e| BlockingStorageError::QueryFailed(e.to_string()))
     }
 }
 

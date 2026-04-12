@@ -114,16 +114,19 @@ impl IdentityService {
             LIMIT 1
         "#;
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         let mut rows = conn
             .query(query, libsql::params![issuer, subject])
             .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to query identity: {}", e))
-            })?;
-        let row = rows.next().await.map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to read identity row: {}", e))
-        })?;
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to query identity: {}", e)))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to read identity row: {}", e)))?;
 
         match row {
             Some(row) => Ok(Some(UserRecord {
@@ -210,7 +213,11 @@ impl IdentityService {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#;
 
-            let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+            let conn = self
+                .db
+                .guard()
+                .await
+                .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
             let result = conn
                 .execute(
                     insert,
@@ -268,7 +275,11 @@ impl IdentityService {
         let raw = serde_json::to_string(&claims.raw_claims)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to serialize claims: {}", e)))?;
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(
             r#"
                 INSERT INTO auth_identities (
@@ -303,7 +314,11 @@ impl IdentityService {
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
 
-        let conn = self.db.guard().await.map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(
             "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
             libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],

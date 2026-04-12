@@ -155,10 +155,7 @@ async fn search_users(
         LIMIT ?2
     "#;
 
-    let conn = db
-        .guard()
-        .await
-        .map_err(|e| e.to_string())?;
+    let conn = db.guard().await.map_err(|e| e.to_string())?;
 
     let mut users = Vec::new();
     let mut rows = conn

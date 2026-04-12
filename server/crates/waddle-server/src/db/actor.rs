@@ -89,11 +89,7 @@ pub type RowValues = Vec<libsql::Value>;
 impl kameo::message::Message<DbQuery> for DbActor {
     type Reply = Result<Vec<RowValues>, DatabaseError>;
 
-    async fn handle(
-        &mut self,
-        msg: DbQuery,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+    async fn handle(&mut self, msg: DbQuery, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.touch();
         let conn = self.db.guard().await?;
         let mut rows = conn.query(&msg.sql, msg.params).await?;
