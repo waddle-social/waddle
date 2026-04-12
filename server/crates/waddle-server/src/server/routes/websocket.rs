@@ -11,6 +11,7 @@ use axum::{
     routing::get,
     Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use jid::{BareJid, FullJid};
@@ -18,6 +19,7 @@ use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
+    auth::{parse_oauthbearer, OAuthBearerResult},
     connection::Stanza,
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
@@ -39,7 +41,7 @@ use xmpp_parsers::minidom::Element;
 use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
-use crate::auth::Session;
+use crate::auth::{localpart_to_jid, Session};
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
@@ -277,6 +279,58 @@ fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
     element_to_xml(iq)
 }
 
+fn build_stream_features_xml(authenticated: bool) -> String {
+    let feature = if authenticated {
+        Element::builder("bind", waddle_xmpp::ns::BIND).build()
+    } else {
+        Element::builder("mechanisms", waddle_xmpp::ns::SASL)
+            .append(
+                Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                    .append("OAUTHBEARER")
+                    .build(),
+            )
+            .append(
+                Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                    .append("PLAIN")
+                    .build(),
+            )
+            .build()
+    };
+
+    element_to_xml(
+        Element::builder("features", waddle_xmpp::ns::STREAM)
+            .append(feature)
+            .build(),
+    )
+}
+
+fn sasl_success_xml() -> String {
+    element_to_xml(Element::builder("success", waddle_xmpp::ns::SASL).build())
+}
+
+fn sasl_failure_xml(condition: &str) -> String {
+    element_to_xml(
+        Element::builder("failure", waddle_xmpp::ns::SASL)
+            .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
+            .build(),
+    )
+}
+
+fn parse_sasl_auth_frame(frame: &str) -> Result<(String, String), String> {
+    let element =
+        Element::from_str(frame).map_err(|err| format!("Invalid SASL auth XML: {err}"))?;
+    if element.name() != "auth" {
+        return Err("SASL frame is not an auth element".to_string());
+    }
+
+    let mechanism = element
+        .attr("mechanism")
+        .ok_or_else(|| "SASL auth missing mechanism".to_string())?
+        .to_string();
+
+    Ok((mechanism, element.text().trim().to_string()))
+}
+
 /// Handle an XMPP frame per RFC 7395
 async fn handle_xmpp_frame(
     frame: &str,
@@ -294,27 +348,13 @@ async fn handle_xmpp_frame(
     if frame.starts_with("<open") {
         info!("XMPP stream open requested");
 
-        // Respond with stream features
-        let features = if *authenticated {
-            // Post-auth features
-            r#"<bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"/>"#
-        } else {
-            // Pre-auth features - offer PLAIN auth with session token
-            r#"<mechanisms xmlns="urn:ietf:params:xml:ns:xmpp-sasl">
-                <mechanism>PLAIN</mechanism>
-            </mechanisms>"#
-        };
-
         // RFC 7395: Send <open> and <stream:features> as SEPARATE WebSocket messages
         let open_element = format!(
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="{}" id="{}" version="1.0" xml:lang="en"/>"#,
             domain,
             uuid::Uuid::new_v4()
         );
-        let features_element = format!(
-            r#"<stream:features xmlns:stream="http://etherx.jabber.org/streams">{}</stream:features>"#,
-            features
-        );
+        let features_element = build_stream_features_xml(*authenticated);
         return vec![open_element, features_element];
     }
 
@@ -324,17 +364,42 @@ async fn handle_xmpp_frame(
         return vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()];
     }
 
-    // Handle SASL authentication
-    if frame.starts_with("<auth") && frame.contains("PLAIN") {
-        return handle_sasl_plain(
-            frame,
-            domain,
-            state,
-            authenticated,
-            session_jid,
-            authenticated_session,
-        )
-        .await;
+    if frame.starts_with("<auth") {
+        let (mechanism, data) = match parse_sasl_auth_frame(frame) {
+            Ok(auth) => auth,
+            Err(err) => {
+                warn!(error = %err, "Invalid SASL auth frame");
+                return vec![sasl_failure_xml("not-authorized")];
+            }
+        };
+
+        return match mechanism.as_str() {
+            "PLAIN" => {
+                handle_sasl_plain(
+                    &data,
+                    domain,
+                    state,
+                    authenticated,
+                    session_jid,
+                    authenticated_session,
+                )
+                .await
+            }
+            "OAUTHBEARER" => {
+                handle_sasl_oauthbearer(
+                    &data,
+                    state,
+                    authenticated,
+                    session_jid,
+                    authenticated_session,
+                )
+                .await
+            }
+            mechanism => {
+                warn!(mechanism = %mechanism, "Unsupported SASL mechanism");
+                vec![sasl_failure_xml("invalid-mechanism")]
+            }
+        };
     }
 
     // Handle resource binding
@@ -374,46 +439,23 @@ async fn handle_xmpp_frame(
 
 /// Handle SASL PLAIN authentication
 async fn handle_sasl_plain(
-    frame: &str,
+    b64_creds: &str,
     domain: &str,
     state: &WebSocketState,
     authenticated: &mut bool,
     session_jid: &mut Option<FullJid>,
     authenticated_session: &mut Option<Session>,
 ) -> Vec<String> {
-    debug!(frame = %frame, "SASL PLAIN auth attempt");
-
-    // Extract base64 credentials
-    let Some(start) = frame.find('>') else {
-        warn!("SASL PLAIN: could not find opening tag end");
-        return vec![
-            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                .to_string(),
-        ];
-    };
-
-    let Some(end) = frame[start..].find('<') else {
-        warn!("SASL PLAIN: could not find closing tag");
-        return vec![
-            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                .to_string(),
-        ];
-    };
-
-    let b64_creds = frame[start + 1..start + end].trim();
+    debug!("SASL PLAIN auth attempt");
     debug!(b64 = %b64_creds, "Extracted base64 credentials");
 
-    let decoded =
-        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_creds) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(error = %e, b64 = %b64_creds, "Failed to decode base64 credentials");
-                return vec![
-                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                    .to_string(),
-            ];
-            }
-        };
+    let decoded = match BASE64_STANDARD.decode(b64_creds) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, b64 = %b64_creds, "Failed to decode base64 credentials");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
 
     // PLAIN format: \0authzid\0username\0password or \0username\0password
     let parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
@@ -428,10 +470,7 @@ async fn handle_sasl_plain(
             parts_count = parts.len(),
             "SASL PLAIN: unexpected number of parts"
         );
-        return vec![
-            r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                .to_string(),
-        ];
+        return vec![sasl_failure_xml("not-authorized")];
     };
 
     let (username, password) = match (
@@ -441,17 +480,11 @@ async fn handle_sasl_plain(
         (Ok(u), Ok(p)) => (u, p),
         (Err(e), _) => {
             warn!(error = %e, "SASL PLAIN: username is not valid UTF-8");
-            return vec![
-                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                    .to_string(),
-            ];
+            return vec![sasl_failure_xml("not-authorized")];
         }
         (_, Err(e)) => {
             warn!(error = %e, "SASL PLAIN: password is not valid UTF-8");
-            return vec![
-                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                    .to_string(),
-            ];
+            return vec![sasl_failure_xml("not-authorized")];
         }
     };
 
@@ -479,10 +512,7 @@ async fn handle_sasl_plain(
                 Ok(jid) => jid,
                 Err(e) => {
                     warn!(username = %username, error = %e, "SASL PLAIN: JID construction failed");
-                    return vec![
-                        r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                            .to_string(),
-                    ];
+                    return vec![sasl_failure_xml("not-authorized")];
                 }
             };
 
@@ -490,14 +520,88 @@ async fn handle_sasl_plain(
             *authenticated_session = Some(session.clone());
             *session_jid = Some(full_jid);
 
-            vec![r#"<success xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>"#.to_string()]
+            vec![sasl_success_xml()]
         }
         Err(e) => {
             warn!(username = %username, error = %e, "SASL PLAIN authentication failed");
-            vec![
-                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
-                    .to_string(),
-            ]
+            vec![sasl_failure_xml("not-authorized")]
+        }
+    }
+}
+
+/// Handle SASL OAUTHBEARER authentication.
+async fn handle_sasl_oauthbearer(
+    b64_data: &str,
+    state: &WebSocketState,
+    authenticated: &mut bool,
+    session_jid: &mut Option<FullJid>,
+    authenticated_session: &mut Option<Session>,
+) -> Vec<String> {
+    debug!("SASL OAUTHBEARER auth attempt");
+
+    let decoded = match BASE64_STANDARD.decode(b64_data) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(error = %e, "SASL OAUTHBEARER: failed to decode base64 data");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let token = match parse_oauthbearer(&decoded) {
+        Ok(OAuthBearerResult::Credentials(credentials)) => credentials.token,
+        Ok(OAuthBearerResult::DiscoveryRequest) => {
+            warn!("SASL OAUTHBEARER: discovery request received on token-auth WebSocket path");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+        Err(e) => {
+            warn!(error = %e, "SASL OAUTHBEARER: failed to parse bearer data");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    match state
+        .auth_state
+        .session_manager
+        .validate_session(&token)
+        .await
+    {
+        Ok(session) => {
+            let bare_jid_str =
+                match localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain) {
+                    Ok(jid) => jid,
+                    Err(e) => {
+                        warn!(
+                            localpart = %session.xmpp_localpart,
+                            error = %e,
+                            "SASL OAUTHBEARER: failed to build JID from session localpart",
+                        );
+                        return vec![sasl_failure_xml("not-authorized")];
+                    }
+                };
+
+            let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
+                Ok(jid) => jid,
+                Err(e) => {
+                    warn!(jid = %bare_jid_str, error = %e, "SASL OAUTHBEARER: JID construction failed");
+                    return vec![sasl_failure_xml("not-authorized")];
+                }
+            };
+
+            info!(
+                jid = %bare_jid_str,
+                user_id = %session.user_id,
+                "SASL OAUTHBEARER authentication successful",
+            );
+
+            *authenticated = true;
+            *authenticated_session = Some(session);
+            *session_jid = Some(full_jid);
+
+            vec![sasl_success_xml()]
+        }
+        Err(e) => {
+            warn!(error = %e, "SASL OAUTHBEARER authentication failed");
+            vec![sasl_failure_xml("not-authorized")]
         }
     }
 }
@@ -1693,6 +1797,80 @@ mod tests {
             .await
             .expect("session");
         session
+    }
+
+    #[tokio::test]
+    async fn websocket_features_advertise_oauthbearer() {
+        let state = create_test_websocket_state().await;
+        let mut authenticated = false;
+        let mut session_jid = None;
+        let mut authenticated_session = None;
+        let mut resource_bound = false;
+
+        let responses = handle_xmpp_frame(
+            r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut authenticated,
+            &mut session_jid,
+            &mut authenticated_session,
+            &mut resource_bound,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2);
+        let features = &responses[1];
+        assert!(
+            features.contains("<mechanism>OAUTHBEARER</mechanism>"),
+            "expected OAUTHBEARER in WebSocket SASL mechanisms: {features}"
+        );
+        assert!(
+            features.contains("<mechanism>PLAIN</mechanism>"),
+            "expected existing PLAIN mechanism to remain advertised: {features}"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_oauthbearer_authenticates_session_token() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut authenticated = false;
+        let mut session_jid = None;
+        let mut authenticated_session = None;
+        let mut resource_bound = false;
+
+        let responses = handle_xmpp_frame(
+            &frame,
+            "example.com",
+            state.as_ref(),
+            &mut authenticated,
+            &mut session_jid,
+            &mut authenticated_session,
+            &mut resource_bound,
+        )
+        .await;
+
+        assert_eq!(responses, vec![sasl_success_xml()]);
+        assert!(authenticated);
+        assert!(!resource_bound);
+        assert_eq!(
+            authenticated_session.as_ref().map(|s| s.user_id.as_str()),
+            Some(session.user_id.as_str())
+        );
+        let expected_bare =
+            localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
+                .expect("session localpart should produce JID");
+        assert_eq!(
+            session_jid.as_ref().map(|jid| jid.to_bare().to_string()),
+            Some(expected_bare)
+        );
     }
 
     #[test]
