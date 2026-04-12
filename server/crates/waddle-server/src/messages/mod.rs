@@ -77,8 +77,7 @@ mod tests {
 
     /// Helper function to create a test channel in the database
     async fn create_test_channel(db: &Arc<Database>, channel_id: &str) {
-        let conn = db.persistent_connection().unwrap();
-        let conn = conn.lock().await;
+        let conn = db.guard().await.unwrap();
         conn.execute(
             "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
             libsql::params![channel_id, format!("Test Channel {}", channel_id)],

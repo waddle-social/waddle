@@ -533,43 +533,24 @@ impl waddle_xmpp::AppState for XmppAppState {
         let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
 
         // Store the slot in the database
-        // Use persistent connection for in-memory databases
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
-                "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                libsql::params![
-                    slot_id.clone(),
-                    requester_jid.to_string(),
-                    safe_filename.clone(),
-                    size as i64,
-                    effective_type.clone(),
-                    expires_at.to_rfc3339(),
-                ],
-            ).await.map_err(|e| {
-                warn!(error = %e, "Failed to create upload slot in database");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-        } else {
-            let conn = self.db.connect().map_err(|e| {
-                warn!(error = %e, "Failed to connect to database for upload slot");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-            conn.execute(
-                "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                libsql::params![
-                    slot_id.clone(),
-                    requester_jid.to_string(),
-                    safe_filename.clone(),
-                    size as i64,
-                    effective_type.clone(),
-                    expires_at.to_rfc3339(),
-                ],
-            ).await.map_err(|e| {
-                warn!(error = %e, "Failed to create upload slot in database");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-        }
+        let conn = self.db.guard().await.map_err(|e| {
+            warn!(error = %e, "Failed to connect to database for upload slot");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+        conn.execute(
+            "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            libsql::params![
+                slot_id.clone(),
+                requester_jid.to_string(),
+                safe_filename.clone(),
+                size as i64,
+                effective_type.clone(),
+                expires_at.to_rfc3339(),
+            ],
+        ).await.map_err(|e| {
+            warn!(error = %e, "Failed to create upload slot in database");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
 
         debug!(
             slot_id = %slot_id,
@@ -924,47 +905,27 @@ impl waddle_xmpp::AppState for XmppAppState {
         let query = "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?";
         let params = libsql::params![jid.to_string(), namespace.to_string()];
 
-        let result = if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            let mut rows = conn.query(query, params).await.map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-            match rows
-                .next()
-                .await
-                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?
-            {
-                Some(row) => {
-                    let xml: String = row
-                        .get(0)
-                        .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-                    Some(xml)
-                }
-                None => None,
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+        let mut rows = conn.query(query, params).await.map_err(|e| {
+            warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+        let result = match rows
+            .next()
+            .await
+            .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?
+        {
+            Some(row) => {
+                let xml: String = row
+                    .get(0)
+                    .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+                Some(xml)
             }
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-            let mut rows = conn.query(query, params).await.map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-            match rows
-                .next()
-                .await
-                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?
-            {
-                Some(row) => {
-                    let xml: String = row
-                        .get(0)
-                        .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-                    Some(xml)
-                }
-                None => None,
-            }
+            None => None,
         };
 
         Ok(result)
@@ -986,22 +947,15 @@ impl waddle_xmpp::AppState for XmppAppState {
             xml_content.to_string()
         ];
 
-        if let Some(persistent) = self.db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(query, params).await.map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-        } else {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-            conn.execute(query, params).await.map_err(|e| {
-                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
-                XmppError::internal(format!("Database error: {}", e))
-            })?;
-        }
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
+        conn.execute(query, params).await.map_err(|e| {
+            warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
 
         Ok(())
     }

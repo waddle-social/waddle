@@ -285,12 +285,6 @@ impl Database {
         }
     }
 
-    /// Get a reference to the persistent connection if this is an in-memory database.
-    /// This is useful for operations that need to maintain connection state.
-    pub fn persistent_connection(&self) -> Option<&Arc<Mutex<Connection>>> {
-        self.persistent_conn.as_ref()
-    }
-
     /// Acquire a [`ConnectionGuard`] for this database.
     ///
     /// For in-memory databases this locks the shared `Mutex<Connection>` and
@@ -379,9 +373,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Query should succeed - use persistent connection for in-memory database
-        let conn = db.persistent_connection().unwrap();
-        let conn = conn.lock().await;
+        // Query should succeed
+        let conn = db.guard().await.unwrap();
         let mut rows = conn.query("SELECT * FROM test", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let name: String = row.get(1).unwrap();

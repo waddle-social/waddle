@@ -573,44 +573,25 @@ async fn insert_channel(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(
-            query,
-            libsql::params![
-                id,
-                name,
-                description,
-                channel_type,
-                position,
-                is_default as i32,
-                now,
-                now
-            ],
-        )
+    let conn = db
+        .guard()
         .await
-        .map_err(|e| format!("Failed to insert channel: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(
-            query,
-            libsql::params![
-                id,
-                name,
-                description,
-                channel_type,
-                position,
-                is_default as i32,
-                now,
-                now
-            ],
-        )
-        .await
-        .map_err(|e| format!("Failed to insert channel: {}", e))?;
-    }
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    conn.execute(
+        query,
+        libsql::params![
+            id,
+            name,
+            description,
+            channel_type,
+            position,
+            is_default as i32,
+            now,
+            now
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to insert channel: {}", e))?;
 
     Ok(())
 }
@@ -627,30 +608,18 @@ pub(crate) async fn get_channel_from_db(
         WHERE id = ?
     "#;
 
-    let row = if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![channel_id])
-            .await
-            .map_err(|e| format!("Failed to query channel: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read channel row: {}", e))?
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![channel_id])
-            .await
-            .map_err(|e| format!("Failed to query channel: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read channel row: {}", e))?
-    };
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    let mut rows = conn
+        .query(query, libsql::params![channel_id])
+        .await
+        .map_err(|e| format!("Failed to query channel: {}", e))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read channel row: {}", e))?;
 
     match row {
         Some(row) => {
@@ -705,39 +674,22 @@ pub(crate) async fn list_channels_from_db(
 
     let mut channels = Vec::new();
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![limit as i64, offset as i64])
-            .await
-            .map_err(|e| format!("Failed to query channels: {}", e))?;
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    let mut rows = conn
+        .query(query, libsql::params![limit as i64, offset as i64])
+        .await
+        .map_err(|e| format!("Failed to query channels: {}", e))?;
 
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read channel row: {}", e))?
-        {
-            let channel = parse_channel_row(&row, waddle_id)?;
-            channels.push(channel);
-        }
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![limit as i64, offset as i64])
-            .await
-            .map_err(|e| format!("Failed to query channels: {}", e))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| format!("Failed to read channel row: {}", e))?
-        {
-            let channel = parse_channel_row(&row, waddle_id)?;
-            channels.push(channel);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read channel row: {}", e))?
+    {
+        let channel = parse_channel_row(&row, waddle_id)?;
+        channels.push(channel);
     }
 
     Ok(channels)
@@ -807,20 +759,13 @@ async fn update_channel_in_db(
 
     let query = format!("UPDATE channels SET {} WHERE id = ?", updates.join(", "));
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(&query, params)
-            .await
-            .map_err(|e| format!("Failed to update channel: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(&query, params)
-            .await
-            .map_err(|e| format!("Failed to update channel: {}", e))?;
-    }
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    conn.execute(&query, params)
+        .await
+        .map_err(|e| format!("Failed to update channel: {}", e))?;
 
     Ok(())
 }
@@ -830,20 +775,13 @@ async fn delete_channel_from_db(db: &Database, channel_id: &str) -> Result<(), S
     // Messages will be cascade deleted due to foreign key constraint
     let query = "DELETE FROM channels WHERE id = ?";
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(query, libsql::params![channel_id])
-            .await
-            .map_err(|e| format!("Failed to delete channel: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(query, libsql::params![channel_id])
-            .await
-            .map_err(|e| format!("Failed to delete channel: {}", e))?;
-    }
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    conn.execute(query, libsql::params![channel_id])
+        .await
+        .map_err(|e| format!("Failed to delete channel: {}", e))?;
 
     Ok(())
 }

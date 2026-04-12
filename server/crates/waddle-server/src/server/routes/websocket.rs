@@ -1713,9 +1713,9 @@ mod tests {
             .app_state
             .db_pool
             .global()
-            .persistent_connection()
-            .expect("persistent connection");
-        let conn = conn.lock().await;
+            .guard()
+            .await
+            .expect("db connection");
         conn.execute(
             "INSERT INTO waddles (id, name, description, owner_id, icon_url, is_public, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             libsql::params![
@@ -1744,9 +1744,9 @@ mod tests {
             .app_state
             .db_pool
             .global()
-            .persistent_connection()
-            .expect("persistent connection");
-        let conn = conn.lock().await;
+            .guard()
+            .await
+            .expect("db connection");
         conn.execute(
             "INSERT INTO waddle_members (waddle_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
             libsql::params![waddle_id, user_id, chrono::Utc::now().to_rfc3339()],
@@ -1861,9 +1861,9 @@ mod tests {
             .await
             .expect("waddle migrations");
         let conn = waddle_db
-            .persistent_connection()
-            .expect("persistent connection");
-        let conn = conn.lock().await;
+            .guard()
+            .await
+            .expect("db connection");
         conn.execute(
             "INSERT INTO channels (id, name, channel_type, position, is_default) VALUES (?, ?, 'text', 0, 0)",
             libsql::params!["general", "General"],

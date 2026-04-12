@@ -178,30 +178,18 @@ async fn get_upload_slot(db: &Database, slot_id: &str) -> Result<Option<UploadSl
         WHERE id = ?
     "#;
 
-    let row = if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        let mut rows = conn
-            .query(query, libsql::params![slot_id])
-            .await
-            .map_err(|e| format!("Failed to query upload slot: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read slot row: {}", e))?
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        let mut rows = conn
-            .query(query, libsql::params![slot_id])
-            .await
-            .map_err(|e| format!("Failed to query upload slot: {}", e))?;
-
-        rows.next()
-            .await
-            .map_err(|e| format!("Failed to read slot row: {}", e))?
-    };
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    let mut rows = conn
+        .query(query, libsql::params![slot_id])
+        .await
+        .map_err(|e| format!("Failed to query upload slot: {}", e))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| format!("Failed to read slot row: {}", e))?;
 
     match row {
         Some(row) => {
@@ -244,20 +232,13 @@ async fn mark_slot_uploaded(db: &Database, slot_id: &str, storage_key: &str) -> 
         WHERE id = ?
     "#;
 
-    if let Some(persistent) = db.persistent_connection() {
-        let conn = persistent.lock().await;
-        conn.execute(query, libsql::params![storage_key, now, slot_id])
-            .await
-            .map_err(|e| format!("Failed to update slot status: {}", e))?;
-    } else {
-        let conn = db
-            .connect()
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-        conn.execute(query, libsql::params![storage_key, now, slot_id])
-            .await
-            .map_err(|e| format!("Failed to update slot status: {}", e))?;
-    }
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+    conn.execute(query, libsql::params![storage_key, now, slot_id])
+        .await
+        .map_err(|e| format!("Failed to update slot status: {}", e))?;
 
     Ok(())
 }
@@ -633,15 +614,15 @@ mod tests {
             VALUES (?, 'test@example.com', ?, ?, ?, 'pending', ?)
         "#;
 
-        if let Some(persistent) = db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(
+        db.guard()
+            .await
+            .expect("db connection")
+            .execute(
                 query,
                 libsql::params![slot_id, filename, size, content_type, expires_at],
             )
             .await
             .unwrap();
-        }
     }
 
     async fn create_expired_slot(state: &UploadState, slot_id: &str) {
@@ -654,12 +635,12 @@ mod tests {
             VALUES (?, 'test@example.com', 'expired.txt', 100, 'text/plain', 'pending', ?)
         "#;
 
-        if let Some(persistent) = db.persistent_connection() {
-            let conn = persistent.lock().await;
-            conn.execute(query, libsql::params![slot_id, expires_at])
-                .await
-                .unwrap();
-        }
+        db.guard()
+            .await
+            .expect("db connection")
+            .execute(query, libsql::params![slot_id, expires_at])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
