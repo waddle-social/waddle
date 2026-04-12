@@ -396,6 +396,7 @@ pub async fn start_with_config(
             XmppAppState::new(
                 xmpp_config.domain.clone(),
                 Arc::new(db_pool.global().clone()),
+                db_pool.global_actor().clone(),
                 encryption_key.as_ref().map(|s| s.as_bytes()),
             )
             .with_db_pool(Arc::clone(&db_pool)),

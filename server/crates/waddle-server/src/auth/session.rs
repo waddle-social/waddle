@@ -1,15 +1,19 @@
 //! Local session management for provider-authenticated users.
+//!
+//! All database access is routed through a `DbActor` to serialise operations
+//! and avoid SQLite write-lock contention.
 
 use super::AuthError;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use hmac::{Hmac, Mac};
+use kameo::actor::ActorRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
-use crate::db::Database;
+use crate::db::actor::{DbActor, DbExecute, DbQueryOne, RowValues};
+use crate::db::{row_value, ValueExt};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -49,14 +53,14 @@ impl Session {
 }
 
 pub struct SessionManager {
-    db: Arc<Database>,
+    actor: ActorRef<DbActor>,
     hash_key: Option<Vec<u8>>,
 }
 
 impl SessionManager {
-    pub fn new(db: Arc<Database>, hash_key: Option<&[u8]>) -> Self {
+    pub fn new(actor: ActorRef<DbActor>, hash_key: Option<&[u8]>) -> Self {
         Self {
-            db,
+            actor,
             hash_key: hash_key.map(|k| k.to_vec()),
         }
     }
@@ -76,29 +80,31 @@ impl SessionManager {
         }
     }
 
+    /// Convert an actor ask error into an AuthError.
+    fn ask_err(e: impl std::fmt::Display) -> AuthError {
+        AuthError::DatabaseError(e.to_string())
+    }
+
     async fn ensure_user_exists(&self, session: &Session) -> Result<(), AuthError> {
-        let query = r#"
+        let sql = r#"
             INSERT OR IGNORE INTO users (id, username, xmpp_localpart, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
-        "#;
+        "#
+        .to_string();
 
-        let conn = self
-            .db
-            .guard()
+        self.actor
+            .ask(DbExecute {
+                sql,
+                params: vec![
+                    libsql::Value::from(session.user_id.as_str()),
+                    libsql::Value::from(session.username.as_str()),
+                    libsql::Value::from(session.xmpp_localpart.as_str()),
+                    libsql::Value::from(session.created_at.to_rfc3339()),
+                    libsql::Value::from(session.created_at.to_rfc3339()),
+                ],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        conn.execute(
-            query,
-            libsql::params![
-                session.user_id.as_str(),
-                session.username.as_str(),
-                session.xmpp_localpart.as_str(),
-                session.created_at.to_rfc3339(),
-                session.created_at.to_rfc3339()
-            ],
-        )
-        .await
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to ensure user exists: {}", e)))?;
+            .map_err(Self::ask_err)?;
         Ok(())
     }
 
@@ -109,29 +115,29 @@ impl SessionManager {
         let token_hash = self.token_hash(&session.id);
         let expires_at = session.expires_at.map(|v| v.to_rfc3339());
 
-        let query = r#"
+        let sql = r#"
             INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        "#;
+        "#
+        .to_string();
 
-        let conn = self
-            .db
-            .guard()
+        self.actor
+            .ask(DbExecute {
+                sql,
+                params: vec![
+                    libsql::Value::from(session.id.as_str()),
+                    libsql::Value::from(session.user_id.as_str()),
+                    libsql::Value::from(token_hash),
+                    match expires_at {
+                        Some(v) => libsql::Value::from(v),
+                        None => libsql::Value::Null,
+                    },
+                    libsql::Value::from(session.created_at.to_rfc3339()),
+                    libsql::Value::from(session.last_used_at.to_rfc3339()),
+                ],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        conn.execute(
-            query,
-            libsql::params![
-                session.id.as_str(),
-                session.user_id.as_str(),
-                token_hash,
-                expires_at,
-                session.created_at.to_rfc3339(),
-                session.last_used_at.to_rfc3339()
-            ],
-        )
-        .await
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to insert session: {}", e)))?;
+            .map_err(Self::ask_err)?;
 
         debug!(session_id = %session.id, user_id = %session.user_id, "Session created");
         Ok(())
@@ -152,41 +158,49 @@ impl SessionManager {
         )))
     }
 
-    fn row_to_session(&self, row: &libsql::Row) -> Result<Session, AuthError> {
-        let id: String = row
-            .get(0)
+    fn values_to_session(&self, row: &[libsql::Value]) -> Result<Session, AuthError> {
+        let id = row_value(row, 0)
+            .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get session id: {}", e)))?;
-        let user_id: String = row
-            .get(1)
+        let user_id = row_value(row, 1)
+            .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get user id: {}", e)))?;
-        let token_hash: String = row
-            .get(2)
+        let token_hash = row_value(row, 2)
+            .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get token hash: {}", e)))?;
 
         if token_hash != self.token_hash(&id) {
             return Err(AuthError::SessionNotFound(id));
         }
 
-        let expires_at = row
-            .get::<Option<String>>(3)
-            .ok()
-            .flatten()
+        let expires_at = row_value(row, 3)
+            .and_then(ValueExt::as_optional_string)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get expires_at: {}", e)))?
             .map(|v| Self::parse_ts(&v))
             .transpose()?;
-        let created_at =
-            Self::parse_ts(&row.get::<String>(4).map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to get created_at: {}", e))
-            })?)?;
-        let last_used_at = Self::parse_ts(&row.get::<String>(5).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get last_used_at: {}", e))
-        })?)?;
+        let created_at = Self::parse_ts(
+            &row_value(row, 4)
+                .and_then(ValueExt::as_string)
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to get created_at: {}", e))
+                })?,
+        )?;
+        let last_used_at = Self::parse_ts(
+            &row_value(row, 5)
+                .and_then(ValueExt::as_string)
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to get last_used_at: {}", e))
+                })?,
+        )?;
 
-        let username: String = row
-            .get(6)
+        let username = row_value(row, 6)
+            .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get username: {}", e)))?;
-        let xmpp_localpart: String = row.get(7).map_err(|e| {
-            AuthError::DatabaseError(format!("Failed to get xmpp_localpart: {}", e))
-        })?;
+        let xmpp_localpart = row_value(row, 7)
+            .and_then(ValueExt::as_string)
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to get xmpp_localpart: {}", e))
+            })?;
 
         Ok(Session {
             id,
@@ -201,31 +215,27 @@ impl SessionManager {
 
     #[instrument(skip(self))]
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
-        let query = r#"
+        let sql = r#"
             SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
                    u.username, u.xmpp_localpart
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.id = ?
             LIMIT 1
-        "#;
+        "#
+        .to_string();
 
-        let conn = self
-            .db
-            .guard()
+        let row: Option<RowValues> = self
+            .actor
+            .ask(DbQueryOne {
+                sql,
+                params: vec![libsql::Value::from(session_id)],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        let mut rows = conn
-            .query(query, libsql::params![session_id])
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to query session: {}", e)))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to read session row: {}", e)))?;
+            .map_err(Self::ask_err)?;
 
         match row {
-            Some(row) => Ok(Some(self.row_to_session(&row)?)),
+            Some(values) => Ok(Some(self.values_to_session(&values)?)),
             None => Ok(None),
         }
     }
@@ -233,30 +243,26 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn touch_session(&self, session_id: &str) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
-        let query = "UPDATE sessions SET last_used_at = ? WHERE id = ?";
 
-        let conn = self
-            .db
-            .guard()
+        self.actor
+            .ask(DbExecute {
+                sql: "UPDATE sessions SET last_used_at = ? WHERE id = ?".to_string(),
+                params: vec![libsql::Value::from(now), libsql::Value::from(session_id)],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        conn.execute(query, libsql::params![now, session_id])
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to update session: {}", e)))?;
+            .map_err(Self::ask_err)?;
         Ok(())
     }
 
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &str) -> Result<(), AuthError> {
-        let query = "DELETE FROM sessions WHERE id = ?";
-        let conn = self
-            .db
-            .guard()
+        self.actor
+            .ask(DbExecute {
+                sql: "DELETE FROM sessions WHERE id = ?".to_string(),
+                params: vec![libsql::Value::from(session_id)],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        conn.execute(query, libsql::params![session_id])
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
+            .map_err(Self::ask_err)?;
         Ok(())
     }
 
@@ -279,18 +285,15 @@ impl SessionManager {
     #[allow(dead_code)]
     pub async fn cleanup_expired_sessions(&self) -> Result<usize, AuthError> {
         let now = Utc::now().to_rfc3339();
-        let query = "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?";
-        let conn = self
-            .db
-            .guard()
+        let deleted = self
+            .actor
+            .ask(DbExecute {
+                sql: "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?"
+                    .to_string(),
+                params: vec![libsql::Value::from(now)],
+            })
             .await
-            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        let deleted = conn
-            .execute(query, libsql::params![now])
-            .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed cleanup expired sessions: {}", e))
-            })?;
+            .map_err(Self::ask_err)?;
         Ok(deleted as usize)
     }
 }
