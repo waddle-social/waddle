@@ -57,7 +57,17 @@ export class BrowserXmppClient {
     registerWaddleExtensions(xmpp);
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
-    try { xmpp.connect(); } catch (e) { this.xmpp = null; throw e; }
+
+    // Wait for session:started before returning, so callers can safely
+    // use the connection. Reject on disconnect/stream errors.
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => { xmpp.off("session:started", onReady); xmpp.off("disconnected", onFail); };
+      const onReady = () => { cleanup(); resolve(); };
+      const onFail = (err?: Error) => { cleanup(); this.xmpp = null; reject(err ?? new Error("XMPP connection failed")); };
+      xmpp.on("session:started", onReady);
+      xmpp.on("disconnected", onFail);
+      xmpp.connect();
+    });
   }
 
   async disconnect() {
@@ -151,8 +161,16 @@ export class BrowserXmppClient {
   private wireEvents(xmpp: Agent) {
     xmpp.on("session:started", () =>
       this.statusHandler?.({ state: "online", detail: "Live room connection ready" }));
-    xmpp.on("disconnected", () =>
-      this.statusHandler?.({ state: "offline", detail: "Live room connection offline" }));
+    xmpp.on("disconnected", (err) => {
+      const detail = err?.message ?? "Live room connection offline";
+      this.statusHandler?.({ state: "offline", detail });
+      console.error("XMPP disconnected", err);
+    });
+    xmpp.on("stream:error", (streamError, err) => {
+      const detail = err?.message ?? streamError?.condition ?? "Stream error";
+      this.statusHandler?.({ state: "error", detail });
+      console.error("XMPP stream error", detail);
+    });
 
     xmpp.on("muc:available", (pres: ReceivedMUCPresence) => {
       const [room, nick] = (pres.from ?? "").split("/");
