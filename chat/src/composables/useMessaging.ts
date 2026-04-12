@@ -116,10 +116,9 @@ export function useMessaging(
         mergeLiveMessage(fromLiveMessage(session.value!, msg));
 
         // Trigger notification for mentions when tab is unfocused
-        if (
-          msg.nick !== session.value?.username &&
-          (!document.hasFocus() || document.visibilityState === "hidden")
-        ) {
+        const isTabHidden = typeof document !== "undefined"
+          && (!document.hasFocus() || document.visibilityState === "hidden");
+        if (msg.nick !== session.value?.username && isTabHidden) {
           const isMentioned =
             !!msg.broadcastMention ||
             msg.mentions?.some(

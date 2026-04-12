@@ -1,7 +1,13 @@
 /** Service worker for Waddle push notifications. */
 
 self.addEventListener("push", (event) => {
-  const data = event.data?.json() ?? {};
+  let data = {};
+  try {
+    data = event.data?.json() ?? {};
+  } catch {
+    const text = event.data?.text() ?? "";
+    data = { title: "Waddle", body: text };
+  }
   event.waitUntil(
     self.registration.showNotification(data.title ?? "Waddle", {
       body: data.body ?? "",

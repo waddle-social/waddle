@@ -34,6 +34,7 @@ rustls-pemfile = "2.2"
 
 # Serialization
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Error Handling
 thiserror = { workspace = true }

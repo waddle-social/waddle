@@ -1592,6 +1592,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let remote_domain_count = federated_messages.remote_domain_count();
         let remote_count = federated_messages.remote_count();
 
+        // XEP-0357: Collect occupant bare JIDs for broadcast mention push (before dropping room lock)
+        let occupant_bare_jids: Vec<String> = room
+            .occupants
+            .values()
+            .filter(|o| o.real_jid != sender_jid)
+            .map(|o| o.real_jid.to_bare().to_string())
+            .collect();
+
         drop(room); // Release the read lock before archival and sending
 
         // Archive the message to MAM storage (only if it has a body)
@@ -1698,11 +1706,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // XEP-0357: Trigger push notifications for mentioned users
         if muc_msg.has_body() {
-            let mentioned_jids = crate::xep::xep0372::extract_mentioned_jids(&muc_msg.message);
+            let mut push_jids = crate::xep::xep0372::extract_mentioned_jids(&muc_msg.message);
             let explicit = crate::xep::xep0513::extract_explicit_mentions(&muc_msg.message);
             let is_broadcast = explicit.as_ref().is_some_and(|m| m.has_broadcast());
 
-            if !mentioned_jids.is_empty() || is_broadcast {
+            // For broadcast mentions (@everyone/@here), expand to all room occupants
+            if is_broadcast {
+                for jid in &occupant_bare_jids {
+                    if !push_jids.contains(jid) {
+                        push_jids.push(jid.clone());
+                    }
+                }
+            }
+
+            if !push_jids.is_empty() {
                 let body = muc_msg
                     .message
                     .bodies
@@ -1716,12 +1733,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 let room_jid_str = room_jid.to_string();
                 let nick = sender_nick.clone();
 
-                // Send push notifications in a background task to avoid blocking message delivery
                 tokio::spawn(async move {
                     crate::push::notify_mentioned_users(
                         push_store.as_ref(),
                         push_sender.as_ref(),
-                        &mentioned_jids,
+                        &push_jids,
                         &nick,
                         &body,
                         &room_jid_str,
@@ -7099,11 +7115,35 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         };
 
         let bare_jid = sender_jid.to_bare().to_string();
+        let endpoint = enable.options.iter().find(|(k, _)| k == "endpoint").map(|(_, v)| v.clone());
+
+        // SSRF protection: only allow https endpoints, reject private/local URLs
+        if let Some(ref ep) = endpoint {
+            if !ep.starts_with("https://") {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must use https".into(),
+                )));
+            }
+            let host = ep.trim_start_matches("https://").split('/').next().unwrap_or("");
+            let host_no_port = host.split(':').next().unwrap_or("");
+            if host_no_port == "localhost"
+                || host_no_port == "127.0.0.1"
+                || host_no_port == "::1"
+                || host_no_port.starts_with("10.")
+                || host_no_port.starts_with("192.168.")
+                || host_no_port.starts_with("169.254.")
+            {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+
         let sub = crate::push::PushSubscription {
             user_jid: bare_jid.clone(),
             service_jid: enable.jid.clone(),
             node: enable.node.clone(),
-            endpoint: enable.options.iter().find(|(k, _)| k == "endpoint").map(|(_, v)| v.clone()),
+            endpoint,
             p256dh: enable.options.iter().find(|(k, _)| k == "p256dh").map(|(_, v)| v.clone()),
             auth_key: enable.options.iter().find(|(k, _)| k == "auth").map(|(_, v)| v.clone()),
         };

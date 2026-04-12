@@ -27,11 +27,13 @@ pub struct HttpWebPushSender {
 }
 
 impl HttpWebPushSender {
-    /// Create a new HTTP Web Push sender.
+    /// Create a new HTTP Web Push sender with a 10-second request timeout.
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        Self { client }
     }
 }
 
@@ -50,15 +52,14 @@ impl WebPushSender for HttpWebPushSender {
         room_jid: &str,
     ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
         let endpoint = subscription.endpoint.clone();
-        let json_body = format!(
-            r#"{{"title":"{}","body":"{}","roomJid":"{}"}}"#,
-            title.replace('\\', "\\\\").replace('"', "\\\""),
-            body.replace('\\', "\\\\").replace('"', "\\\""),
-            room_jid.replace('\\', "\\\\").replace('"', "\\\""),
-        );
+        let payload = serde_json::json!({
+            "title": title,
+            "body": body,
+            "roomJid": room_jid,
+        });
         Box::pin(async move {
             let ep = endpoint.as_deref().ok_or(PushError::MissingEndpoint)?;
-            match self.client.post(ep).body(json_body).header("Content-Type", "application/json").send().await {
+            match self.client.post(ep).json(&payload).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     debug!(endpoint = %ep, "Push notification delivered");
                     Ok(())

@@ -43,6 +43,7 @@ function handleBellClick() {
         ? 'opacity-30 cursor-not-allowed'
         : 'hover:bg-foreground/10'"
       :title="bellTitle"
+      :aria-label="bellTitle"
       :disabled="notificationPermission === 'denied'"
       @click="handleBellClick"
     >
