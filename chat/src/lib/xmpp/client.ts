@@ -137,10 +137,12 @@ export class BrowserXmppClient {
     return this.xmpp ? history.searchMessages(this.xmpp, roomBareJidFor(this.session, w, c), query, max) : [];
   }
   async discoverWaddles(): Promise<DiscoveredWaddle[]> {
-    return discovery.discoverWaddles(this.xmpp!, this.session.jid);
+    await this.connect();
+    return this.xmpp ? discovery.discoverWaddles(this.xmpp, this.session.jid) : [];
   }
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
-    return discovery.discoverChannels(this.xmpp!, this.session.jid, waddleId);
+    await this.connect();
+    return this.xmpp ? discovery.discoverChannels(this.xmpp, this.session.jid, waddleId) : [];
   }
 
   // -- Private --
