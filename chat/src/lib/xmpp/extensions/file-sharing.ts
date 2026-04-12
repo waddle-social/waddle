@@ -16,7 +16,7 @@
  */
 import type { DefinitionOptions, FieldDefinition } from "stanza/jxt";
 import { attribute, deepChildText } from "stanza/jxt";
-import type XMLElement from "stanza/jxt/Element";
+import XMLElement from "stanza/jxt/Element";
 
 const NS_SFS_0 = "urn:xmpp:sfs:0";
 const NS_FILE_METADATA_0 = "urn:xmpp:file:metadata:0";
@@ -52,14 +52,12 @@ const urlField: FieldDefinition<string> = {
     if (!value) return;
     let sources = xml.getChild("sources", NS_SFS_0);
     if (!sources) {
-      const { default: XElem } = require("stanza/jxt/Element") as { default: new (name: string, attrs?: Record<string, string>) => XMLElement };
-      sources = new XElem("sources", { xmlns: NS_SFS_0 });
+      sources = new XMLElement("sources", { xmlns: NS_SFS_0 });
       xml.appendChild(sources);
     }
     let urlData = sources.getChild("url-data", NS_URL_DATA);
     if (!urlData) {
-      const { default: XElem } = require("stanza/jxt/Element") as { default: new (name: string, attrs?: Record<string, string>) => XMLElement };
-      urlData = new XElem("url-data", { xmlns: NS_URL_DATA });
+      urlData = new XMLElement("url-data", { xmlns: NS_URL_DATA });
       sources.appendChild(urlData);
     }
     urlData.setAttribute("target", value);
