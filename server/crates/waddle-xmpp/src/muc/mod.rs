@@ -15,7 +15,9 @@ pub mod federation;
 pub mod messages;
 pub mod owner;
 pub mod presence;
+pub mod room_actor;
 pub mod room_registry;
+pub mod room_registry_actor;
 
 pub use admin::{
     build_admin_result, build_admin_set_result, build_role_result, is_affiliation_change_query,
