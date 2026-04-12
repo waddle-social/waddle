@@ -2,7 +2,7 @@
 import type { ReceivedMessage } from "stanza/protocol";
 import type {
   CallInviteInfo, ChatStateEvent, ChatStateType, DisplayedEvent,
-  LiveRoomMessage, ReactionEvent, SharedFileInfo,
+  LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
 } from "./types";
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -79,7 +79,7 @@ export interface GroupchatHandlers {
   onChatState: ((event: ChatStateEvent) => void) | null;
   onDisplayed: ((event: DisplayedEvent) => void) | null;
   onReaction: ((event: ReactionEvent) => void) | null;
-  onActivity: ((roomJid: string) => void) | null;
+  onActivity: ((event: RoomActivityEvent) => void) | null;
 }
 
 /** Route an inbound groupchat message to the appropriate handler. */
@@ -89,7 +89,15 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
   if (!roomJid) return;
 
   if (roomJid !== h.currentRoom) {
-    if (msg.body) h.onActivity?.(roomJid);
+    if (msg.body) {
+      const partial: LiveRoomMessage = { id: "", roomJid, nick, body: msg.body, createdAt: "", type: "message" };
+      extractReferences(msg, partial);
+      extractExplicitMentions(msg, partial);
+      const activity: RoomActivityEvent = { roomJid, nick, body: msg.body };
+      if (partial.mentions) activity.mentions = partial.mentions;
+      if (partial.broadcastMention) activity.broadcastMention = partial.broadcastMention;
+      h.onActivity?.(activity);
+    }
     return;
   }
 

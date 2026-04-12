@@ -6,7 +6,7 @@ import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle,
-  DisplayedEvent, LiveRoomMessage, ReactionEvent, RoomHats, XmppStatusSnapshot,
+  DisplayedEvent, LiveRoomMessage, ReactionEvent, RoomActivityEvent, RoomHats, XmppStatusSnapshot,
 } from "./types";
 import { roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
@@ -73,7 +73,7 @@ export class BrowserXmppClient {
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private slowModeHandler: ((seconds: number) => void) | null = null;
-  private activityHandler: ((roomJid: string) => void) | null = null;
+  private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: Agent | null = null;
@@ -94,7 +94,7 @@ export class BrowserXmppClient {
   setDisplayedHandler(h: (event: DisplayedEvent) => void) { this.displayedHandler = h; }
   setHatsHandler(h: (hats: RoomHats) => void) { this.hatsHandler = h; }
   setSlowModeHandler(h: (seconds: number) => void) { this.slowModeHandler = h; }
-  setActivityHandler(h: (roomJid: string) => void) { this.activityHandler = h; }
+  setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
   setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
 

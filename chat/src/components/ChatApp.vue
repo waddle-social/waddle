@@ -5,6 +5,7 @@ import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
+import { useNotifications } from "@/composables/useNotifications";
 import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import LandingState from "@/components/chat/LandingState.vue";
@@ -62,6 +63,47 @@ const messaging = useMessaging(
   ui.actionError,
   ui.clearActionError,
 );
+
+const notifications = useNotifications();
+
+function resolveChannelNameFromJid(roomJid: string): string | null {
+  const localpart = roomJid.split("@")[0] ?? "";
+  const waddleId = waddles.activeWaddleId.value;
+  const channelId = waddleId && localpart.startsWith(`${waddleId}_`)
+    ? localpart.slice(waddleId.length + 1)
+    : localpart;
+  return waddles.channels.value.find((c) => c.id === channelId)?.name ?? null;
+}
+
+watch(() => messaging.lastMentionActivity.value, (event) => {
+  if (!event) return;
+
+  const channelName = resolveChannelNameFromJid(event.roomJid) ?? "unknown";
+  const isBroadcast = !!event.broadcastMention;
+  const isPersonalMention = event.mentions?.some(
+    (m) => m === auth.session.value?.username || m.split("@")[0] === auth.session.value?.username,
+  );
+
+  if (isBroadcast || isPersonalMention) {
+    notifications.showMentionNotification({
+      senderNick: event.nick,
+      channelName,
+      body: event.body,
+      roomJid: event.roomJid,
+      isBroadcast,
+      onNavigate: (roomJid) => {
+        const localpart = roomJid.split("@")[0] ?? "";
+        const waddleId = waddles.activeWaddleId.value;
+        const channelId = waddleId && localpart.startsWith(`${waddleId}_`)
+          ? localpart.slice(waddleId.length + 1)
+          : localpart;
+        void selectChannel(channelId);
+      },
+    });
+  }
+
+  messaging.lastMentionActivity.value = null;
+});
 
 const publicBrowseQuery = ref("");
 const isApplyingRoute = ref(false);
@@ -153,6 +195,9 @@ async function bootstrap() {
         updateUrl();
       }
     }
+
+    // Register service worker for push notifications (best-effort, non-blocking)
+    void notifications.registerServiceWorker();
   }
 }
 
@@ -380,7 +425,11 @@ onUnmounted(() => {
         <ProfilePanel
           v-if="auth.session.value"
           :session="auth.session.value"
+          :notification-permission="notifications.permissionState.value"
+          :notifications-enabled="notifications.notificationsEnabled.value"
           @logout="handleLogout"
+          @request-notifications="notifications.requestPermission()"
+          @toggle-notifications="notifications.notificationsEnabled.value = !notifications.notificationsEnabled.value"
         />
       </div>
     </AppDrawer>
