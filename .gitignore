@@ -1,6 +1,9 @@
 # XMPP XEPs
 xeps
 
+# Astro
+.astro/
+
 # Bun
 node_modules
 
