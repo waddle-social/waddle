@@ -26,6 +26,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "@xmpp/base64@0.14.0": "patches/@xmpp__base64@0.14.0.patch",
+  },
   "packages": {
     "@antfu/utils": ["@antfu/utils@0.7.10", "", {}, "sha512-+562v9k4aI80m1+VuMHehNJWLOFjBnXn3tdOitzD0il5b7smkSBal4+a3oKiQTbrwMmN/TBUMDvbdoWDehgOww=="],
 

@@ -419,16 +419,10 @@ async fn handle_sasl_plain(
     let parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
     debug!(parts_count = parts.len(), "SASL PLAIN parts");
 
-    let (username, password) = if parts.len() >= 3 {
-        (
-            String::from_utf8_lossy(parts[1]),
-            String::from_utf8_lossy(parts[2]),
-        )
+    let (username_bytes, password_bytes) = if parts.len() >= 3 {
+        (parts[1], parts[2])
     } else if parts.len() == 2 {
-        (
-            String::from_utf8_lossy(parts[0]),
-            String::from_utf8_lossy(parts[1]),
-        )
+        (parts[0], parts[1])
     } else {
         warn!(
             parts_count = parts.len(),
@@ -438,6 +432,27 @@ async fn handle_sasl_plain(
             r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
                 .to_string(),
         ];
+    };
+
+    let (username, password) = match (
+        String::from_utf8(username_bytes.to_vec()),
+        String::from_utf8(password_bytes.to_vec()),
+    ) {
+        (Ok(u), Ok(p)) => (u, p),
+        (Err(e), _) => {
+            warn!(error = %e, "SASL PLAIN: username is not valid UTF-8");
+            return vec![
+                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                    .to_string(),
+            ];
+        }
+        (_, Err(e)) => {
+            warn!(error = %e, "SASL PLAIN: password is not valid UTF-8");
+            return vec![
+                r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                    .to_string(),
+            ];
+        }
     };
 
     debug!(username = %username, password_len = password.len(), "SASL PLAIN credentials");
@@ -451,21 +466,29 @@ async fn handle_sasl_plain(
     {
         Ok(session) => {
             info!(jid = %username, user_id = %session.user_id, "SASL PLAIN authentication successful");
-            *authenticated = true;
-            *authenticated_session = Some(session.clone());
 
             // Create a bare JID string (full JID is set during resource binding)
             let bare_jid_str = if username.contains('@') {
-                username.to_string()
+                username.clone()
             } else {
                 format!("{}@{}", username, domain)
             };
 
             // Store as a temporary placeholder - will be replaced during resource binding
-            // For now, create with a temporary resource
-            if let Ok(full_jid) = format!("{}/pending", bare_jid_str).parse::<FullJid>() {
-                *session_jid = Some(full_jid);
-            }
+            let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
+                Ok(jid) => jid,
+                Err(e) => {
+                    warn!(username = %username, error = %e, "SASL PLAIN: JID construction failed");
+                    return vec![
+                        r#"<failure xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><not-authorized/></failure>"#
+                            .to_string(),
+                    ];
+                }
+            };
+
+            *authenticated = true;
+            *authenticated_session = Some(session.clone());
+            *session_jid = Some(full_jid);
 
             vec![r#"<success xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>"#.to_string()]
         }
