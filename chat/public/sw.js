@@ -13,7 +13,7 @@ self.addEventListener("push", (event) => {
       body: data.body ?? "",
       tag: data.roomJid,
       icon: "/favicon.svg",
-      data: { url: data.url ?? "/" },
+      data: { url: data.url ?? roomJidToPath(data.roomJid) },
     }),
   );
 });
@@ -25,12 +25,18 @@ self.addEventListener("notificationclick", (event) => {
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
       for (const client of windowClients) {
         if (client.url.includes(self.location.origin) && "focus" in client) {
-          client.focus();
-          client.navigate(url);
-          return;
+          return client.focus().then(() => client.navigate(url));
         }
       }
       return clients.openWindow(url);
     }),
   );
 });
+
+function roomJidToPath(roomJid) {
+  if (typeof roomJid !== "string") return "/";
+  const localpart = roomJid.split("@")[0] ?? "";
+  const parts = localpart.split("_");
+  if (parts.length < 2) return "/";
+  return `/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+}

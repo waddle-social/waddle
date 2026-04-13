@@ -108,8 +108,7 @@ export function useNotifications() {
     const auth = subJson.keys?.auth;
     if (!endpoint || !p256dh || !auth) return false;
 
-    const domain = userJid.includes("@") ? userJid.split("@")[1] ?? "" : "";
-    const serviceJid = PUSH_SERVICE_JID || (domain ? `push.${domain}` : "");
+    const serviceJid = resolvePushServiceJid(userJid);
     if (!serviceJid) return false;
 
     return xmppClient.enablePushNotifications({
@@ -121,6 +120,24 @@ export function useNotifications() {
     });
   }
 
+  async function disablePushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
+    const reg = swRegistration ?? (await registerServiceWorker());
+    if (reg) {
+      const existing = await reg.pushManager.getSubscription();
+      if (existing) {
+        await existing.unsubscribe();
+      }
+    }
+
+    const serviceJid = resolvePushServiceJid(userJid);
+    if (!serviceJid) return false;
+
+    return xmppClient.disablePushNotifications({
+      serviceJid,
+      node: "web-push",
+    });
+  }
+
   return {
     permissionState,
     notificationsEnabled,
@@ -129,7 +146,13 @@ export function useNotifications() {
     registerServiceWorker,
     subscribeToPush,
     syncPushSubscription,
+    disablePushSubscription,
   };
+}
+
+function resolvePushServiceJid(userJid: string): string {
+  const domain = userJid.includes("@") ? userJid.split("@")[1] ?? "" : "";
+  return PUSH_SERVICE_JID || (domain ? `push.${domain}` : "");
 }
 
 function loadEnabled(): boolean {

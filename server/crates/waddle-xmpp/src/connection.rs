@@ -7121,6 +7121,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .iter()
             .find(|(k, _)| k == "endpoint")
             .map(|(_, v)| v.clone());
+        let p256dh = enable
+            .options
+            .iter()
+            .find(|(k, _)| k == "p256dh")
+            .map(|(_, v)| v.clone());
+        let auth_key = enable
+            .options
+            .iter()
+            .find(|(k, _)| k == "auth")
+            .map(|(_, v)| v.clone());
+
+        if endpoint.is_none() || p256dh.is_none() || auth_key.is_none() {
+            return Err(XmppError::bad_request(Some(
+                "Push enable requires endpoint, p256dh, and auth options".into(),
+            )));
+        }
 
         // SSRF protection: only allow https endpoints and reject local/private targets.
         if let Some(ref ep) = endpoint {
@@ -7132,16 +7148,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             service_jid: enable.jid.clone(),
             node: enable.node.clone(),
             endpoint,
-            p256dh: enable
-                .options
-                .iter()
-                .find(|(k, _)| k == "p256dh")
-                .map(|(_, v)| v.clone()),
-            auth_key: enable
-                .options
-                .iter()
-                .find(|(k, _)| k == "auth")
-                .map(|(_, v)| v.clone()),
+            p256dh,
+            auth_key,
         };
 
         if let Err(e) = self.push_store.register(sub).await {
@@ -7251,6 +7259,11 @@ fn validate_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
                     "Push endpoint must not target private networks".into(),
                 )));
             }
+            if resolves_to_disallowed_ip(&host) {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
         }
         Some(Host::Ipv4(ipv4)) => {
             if is_disallowed_push_ipv4(ipv4) {
@@ -7274,6 +7287,18 @@ fn validate_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
     }
 
     Ok(())
+}
+
+fn resolves_to_disallowed_ip(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+
+    match (host, 443).to_socket_addrs() {
+        Ok(addrs) => addrs.into_iter().any(|addr| match addr.ip() {
+            std::net::IpAddr::V4(ipv4) => is_disallowed_push_ipv4(ipv4),
+            std::net::IpAddr::V6(ipv6) => is_disallowed_push_ipv6(ipv6),
+        }),
+        Err(_) => true,
+    }
 }
 
 fn is_disallowed_push_ipv4(ip: std::net::Ipv4Addr) -> bool {
@@ -7334,6 +7359,7 @@ impl Stanza {
 
 #[cfg(test)]
 mod tests {
+    use super::resolves_to_disallowed_ip;
     use super::validate_push_endpoint;
 
     #[test]
@@ -7359,5 +7385,10 @@ mod tests {
     #[test]
     fn rejects_link_local_ipv6_endpoint() {
         assert!(validate_push_endpoint("https://[fe80::1]/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_unresolvable_push_host() {
+        assert!(resolves_to_disallowed_ip("nonexistent.invalid"));
     }
 }

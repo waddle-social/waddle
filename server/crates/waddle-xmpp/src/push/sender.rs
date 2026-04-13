@@ -31,8 +31,9 @@ impl HttpWebPushSender {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
+            .expect("failed to build HTTP Web Push client");
         Self { client }
     }
 }
@@ -52,10 +53,20 @@ impl WebPushSender for HttpWebPushSender {
         room_jid: &str,
     ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
         let endpoint = subscription.endpoint.clone();
+        let subscription_endpoint = subscription.endpoint.clone();
+        let subscription_p256dh = subscription.p256dh.clone();
+        let subscription_auth = subscription.auth_key.clone();
+        // This sender targets an application relay/gateway endpoint. The relay is
+        // responsible for performing standards-compliant Web Push (VAPID/encryption)
+        // using the subscription keys supplied below.
         let payload = serde_json::json!({
             "title": title,
             "body": body,
             "roomJid": room_jid,
+            "url": room_jid_to_path(room_jid),
+            "endpoint": subscription_endpoint,
+            "p256dh": subscription_p256dh,
+            "auth": subscription_auth,
         });
         Box::pin(async move {
             let ep = endpoint.as_deref().ok_or(PushError::MissingEndpoint)?;
@@ -76,6 +87,14 @@ impl WebPushSender for HttpWebPushSender {
             }
         })
     }
+}
+
+fn room_jid_to_path(room_jid: &str) -> String {
+    let localpart = room_jid.split('@').next().unwrap_or_default();
+    if let Some((waddle_id, channel_id)) = localpart.split_once('_') {
+        return format!("/{}/{}", waddle_id, channel_id);
+    }
+    "/".to_string()
 }
 
 /// Send push notifications for mentioned users.
@@ -189,5 +208,11 @@ mod tests {
         )
         .await;
         assert_eq!(sender.count(), 0);
+    }
+
+    #[test]
+    fn room_jid_to_path_uses_waddle_and_channel_ids() {
+        assert_eq!(room_jid_to_path("w1_c2@conference.example.com"), "/w1/c2");
+        assert_eq!(room_jid_to_path("room@conference.example.com"), "/");
     }
 }

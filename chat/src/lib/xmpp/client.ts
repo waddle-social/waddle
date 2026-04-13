@@ -321,6 +321,27 @@ export class BrowserXmppClient {
     }
   }
 
+  async disablePushNotifications(opts: {
+    serviceJid: string;
+    node?: string;
+  }): Promise<boolean> {
+    await this.connect();
+    if (!this.xmpp) return false;
+    try {
+      await this.xmpp.sendIQ({
+        type: "set",
+        pushDisable: {
+          jid: opts.serviceJid,
+          node: opts.node ?? "web-push",
+        },
+      } as Parameters<Agent["sendIQ"]>[0]);
+      return true;
+    } catch (err) {
+      console.warn("Failed to disable XMPP push notifications", err);
+      return false;
+    }
+  }
+
   // -- Query delegators --
 
   async queryMam(w: string, c: string, max = 50): Promise<LiveRoomMessage[]> {

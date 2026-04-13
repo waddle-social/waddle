@@ -121,10 +121,12 @@ async function handleRequestNotifications() {
   }
 }
 
-function handleToggleNotifications() {
+async function handleToggleNotifications() {
   notifications.notificationsEnabled.value = !notifications.notificationsEnabled.value;
   if (notifications.notificationsEnabled.value) {
-    void setupPushSubscription();
+    await setupPushSubscription();
+  } else if (xmppClient.value && auth.session.value) {
+    await notifications.disablePushSubscription(xmppClient.value, auth.session.value.jid);
   }
 }
 
