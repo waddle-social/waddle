@@ -85,3 +85,14 @@ export interface DiscoveredChannel {
   id: string;
   name: string;
 }
+
+/** Cross-room activity event with optional mention data for notifications. */
+export interface RoomActivityEvent {
+  roomJid: string;
+  nick: string;
+  body: string;
+  /** XEP-0372 */
+  mentions?: string[];
+  /** XEP-0513 */
+  broadcastMention?: "everyone" | "here";
+}

@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
+use url::{Host, Url};
 use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
 use xmpp_parsers::presence::Type as PresenceType;
@@ -85,6 +86,10 @@ use crate::xep::xep0191::{
 };
 use crate::xep::xep0199::{build_ping_result, is_ping};
 use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
+use crate::xep::xep0357::{
+    build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
+    parse_push_disable, parse_push_enable,
+};
 use crate::xep::xep0363::{
     build_upload_error, build_upload_slot_response, is_upload_request, parse_upload_request,
     UploadError, UploadSlot,
@@ -166,13 +171,17 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     /// Whether the server operates in single-tenant mode (XEP-0503).
     /// When true, all spaces are publicly discoverable regardless of membership.
     single_tenant: bool,
+    /// XEP-0357 Push notification subscription store
+    push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
+    /// XEP-0357 Push notification sender
+    push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -191,6 +200,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
         github_enricher: Option<Arc<MessageEnricher>>,
         single_tenant: bool,
+        push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
+        push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -220,6 +231,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
             github_enricher,          // GitHub link enrichment (optional)
             single_tenant,            // XEP-0503: single-tenant mode for spaces
+            push_store,               // XEP-0357: push subscription store
+            push_sender,              // XEP-0357: push notification sender
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -1580,6 +1593,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let remote_domain_count = federated_messages.remote_domain_count();
         let remote_count = federated_messages.remote_count();
 
+        // XEP-0357: Collect occupant bare JIDs for broadcast mention push (before dropping room lock)
+        let occupant_bare_jids: Vec<String> = room
+            .occupants
+            .values()
+            .filter(|o| o.real_jid != sender_jid)
+            .map(|o| o.real_jid.to_bare().to_string())
+            .collect();
+
         drop(room); // Release the read lock before archival and sending
 
         // Archive the message to MAM storage (only if it has a body)
@@ -1681,6 +1702,49 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         );
                     }
                 }
+            }
+        }
+
+        // XEP-0357: Trigger push notifications for mentioned users
+        if muc_msg.has_body() {
+            let mut push_jids = crate::xep::xep0372::extract_mentioned_jids(&muc_msg.message);
+            let explicit = crate::xep::xep0513::extract_explicit_mentions(&muc_msg.message);
+            let is_broadcast = explicit.as_ref().is_some_and(|m| m.has_broadcast());
+
+            // For broadcast mentions (@everyone/@here), expand to all room occupants
+            if is_broadcast {
+                for jid in &occupant_bare_jids {
+                    if !push_jids.contains(jid) {
+                        push_jids.push(jid.clone());
+                    }
+                }
+            }
+
+            if !push_jids.is_empty() {
+                let body = muc_msg
+                    .message
+                    .bodies
+                    .get("")
+                    .or_else(|| muc_msg.message.bodies.values().next())
+                    .map(|b| b.0.clone())
+                    .unwrap_or_default();
+
+                let push_store = Arc::clone(&self.push_store);
+                let push_sender = Arc::clone(&self.push_sender);
+                let room_jid_str = room_jid.to_string();
+                let nick = sender_nick.clone();
+
+                tokio::spawn(async move {
+                    crate::push::notify_mentioned_users(
+                        push_store.as_ref(),
+                        push_sender.as_ref(),
+                        &push_jids,
+                        &nick,
+                        &body,
+                        &room_jid_str,
+                    )
+                    .await;
+                });
             }
         }
 
@@ -3728,6 +3792,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a PubSub/PEP IQ (XEP-0060/XEP-0163)
         if is_pubsub_iq(&iq) {
             return self.handle_pubsub_iq(iq).await;
+        }
+
+        // Check if this is a push notification enable request (XEP-0357)
+        if is_push_enable(&iq) {
+            return self.handle_push_enable(iq).await;
+        }
+
+        // Check if this is a push notification disable request (XEP-0357)
+        if is_push_disable(&iq) {
+            return self.handle_push_disable(iq).await;
         }
 
         // Unhandled IQ get/set - RFC 6120 §8.2.3 requires an error response
@@ -7018,6 +7092,114 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
     }
+
+    // =========================================================================
+    // XEP-0357 Push Notification Handlers
+    // =========================================================================
+
+    async fn handle_push_enable(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Push enable received before JID bound");
+                return Err(XmppError::not_authorized(Some("Not authenticated".into())));
+            }
+        };
+
+        let enable = match parse_push_enable(&iq) {
+            Some(e) => e,
+            None => {
+                return Err(XmppError::bad_request(Some(
+                    "Invalid push enable request".into(),
+                )));
+            }
+        };
+
+        let bare_jid = sender_jid.to_bare().to_string();
+        let endpoint = enable
+            .options
+            .iter()
+            .find(|(k, _)| k == "endpoint")
+            .map(|(_, v)| v.clone());
+
+        // SSRF protection: only allow https endpoints and reject local/private targets.
+        if let Some(ref ep) = endpoint {
+            validate_push_endpoint(ep)?;
+        }
+
+        let sub = crate::push::PushSubscription {
+            user_jid: bare_jid.clone(),
+            service_jid: enable.jid.clone(),
+            node: enable.node.clone(),
+            endpoint,
+            p256dh: enable
+                .options
+                .iter()
+                .find(|(k, _)| k == "p256dh")
+                .map(|(_, v)| v.clone()),
+            auth_key: enable
+                .options
+                .iter()
+                .find(|(k, _)| k == "auth")
+                .map(|(_, v)| v.clone()),
+        };
+
+        if let Err(e) = self.push_store.register(sub).await {
+            warn!(user = %bare_jid, error = %e, "Failed to register push subscription");
+            return Err(XmppError::internal_server_error(Some(
+                "Failed to store push subscription".into(),
+            )));
+        }
+
+        debug!(
+            user = %bare_jid,
+            service = %enable.jid,
+            node = ?enable.node,
+            "Push notification subscription registered"
+        );
+
+        let response = build_push_enable_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await
+    }
+
+    async fn handle_push_disable(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone(),
+            None => {
+                warn!("Push disable received before JID bound");
+                return Err(XmppError::not_authorized(Some("Not authenticated".into())));
+            }
+        };
+
+        let disable = match parse_push_disable(&iq) {
+            Some(d) => d,
+            None => {
+                return Err(XmppError::bad_request(Some(
+                    "Invalid push disable request".into(),
+                )));
+            }
+        };
+
+        let bare_jid = sender_jid.to_bare().to_string();
+
+        if let Err(e) = self
+            .push_store
+            .remove(&bare_jid, &disable.jid, disable.node.as_deref())
+            .await
+        {
+            warn!(user = %bare_jid, error = %e, "Failed to remove push subscription");
+        }
+
+        debug!(
+            user = %bare_jid,
+            service = %disable.jid,
+            node = ?disable.node,
+            "Push notification subscription removed"
+        );
+
+        let response = build_push_disable_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await
+    }
 }
 
 fn extract_origin_id(msg: &xmpp_parsers::message::Message) -> Option<String> {
@@ -7051,6 +7233,77 @@ fn isr_token_in_sasl_success_enabled() -> bool {
     )
 }
 
+fn validate_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
+    let url = Url::parse(endpoint)
+        .map_err(|_| XmppError::bad_request(Some("Invalid push endpoint URL".into())))?;
+
+    if url.scheme() != "https" {
+        return Err(XmppError::bad_request(Some(
+            "Push endpoint must use https".into(),
+        )));
+    }
+
+    match url.host() {
+        Some(Host::Domain(host)) => {
+            let host = host.to_ascii_lowercase();
+            if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+        Some(Host::Ipv4(ipv4)) => {
+            if is_disallowed_push_ipv4(ipv4) {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+        Some(Host::Ipv6(ipv6)) => {
+            if is_disallowed_push_ipv6(ipv6) {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+        None => {
+            return Err(XmppError::bad_request(Some(
+                "Invalid push endpoint URL".into(),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_disallowed_push_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+
+    // RFC 6598: 100.64.0.0/10 (Carrier-grade NAT)
+    let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000;
+    // RFC 2544: 198.18.0.0/15 (Benchmarking)
+    let is_benchmark = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
+
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || is_cgnat
+        || is_benchmark
+}
+
+fn is_disallowed_push_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_disallowed_push_ipv4(mapped);
+    }
+
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip.is_multicast()
+}
+
 /// Parsed stanza types.
 #[derive(Debug, Clone)]
 pub enum Stanza {
@@ -7076,5 +7329,35 @@ impl Stanza {
             Stanza::Presence(p) => p.clone().into(),
             Stanza::Iq(i) => i.clone().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_push_endpoint;
+
+    #[test]
+    fn accepts_public_https_endpoint() {
+        assert!(validate_push_endpoint("https://push.example.com/notify").is_ok());
+    }
+
+    #[test]
+    fn rejects_non_https_endpoint() {
+        assert!(validate_push_endpoint("http://push.example.com/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_localhost_endpoint() {
+        assert!(validate_push_endpoint("https://localhost/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_private_ipv4_endpoint() {
+        assert!(validate_push_endpoint("https://10.0.0.12/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_link_local_ipv6_endpoint() {
+        assert!(validate_push_endpoint("https://[fe80::1]/notify").is_err());
     }
 }

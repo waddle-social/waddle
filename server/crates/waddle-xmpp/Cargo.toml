@@ -34,6 +34,7 @@ rustls-pemfile = "2.2"
 
 # Serialization
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Error Handling
 thiserror = { workspace = true }
@@ -46,6 +47,7 @@ opentelemetry = { workspace = true }
 # Utilities
 uuid = { workspace = true }
 chrono = { workspace = true }
+url = { workspace = true }
 base64 = { workspace = true }
 
 # HTML rendering
@@ -60,6 +62,9 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }
 pbkdf2 = { version = "0.12", features = ["hmac"] }
+
+# HTTP client (for Web Push notifications)
+reqwest = { workspace = true }
 
 # GitHub link enrichment
 waddle-xmpp-xep-github = { path = "../waddle-xmpp-xep-github" }

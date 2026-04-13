@@ -5,6 +5,7 @@ import {
   BrowserXmppClient,
   roomBareJidFor,
   type LiveRoomMessage,
+  type RoomActivityEvent,
   type XmppStatusSnapshot,
   type ChatStateType,
   type RoomHats,
@@ -70,6 +71,7 @@ export function useMessaging(
   const roomHats = ref<RoomHats>({});
   const slowModeCooldown = ref(0);
   const activeChannels = ref<Set<string>>(new Set());
+  const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
   const searchQuery = ref("");
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
@@ -112,6 +114,27 @@ export function useMessaging(
         }
 
         mergeLiveMessage(fromLiveMessage(session.value!, msg));
+
+        // Trigger notification for mentions when tab is unfocused
+        const isTabHidden = typeof document !== "undefined"
+          && (!document.hasFocus() || document.visibilityState === "hidden");
+        if (msg.nick !== session.value?.username && isTabHidden) {
+          const isMentioned =
+            !!msg.broadcastMention ||
+            msg.mentions?.some(
+              (m) => m === session.value?.username || m.split("@")[0] === session.value?.username,
+            );
+          if (isMentioned) {
+            const activity: RoomActivityEvent = {
+              roomJid: msg.roomJid,
+              nick: msg.nick,
+              body: msg.body,
+            };
+            if (msg.mentions) activity.mentions = msg.mentions;
+            if (msg.broadcastMention) activity.broadcastMention = msg.broadcastMention;
+            lastMentionActivity.value = activity;
+          }
+        }
       });
       client.setStatusHandler((status) => {
         xmppStatus.value = status;
@@ -135,8 +158,11 @@ export function useMessaging(
       client.setHatsHandler((hats) => {
         roomHats.value = hats;
       });
-      client.setActivityHandler((roomJid) => {
-        activeChannels.value = new Set([...activeChannels.value, roomJid]);
+      client.setActivityHandler((event) => {
+        activeChannels.value = new Set([...activeChannels.value, event.roomJid]);
+        if (event.mentions?.length || event.broadcastMention) {
+          lastMentionActivity.value = event;
+        }
       });
       // XEP-0486: Track room avatar hashes from presence
       client.setRoomAvatarHandler((roomJid, hash) => {
@@ -619,5 +645,6 @@ export function useMessaging(
     clearSearch,
     clearChannelActivity,
     scrollToBottom,
+    lastMentionActivity,
   };
 }

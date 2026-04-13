@@ -8,6 +8,7 @@ import fileSharing from "./file-sharing";
 import stickers from "./stickers";
 import calls from "./calls";
 import mentions from "./mentions";
+import push from "./push";
 
 const allDefinitions = [
   ...hats,
@@ -18,6 +19,7 @@ const allDefinitions = [
   ...stickers,
   ...calls,
   ...mentions,
+  ...push,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {

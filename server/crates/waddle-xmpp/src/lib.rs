@@ -35,6 +35,7 @@ pub mod parser;
 pub mod presence;
 pub mod prometheus;
 pub mod pubsub;
+pub mod push;
 pub mod registry;
 pub mod roster;
 pub mod routing;

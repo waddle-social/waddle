@@ -10,6 +10,7 @@ export type {
   LiveRoomMessage,
   OccupantHat,
   ReactionEvent,
+  RoomActivityEvent,
   RoomHats,
   SharedFileInfo,
   XmppStatusSnapshot,
