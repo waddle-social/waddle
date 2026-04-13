@@ -1,7 +1,7 @@
 /** BrowserXmppClient — thin orchestrator that delegates to functional modules. */
 import { createClient } from "stanza";
 import type { Agent } from "stanza";
-import type { ReceivedMUCPresence, ReceivedPresence } from "stanza/protocol";
+import type { ReceivedMUCPresence } from "stanza/protocol";
 import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
@@ -243,12 +243,12 @@ export class BrowserXmppClient {
 
       const cleanup = () => {
         clearTimeout(timeout);
-        xmpp.off("presence", onPresence);
+        xmpp.off("muc:available", onMucPresence);
         xmpp.off("disconnected", onDisconnected);
       };
 
-      const onPresence = (presence: ReceivedPresence) => {
-        const from = presence.from ?? "";
+      const onMucPresence = (pres: ReceivedMUCPresence) => {
+        const from = pres.from ?? "";
         if (from === fullJid) {
           cleanup();
           resolve();
@@ -260,7 +260,7 @@ export class BrowserXmppClient {
         reject(error ?? new Error("XMPP disconnected while joining room"));
       };
 
-      xmpp.on("presence", onPresence);
+      xmpp.on("muc:available", onMucPresence);
       xmpp.on("disconnected", onDisconnected);
     });
   }
