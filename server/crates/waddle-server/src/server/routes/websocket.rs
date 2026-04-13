@@ -667,16 +667,15 @@ async fn handle_muc_join(
 
     // Send existing occupants' presence to the joining user
     for (existing_jid, existing_nick, affiliation, role) in &existing_occupants {
-        let presence = format!(
-            r#"<presence from="{}/{}" to="{}"><x xmlns="http://jabber.org/protocol/muc#user"><item affiliation="{}" role="{}" jid="{}"/></x></presence>"#,
+        responses.push(build_muc_join_presence_xml(
             room_jid,
             existing_nick,
             sender_jid,
             affiliation_str(*affiliation),
             role_str(*role),
-            existing_jid
-        );
-        responses.push(presence);
+            existing_jid,
+            false,
+        ));
     }
 
     // Broadcast the new occupant's presence to all existing occupants
@@ -691,22 +690,24 @@ async fn handle_muc_join(
     }
 
     // Send self-presence to the joining user (with status code 110)
-    let self_presence = format!(
-        r#"<presence from="{}/{}" to="{}"><x xmlns="http://jabber.org/protocol/muc#user"><item affiliation="member" role="participant" jid="{}"/><status code="110"/></x></presence>"#,
-        room_jid, nick, sender_jid, sender_jid
-    );
-    responses.push(self_presence);
+    responses.push(build_muc_join_presence_xml(
+        room_jid,
+        nick,
+        sender_jid,
+        "member",
+        "participant",
+        sender_jid,
+        true,
+    ));
 
     // Send room subject
     let room_name = room_jid
         .node()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "Waddle".to_string());
-    let subject = format!(
-        r#"<message from="{}" to="{}" type="groupchat"><subject>Welcome to {}!</subject></message>"#,
-        room_jid, sender_jid, room_name
-    );
-    responses.push(subject);
+    responses.push(build_muc_subject_message_xml(
+        room_jid, sender_jid, &room_name,
+    ));
 
     responses
 }
@@ -1518,6 +1519,60 @@ fn prototype_body(message: &xmpp_parsers::message::Message) -> Option<String> {
         .map(|body| body.0.clone())
 }
 
+fn build_muc_join_presence_xml(
+    room_jid: &BareJid,
+    nick: &str,
+    to_jid: &FullJid,
+    affiliation: &str,
+    role: &str,
+    real_jid: &FullJid,
+    include_self_status: bool,
+) -> String {
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(nick)
+        .unwrap_or_else(|_| to_jid.clone());
+
+    let mut user_payload = Element::builder("x", "http://jabber.org/protocol/muc#user").append(
+        Element::builder("item", "http://jabber.org/protocol/muc#user")
+            .attr("affiliation", affiliation)
+            .attr("role", role)
+            .attr("jid", real_jid.to_string())
+            .build(),
+    );
+
+    if include_self_status {
+        user_payload = user_payload.append(
+            Element::builder("status", "http://jabber.org/protocol/muc#user")
+                .attr("code", "110")
+                .build(),
+        );
+    }
+
+    element_to_xml(
+        Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr("from", from_jid.to_string())
+            .attr("to", to_jid.to_string())
+            .append(user_payload.build())
+            .build(),
+    )
+}
+
+fn build_muc_subject_message_xml(room_jid: &BareJid, to_jid: &FullJid, room_name: &str) -> String {
+    element_to_xml(
+        Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr("from", room_jid.to_string())
+            .attr("to", to_jid.to_string())
+            .attr("type", "groupchat")
+            .append(
+                Element::builder("subject", waddle_xmpp::ns::JABBER_CLIENT)
+                    .append(format!("Welcome to {}!", room_name))
+                    .build(),
+            )
+            .build(),
+    )
+}
+
 fn build_muc_self_unavailable_xml(room_jid: &BareJid, nick: &str, sender_jid: &FullJid) -> String {
     let from_jid = room_jid
         .clone()
@@ -1965,6 +2020,39 @@ mod tests {
         assert_eq!(room.find_nick_by_real_jid(&current_jid), Some("alice"));
         assert!(room.find_nick_by_real_jid(&stale_jid).is_none());
         assert_eq!(room.occupant_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn muc_join_responses_use_client_namespace() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "waddle_channel@muc.example.com".parse().expect("room jid");
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+        let responses = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &sender_jid,
+            "alice",
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2);
+
+        let self_presence = Element::from_str(&responses[0]).expect("self presence xml");
+        assert_eq!(self_presence.name(), "presence");
+        assert_eq!(self_presence.ns(), waddle_xmpp::ns::JABBER_CLIENT);
+        let user_x = self_presence
+            .get_child("x", "http://jabber.org/protocol/muc#user")
+            .expect("muc user payload");
+        assert!(user_x
+            .children()
+            .any(|child| child.name() == "status" && child.attr("code") == Some("110")));
+
+        let subject_message = Element::from_str(&responses[1]).expect("subject xml");
+        assert_eq!(subject_message.name(), "message");
+        assert_eq!(subject_message.ns(), waddle_xmpp::ns::JABBER_CLIENT);
+        assert_eq!(subject_message.attr("type"), Some("groupchat"));
     }
 
     #[test]
