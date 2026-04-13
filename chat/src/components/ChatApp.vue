@@ -64,6 +64,8 @@ const messaging = useMessaging(
 );
 
 const publicBrowseQuery = ref("");
+const isApplyingRoute = ref(false);
+let routeRequestId = 0;
 
 async function sendGif(url: string) {
   await messaging.sendMessage(url);
@@ -72,6 +74,7 @@ async function sendGif(url: string) {
 // --- Deep linking ---
 
 function updateUrl() {
+  if (isApplyingRoute.value) return;
   pushRoute(waddles.currentWaddle.value, waddles.currentChannel.value);
 }
 
@@ -79,21 +82,38 @@ watch([waddles.activeWaddleId, waddles.activeChannelId], updateUrl);
 
 function onPopState() {
   const route = parseRoute(window.location.pathname);
+  if (!route.waddleSlug) return;
+
+  const requestId = ++routeRequestId;
+  isApplyingRoute.value = true;
+  void applyRouteTarget(route, requestId).finally(() => {
+    if (requestId === routeRequestId) {
+      isApplyingRoute.value = false;
+    }
+  });
+}
+
+async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId: number) {
   if (route.waddleSlug) {
     const w = resolveWaddle(route.waddleSlug, waddles.waddles.value);
     if (w && w.id !== waddles.activeWaddleId.value) {
-      const ch = route.channelSlug
-        ? resolveChannel(route.channelSlug, waddles.channels.value)
-        : undefined;
-      void selectWaddle(w.id, ch?.id);
-      return;
+      waddles.activeWaddleId.value = w.id;
+      await waddles.loadStructure(w.id);
+      if (requestId !== routeRequestId) return;
     }
   }
-  if (route.channelSlug) {
+
+  if (route.channelSlug && waddles.activeWaddleId.value) {
     const ch = resolveChannel(route.channelSlug, waddles.channels.value);
-    if (ch && ch.id !== waddles.activeChannelId.value) {
-      void selectChannel(ch.id);
+    const channelId = ch?.id ?? waddles.activeChannelId.value;
+    if (channelId) {
+      waddles.activeChannelId.value = channelId;
+      messaging.clearMessages();
+      await messaging.loadMessages(waddles.activeWaddleId.value, channelId);
     }
+  } else if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
+    messaging.clearMessages();
+    await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
   }
 }
 
@@ -105,34 +125,19 @@ async function bootstrap() {
     xmppClient.value = new BrowserXmppClient(auth.session.value);
 
     const route = parseRoute(window.location.pathname);
+    const requestId = ++routeRequestId;
+    isApplyingRoute.value = true;
 
-    // Resolve waddle slug to ID for initial load
-    const preferredWaddleId = route.waddleSlug
-      ? undefined // will resolve after loading list
-      : undefined;
-
-    await waddles.loadWaddles(preferredWaddleId);
-
-    // Resolve slug after waddles are loaded
-    if (route.waddleSlug) {
-      const w = resolveWaddle(route.waddleSlug, waddles.waddles.value);
-      if (w && w.id !== waddles.activeWaddleId.value) {
-        waddles.activeWaddleId.value = w.id;
-        await waddles.loadStructure(w.id);
+    try {
+      await waddles.loadWaddles();
+      if (requestId === routeRequestId) {
+        await applyRouteTarget(route, requestId);
       }
-    }
-
-    // Resolve channel slug after channels are loaded
-    if (route.channelSlug && waddles.activeWaddleId.value) {
-      const ch = resolveChannel(route.channelSlug, waddles.channels.value);
-      if (ch) {
-        waddles.activeChannelId.value = ch.id;
-        await messaging.loadMessages(waddles.activeWaddleId.value, ch.id);
-      } else if (waddles.activeChannelId.value) {
-        await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
+    } finally {
+      if (requestId === routeRequestId) {
+        isApplyingRoute.value = false;
+        updateUrl();
       }
-    } else if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
-      await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
     }
   }
 }
@@ -153,6 +158,7 @@ async function selectWaddle(waddleId: string, preferredChannelId?: string | null
   waddles.activeWaddleId.value = waddleId;
   const channelId = await waddles.loadStructure(waddleId, preferredChannelId);
   if (channelId) {
+    messaging.clearMessages();
     await messaging.loadMessages(waddleId, channelId);
   }
   ui.showMobileNav.value = false;
@@ -178,6 +184,7 @@ async function handleCreateWaddle() {
     ui.showCreateWaddle.value = false;
     const channelId = await waddles.loadStructure(created.id);
     if (channelId) {
+      messaging.clearMessages();
       await messaging.loadMessages(created.id, channelId);
     }
   }
@@ -198,6 +205,7 @@ async function handleJoinPublicWaddle(waddleId: string) {
 
   ui.showBrowsePublicWaddles.value = false;
   if (joined.channelId) {
+    messaging.clearMessages();
     await messaging.loadMessages(joined.waddleId, joined.channelId);
   }
 }
@@ -207,6 +215,7 @@ async function handleCreateChannel() {
   if (created) {
     ui.showCreateChannel.value = false;
     if (waddles.activeWaddleId.value) {
+      messaging.clearMessages();
       await messaging.loadMessages(waddles.activeWaddleId.value, created.id);
     }
   }
@@ -226,6 +235,7 @@ async function confirmDeleteChannel() {
   await waddles.deleteChannel();
   ui.showEditChannel.value = false;
   if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
+    messaging.clearMessages();
     await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
   }
 }
@@ -244,6 +254,7 @@ async function confirmDeleteWaddle() {
   await waddles.deleteWaddle();
   ui.showWaddleSettings.value = false;
   if (waddles.activeWaddleId.value && waddles.activeChannelId.value) {
+    messaging.clearMessages();
     await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
   }
 }

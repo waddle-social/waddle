@@ -19,6 +19,7 @@ export function useMembers(
   const isSearchingUsers = ref(false);
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let searchRequestId = 0;
 
   watch(memberQuery, (query) => {
     if (searchTimer) {
@@ -28,67 +29,91 @@ export function useMembers(
 
     const trimmed = query.trim();
     if (!trimmed || !api.value || !canManageMembers.value || !activeWaddleId.value) {
+      searchRequestId++;
       memberSearchResults.value = [];
       isSearchingUsers.value = false;
       return;
     }
 
     searchTimer = setTimeout(async () => {
+      const requestId = ++searchRequestId;
+      const client = api.value;
+      const waddleId = activeWaddleId.value;
+      if (!client || !waddleId || !canManageMembers.value) return;
+
       isSearchingUsers.value = true;
       try {
-        const res = await api.value!.searchUsers(trimmed);
+        const res = await client.searchUsers(trimmed);
+        if (
+          requestId !== searchRequestId ||
+          activeWaddleId.value !== waddleId ||
+          memberQuery.value.trim() !== trimmed
+        )
+          return;
+
         const existingIds = new Set(members.value.map((m) => m.user_id));
         memberSearchResults.value = res.users.filter((u) => !existingIds.has(u.id));
       } catch (e) {
-        actionError.value = normalizeError(e);
+        if (requestId === searchRequestId) {
+          actionError.value = normalizeError(e);
+        }
       } finally {
-        isSearchingUsers.value = false;
+        if (requestId === searchRequestId) {
+          isSearchingUsers.value = false;
+        }
       }
     }, 220);
   });
 
   async function addMember(userId: string) {
-    if (!api.value || !activeWaddleId.value) return;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!api.value || !waddleId) return;
 
     clearActionError();
     try {
-      await api.value.addMember(activeWaddleId.value, {
+      await api.value.addMember(waddleId, {
         user_id: userId,
         role: newMemberRole.value,
       });
       memberQuery.value = "";
       memberSearchResults.value = [];
-      await reloadStructure(activeWaddleId.value, activeChannelId.value);
+      await reloadStructure(waddleId, channelId);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
   }
 
   async function updateMemberRole(member: MemberSummary, role: EditableRole) {
-    if (!api.value || !activeWaddleId.value || member.role === "owner") return;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!api.value || !waddleId || member.role === "owner") return;
 
     clearActionError();
     try {
-      await api.value.updateMemberRole(activeWaddleId.value, member.user_id, role);
-      await reloadStructure(activeWaddleId.value, activeChannelId.value);
+      await api.value.updateMemberRole(waddleId, member.user_id, role);
+      await reloadStructure(waddleId, channelId);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
   }
 
   async function removeMember(member: MemberSummary) {
-    if (!api.value || !activeWaddleId.value || member.role === "owner") return;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!api.value || !waddleId || member.role === "owner") return;
 
     clearActionError();
     try {
-      await api.value.removeMember(activeWaddleId.value, member.user_id);
-      await reloadStructure(activeWaddleId.value, activeChannelId.value);
+      await api.value.removeMember(waddleId, member.user_id);
+      await reloadStructure(waddleId, channelId);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
   }
 
   function clearSearch() {
+    searchRequestId++;
     memberQuery.value = "";
     memberSearchResults.value = [];
     newMemberRole.value = "member";

@@ -72,6 +72,8 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private currentRoom: string | null = null;
+  private roomSwitchPromise: Promise<void> | null = null;
+  private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
 
@@ -98,6 +100,8 @@ export class BrowserXmppClient {
       this.xmpp = null;
     }
     this.currentRoom = null;
+    this.roomSwitchPromise = null;
+    this.roomSwitchTarget = null;
     this.roomHats = {};
     this.hatsHandler?.({});
     const xmpp = createClient({
@@ -140,8 +144,11 @@ export class BrowserXmppClient {
 
   async disconnect() {
     if (!this.xmpp) return;
-    if (this.currentRoom) {
-      try { await this.xmpp.leaveRoom(this.currentRoom, this.session.username); } catch { /* best-effort */ }
+    const currentRoom = this.currentRoom;
+    this.roomSwitchPromise = null;
+    this.roomSwitchTarget = null;
+    if (currentRoom) {
+      try { await this.xmpp.leaveRoom(currentRoom, this.session.username); } catch { /* best-effort */ }
     }
     this.stopSelfPing();
     const xmpp = this.xmpp;
@@ -157,14 +164,54 @@ export class BrowserXmppClient {
   async switchRoom(waddleId: string, channelId: string) {
     await this.connect();
     const nextRoom = roomBareJidFor(this.session, waddleId, channelId);
+
+    const pendingSwitch = this.roomSwitchPromise;
+    if (pendingSwitch) {
+      if (this.roomSwitchTarget === nextRoom) {
+        await pendingSwitch;
+        return;
+      }
+      await pendingSwitch.catch(() => undefined);
+    }
+
     if (this.currentRoom === nextRoom) return;
+
+    const switchPromise = this.performRoomSwitch(nextRoom);
+    this.roomSwitchPromise = switchPromise;
+    this.roomSwitchTarget = nextRoom;
+    try {
+      await switchPromise;
+    } finally {
+      if (this.roomSwitchPromise === switchPromise) {
+        this.roomSwitchPromise = null;
+        this.roomSwitchTarget = null;
+      }
+    }
+  }
+
+  private async performRoomSwitch(nextRoom: string) {
     if (this.currentRoom && this.xmpp) {
       try { await this.xmpp.leaveRoom(this.currentRoom, this.session.username); } catch { /* best-effort */ }
     }
     this.currentRoom = nextRoom;
     this.roomHats = {};
     this.hatsHandler?.({});
-    if (this.xmpp) { await this.xmpp.joinRoom(nextRoom, this.session.username); this.startSelfPing(); }
+    const xmpp = this.xmpp;
+    if (!xmpp) return;
+
+    try {
+      await xmpp.joinRoom(nextRoom, this.session.username);
+      if (this.xmpp !== xmpp || this.currentRoom !== nextRoom) return;
+      this.startSelfPing();
+    } catch (error) {
+      if (this.currentRoom === nextRoom) {
+        this.currentRoom = null;
+        this.stopSelfPing();
+        this.roomHats = {};
+        this.hatsHandler?.({});
+      }
+      throw error;
+    }
   }
 
   // -- Send delegators --
@@ -242,6 +289,8 @@ export class BrowserXmppClient {
         this.connectPromise = null;
         this.xmpp = null;
         this.currentRoom = null;
+        this.roomSwitchPromise = null;
+        this.roomSwitchTarget = null;
         this.roomHats = {};
         this.hatsHandler?.({});
         this.stopSelfPing();

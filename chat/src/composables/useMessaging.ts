@@ -77,6 +77,7 @@ export function useMessaging(
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let messageRequestId = 0;
+  let searchRequestId = 0;
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -197,19 +198,27 @@ export function useMessaging(
   }
 
   function notifyComposing() {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    const client = xmppClient.value;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!client || !waddleId || !channelId) return;
 
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      xmppClient.value.sendChatState(activeWaddleId.value, activeChannelId.value, "composing");
+      client.sendChatState(waddleId, channelId, "composing");
     }
 
     // Reset the pause timer: if user stops typing for 3s, send "paused"
     if (composingTimeout) clearTimeout(composingTimeout);
     composingTimeout = setTimeout(() => {
-      if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+      if (
+        xmppClient.value !== client ||
+        activeWaddleId.value !== waddleId ||
+        activeChannelId.value !== channelId
+      )
+        return;
       lastChatState = "paused";
-      xmppClient.value.sendChatState(activeWaddleId.value, activeChannelId.value, "paused");
+      client.sendChatState(waddleId, channelId, "paused");
     }, 3000);
   }
 
@@ -375,10 +384,13 @@ export function useMessaging(
 
   async function sendMessage(explicitBody?: string) {
     const bodyText = explicitBody ?? draft.value;
+    const client = xmppClient.value;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
     if (
-      !xmppClient.value ||
-      !activeWaddleId.value ||
-      !activeChannelId.value ||
+      !client ||
+      !waddleId ||
+      !channelId ||
       !bodyText.trim()
     )
       return;
@@ -387,13 +399,13 @@ export function useMessaging(
     clearActionError();
 
     try {
-      const msgId = await xmppClient.value.sendGroupMessage(
-        activeWaddleId.value,
-        activeChannelId.value,
-        bodyText,
-      );
+      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText);
+      const isStillCurrentChannel =
+        xmppClient.value === client &&
+        activeWaddleId.value === waddleId &&
+        activeChannelId.value === channelId;
 
-      if (msgId && session.value) {
+      if (msgId && session.value && isStillCurrentChannel) {
         // Optimistic insert: show message immediately with "sending" status
         const optimistic: TimelineMessage = {
           id: msgId,
@@ -408,16 +420,18 @@ export function useMessaging(
       }
 
       // Only clear draft when sending from the composer (not explicit body)
-      if (!explicitBody) {
+      if (!explicitBody && isStillCurrentChannel) {
         draft.value = "";
       }
       // Send "active" state after sending a message (stops composing indicator)
-      if (composingTimeout) {
-        clearTimeout(composingTimeout);
-        composingTimeout = null;
+      if (isStillCurrentChannel) {
+        if (composingTimeout) {
+          clearTimeout(composingTimeout);
+          composingTimeout = null;
+        }
+        lastChatState = "active";
       }
-      lastChatState = "active";
-      await xmppClient.value.sendChatState(activeWaddleId.value, activeChannelId.value, "active");
+      await client.sendChatState(waddleId, channelId, "active");
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
@@ -511,39 +525,61 @@ export function useMessaging(
   }
 
   function disconnect() {
+    messageRequestId++;
+    searchRequestId++;
     xmppStatus.value = { state: "offline", detail: "Live room offline" };
     clearTypingState();
+    isLoadingMessages.value = false;
+    isSearching.value = false;
   }
 
   function clearMessages() {
+    messageRequestId++;
     messages.value = [];
+    isLoadingMessages.value = false;
+    clearTypingState();
   }
 
   async function searchMessages(query: string) {
-    if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    const client = xmppClient.value;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!client || !waddleId || !channelId) return;
+    const requestId = ++searchRequestId;
     const trimmed = query.trim();
     searchQuery.value = trimmed;
     if (!trimmed) {
       searchResults.value = [];
+      isSearching.value = false;
       return;
     }
     isSearching.value = true;
     try {
-      searchResults.value = await xmppClient.value.searchMessages(
-        activeWaddleId.value,
-        activeChannelId.value,
-        trimmed,
-      );
+      const results = await client.searchMessages(waddleId, channelId, trimmed);
+      if (
+        requestId === searchRequestId &&
+        xmppClient.value === client &&
+        activeWaddleId.value === waddleId &&
+        activeChannelId.value === channelId
+      ) {
+        searchResults.value = results;
+      }
     } catch {
-      searchResults.value = [];
+      if (requestId === searchRequestId) {
+        searchResults.value = [];
+      }
     } finally {
-      isSearching.value = false;
+      if (requestId === searchRequestId) {
+        isSearching.value = false;
+      }
     }
   }
 
   function clearSearch() {
+    searchRequestId++;
     searchQuery.value = "";
     searchResults.value = [];
+    isSearching.value = false;
   }
 
   function clearChannelActivity(roomJid: string) {

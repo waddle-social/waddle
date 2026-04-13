@@ -30,7 +30,9 @@ export function useWaddles(
   const isSubmitting = ref(false);
   const joiningPublicWaddleId = ref<string | null>(null);
 
+  let waddleRequestId = 0;
   let structureRequestId = 0;
+  let publicWaddlesRequestId = 0;
 
   const createWaddleForm = ref<CommunityFormData>({
     name: "",
@@ -190,9 +192,12 @@ export function useWaddles(
   }
 
   async function loadWaddles(preferredId?: string | null) {
-    if (!xmppClient.value) return;
+    if (!xmppClient.value) return null;
 
+    const requestId = ++waddleRequestId;
     const discovered = await xmppClient.value.discoverWaddles();
+    if (requestId !== waddleRequestId) return null;
+
     const waddleList: WaddleSummary[] = discovered.map((w) => ({
       id: w.id,
       name: w.name,
@@ -222,15 +227,22 @@ export function useWaddles(
   async function loadPublicWaddles(query?: string) {
     if (!api.value) return;
 
+    const requestId = ++publicWaddlesRequestId;
     isLoadingPublicWaddles.value = true;
     clearActionError();
     try {
       const response = await api.value.listPublicWaddles(query);
-      publicWaddles.value = response.waddles;
+      if (requestId === publicWaddlesRequestId) {
+        publicWaddles.value = response.waddles;
+      }
     } catch (e) {
-      actionError.value = normalizeError(e);
+      if (requestId === publicWaddlesRequestId) {
+        actionError.value = normalizeError(e);
+      }
     } finally {
-      isLoadingPublicWaddles.value = false;
+      if (requestId === publicWaddlesRequestId) {
+        isLoadingPublicWaddles.value = false;
+      }
     }
   }
 
@@ -315,14 +327,15 @@ export function useWaddles(
   }
 
   async function createChannel() {
-    if (!api.value || !activeWaddleId.value || !createChannelForm.value.name.trim()) return undefined;
+    const waddleId = activeWaddleId.value;
+    if (!api.value || !waddleId || !createChannelForm.value.name.trim()) return undefined;
 
     isSubmitting.value = true;
     clearActionError();
 
     try {
       const desc = createChannelForm.value.description.trim();
-      const created = await api.value.createChannel(activeWaddleId.value, {
+      const created = await api.value.createChannel(waddleId, {
         name: createChannelForm.value.name.trim(),
         ...(desc ? { description: desc } : {}),
         channel_type: createChannelForm.value.channel_type,
@@ -334,7 +347,7 @@ export function useWaddles(
         channel_type: "text",
         position: channels.value.length + 1,
       };
-      await loadStructure(activeWaddleId.value, created.id);
+      await loadStructure(waddleId, created.id);
       return created;
     } catch (e) {
       actionError.value = normalizeError(e);
@@ -345,19 +358,21 @@ export function useWaddles(
   }
 
   async function updateChannel() {
-    if (!api.value || !activeWaddleId.value || !currentChannel.value || !editChannelForm.value.name.trim()) return;
+    const waddleId = activeWaddleId.value;
+    const channelId = currentChannel.value?.id;
+    if (!api.value || !waddleId || !channelId || !editChannelForm.value.name.trim()) return;
 
     isSubmitting.value = true;
     clearActionError();
 
     try {
       const desc = editChannelForm.value.description.trim();
-      await api.value.updateChannel(activeWaddleId.value, currentChannel.value.id, {
+      await api.value.updateChannel(waddleId, channelId, {
         name: editChannelForm.value.name.trim(),
         ...(desc ? { description: desc } : {}),
         position: editChannelForm.value.position,
       });
-      await loadStructure(activeWaddleId.value, currentChannel.value.id);
+      await loadStructure(waddleId, channelId);
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
@@ -366,17 +381,18 @@ export function useWaddles(
   }
 
   async function deleteChannel() {
-    if (!api.value || !activeWaddleId.value || !currentChannel.value) return;
+    const waddleId = activeWaddleId.value;
+    const channelId = currentChannel.value?.id;
+    if (!api.value || !waddleId || !channelId) return;
 
     isSubmitting.value = true;
     clearActionError();
 
     try {
-      const deletedId = currentChannel.value.id;
-      await api.value.deleteChannel(activeWaddleId.value, deletedId);
+      await api.value.deleteChannel(waddleId, channelId);
       await loadStructure(
-        activeWaddleId.value,
-        channels.value.find((c) => c.id !== deletedId)?.id ?? null,
+        waddleId,
+        channels.value.find((c) => c.id !== channelId)?.id ?? null,
       );
     } catch (e) {
       actionError.value = normalizeError(e);
@@ -386,6 +402,9 @@ export function useWaddles(
   }
 
   function clearData() {
+    waddleRequestId++;
+    structureRequestId++;
+    publicWaddlesRequestId++;
     waddles.value = [];
     publicWaddles.value = [];
     channels.value = [];
