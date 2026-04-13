@@ -619,6 +619,11 @@ async fn run_test_server<S: AppState>(
     // Create a shared PubSub storage for PEP
     let pubsub_storage: std::sync::Arc<dyn waddle_xmpp::pubsub::PubSubStorage + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
+    let push_store: std::sync::Arc<
+        dyn waddle_xmpp::push::PushSubscriptionStore + Send + Sync,
+    > = std::sync::Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
+    let push_sender: std::sync::Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync> =
+        std::sync::Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
 
     loop {
         tokio::select! {
@@ -635,12 +640,14 @@ async fn run_test_server<S: AppState>(
                         let isr = Arc::clone(&isr_token_store);
                         let sm_reg = Arc::clone(&sm_session_registry);
                         let pubsub = Arc::clone(&pubsub_storage);
+                        let push_store = Arc::clone(&push_store);
+                        let push_sender = Arc::clone(&push_sender);
                         // Enable registration for tests
                         let registration_enabled = true;
                         let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender
                             ).await;
                         });
                     }

@@ -109,6 +109,25 @@ const publicBrowseQuery = ref("");
 const isApplyingRoute = ref(false);
 let routeRequestId = 0;
 
+async function setupPushSubscription() {
+  if (!xmppClient.value || !auth.session.value) return;
+  await notifications.syncPushSubscription(xmppClient.value, auth.session.value.jid);
+}
+
+async function handleRequestNotifications() {
+  const state = await notifications.requestPermission();
+  if (state === "granted") {
+    await setupPushSubscription();
+  }
+}
+
+function handleToggleNotifications() {
+  notifications.notificationsEnabled.value = !notifications.notificationsEnabled.value;
+  if (notifications.notificationsEnabled.value) {
+    void setupPushSubscription();
+  }
+}
+
 async function sendGif(url: string) {
   await messaging.sendMessage(url);
 }
@@ -196,8 +215,11 @@ async function bootstrap() {
       }
     }
 
-    // Register service worker for push notifications (best-effort, non-blocking)
-    void notifications.registerServiceWorker();
+    // Register service worker and sync push subscription (best-effort, non-blocking)
+    void (async () => {
+      await notifications.registerServiceWorker();
+      await setupPushSubscription();
+    })();
   }
 }
 
@@ -428,8 +450,8 @@ onUnmounted(() => {
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
           @logout="handleLogout"
-          @request-notifications="notifications.requestPermission()"
-          @toggle-notifications="notifications.notificationsEnabled.value = !notifications.notificationsEnabled.value"
+          @request-notifications="handleRequestNotifications"
+          @toggle-notifications="handleToggleNotifications"
         />
       </div>
     </AppDrawer>

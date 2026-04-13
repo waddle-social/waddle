@@ -41,14 +41,17 @@ impl InMemoryPushStore {
 
 impl PushSubscriptionStore for InMemoryPushStore {
     fn register(&self, sub: PushSubscription) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
-        Box::pin(async move {
-            let service_jid = sub.service_jid.clone();
-            let node = sub.node.clone();
-            let mut entry = self.subs.entry(sub.user_jid.clone()).or_default();
+        let service_jid = sub.service_jid.clone();
+        let node = sub.node.clone();
+        let user_jid = sub.user_jid.clone();
+
+        {
+            let mut entry = self.subs.entry(user_jid).or_default();
             entry.retain(|s| !(s.service_jid == service_jid && s.node == node));
             entry.push(sub);
-            Ok(())
-        })
+        }
+
+        Box::pin(std::future::ready(Ok(())))
     }
 
     fn remove(&self, user_jid: &str, service_jid: &str, node: Option<&str>) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
@@ -137,5 +140,29 @@ mod tests {
         store.register(make_sub("bob@ex", "push.ex", Some("n1"))).await.expect("ok");
         assert_eq!(store.get_for_user("alice@ex").await.expect("ok").len(), 1);
         assert_eq!(store.get_for_user("bob@ex").await.expect("ok").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_register_same_key_concurrent_dedup() {
+        let store = InMemoryPushStore::new();
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .register(make_sub("alice@ex", "push.ex", Some("same-node")))
+                    .await
+                    .expect("ok");
+            }));
+        }
+
+        for task in tasks {
+            task.await.expect("task joined");
+        }
+
+        let subs = store.get_for_user("alice@ex").await.expect("ok");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].service_jid, "push.ex");
+        assert_eq!(subs[0].node.as_deref(), Some("same-node"));
     }
 }

@@ -1,6 +1,9 @@
 import { ref, watch } from "vue";
+import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
+const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_WEB_PUSH_VAPID_PUBLIC_KEY ?? "").trim();
+const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
 
 const hasNotificationApi =
   typeof window !== "undefined" && "Notification" in window;
@@ -92,6 +95,32 @@ export function useNotifications() {
     }
   }
 
+  async function syncPushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
+    if (!notificationsEnabled.value || permissionState.value !== "granted") return false;
+    if (!VAPID_PUBLIC_KEY) return false;
+
+    const sub = await subscribeToPush(VAPID_PUBLIC_KEY);
+    if (!sub) return false;
+
+    const subJson = sub.toJSON();
+    const endpoint = subJson.endpoint ?? sub.endpoint;
+    const p256dh = subJson.keys?.p256dh;
+    const auth = subJson.keys?.auth;
+    if (!endpoint || !p256dh || !auth) return false;
+
+    const domain = userJid.includes("@") ? userJid.split("@")[1] ?? "" : "";
+    const serviceJid = PUSH_SERVICE_JID || (domain ? `push.${domain}` : "");
+    if (!serviceJid) return false;
+
+    return xmppClient.enablePushNotifications({
+      serviceJid,
+      node: "web-push",
+      endpoint,
+      p256dh,
+      auth,
+    });
+  }
+
   return {
     permissionState,
     notificationsEnabled,
@@ -99,6 +128,7 @@ export function useNotifications() {
     showMentionNotification,
     registerServiceWorker,
     subscribeToPush,
+    syncPushSubscription,
   };
 }
 

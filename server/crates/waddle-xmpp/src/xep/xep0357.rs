@@ -97,7 +97,14 @@ pub fn parse_push_enable(iq: &Iq) -> Option<PushEnable> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_owned());
 
-    let options = parse_data_form_options(elem);
+    let mut options = parse_data_form_options(elem);
+    for attr_key in ["endpoint", "p256dh", "auth"] {
+        if let Some(value) = elem.attr(attr_key).filter(|s| !s.is_empty()) {
+            if !options.iter().any(|(k, _)| k == attr_key) {
+                options.push((attr_key.to_owned(), value.to_owned()));
+            }
+        }
+    }
 
     Some(PushEnable { jid, node, options })
 }
@@ -349,6 +356,40 @@ mod tests {
         assert_eq!(enable.jid, "push-service.example.com");
         assert_eq!(enable.node.as_deref(), Some("web-push"));
         assert!(enable.options.is_empty());
+    }
+
+    #[test]
+    fn test_parse_push_enable_with_attribute_options() {
+        let elem = Element::builder("enable", NS_PUSH)
+            .attr("jid", "push-service.example.com")
+            .attr("node", "web-push")
+            .attr("endpoint", "https://push.example.com/abc")
+            .attr("p256dh", "BASE64KEY")
+            .attr("auth", "BASE64AUTH")
+            .build();
+        let iq = Iq {
+            from: Some("alice@example.com".parse().expect("valid jid")),
+            to: Some("example.com".parse().expect("valid jid")),
+            id: "push1".to_string(),
+            payload: IqType::Set(elem),
+        };
+        let enable = parse_push_enable(&iq).expect("should parse");
+
+        assert_eq!(enable.jid, "push-service.example.com");
+        assert_eq!(enable.node.as_deref(), Some("web-push"));
+        assert_eq!(enable.options.len(), 3);
+        assert!(enable
+            .options
+            .iter()
+            .any(|(k, v)| k == "endpoint" && v == "https://push.example.com/abc"));
+        assert!(enable
+            .options
+            .iter()
+            .any(|(k, v)| k == "p256dh" && v == "BASE64KEY"));
+        assert!(enable
+            .options
+            .iter()
+            .any(|(k, v)| k == "auth" && v == "BASE64AUTH"));
     }
 
     #[test]

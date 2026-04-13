@@ -294,6 +294,33 @@ export class BrowserXmppClient {
     return this.xmpp ? messaging.sendCallInvite(this.xmpp, roomBareJidFor(this.session, w, c), meetingUrl, video) : null;
   }
 
+  async enablePushNotifications(opts: {
+    serviceJid: string;
+    node?: string;
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+  }): Promise<boolean> {
+    await this.connect();
+    if (!this.xmpp) return false;
+    try {
+      await this.xmpp.sendIQ({
+        type: "set",
+        pushEnable: {
+          jid: opts.serviceJid,
+          node: opts.node ?? "web-push",
+          endpoint: opts.endpoint,
+          p256dh: opts.p256dh,
+          auth: opts.auth,
+        },
+      } as Parameters<Agent["sendIQ"]>[0]);
+      return true;
+    } catch (err) {
+      console.warn("Failed to enable XMPP push notifications", err);
+      return false;
+    }
+  }
+
   // -- Query delegators --
 
   async queryMam(w: string, c: string, max = 50): Promise<LiveRoomMessage[]> {
