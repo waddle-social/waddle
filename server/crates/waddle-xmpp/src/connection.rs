@@ -7364,7 +7364,7 @@ mod tests {
 
     #[test]
     fn accepts_public_https_endpoint() {
-        assert!(validate_push_endpoint("https://push.example.com/notify").is_ok());
+        assert!(validate_push_endpoint("https://1.1.1.1/notify").is_ok());
     }
 
     #[test]
