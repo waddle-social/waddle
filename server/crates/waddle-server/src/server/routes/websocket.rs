@@ -719,13 +719,32 @@ async fn handle_muc_leave(
     nick: &str,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
+    let self_presence = build_muc_self_unavailable_xml(room_jid, nick, sender_jid);
 
     let Some(room_data) = state.muc_registry.get_room_data(room_jid) else {
         debug!(room = %room_jid, "Room not found for leave");
-        return vec![];
+        return vec![self_presence];
     };
 
     let mut room = room_data.write().await;
+
+    match room.occupants.get(nick) {
+        Some(occupant) if occupant.real_jid == *sender_jid => {}
+        Some(occupant) => {
+            warn!(
+                room = %room_jid,
+                nick = %nick,
+                sender = %sender_jid,
+                current_jid = %occupant.real_jid,
+                "Ignoring stale MUC leave for nick owned by another resource"
+            );
+            return vec![self_presence];
+        }
+        None => {
+            debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
+            return vec![self_presence];
+        }
+    }
 
     // Get remaining occupants before removing the leaving user
     let remaining_occupants: Vec<FullJid> = room
@@ -757,10 +776,7 @@ async fn handle_muc_leave(
     }
 
     // Send self-presence unavailable to the leaving user
-    vec![format!(
-        r#"<presence from="{}/{}" to="{}" type="unavailable"><x xmlns="http://jabber.org/protocol/muc#user"><item affiliation="member" role="none"/><status code="110"/></x></presence>"#,
-        room_jid, nick, sender_jid
-    )]
+    vec![self_presence]
 }
 
 /// Handle IQ stanzas
@@ -1502,6 +1518,36 @@ fn prototype_body(message: &xmpp_parsers::message::Message) -> Option<String> {
         .map(|body| body.0.clone())
 }
 
+fn build_muc_self_unavailable_xml(room_jid: &BareJid, nick: &str, sender_jid: &FullJid) -> String {
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(nick)
+        .unwrap_or_else(|_| sender_jid.clone());
+
+    element_to_xml(
+        Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr("from", from_jid.to_string())
+            .attr("to", sender_jid.to_string())
+            .attr("type", "unavailable")
+            .append(
+                Element::builder("x", "http://jabber.org/protocol/muc#user")
+                    .append(
+                        Element::builder("item", "http://jabber.org/protocol/muc#user")
+                            .attr("affiliation", "member")
+                            .attr("role", "none")
+                            .build(),
+                    )
+                    .append(
+                        Element::builder("status", "http://jabber.org/protocol/muc#user")
+                            .attr("code", "110")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+}
+
 /// Create a presence stanza for MUC
 fn create_presence_stanza(
     room_jid: &BareJid,
@@ -1886,6 +1932,39 @@ mod tests {
             session_jid.as_ref().map(ToString::to_string),
             Some(format!("{expected_bare}/web"))
         );
+    }
+
+    #[tokio::test]
+    async fn muc_stale_leave_does_not_remove_current_resource() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "waddle_channel@muc.example.com".parse().expect("room jid");
+        let current_jid: FullJid = "alice@example.com/current".parse().expect("current jid");
+        let stale_jid: FullJid = "alice@example.com/stale".parse().expect("stale jid");
+
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &current_jid,
+            "alice",
+        )
+        .await;
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &stale_jid, "alice").await;
+
+        assert_eq!(responses.len(), 1);
+        let response = Element::from_str(&responses[0]).expect("leave response XML");
+        assert_eq!(response.name(), "presence");
+        assert_eq!(response.attr("type"), Some("unavailable"));
+
+        let room_data = state
+            .muc_registry
+            .get_room_data(&room_jid)
+            .expect("room data");
+        let room = room_data.read().await;
+        assert_eq!(room.find_nick_by_real_jid(&current_jid), Some("alice"));
+        assert!(room.find_nick_by_real_jid(&stale_jid).is_none());
+        assert_eq!(room.occupant_count(), 1);
     }
 
     #[test]

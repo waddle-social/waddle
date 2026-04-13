@@ -33,6 +33,11 @@ const DISABLED_SASL_MECHANISMS = [
   "ANONYMOUS",
 ];
 
+function createXmppResource() {
+  const randomId = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  return `web-${randomId}`;
+}
+
 function keepOnlyOAuthBearer(xmpp: Agent) {
   const sasl = xmpp.sasl as unknown as StanzaSaslFactory;
   for (const mech of DISABLED_SASL_MECHANISMS) {
@@ -52,6 +57,7 @@ function keepOnlyOAuthBearer(xmpp: Agent) {
 
 export class BrowserXmppClient {
   private readonly session: WaddleSession;
+  private readonly resource = createXmppResource();
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
@@ -88,7 +94,7 @@ export class BrowserXmppClient {
       jid: this.session.jid,
       // The session_id is a bearer token — use OAUTHBEARER (RFC 7628)
       credentials: { token: this.session.session_id },
-      resource: "web",
+      resource: this.resource,
       transports: { websocket: this.session.xmpp_websocket_url, bosh: false },
       useStreamManagement: false,
       sendReceipts: false, chatMarkers: false,
