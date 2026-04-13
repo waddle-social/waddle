@@ -1,7 +1,7 @@
 /** BrowserXmppClient — thin orchestrator that delegates to functional modules. */
 import { createClient } from "stanza";
 import type { Agent } from "stanza";
-import type { ReceivedMUCPresence } from "stanza/protocol";
+import type { ReceivedMUCPresence, ReceivedPresence } from "stanza/protocol";
 import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
@@ -208,7 +208,13 @@ export class BrowserXmppClient {
     if (!xmpp) return;
 
     try {
-      await xmpp.joinRoom(nextRoom, this.session.username);
+      const fallbackJoin = this.waitForRoomSelfPresence(xmpp, nextRoom, this.session.username);
+      const stanzaJoin = xmpp.joinRoom(nextRoom, this.session.username);
+      void stanzaJoin.catch(() => undefined);
+
+      await Promise.race([stanzaJoin.then(() => undefined), fallbackJoin]);
+      xmpp.joinedRooms?.set(nextRoom, this.session.username);
+      xmpp.joiningRooms?.delete(nextRoom);
       if (this.xmpp !== xmpp || this.currentRoom !== nextRoom) return;
       this.startSelfPing();
     } catch (error) {
@@ -220,6 +226,43 @@ export class BrowserXmppClient {
       }
       throw error;
     }
+  }
+
+  private waitForRoomSelfPresence(
+    xmpp: Agent,
+    roomJid: string,
+    nick: string,
+  ): Promise<void> {
+    const fullJid = `${roomJid}/${nick}`;
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting for self-presence in ${roomJid}`));
+      }, 10_000);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        xmpp.off("presence", onPresence);
+        xmpp.off("disconnected", onDisconnected);
+      };
+
+      const onPresence = (presence: ReceivedPresence) => {
+        const from = presence.from ?? "";
+        if (from === fullJid) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      const onDisconnected = (error?: Error) => {
+        cleanup();
+        reject(error ?? new Error("XMPP disconnected while joining room"));
+      };
+
+      xmpp.on("presence", onPresence);
+      xmpp.on("disconnected", onDisconnected);
+    });
   }
 
   // -- Send delegators --
