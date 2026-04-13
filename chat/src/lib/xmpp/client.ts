@@ -35,6 +35,10 @@ const DISABLED_SASL_MECHANISMS = [
 
 function keepOnlyOAuthBearer(xmpp: Agent) {
   const sasl = xmpp.sasl as unknown as StanzaSaslFactory;
+  for (const mech of DISABLED_SASL_MECHANISMS) {
+    sasl.disable(mech);
+  }
+
   if (Array.isArray(sasl.mechanisms)) {
     const oauthBearer = sasl.mechanisms.filter(
       (mechanism) => mechanism.name.toUpperCase() === "OAUTHBEARER",
@@ -43,11 +47,6 @@ function keepOnlyOAuthBearer(xmpp: Agent) {
       throw new Error("Stanza OAUTHBEARER SASL mechanism is unavailable");
     }
     sasl.mechanisms = oauthBearer;
-    return;
-  }
-
-  for (const mech of DISABLED_SASL_MECHANISMS) {
-    sasl.disable(mech);
   }
 }
 
