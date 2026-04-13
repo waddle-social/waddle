@@ -15,6 +15,42 @@ import * as messaging from "./messaging";
 import * as history from "./history";
 import * as discovery from "./discovery";
 
+type StanzaSaslMechanism = { name: string };
+type StanzaSaslFactory = {
+  disable(mechanism: string): void;
+  mechanisms?: StanzaSaslMechanism[];
+};
+
+const DISABLED_SASL_MECHANISMS = [
+  "EXTERNAL",
+  "SCRAM-SHA-256-PLUS",
+  "SCRAM-SHA-256",
+  "SCRAM-SHA-1-PLUS",
+  "SCRAM-SHA-1",
+  "DIGEST-MD5",
+  "X-OAUTH2",
+  "PLAIN",
+  "ANONYMOUS",
+];
+
+function keepOnlyOAuthBearer(xmpp: Agent) {
+  const sasl = xmpp.sasl as unknown as StanzaSaslFactory;
+  if (Array.isArray(sasl.mechanisms)) {
+    const oauthBearer = sasl.mechanisms.filter(
+      (mechanism) => mechanism.name.toUpperCase() === "OAUTHBEARER",
+    );
+    if (oauthBearer.length === 0) {
+      throw new Error("Stanza OAUTHBEARER SASL mechanism is unavailable");
+    }
+    sasl.mechanisms = oauthBearer;
+    return;
+  }
+
+  for (const mech of DISABLED_SASL_MECHANISMS) {
+    sasl.disable(mech);
+  }
+}
+
 export class BrowserXmppClient {
   private readonly session: WaddleSession;
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
@@ -59,9 +95,7 @@ export class BrowserXmppClient {
       sendReceipts: false, chatMarkers: false,
     });
     // Only keep OAUTHBEARER; session tokens aren't SCRAM/PLAIN passwords
-    for (const mech of ["EXTERNAL", "SCRAM-SHA-256-PLUS", "SCRAM-SHA-256", "SCRAM-SHA-1-PLUS", "SCRAM-SHA-1", "DIGEST-MD5", "X-OAUTH2", "PLAIN", "ANONYMOUS"]) {
-      xmpp.sasl.disable(mech);
-    }
+    keepOnlyOAuthBearer(xmpp);
     registerWaddleExtensions(xmpp);
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
