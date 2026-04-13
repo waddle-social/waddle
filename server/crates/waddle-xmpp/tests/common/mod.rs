@@ -619,9 +619,8 @@ async fn run_test_server<S: AppState>(
     // Create a shared PubSub storage for PEP
     let pubsub_storage: std::sync::Arc<dyn waddle_xmpp::pubsub::PubSubStorage + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
-    let push_store: std::sync::Arc<
-        dyn waddle_xmpp::push::PushSubscriptionStore + Send + Sync,
-    > = std::sync::Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
+    let push_store: std::sync::Arc<dyn waddle_xmpp::push::PushSubscriptionStore + Send + Sync> =
+        std::sync::Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
     let push_sender: std::sync::Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
 

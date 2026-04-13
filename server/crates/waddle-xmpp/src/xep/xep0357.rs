@@ -415,9 +415,7 @@ mod tests {
 
     #[test]
     fn test_parse_push_enable_empty_jid() {
-        let elem = Element::builder("enable", NS_PUSH)
-            .attr("jid", "")
-            .build();
+        let elem = Element::builder("enable", NS_PUSH).attr("jid", "").build();
         let iq = Iq {
             from: None,
             to: None,

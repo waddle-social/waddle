@@ -55,7 +55,10 @@ mod tests {
 
     #[test]
     fn test_push_error_display() {
-        assert_eq!(PushError::NotFound.to_string(), "push subscription not found");
+        assert_eq!(
+            PushError::NotFound.to_string(),
+            "push subscription not found"
+        );
         assert_eq!(
             PushError::SendFailed("timeout".into()).to_string(),
             "failed to send push notification: timeout"

@@ -1,12 +1,12 @@
 //! Web Push notification sender.
 
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 use tracing::{debug, warn};
 
-use super::{PushError, PushSubscription};
 use super::store::PushSubscriptionStore;
+use super::{PushError, PushSubscription};
 
 /// Trait for sending Web Push notifications.
 pub trait WebPushSender: Send + Sync + 'static {
@@ -109,7 +109,10 @@ pub async fn notify_mentioned_users<S, W>(
             body.to_string()
         };
         for sub in &subs {
-            if let Err(e) = sender.send_notification(sub, &title, &preview, room_jid).await {
+            if let Err(e) = sender
+                .send_notification(sub, &title, &preview, room_jid)
+                .await
+            {
                 debug!(user_jid = %jid, error = %e, "Push notification failed");
             }
         }
@@ -118,17 +121,27 @@ pub async fn notify_mentioned_users<S, W>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::store::InMemoryPushStore;
+    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockSender(AtomicUsize);
     impl MockSender {
-        fn new() -> Self { Self(AtomicUsize::new(0)) }
-        fn count(&self) -> usize { self.0.load(Ordering::SeqCst) }
+        fn new() -> Self {
+            Self(AtomicUsize::new(0))
+        }
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
     }
     impl WebPushSender for MockSender {
-        fn send_notification(&self, _: &PushSubscription, _: &str, _: &str, _: &str) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
+        fn send_notification(
+            &self,
+            _: &PushSubscription,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), PushError>> + Send + '_>> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         }
@@ -137,14 +150,28 @@ mod tests {
     #[tokio::test]
     async fn test_notify_sends_to_subscribed() {
         let store = InMemoryPushStore::new();
-        store.register(PushSubscription {
-            user_jid: "alice@ex".into(), service_jid: "push.ex".into(),
-            node: Some("n1".into()), endpoint: Some("https://ep".into()),
-            p256dh: None, auth_key: None,
-        }).await.expect("ok");
+        store
+            .register(PushSubscription {
+                user_jid: "alice@ex".into(),
+                service_jid: "push.ex".into(),
+                node: Some("n1".into()),
+                endpoint: Some("https://ep".into()),
+                p256dh: None,
+                auth_key: None,
+            })
+            .await
+            .expect("ok");
 
         let sender = MockSender::new();
-        notify_mentioned_users(&store, &sender, &["alice@ex".into(), "bob@ex".into()], "charlie", "Hey!", "room@muc").await;
+        notify_mentioned_users(
+            &store,
+            &sender,
+            &["alice@ex".into(), "bob@ex".into()],
+            "charlie",
+            "Hey!",
+            "room@muc",
+        )
+        .await;
         assert_eq!(sender.count(), 1); // only alice has a sub
     }
 
@@ -152,7 +179,15 @@ mod tests {
     async fn test_notify_no_subs() {
         let store = InMemoryPushStore::new();
         let sender = MockSender::new();
-        notify_mentioned_users(&store, &sender, &["alice@ex".into()], "bob", "Hi", "room@muc").await;
+        notify_mentioned_users(
+            &store,
+            &sender,
+            &["alice@ex".into()],
+            "bob",
+            "Hi",
+            "room@muc",
+        )
+        .await;
         assert_eq!(sender.count(), 0);
     }
 }

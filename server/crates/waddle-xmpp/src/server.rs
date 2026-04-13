@@ -145,8 +145,7 @@ impl<S: AppState> XmppServer<S> {
         // Create the push subscription store and sender (XEP-0357)
         let push_store: Arc<dyn PushSubscriptionStore + Send + Sync> =
             Arc::new(InMemoryPushStore::new());
-        let push_sender: Arc<dyn WebPushSender + Send + Sync> =
-            Arc::new(HttpWebPushSender::new());
+        let push_sender: Arc<dyn WebPushSender + Send + Sync> = Arc::new(HttpWebPushSender::new());
         info!("Push notification store initialized");
 
         // Create the GitHub link enricher from environment
