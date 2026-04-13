@@ -9,6 +9,10 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, ChannelCreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
 
+interface LoadWaddlesOptions {
+  loadStructure?: boolean;
+}
+
 export function useWaddles(
   api: Ref<WaddleApi | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -191,7 +195,10 @@ export function useWaddles(
     }
   }
 
-  async function loadWaddles(preferredId?: string | null) {
+  async function loadWaddles(
+    preferredId?: string | null,
+    options: LoadWaddlesOptions = {},
+  ) {
     if (!xmppClient.value) return null;
 
     const requestId = ++waddleRequestId;
@@ -214,12 +221,14 @@ export function useWaddles(
 
     activeWaddleId.value = nextId;
 
-    if (nextId) {
+    if (nextId && options.loadStructure !== false) {
       return loadStructure(nextId);
     } else {
-      channels.value = [];
-      members.value = [];
-      activeChannelId.value = null;
+      if (!nextId) {
+        channels.value = [];
+        members.value = [];
+        activeChannelId.value = null;
+      }
       return null;
     }
   }

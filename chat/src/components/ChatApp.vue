@@ -94,13 +94,27 @@ function onPopState() {
 }
 
 async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId: number) {
+  let matchedRouteWaddle = false;
   if (route.waddleSlug) {
     const w = resolveWaddle(route.waddleSlug, waddles.waddles.value);
-    if (w && w.id !== waddles.activeWaddleId.value) {
-      waddles.activeWaddleId.value = w.id;
-      await waddles.loadStructure(w.id);
-      if (requestId !== routeRequestId) return;
+    if (w) {
+      matchedRouteWaddle = true;
+      if (w.id !== waddles.activeWaddleId.value || waddles.channels.value.length === 0) {
+        waddles.activeWaddleId.value = w.id;
+        await waddles.loadStructure(w.id);
+        if (requestId !== routeRequestId) return;
+      }
     }
+  }
+
+  if (
+    route.waddleSlug &&
+    !matchedRouteWaddle &&
+    waddles.activeWaddleId.value &&
+    waddles.channels.value.length === 0
+  ) {
+    await waddles.loadStructure(waddles.activeWaddleId.value);
+    if (requestId !== routeRequestId) return;
   }
 
   if (route.channelSlug && waddles.activeWaddleId.value) {
@@ -129,7 +143,7 @@ async function bootstrap() {
     isApplyingRoute.value = true;
 
     try {
-      await waddles.loadWaddles();
+      await waddles.loadWaddles(undefined, { loadStructure: !route.waddleSlug });
       if (requestId === routeRequestId) {
         await applyRouteTarget(route, requestId);
       }

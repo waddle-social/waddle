@@ -1,22 +1,38 @@
 /** XEP-0030: Service discovery for waddles and channels. */
 import type { Agent } from "stanza";
+import type { DataFormField, DiscoInfoResult } from "stanza/protocol";
 import type { DiscoveredChannel, DiscoveredWaddle } from "./types";
 import { jidDomain } from "./jid";
 
-function parseAccessModel(
-  infoResult: { extensions?: Array<{ fields?: Array<{ name?: string; value?: unknown }> }> },
-): "open" | "whitelist" | null {
-  if (!infoResult.extensions) return null;
+function fieldStringValue(field: DataFormField | undefined): string | null {
+  if (!field || field.value === undefined || Array.isArray(field.value)) return null;
+  return String(field.value).trim() || null;
+}
 
-  for (const form of infoResult.extensions) {
+function metadataField(infoResult: DiscoInfoResult, name: string): string | null {
+  for (const form of infoResult.extensions ?? []) {
     if (!form.fields) continue;
-    const field = form.fields.find((f) => f.name === "pubsub#access_model");
-    if (!field) continue;
-    const value = (typeof field.value === "string" ? field.value : String(field.value ?? ""))
-      .trim().toLowerCase();
+    const field = form.fields.find((f) => f.name === name);
+    const value = fieldStringValue(field);
+    if (value) return value;
+  }
+  return null;
+}
+
+function parseAccessModel(infoResult: DiscoInfoResult): "open" | "whitelist" | null {
+  const value = metadataField(infoResult, "pubsub#access_model")?.toLowerCase();
+  if (value) {
     if (value === "open" || value === "whitelist") return value;
   }
   return null;
+}
+
+function parseWaddleName(infoResult: DiscoInfoResult): string | null {
+  return (
+    metadataField(infoResult, "pubsub#title") ??
+    infoResult.identities.find((identity) => identity.name)?.name?.trim() ??
+    null
+  );
 }
 
 export async function discoverWaddles(xmpp: Agent, jid: string): Promise<DiscoveredWaddle[]> {
@@ -31,7 +47,11 @@ export async function discoverWaddles(xmpp: Agent, jid: string): Promise<Discove
     discovered.map(async (waddle) => {
       try {
         const info = await xmpp.getDiscoInfo(spacesDomain, waddle.id);
-        return { ...waddle, isPublic: parseAccessModel(info) !== "whitelist" };
+        return {
+          ...waddle,
+          name: parseWaddleName(info) ?? waddle.name,
+          isPublic: parseAccessModel(info) !== "whitelist",
+        };
       } catch {
         return { ...waddle, isPublic: true };
       }

@@ -55,6 +55,14 @@ function keepOnlyOAuthBearer(xmpp: Agent) {
   }
 }
 
+function parsePresenceHats(value: unknown): WaddleHat[] {
+  const hats = Array.isArray(value) ? value : value ? [value] : [];
+  return hats
+    .map((hat) => hat as Partial<WaddleHat>)
+    .map((hat) => ({ title: hat.title ?? "", uri: hat.uri ?? "" }))
+    .filter((hat) => hat.title && hat.uri);
+}
+
 export class BrowserXmppClient {
   private readonly session: WaddleSession;
   private readonly resource = createXmppResource();
@@ -306,22 +314,28 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("muc:available", (pres: ReceivedMUCPresence) => {
-      const [room, nick] = (pres.from ?? "").split("/");
-      if (room === this.currentRoom && nick) {
-        this.roomHats[nick] = ((ext(pres).hats as WaddleHat[] | undefined) ?? [])
-          .map((h) => ({ title: h.title ?? "", uri: h.uri ?? "" }))
-          .filter((h) => h.title && h.uri);
-        this.hatsHandler?.({ ...this.roomHats });
+      try {
+        const [room, nick] = (pres.from ?? "").split("/");
+        if (room === this.currentRoom && nick) {
+          this.roomHats[nick] = parsePresenceHats(ext(pres).hats ?? ext(pres).hat);
+          this.hatsHandler?.({ ...this.roomHats });
+        }
+        if (room && !nick && typeof pres.vcardAvatar === "string" && pres.vcardAvatar)
+          this.roomAvatarHandler?.(room, pres.vcardAvatar);
+      } catch (error) {
+        console.error("Failed to process MUC presence", error);
       }
-      if (room && !nick && typeof pres.vcardAvatar === "string" && pres.vcardAvatar)
-        this.roomAvatarHandler?.(room, pres.vcardAvatar);
     });
 
     xmpp.on("muc:unavailable", (pres: ReceivedMUCPresence) => {
-      const [room, nick] = (pres.from ?? "").split("/");
-      if (room === this.currentRoom && nick) {
-        delete this.roomHats[nick];
-        this.hatsHandler?.({ ...this.roomHats });
+      try {
+        const [room, nick] = (pres.from ?? "").split("/");
+        if (room === this.currentRoom && nick) {
+          delete this.roomHats[nick];
+          this.hatsHandler?.({ ...this.roomHats });
+        }
+      } catch (error) {
+        console.error("Failed to process MUC unavailable presence", error);
       }
     });
 
