@@ -177,3 +177,39 @@ jobs:
         run: |
           first_tag="$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n1)"
           docker buildx imagetools inspect "${first_tag}"
+
+  gitops-push:
+    name: Push GitOps artifact
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    needs: publish-manifest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Flux CLI
+        uses: fluxcd/flux2/action@main
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pin image tag to commit SHA
+        working-directory: infrastructure/waddle.cloud
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          sed -i "s/tag: main/tag: sha-${SHORT_SHA}/" ./gitops/waddle-server/helmrelease.yaml
+
+      - name: Push gitops artifact
+        working-directory: infrastructure/waddle.cloud
+        run: |
+          flux push artifact \
+            oci://ghcr.io/waddle-social/waddle/gitops:latest \
+            --path=./gitops \
+            --source="${{ github.server_url }}/${{ github.repository }}" \
+            --revision="$(git rev-parse --short HEAD)"
