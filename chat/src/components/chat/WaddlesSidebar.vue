@@ -9,6 +9,8 @@ const props = defineProps<{
   waddles: WaddleSummary[];
   activeWaddleId: string | null;
   session: WaddleSession | null;
+  notificationPermission?: NotificationPermission;
+  notificationsEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -16,6 +18,8 @@ const emit = defineEmits<{
   createWaddle: [];
   browsePublicWaddles: [];
   logout: [];
+  "request-notifications": [];
+  "toggle-notifications": [];
 }>();
 
 const publicWaddles = computed(() =>
@@ -117,7 +121,11 @@ function waddleColor(waddle: WaddleSummary): string {
     <ProfilePanel
       v-if="session"
       :session="session"
+      :notification-permission="notificationPermission"
+      :notifications-enabled="notificationsEnabled"
       @logout="emit('logout')"
+      @request-notifications="emit('request-notifications')"
+      @toggle-notifications="emit('toggle-notifications')"
     />
   </div>
 </template>
