@@ -15,6 +15,7 @@ node_modules
 
 # direnv
 .direnv
+.cuenv/
 dist/
 build/
 coverage/
