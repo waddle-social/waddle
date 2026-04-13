@@ -7,17 +7,23 @@ const props = defineProps<{
   defaultServerUrl: string;
   activeServerUrl: string;
   providers: AuthProvider[];
+  nativeAuthAvailable: boolean;
+  registrationAvailable: boolean;
   errorMessage: string;
 }>();
 
 const emit = defineEmits<{
   login: [serverUrl: string, providerId?: string];
+  nativeLogin: [serverUrl: string, username: string, password: string];
+  nativeRegister: [serverUrl: string, username: string, password: string];
   fetchProviders: [serverUrl: string];
 }>();
 
 const showCustomServer = ref(false);
 const useCustom = ref(false);
 const customUrl = ref("");
+const username = ref("");
+const password = ref("");
 
 function normalizeServerUrl(value: string) {
   return value.trim().replace(/\/$/, "");
@@ -88,6 +94,14 @@ watch(customUrl, (url) => {
 
 function handleLogin(providerId?: string) {
   emit("login", activeServerUrl.value, providerId);
+}
+
+function handleNativeLogin() {
+  emit("nativeLogin", activeServerUrl.value, username.value, password.value);
+}
+
+function handleNativeRegister() {
+  emit("nativeRegister", activeServerUrl.value, username.value, password.value);
 }
 </script>
 
@@ -173,6 +187,46 @@ function handleLogin(providerId?: string) {
           {{ errorMessage }}
         </p>
 
+        <form
+          v-if="nativeAuthAvailable"
+          class="space-y-3"
+          @submit.prevent="handleNativeLogin"
+        >
+          <label class="text-xs font-mono uppercase tracking-widest text-muted-foreground">
+            Local account
+          </label>
+          <input
+            v-model="username"
+            type="text"
+            autocomplete="username"
+            placeholder="username"
+            required
+            class="w-full font-mono text-sm px-3 py-2 border border-foreground bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-foreground"
+          />
+          <input
+            v-model="password"
+            type="password"
+            autocomplete="current-password"
+            placeholder="password"
+            required
+            class="w-full font-mono text-sm px-3 py-2 border border-foreground bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-foreground"
+          />
+          <button
+            type="submit"
+            class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
+          >
+            Sign in
+          </button>
+          <button
+            v-if="registrationAvailable"
+            type="button"
+            class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-background text-foreground hover:bg-muted transition-colors"
+            @click="handleNativeRegister"
+          >
+            Create account
+          </button>
+        </form>
+
         <template v-if="providers.length > 1">
           <label class="text-xs font-mono uppercase tracking-widest text-muted-foreground">
             Sign in with
@@ -188,13 +242,19 @@ function handleLogin(providerId?: string) {
         </template>
 
         <button
-          v-else
+          v-else-if="providers.length === 1"
           class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
-          :disabled="providers.length === 0"
-          :class="providers.length === 0 ? 'opacity-50 cursor-not-allowed' : ''"
           @click="handleLogin(providers[0]?.id)"
         >
-          {{ providers.length === 0 ? "No sign-in methods found" : `Sign in with ${singleProviderLabel}` }}
+          {{ `Sign in with ${singleProviderLabel}` }}
+        </button>
+
+        <button
+          v-else-if="!nativeAuthAvailable"
+          class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background opacity-50 cursor-not-allowed"
+          disabled
+        >
+          No sign-in methods found
         </button>
       </div>
     </div>

@@ -424,6 +424,7 @@ pub async fn start_with_config(
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
+    let xmpp_registration_enabled = xmpp_config.registration_enabled;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server
@@ -439,6 +440,7 @@ pub async fn start_with_config(
             http_state,
             http_server_config,
             xmpp_native_auth_enabled,
+            xmpp_registration_enabled,
             http_mam_storage,
             acme_http01_challenge_service,
             http_listener,
@@ -528,6 +530,7 @@ async fn start_http_server(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
+    xmpp_registration_enabled: bool,
     mam_storage: Arc<LibSqlMamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
@@ -537,6 +540,7 @@ async fn start_http_server(
         state,
         server_config,
         xmpp_native_auth_enabled,
+        xmpp_registration_enabled,
         mam_storage,
         acme_http01_challenge_service,
     );
@@ -655,6 +659,7 @@ fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
+    xmpp_registration_enabled: bool,
     mam_storage: Arc<LibSqlMamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
@@ -666,6 +671,8 @@ fn create_router(
         state.clone(),
         &server_config,
         encryption_key.as_ref().map(|s| s.as_bytes()),
+        xmpp_native_auth_enabled,
+        xmpp_registration_enabled,
     ));
 
     // Create connection registry for WebSocket message routing
@@ -718,7 +725,11 @@ fn create_router(
     let users_router = routes::users::router(waddle_state.clone());
 
     // Create server info for the /api/v1/server-info endpoint
-    let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
+    let server_info = ServerInfo::from_config(
+        &server_config,
+        xmpp_native_auth_enabled,
+        xmpp_registration_enabled,
+    );
     let server_info_state = ServerInfoState { server_info };
     // Well-known endpoints for XMPP service discovery (XEP-0156)
     let well_known_router = routes::well_known::router(auth_state.clone());
@@ -997,7 +1008,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1024,7 +1035,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1044,7 +1055,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1072,7 +1083,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1097,7 +1108,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, true, mam_storage, None);
 
         let response = app
             .oneshot(
@@ -1117,7 +1128,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, true, mam_storage, None);
 
         let response = app
             .oneshot(

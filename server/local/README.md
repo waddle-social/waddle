@@ -13,7 +13,7 @@
 ## Usage
 
 1. Copy `local/waddle.env.example` to `local/waddle.env`.
-2. Edit `local/waddle.env` and replace the `replace-me` secret inside `WADDLE_AUTH_PROVIDERS_JSON`.
-3. Run `cuenv task dev`.
+2. Run `cuenv task dev`.
+3. In local chat, use the local account form to create a username/password account.
 
 For local `chat`, point `SERVER_BASE_URL` at `http://localhost:3000`.

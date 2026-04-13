@@ -52,16 +52,16 @@ cargo run --bin waddle
 cargo test
 ```
 
-### Local Chat + Colony Flow
+### Local Chat
 
-To run the Rust server locally with the same Colony-backed auth flow used by `chat`:
+To run the Rust server locally with username/password auth:
 
 ```bash
 cp local/waddle.env.example local/waddle.env
 cuenv task dev
 ```
 
-Before the first login, copy [local/waddle.env.example](/Users/icepuma/development/waddle/server/local/waddle.env.example) to `local/waddle.env` and replace the `replace-me` secret inside `WADDLE_AUTH_PROVIDERS_JSON`. The checked-in local certs live in [local/certs](/Users/icepuma/development/waddle/server/local/certs), runtime data stays under `server/local/`, and the app serves on `http://localhost:3000`.
+The local example disables OAuth providers, enables native auth, and allows local registration. The checked-in local certs live in `local/certs`, runtime data stays under `server/local/`, and the app serves on `http://localhost:3000`.
 
 ### Runtime Configuration
 

@@ -18,11 +18,13 @@ use argon2::{
     Argon2,
 };
 use base64::prelude::*;
+use chrono::Utc;
 use tracing::debug;
 use waddle_xmpp::ScramCredentials;
 
 use crate::db::Database;
 
+use super::identity::UserRecord;
 use super::AuthError;
 
 /// Default PBKDF2 iteration count for SCRAM key derivation.
@@ -186,7 +188,6 @@ impl NativeUserStore {
     }
 
     /// Verify a password for a native user using Argon2id.
-    #[cfg(test)]
     pub async fn verify_password(
         &self,
         username: &str,
@@ -215,6 +216,95 @@ impl NativeUserStore {
                     .is_ok())
             }
             None => Ok(false),
+        }
+    }
+
+    /// Resolve the native account to the shared HTTP/API user record.
+    ///
+    /// Native XMPP credentials are stored separately from the app-level users
+    /// table because XEP-0077 registration can happen without an HTTP session.
+    /// Browser login needs a normal user principal, so create it lazily.
+    pub async fn resolve_or_create_user(
+        &self,
+        username: &str,
+        domain: &str,
+        email: Option<&str>,
+    ) -> Result<UserRecord, AuthError> {
+        let user_id = native_user_id(username, domain);
+        if let Some(existing) = self.find_user_by_id(&user_id).await? {
+            return Ok(existing);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let conn = self.get_connection().await?;
+        let insert_result = conn
+            .execute(
+                r#"
+                INSERT INTO users (
+                    id, username, xmpp_localpart, primary_email, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+                (
+                    user_id.as_str(),
+                    username,
+                    username,
+                    email,
+                    now.as_str(),
+                    now.as_str(),
+                ),
+            )
+            .await;
+
+        match insert_result {
+            Ok(_) => Ok(UserRecord {
+                id: user_id,
+                username: username.to_string(),
+                xmpp_localpart: username.to_string(),
+                display_name: None,
+                avatar_url: None,
+                primary_email: email.map(str::to_string),
+            }),
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("UNIQUE") || message.contains("constraint") {
+                    if let Some(existing) = self.find_user_by_id(&user_id).await? {
+                        return Ok(existing);
+                    }
+                    return Err(AuthError::UserAlreadyExists(username.to_string()));
+                }
+                Err(AuthError::DatabaseError(format!(
+                    "Failed to insert native app user: {}",
+                    err
+                )))
+            }
+        }
+    }
+
+    async fn find_user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, AuthError> {
+        let conn = self.get_connection().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, username, xmpp_localpart, display_name, avatar_url, primary_email
+                FROM users
+                WHERE id = ?
+                LIMIT 1
+                "#,
+                [user_id],
+            )
+            .await
+            .map_err(db_err)?;
+
+        match rows.next().await.map_err(db_err)? {
+            Some(row) => Ok(Some(UserRecord {
+                id: row.get(0).map_err(db_err)?,
+                username: row.get(1).map_err(db_err)?,
+                xmpp_localpart: row.get(2).map_err(db_err)?,
+                display_name: row.get::<Option<String>>(3).ok().flatten(),
+                avatar_url: row.get::<Option<String>>(4).ok().flatten(),
+                primary_email: row.get::<Option<String>>(5).ok().flatten(),
+            })),
+            None => Ok(None),
         }
     }
 
@@ -293,6 +383,10 @@ impl NativeUserStore {
             Ok(false)
         }
     }
+}
+
+fn native_user_id(username: &str, domain: &str) -> String {
+    format!("native:{}:{}", domain.trim().to_lowercase(), username)
 }
 
 /// Generate a random SCRAM salt (16 bytes).

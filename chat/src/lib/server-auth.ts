@@ -19,6 +19,11 @@ export interface AuthProvider {
   display_name?: string;
 }
 
+export interface ServerInfo {
+  native_auth_available: boolean;
+  registration_available?: boolean;
+}
+
 export interface LoginUrlOptions {
   sessionTransport?: "cookie" | "fragment";
 }
@@ -40,6 +45,18 @@ export function createServerAuth(serverBaseUrl: string) {
       return Array.isArray(data) ? (data as AuthProvider[]) : [];
     },
 
+    async getServerInfo(): Promise<ServerInfo | null> {
+      const response = await fetch(`${baseUrl}/api/v1/server-info`, {
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      return (await response.json()) as ServerInfo;
+    },
+
     loginUrl(nextUrl: string, providerId: string, options?: LoginUrlOptions) {
       const url = new URL("/api/auth/start", `${baseUrl}/`);
       url.searchParams.set("provider", providerId);
@@ -49,6 +66,12 @@ export function createServerAuth(serverBaseUrl: string) {
         url.searchParams.set("session_transport", options.sessionTransport);
       }
       return url.toString();
+    },
+    async loginNative(username: string, password: string) {
+      return nativeAuthRequest("/api/auth/native/login", { username, password });
+    },
+    async registerNative(username: string, password: string) {
+      return nativeAuthRequest("/api/auth/native/register", { username, password });
     },
     async getSession(sessionId?: string) {
       const url = new URL("/api/auth/session", `${baseUrl}/`);
@@ -89,4 +112,32 @@ export function createServerAuth(serverBaseUrl: string) {
       }
     },
   };
+
+  async function nativeAuthRequest(path: string, body: { username: string; password: string }) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      let message = `Authentication failed (${response.status})`;
+      try {
+        const payload = (await response.json()) as { message?: unknown; error?: unknown };
+        if (typeof payload.message === "string") {
+          message = payload.message;
+        } else if (typeof payload.error === "string") {
+          message = payload.error;
+        }
+      } catch {
+        // keep fallback message
+      }
+      throw new Error(message);
+    }
+
+    return (await response.json()) as WaddleSession;
+  }
 }

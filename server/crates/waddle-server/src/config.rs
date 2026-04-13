@@ -179,6 +179,7 @@ pub struct ServerInfo {
     pub mode: ServerMode,
     pub auth_enabled: bool,
     pub native_auth_available: bool,
+    pub registration_available: bool,
     pub features: ServerFeatures,
 }
 
@@ -188,18 +189,26 @@ pub struct ServerFeatures {
     pub device_flow: bool,
     pub xmpp_oauth: bool,
     pub auth_page: bool,
+    pub native_auth: bool,
+    pub registration: bool,
     pub websocket: bool,
     pub communities: bool,
 }
 
 impl ServerInfo {
-    pub fn from_config(config: &ServerConfig, native_auth_enabled: bool) -> Self {
+    pub fn from_config(
+        config: &ServerConfig,
+        native_auth_enabled: bool,
+        registration_enabled: bool,
+    ) -> Self {
         let auth_enabled = config.auth_enabled();
         let features = ServerFeatures {
             oauth: auth_enabled,
             device_flow: auth_enabled,
             xmpp_oauth: auth_enabled,
             auth_page: auth_enabled,
+            native_auth: native_auth_enabled,
+            registration: native_auth_enabled && registration_enabled,
             websocket: true,
             communities: true,
         };
@@ -210,6 +219,7 @@ impl ServerInfo {
             mode: config.mode,
             auth_enabled,
             native_auth_available: native_auth_enabled,
+            registration_available: native_auth_enabled && registration_enabled,
             features,
         }
     }

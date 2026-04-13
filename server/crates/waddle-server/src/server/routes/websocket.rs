@@ -1774,6 +1774,8 @@ mod tests {
             app_state.clone(),
             &server_config,
             Some(b"test-encryption-key-32-bytes!!!"),
+            true,
+            true,
         ));
         let mam_db = libsql::Builder::new_local(":memory:")
             .build()

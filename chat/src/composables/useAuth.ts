@@ -151,6 +151,8 @@ export function useAuth(defaultServerUrl: string) {
   const normalizedDefaultServerUrl = normalizeServerUrl(defaultServerUrl);
   const activeServerUrl = ref(loadActiveServer(normalizedDefaultServerUrl));
   const providers = ref<AuthProvider[]>([]);
+  const nativeAuthAvailable = ref(false);
+  const registrationAvailable = ref(false);
 
   let auth = createServerAuth(activeServerUrl.value);
 
@@ -162,10 +164,21 @@ export function useAuth(defaultServerUrl: string) {
 
   async function loadProviders() {
     try {
-      providers.value = await auth.getProviders();
-      appError.value = providers.value.length === 0 ? "No auth providers available on this server." : "";
+      const [nextProviders, serverInfo] = await Promise.all([
+        auth.getProviders(),
+        auth.getServerInfo(),
+      ]);
+      providers.value = nextProviders;
+      nativeAuthAvailable.value = serverInfo?.native_auth_available ?? false;
+      registrationAvailable.value = serverInfo?.registration_available ?? false;
+      appError.value =
+        providers.value.length === 0 && !nativeAuthAvailable.value
+          ? "No sign-in methods available on this server."
+          : "";
     } catch (e) {
       providers.value = [];
+      nativeAuthAvailable.value = false;
+      registrationAvailable.value = false;
       appError.value = e instanceof Error ? e.message : "Failed to load auth providers.";
     }
   }
@@ -235,6 +248,48 @@ export function useAuth(defaultServerUrl: string) {
     });
   }
 
+  async function loginNative(serverUrl: string, username: string, password: string) {
+    const nextServerUrl = normalizeServerUrl(serverUrl || activeServerUrl.value);
+    if (nextServerUrl !== activeServerUrl.value) {
+      activeServerUrl.value = nextServerUrl;
+      auth = createServerAuth(nextServerUrl);
+      await loadProviders();
+    }
+
+    try {
+      saveActiveServer(activeServerUrl.value);
+      const loaded = await auth.loginNative(username, password);
+      storeSessionId(activeServerUrl.value, loaded.session_id);
+      session.value = loaded;
+      api.value = new WaddleApi(activeServerUrl.value, loaded.session_id);
+      appState.value = "ready";
+      appError.value = "";
+    } catch (e) {
+      appError.value = e instanceof Error ? e.message : "Native login failed.";
+    }
+  }
+
+  async function registerNative(serverUrl: string, username: string, password: string) {
+    const nextServerUrl = normalizeServerUrl(serverUrl || activeServerUrl.value);
+    if (nextServerUrl !== activeServerUrl.value) {
+      activeServerUrl.value = nextServerUrl;
+      auth = createServerAuth(nextServerUrl);
+      await loadProviders();
+    }
+
+    try {
+      saveActiveServer(activeServerUrl.value);
+      const loaded = await auth.registerNative(username, password);
+      storeSessionId(activeServerUrl.value, loaded.session_id);
+      session.value = loaded;
+      api.value = new WaddleApi(activeServerUrl.value, loaded.session_id);
+      appState.value = "ready";
+      appError.value = "";
+    } catch (e) {
+      appError.value = e instanceof Error ? e.message : "Native registration failed.";
+    }
+  }
+
   async function fetchProviders(serverUrl: string) {
     const nextServerUrl = normalizeServerUrl(serverUrl);
     if (nextServerUrl !== activeServerUrl.value) {
@@ -269,8 +324,12 @@ export function useAuth(defaultServerUrl: string) {
     isBootstrapping,
     activeServerUrl,
     providers,
+    nativeAuthAvailable,
+    registrationAvailable,
     bootstrap,
     login,
+    loginNative,
+    registerNative,
     fetchProviders,
     logout,
   };

@@ -11,8 +11,8 @@ use crate::auth::identity::IdentityService;
 use crate::auth::oauth2;
 use crate::auth::oidc;
 use crate::auth::{
-    localpart_to_jid, AuthError, AuthProviderConfig, AuthProviderKind, ProviderRegistry, Session,
-    SessionManager,
+    jid_to_localpart, localpart_to_jid, username_to_localpart, AuthError, AuthProviderConfig,
+    AuthProviderKind, NativeUserStore, ProviderRegistry, RegisterRequest, Session, SessionManager,
 };
 use crate::config::ServerConfig;
 use crate::server::AppState;
@@ -37,9 +37,12 @@ use uuid::Uuid;
 pub struct AuthState {
     pub session_manager: SessionManager,
     pub identity_service: IdentityService,
+    pub native_user_store: NativeUserStore,
     pub providers: ProviderRegistry,
     pub base_url: String,
     pub xmpp_domain: String,
+    pub native_auth_enabled: bool,
+    pub registration_enabled: bool,
     pub http_client: reqwest::Client,
     pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
     pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
@@ -51,21 +54,27 @@ impl AuthState {
         app_state: Arc<AppState>,
         server_config: &ServerConfig,
         encryption_key: Option<&[u8]>,
+        native_auth_enabled: bool,
+        registration_enabled: bool,
     ) -> Self {
         let db = Arc::new(app_state.db_pool.global().clone());
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         let identity_service = IdentityService::new(Arc::clone(&db));
+        let native_user_store = NativeUserStore::new(Arc::clone(&db));
         let providers = ProviderRegistry::new(server_config.auth.providers.clone())
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
         Self {
             session_manager,
             identity_service,
+            native_user_store,
             providers,
             base_url: server_config.base_url.trim_end_matches('/').to_string(),
             xmpp_domain: std::env::var("WADDLE_XMPP_DOMAIN")
                 .unwrap_or_else(|_| "localhost".to_string()),
+            native_auth_enabled,
+            registration_enabled,
             http_client: reqwest::Client::new(),
             pending_auth: Arc::new(DashMap::new()),
             device_auth: Arc::new(DashMap::new()),
@@ -129,6 +138,24 @@ impl AuthState {
     fn random_state() -> String {
         let bytes: [u8; 24] = rand::rng().random();
         URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn session_response(&self, session: Session) -> SessionResponse {
+        let is_expired = session.is_expired();
+        let expires_at = session.expires_at.map(|v| v.to_rfc3339());
+        let jid = localpart_to_jid(&session.xmpp_localpart, &self.xmpp_domain)
+            .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, self.xmpp_domain));
+
+        SessionResponse {
+            session_id: session.id,
+            user_id: session.user_id,
+            username: session.username,
+            xmpp_localpart: session.xmpp_localpart,
+            jid,
+            xmpp_websocket_url: self.websocket_url(),
+            is_expired,
+            expires_at,
+        }
     }
 
     pub async fn start_authorization(
@@ -302,6 +329,8 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
         .route("/api/auth/providers", get(list_providers_handler))
         .route("/api/auth/start", get(start_handler))
         .route("/api/auth/callback", get(callback_handler))
+        .route("/api/auth/native/login", post(native_login_handler))
+        .route("/api/auth/native/register", post(native_register_handler))
         .route("/api/auth/session", get(session_handler))
         .route("/api/auth/logout", post(logout_handler))
         .with_state(auth_state)
@@ -356,6 +385,19 @@ pub struct LogoutRequest {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct NativeLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NativeRegisterRequest {
+    pub username: String,
+    pub password: String,
+    pub email: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
     pub session_id: String,
@@ -388,8 +430,12 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
         AuthError::InvalidProvider(_) | AuthError::InvalidRequest(_) | AuthError::InvalidState => {
             StatusCode::BAD_REQUEST
         }
+        AuthError::InvalidUsername(_) => StatusCode::BAD_REQUEST,
         AuthError::SessionNotFound(_) => StatusCode::NOT_FOUND,
         AuthError::SessionExpired => StatusCode::UNAUTHORIZED,
+        AuthError::InvalidPassword(_) => StatusCode::UNAUTHORIZED,
+        AuthError::RegistrationDisabled => StatusCode::FORBIDDEN,
+        AuthError::UserAlreadyExists(_) => StatusCode::CONFLICT,
         AuthError::AuthorizationFailed(_)
         | AuthError::TokenExchangeFailed(_)
         | AuthError::UserInfoFailed(_)
@@ -401,9 +447,13 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
     let code = match &err {
         AuthError::InvalidProvider(_) => "invalid_provider",
         AuthError::InvalidRequest(_) => "invalid_request",
+        AuthError::InvalidUsername(_) => "invalid_username",
         AuthError::InvalidState => "invalid_state",
         AuthError::SessionNotFound(_) => "session_not_found",
         AuthError::SessionExpired => "session_expired",
+        AuthError::InvalidPassword(_) => "invalid_password",
+        AuthError::RegistrationDisabled => "registration_disabled",
+        AuthError::UserAlreadyExists(_) => "user_already_exists",
         AuthError::AuthorizationFailed(_) => "authorization_failed",
         AuthError::TokenExchangeFailed(_) => "token_exchange_failed",
         AuthError::UserInfoFailed(_) => "userinfo_failed",
@@ -414,9 +464,133 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
     (status, Json(ErrorResponse::new(code, &err.to_string())))
 }
 
+fn invalid_credentials_response() -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse::new(
+            "invalid_credentials",
+            "Invalid username or password",
+        )),
+    )
+        .into_response()
+}
+
+fn normalize_native_username(input: &str) -> Result<String, AuthError> {
+    let localpart = jid_to_localpart(input)?;
+    if !localpart.chars().any(|ch| ch.is_alphanumeric()) {
+        return Err(AuthError::InvalidUsername(
+            "username must contain at least one letter or number".to_string(),
+        ));
+    }
+
+    Ok(username_to_localpart(&localpart))
+}
+
+async fn create_native_session_response(
+    state: &AuthState,
+    username: &str,
+    email: Option<&str>,
+) -> Result<axum::response::Response, AuthError> {
+    let user = state
+        .native_user_store
+        .resolve_or_create_user(username, &state.xmpp_domain, email)
+        .await?;
+    let session = Session::new(&user.id, &user.username, &user.xmpp_localpart);
+    state.session_manager.create_session(&session).await?;
+
+    let cookie = state.session_cookie_header(Some(&session.id), 60 * 60 * 24 * 30);
+    let body = state.session_response(session);
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, cookie.parse().expect("valid cookie"));
+    Ok(response)
+}
+
 #[instrument(skip(state))]
 pub async fn list_providers_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     (StatusCode::OK, Json(state.providers.list()))
+}
+
+#[instrument(skip(state, body))]
+pub async fn native_login_handler(
+    State(state): State<Arc<AuthState>>,
+    Json(body): Json<NativeLoginRequest>,
+) -> impl IntoResponse {
+    if !state.native_auth_enabled {
+        return auth_error_to_response(AuthError::InvalidRequest(
+            "native auth is disabled".to_string(),
+        ))
+        .into_response();
+    }
+
+    let username = match normalize_native_username(&body.username) {
+        Ok(value) => value,
+        Err(_) => return invalid_credentials_response(),
+    };
+
+    match state
+        .native_user_store
+        .verify_password(&username, &state.xmpp_domain, &body.password)
+        .await
+    {
+        Ok(true) => match create_native_session_response(&state, &username, None).await {
+            Ok(response) => response,
+            Err(err) => auth_error_to_response(err).into_response(),
+        },
+        Ok(false) => invalid_credentials_response(),
+        Err(err) => auth_error_to_response(err).into_response(),
+    }
+}
+
+#[instrument(skip(state, body))]
+pub async fn native_register_handler(
+    State(state): State<Arc<AuthState>>,
+    Json(body): Json<NativeRegisterRequest>,
+) -> impl IntoResponse {
+    if !state.native_auth_enabled {
+        return auth_error_to_response(AuthError::InvalidRequest(
+            "native auth is disabled".to_string(),
+        ))
+        .into_response();
+    }
+    if !state.registration_enabled {
+        return auth_error_to_response(AuthError::RegistrationDisabled).into_response();
+    }
+    if body.password.len() < 8 {
+        return auth_error_to_response(AuthError::InvalidPassword(
+            "password must be at least 8 characters".to_string(),
+        ))
+        .into_response();
+    }
+
+    let username = match normalize_native_username(&body.username) {
+        Ok(value) => value,
+        Err(err) => return auth_error_to_response(err).into_response(),
+    };
+    let email = body
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let register_result = state
+        .native_user_store
+        .register(RegisterRequest {
+            username: username.clone(),
+            domain: state.xmpp_domain.clone(),
+            password: body.password,
+            email: email.map(str::to_string),
+        })
+        .await;
+
+    match register_result {
+        Ok(_) => match create_native_session_response(&state, &username, email).await {
+            Ok(response) => response,
+            Err(err) => auth_error_to_response(err).into_response(),
+        },
+        Err(err) => auth_error_to_response(err).into_response(),
+    }
 }
 
 #[instrument(skip(state))]
@@ -752,24 +926,7 @@ pub async fn session_handler(
 
     match state.session_manager.get_session(&session_id).await {
         Ok(Some(session)) => {
-            let is_expired = session.is_expired();
-            let expires_at = session.expires_at.map(|v| v.to_rfc3339());
-            let jid = localpart_to_jid(&session.xmpp_localpart, &state.xmpp_domain)
-                .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, state.xmpp_domain));
-            (
-                StatusCode::OK,
-                Json(SessionResponse {
-                    session_id: session.id,
-                    user_id: session.user_id,
-                    username: session.username,
-                    xmpp_localpart: session.xmpp_localpart,
-                    jid,
-                    xmpp_websocket_url: state.websocket_url(),
-                    is_expired,
-                    expires_at,
-                }),
-            )
-                .into_response()
+            (StatusCode::OK, Json(state.session_response(session))).into_response()
         }
         Ok(None) => auth_error_to_response(AuthError::SessionNotFound(session_id)).into_response(),
         Err(err) => auth_error_to_response(err).into_response(),
@@ -811,6 +968,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
+    use serde_json::json;
     use tower::ServiceExt;
 
     async fn create_test_auth_state(server_config: &ServerConfig) -> Arc<AuthState> {
@@ -823,7 +981,7 @@ mod tests {
             .unwrap();
 
         let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
-        Arc::new(AuthState::new(app_state, server_config, None))
+        Arc::new(AuthState::new(app_state, server_config, None, true, true))
     }
 
     #[tokio::test]
@@ -876,5 +1034,75 @@ mod tests {
         assert!(!insecure_state
             .session_cookie_header(Some("token"), 60)
             .contains("Secure"));
+    }
+
+    #[tokio::test]
+    async fn native_register_and_login_create_sessions() {
+        let server_config = ServerConfig::test_homeserver();
+        let auth_state = create_test_auth_state(&server_config).await;
+        let app = router(auth_state.clone());
+
+        let register_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/native/register")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "username": "Alice",
+                            "password": "secret123",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(register_response.status(), StatusCode::OK);
+        assert!(register_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .is_some());
+        let body = register_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let registered: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(registered["username"], "alice");
+        assert_eq!(registered["jid"], "alice@localhost");
+
+        let login_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/native/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "username": "alice@localhost",
+                            "password": "secret123",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(login_response.status(), StatusCode::OK);
+        let body = login_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let logged_in: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(logged_in["username"], "alice");
+        assert_eq!(logged_in["jid"], "alice@localhost");
     }
 }

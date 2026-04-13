@@ -389,8 +389,12 @@ onUnmounted(() => {
     :default-server-url="props.serverBaseUrl"
     :active-server-url="auth.activeServerUrl.value"
     :providers="auth.providers.value"
+    :native-auth-available="auth.nativeAuthAvailable.value"
+    :registration-available="auth.registrationAvailable.value"
     :error-message="auth.appError.value"
     @login="(url, pid) => auth.login(url, pid)"
+    @native-login="(url, username, password) => auth.loginNative(url, username, password)"
+    @native-register="(url, username, password) => auth.registerNative(url, username, password)"
     @fetch-providers="auth.fetchProviders"
   />
 
