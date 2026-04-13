@@ -5637,6 +5637,7 @@ dependencies = [
  "tokio-xmpp",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "waddle-xmpp-xep-github",
  "xmpp-parsers",

@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
+use url::{Host, Url};
 use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
 use xmpp_parsers::presence::Type as PresenceType;
@@ -84,11 +85,11 @@ use crate::xep::xep0191::{
     build_unblock_push, is_blocking_query, parse_blocking_request, BlockingRequest,
 };
 use crate::xep::xep0199::{build_ping_result, is_ping};
+use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
 use crate::xep::xep0357::{
     build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
     parse_push_disable, parse_push_enable,
 };
-use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
 use crate::xep::xep0363::{
     build_upload_error, build_upload_slot_response, is_upload_request, parse_upload_request,
     UploadError, UploadSlot,
@@ -7115,28 +7116,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         };
 
         let bare_jid = sender_jid.to_bare().to_string();
-        let endpoint = enable.options.iter().find(|(k, _)| k == "endpoint").map(|(_, v)| v.clone());
+        let endpoint = enable
+            .options
+            .iter()
+            .find(|(k, _)| k == "endpoint")
+            .map(|(_, v)| v.clone());
 
-        // SSRF protection: only allow https endpoints, reject private/local URLs
+        // SSRF protection: only allow https endpoints and reject local/private targets.
         if let Some(ref ep) = endpoint {
-            if !ep.starts_with("https://") {
-                return Err(XmppError::bad_request(Some(
-                    "Push endpoint must use https".into(),
-                )));
-            }
-            let host = ep.trim_start_matches("https://").split('/').next().unwrap_or("");
-            let host_no_port = host.split(':').next().unwrap_or("");
-            if host_no_port == "localhost"
-                || host_no_port == "127.0.0.1"
-                || host_no_port == "::1"
-                || host_no_port.starts_with("10.")
-                || host_no_port.starts_with("192.168.")
-                || host_no_port.starts_with("169.254.")
-            {
-                return Err(XmppError::bad_request(Some(
-                    "Push endpoint must not target private networks".into(),
-                )));
-            }
+            validate_push_endpoint(ep)?;
         }
 
         let sub = crate::push::PushSubscription {
@@ -7144,8 +7132,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             service_jid: enable.jid.clone(),
             node: enable.node.clone(),
             endpoint,
-            p256dh: enable.options.iter().find(|(k, _)| k == "p256dh").map(|(_, v)| v.clone()),
-            auth_key: enable.options.iter().find(|(k, _)| k == "auth").map(|(_, v)| v.clone()),
+            p256dh: enable
+                .options
+                .iter()
+                .find(|(k, _)| k == "p256dh")
+                .map(|(_, v)| v.clone()),
+            auth_key: enable
+                .options
+                .iter()
+                .find(|(k, _)| k == "auth")
+                .map(|(_, v)| v.clone()),
         };
 
         if let Err(e) = self.push_store.register(sub).await {
@@ -7237,6 +7233,77 @@ fn isr_token_in_sasl_success_enabled() -> bool {
     )
 }
 
+fn validate_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
+    let url = Url::parse(endpoint)
+        .map_err(|_| XmppError::bad_request(Some("Invalid push endpoint URL".into())))?;
+
+    if url.scheme() != "https" {
+        return Err(XmppError::bad_request(Some(
+            "Push endpoint must use https".into(),
+        )));
+    }
+
+    match url.host() {
+        Some(Host::Domain(host)) => {
+            let host = host.to_ascii_lowercase();
+            if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+        Some(Host::Ipv4(ipv4)) => {
+            if is_disallowed_push_ipv4(ipv4) {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+        Some(Host::Ipv6(ipv6)) => {
+            if is_disallowed_push_ipv6(ipv6) {
+                return Err(XmppError::bad_request(Some(
+                    "Push endpoint must not target private networks".into(),
+                )));
+            }
+        }
+        None => {
+            return Err(XmppError::bad_request(Some(
+                "Invalid push endpoint URL".into(),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_disallowed_push_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+
+    // RFC 6598: 100.64.0.0/10 (Carrier-grade NAT)
+    let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000;
+    // RFC 2544: 198.18.0.0/15 (Benchmarking)
+    let is_benchmark = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
+
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || is_cgnat
+        || is_benchmark
+}
+
+fn is_disallowed_push_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_disallowed_push_ipv4(mapped);
+    }
+
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip.is_multicast()
+}
+
 /// Parsed stanza types.
 #[derive(Debug, Clone)]
 pub enum Stanza {
@@ -7262,5 +7329,35 @@ impl Stanza {
             Stanza::Presence(p) => p.clone().into(),
             Stanza::Iq(i) => i.clone().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_push_endpoint;
+
+    #[test]
+    fn accepts_public_https_endpoint() {
+        assert!(validate_push_endpoint("https://push.example.com/notify").is_ok());
+    }
+
+    #[test]
+    fn rejects_non_https_endpoint() {
+        assert!(validate_push_endpoint("http://push.example.com/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_localhost_endpoint() {
+        assert!(validate_push_endpoint("https://localhost/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_private_ipv4_endpoint() {
+        assert!(validate_push_endpoint("https://10.0.0.12/notify").is_err());
+    }
+
+    #[test]
+    fn rejects_link_local_ipv6_endpoint() {
+        assert!(validate_push_endpoint("https://[fe80::1]/notify").is_err());
     }
 }

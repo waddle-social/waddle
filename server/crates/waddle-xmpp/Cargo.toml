@@ -47,6 +47,7 @@ opentelemetry = { workspace = true }
 # Utilities
 uuid = { workspace = true }
 chrono = { workspace = true }
+url = { workspace = true }
 base64 = { workspace = true }
 
 # HTML rendering
