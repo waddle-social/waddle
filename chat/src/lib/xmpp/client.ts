@@ -69,6 +69,8 @@ export class BrowserXmppClient {
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private xmpp: Agent | null = null;
+  private connectPromise: Promise<void> | null = null;
+  private connected = false;
   private currentRoom: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
@@ -89,13 +91,22 @@ export class BrowserXmppClient {
   // -- Connection lifecycle --
 
   async connect() {
-    if (this.xmpp) return;
+    if (this.xmpp && this.connected) return;
+    if (this.connectPromise) return this.connectPromise;
+    if (this.xmpp) {
+      try { this.xmpp.disconnect(); } catch { /* ignore stale client */ }
+      this.xmpp = null;
+    }
+    this.currentRoom = null;
+    this.roomHats = {};
+    this.hatsHandler?.({});
     const xmpp = createClient({
       jid: this.session.jid,
       // The session_id is a bearer token — use OAUTHBEARER (RFC 7628)
       credentials: { token: this.session.session_id },
       resource: this.resource,
       transports: { websocket: this.session.xmpp_websocket_url, bosh: false },
+      autoReconnect: false,
       useStreamManagement: false,
       sendReceipts: false, chatMarkers: false,
     });
@@ -107,14 +118,24 @@ export class BrowserXmppClient {
 
     // Wait for session:started before returning, so callers can safely
     // use the connection. Reject on disconnect/stream errors.
-    return new Promise<void>((resolve, reject) => {
+    const promise = new Promise<void>((resolve, reject) => {
       const cleanup = () => { xmpp.off("session:started", onReady); xmpp.off("disconnected", onFail); };
-      const onReady = () => { cleanup(); resolve(); };
-      const onFail = (err?: Error) => { cleanup(); this.xmpp = null; reject(err ?? new Error("XMPP connection failed")); };
+      const onReady = () => { cleanup(); this.connected = true; this.connectPromise = null; resolve(); };
+      const onFail = (err?: Error) => {
+        cleanup();
+        if (this.xmpp === xmpp) {
+          this.connected = false;
+          this.xmpp = null;
+        }
+        this.connectPromise = null;
+        reject(err ?? new Error("XMPP connection failed"));
+      };
       xmpp.on("session:started", onReady);
       xmpp.on("disconnected", onFail);
-      xmpp.connect();
     });
+    this.connectPromise = promise;
+    xmpp.connect();
+    return promise;
   }
 
   async disconnect() {
@@ -125,6 +146,8 @@ export class BrowserXmppClient {
     this.stopSelfPing();
     const xmpp = this.xmpp;
     this.xmpp = null;
+    this.connectPromise = null;
+    this.connected = false;
     this.currentRoom = null;
     try { xmpp.disconnect(); } catch { /* ignore */ }
   }
@@ -208,9 +231,21 @@ export class BrowserXmppClient {
   }
 
   private wireEvents(xmpp: Agent) {
-    xmpp.on("session:started", () =>
-      this.statusHandler?.({ state: "online", detail: "Live room connection ready" }));
+    xmpp.on("session:started", () => {
+      if (this.xmpp !== xmpp) return;
+      this.connected = true;
+      this.statusHandler?.({ state: "online", detail: "Live room connection ready" });
+    });
     xmpp.on("disconnected", (err) => {
+      if (this.xmpp === xmpp) {
+        this.connected = false;
+        this.connectPromise = null;
+        this.xmpp = null;
+        this.currentRoom = null;
+        this.roomHats = {};
+        this.hatsHandler?.({});
+        this.stopSelfPing();
+      }
       const detail = err?.message ?? "Live room connection offline";
       this.statusHandler?.({ state: "offline", detail });
       console.error("XMPP disconnected", err);
