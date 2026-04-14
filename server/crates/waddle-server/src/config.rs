@@ -1,7 +1,7 @@
 //! Server configuration.
 
 use crate::auth::providers::AuthProviderConfig;
-use crate::media::{MediaBackendKind, MediaConfig, WebrtcRsSfuConfig};
+use crate::media::{EmbeddedSfuConfig, MediaBackendKind, MediaConfig, WebrtcRsSfuConfig};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
@@ -135,6 +135,36 @@ impl ServerConfig {
             })
             .transpose()?
             .unwrap_or_else(|| vec!["stun:stun.l.google.com:19302".to_string()]);
+        let media_embedded_signaling_path = std::env::var("WADDLE_MEDIA_EMBEDDED_SIGNALING_PATH")
+            .unwrap_or_else(|_| "/v1/media/sfu/embedded".to_string());
+        let media_embedded_room_prefix = std::env::var("WADDLE_MEDIA_EMBEDDED_ROOM_PREFIX")
+            .unwrap_or_else(|_| "waddle".to_string());
+        let media_embedded_max_rooms = std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_ROOMS")
+            .ok()
+            .map(|raw| {
+                raw.parse::<usize>()
+                    .map_err(|e| format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_ROOMS: {e}"))
+            })
+            .transpose()?
+            .unwrap_or(128);
+        let media_embedded_max_participants_per_room =
+            std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM")
+                .ok()
+                .map(|raw| {
+                    raw.parse::<usize>().map_err(|e| {
+                        format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM: {e}")
+                    })
+                })
+                .transpose()?
+                .unwrap_or(32);
+        let media_embedded_max_sessions = std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS")
+            .ok()
+            .map(|raw| {
+                raw.parse::<usize>()
+                    .map_err(|e| format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS: {e}"))
+            })
+            .transpose()?
+            .unwrap_or(1024);
 
         let media = MediaConfig {
             backend: media_backend,
@@ -142,7 +172,15 @@ impl ServerConfig {
             webrtc_rs_sfu: WebrtcRsSfuConfig {
                 signaling_path: media_signaling_path,
                 room_prefix: media_room_prefix,
+                ice_servers: media_ice_servers.clone(),
+            },
+            embedded_sfu: EmbeddedSfuConfig {
+                signaling_path: media_embedded_signaling_path,
+                room_prefix: media_embedded_room_prefix,
                 ice_servers: media_ice_servers,
+                max_rooms: media_embedded_max_rooms,
+                max_participants_per_room: media_embedded_max_participants_per_room,
+                max_sessions: media_embedded_max_sessions,
             },
         };
 

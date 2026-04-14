@@ -5,8 +5,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod embedded_sfu;
 pub mod webrtc_rs_sfu;
 
+pub use embedded_sfu::EmbeddedSfuBackend;
 pub use webrtc_rs_sfu::WebrtcRsSfuBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -15,6 +17,7 @@ pub enum MediaBackendKind {
     #[default]
     Disabled,
     WebrtcRsSfu,
+    EmbeddedSfu,
 }
 
 impl fmt::Display for MediaBackendKind {
@@ -22,6 +25,7 @@ impl fmt::Display for MediaBackendKind {
         match self {
             MediaBackendKind::Disabled => write!(f, "disabled"),
             MediaBackendKind::WebrtcRsSfu => write!(f, "webrtc-rs-sfu"),
+            MediaBackendKind::EmbeddedSfu => write!(f, "embedded-sfu"),
         }
     }
 }
@@ -33,6 +37,7 @@ impl FromStr for MediaBackendKind {
         match value.to_lowercase().as_str() {
             "disabled" | "none" => Ok(MediaBackendKind::Disabled),
             "webrtc-rs-sfu" | "webrtcrs-sfu" | "webrtc_sfu" => Ok(MediaBackendKind::WebrtcRsSfu),
+            "embedded-sfu" | "embedded" | "in-process" => Ok(MediaBackendKind::EmbeddedSfu),
             other => Err(format!("unsupported media backend: {}", other)),
         }
     }
@@ -43,6 +48,7 @@ pub struct MediaConfig {
     pub backend: MediaBackendKind,
     pub public_base_url: String,
     pub webrtc_rs_sfu: WebrtcRsSfuConfig,
+    pub embedded_sfu: EmbeddedSfuConfig,
 }
 
 impl Default for MediaConfig {
@@ -51,6 +57,7 @@ impl Default for MediaConfig {
             backend: MediaBackendKind::Disabled,
             public_base_url: "http://localhost:3000".to_string(),
             webrtc_rs_sfu: WebrtcRsSfuConfig::default(),
+            embedded_sfu: EmbeddedSfuConfig::default(),
         }
     }
 }
@@ -60,6 +67,29 @@ pub struct WebrtcRsSfuConfig {
     pub signaling_path: String,
     pub room_prefix: String,
     pub ice_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddedSfuConfig {
+    pub signaling_path: String,
+    pub room_prefix: String,
+    pub ice_servers: Vec<String>,
+    pub max_rooms: usize,
+    pub max_participants_per_room: usize,
+    pub max_sessions: usize,
+}
+
+impl Default for EmbeddedSfuConfig {
+    fn default() -> Self {
+        Self {
+            signaling_path: "/v1/media/sfu/embedded".to_string(),
+            room_prefix: "waddle".to_string(),
+            ice_servers: vec!["stun:stun.l.google.com:19302".to_string()],
+            max_rooms: 128,
+            max_participants_per_room: 32,
+            max_sessions: 1024,
+        }
+    }
 }
 
 impl Default for WebrtcRsSfuConfig {
@@ -96,6 +126,8 @@ pub enum MediaBackendError {
     Disabled,
     #[error("invalid media request: {0}")]
     InvalidRequest(String),
+    #[error("media capacity exceeded: {0}")]
+    CapacityExceeded(String),
 }
 
 pub trait MediaBackend: Send + Sync {
@@ -126,6 +158,7 @@ pub fn build_media_backend(config: &MediaConfig) -> Arc<dyn MediaBackend> {
     match config.backend {
         MediaBackendKind::Disabled => Arc::new(DisabledMediaBackend),
         MediaBackendKind::WebrtcRsSfu => Arc::new(WebrtcRsSfuBackend::new(config.clone())),
+        MediaBackendKind::EmbeddedSfu => Arc::new(EmbeddedSfuBackend::new(config.clone())),
     }
 }
 
@@ -146,6 +179,10 @@ mod tests {
         assert_eq!(
             "webrtc-rs-sfu".parse::<MediaBackendKind>().unwrap(),
             MediaBackendKind::WebrtcRsSfu
+        );
+        assert_eq!(
+            "embedded".parse::<MediaBackendKind>().unwrap(),
+            MediaBackendKind::EmbeddedSfu
         );
         assert_eq!(
             "disabled".parse::<MediaBackendKind>().unwrap(),

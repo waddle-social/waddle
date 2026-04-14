@@ -70,11 +70,16 @@ Before the first login, copy [local/waddle.env.example](/Users/icepuma/developme
   - Shorthand examples: `debug`, `info`, `warn`, `error`
   - Full filter examples: `info,waddle_server=debug,waddle_xmpp=debug`
 - Default logging filter (when neither env var is set): `info,waddle_server=debug,waddle_xmpp=debug`
-- `WADDLE_MEDIA_BACKEND`: Media backend selector (`disabled` or `webrtc-rs-sfu`).
+- `WADDLE_MEDIA_BACKEND`: Media backend selector (`disabled`, `webrtc-rs-sfu`, or `embedded-sfu`).
 - `WADDLE_MEDIA_PUBLIC_BASE_URL`: Public base URL used to generate media join endpoints.
 - `WADDLE_MEDIA_SFU_SIGNALING_PATH`: Path prefix used for SFU signaling URLs (default `/v1/media/sfu`).
 - `WADDLE_MEDIA_SFU_ROOM_PREFIX`: Prefix applied to generated SFU room ids (default `waddle`).
 - `WADDLE_MEDIA_SFU_ICE_SERVERS_JSON`: JSON array of ICE/STUN/TURN servers.
+- `WADDLE_MEDIA_EMBEDDED_SIGNALING_PATH`: Path prefix for embedded SFU join URLs (default `/v1/media/sfu/embedded`).
+- `WADDLE_MEDIA_EMBEDDED_ROOM_PREFIX`: Prefix applied to embedded SFU room ids (default `waddle`).
+- `WADDLE_MEDIA_EMBEDDED_MAX_ROOMS`: Hard cap on concurrent embedded SFU rooms (default `128`).
+- `WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM`: Hard cap per embedded SFU room (default `32`).
+- `WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS`: Hard cap on total embedded SFU sessions (default `1024`).
 
 ### Container Image
 
