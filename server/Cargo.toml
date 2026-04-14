@@ -39,6 +39,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 # Actor Framework
 kameo = "0.15"
 
+# WebRTC (SFU)
+str0m = "0.18"
+
 # XMPP Server
 tokio-xmpp = "4.0"
 jid = { version = "0.11", features = ["serde"] }

@@ -17,6 +17,9 @@ async-trait = "0.1"
 # Actor Framework
 kameo = { workspace = true }
 
+# WebRTC (SFU)
+str0m = { workspace = true }
+
 # XMPP
 tokio-xmpp = { workspace = true }
 jid = { workspace = true }
