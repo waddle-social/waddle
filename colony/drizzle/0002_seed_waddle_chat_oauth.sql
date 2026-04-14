@@ -15,7 +15,7 @@ VALUES (
   'Waddle Chat',
   '{"firstParty":true,"product":"chat"}',
   'waddle-chat',
-  '["http://localhost:4321/api/auth/oauth2/callback/colony","https://chat.waddle.social/api/auth/oauth2/callback/colony"]',
+  '["http://localhost:4321/api/auth/oauth2/callback/colony","https://waddle.chat/api/auth/oauth2/callback/colony"]',
   'public',
   0,
   unixepoch() * 1000,

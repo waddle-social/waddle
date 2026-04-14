@@ -1150,7 +1150,7 @@ mod tests {
         let app = Router::new()
             .route("/health", get(|| async { StatusCode::OK }))
             .layer(build_cors(Some(
-                "https://chat.waddle.social,http://localhost:4321",
+                "https://waddle.chat,http://localhost:4321",
             )));
 
         let response = app
@@ -1158,7 +1158,7 @@ mod tests {
                 Request::builder()
                     .method("OPTIONS")
                     .uri("/health")
-                    .header(header::ORIGIN, "https://chat.waddle.social")
+                    .header(header::ORIGIN, "https://waddle.chat")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
                     .body(Body::empty())
                     .unwrap(),
@@ -1172,7 +1172,7 @@ mod tests {
                 .headers()
                 .get("access-control-allow-origin")
                 .and_then(|value| value.to_str().ok()),
-            Some("https://chat.waddle.social")
+            Some("https://waddle.chat")
         );
         assert_eq!(
             response

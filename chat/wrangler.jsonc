@@ -16,7 +16,7 @@
   "preview_urls": false,
   "routes": [
     {
-      "pattern": "chat.waddle.social",
+      "pattern": "waddle.chat",
       "custom_domain": true
     }
   ],
