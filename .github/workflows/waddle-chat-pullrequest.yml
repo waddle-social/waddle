@@ -7,7 +7,8 @@ on:
     paths:
     - .github/workflows/waddle-chat-pullrequest.yml
     - chat/astro.config.ts
-    - chat/bun.lock
+    - bun.lock
+    - package.json
     - chat/env.cue
     - chat/package.json
     - chat/public/**

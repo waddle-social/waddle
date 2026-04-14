@@ -9,7 +9,8 @@ on:
     paths:
     - .github/workflows/waddle-colony-default.yml
     - colony/astro.config.ts
-    - colony/bun.lock
+    - bun.lock
+    - package.json
     - colony/dist/**
     - colony/drizzle.config.ts
     - colony/drizzle/**

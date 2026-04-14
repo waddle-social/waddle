@@ -9,7 +9,8 @@ on:
     paths:
     - .github/workflows/waddle-chat-default.yml
     - chat/astro.config.ts
-    - chat/bun.lock
+    - bun.lock
+    - package.json
     - chat/dist/**
     - chat/env.cue
     - chat/package.json

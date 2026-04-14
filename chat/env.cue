@@ -37,10 +37,11 @@ ci: pipelines: {
 tasks: {
   install: {
     command: "bun"
-    args: ["install", "--frozen-lockfile"]
+    args: ["install", "--frozen-lockfile", "--cwd", ".."]
     inputs: [
+      "../package.json",
+      "../bun.lock",
       "package.json",
-      "bun.lock",
     ]
   }
   generateTypes: {
@@ -48,8 +49,9 @@ tasks: {
     args: ["run", "generate-types"]
     dependsOn: [_t.install]
     inputs: [
+      "../package.json",
+      "../bun.lock",
       "package.json",
-      "bun.lock",
       "wrangler.jsonc",
     ]
     outputs: [
@@ -66,8 +68,9 @@ tasks: {
     args: ["run", "build"]
     dependsOn: [_t.generateTypes]
     inputs: [
+      "../package.json",
+      "../bun.lock",
       "package.json",
-      "bun.lock",
       "astro.config.mjs",
       "tsconfig.json",
       "wrangler.jsonc",

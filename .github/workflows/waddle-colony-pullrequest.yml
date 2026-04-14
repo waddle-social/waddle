@@ -7,7 +7,8 @@ on:
     paths:
     - .github/workflows/waddle-colony-pullrequest.yml
     - colony/astro.config.ts
-    - colony/bun.lock
+    - bun.lock
+    - package.json
     - colony/drizzle.config.ts
     - colony/drizzle/**
     - colony/env.cue

@@ -44,10 +44,11 @@ ci: pipelines: {
 tasks: {
   install: {
     command: "bun"
-    args: ["install", "--frozen-lockfile"]
+    args: ["install", "--frozen-lockfile", "--cwd", ".."]
     inputs: [
+      "../package.json",
+      "../bun.lock",
       "package.json",
-      "bun.lock",
     ]
   }
   build: {
@@ -55,8 +56,9 @@ tasks: {
     args: ["run", "build"]
     dependsOn: [_t.install]
     inputs: [
+      "../package.json",
+      "../bun.lock",
       "package.json",
-      "bun.lock",
       "astro.config.ts",
       "tsconfig.json",
       "wrangler.jsonc",
