@@ -45,7 +45,7 @@ spec:
     - name: teleport-passthrough
       protocol: TLS
       port: 443
-      hostname: "teleport.waddle.chat"
+      hostname: "teleport.waddle.social"
       tls:
         mode: Passthrough
       allowedRoutes:
@@ -63,7 +63,7 @@ spec:
     - name: teleport-kube-passthrough
       protocol: TLS
       port: 443
-      hostname: "*.teleport.waddle.chat"
+      hostname: "*.teleport.waddle.social"
       tls:
         mode: Passthrough
       allowedRoutes:

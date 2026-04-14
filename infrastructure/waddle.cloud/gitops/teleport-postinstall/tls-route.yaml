@@ -5,8 +5,8 @@ metadata:
   namespace: teleport
 spec:
   hostnames:
-    - teleport.waddle.chat
-    - "*.teleport.waddle.chat"
+    - teleport.waddle.social
+    - "*.teleport.waddle.social"
     - "*.teleport.cluster.local"
   parentRefs:
     - name: waddle-gateway

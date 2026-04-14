@@ -21,7 +21,7 @@ spec:
   values:
     fullnameOverride: teleport
     chartMode: standalone
-    clusterName: teleport.waddle.chat
+    clusterName: teleport.waddle.social
     kubeClusterName: ${WADDLE_CLUSTER_ENVIRONMENT}
     proxyListenerMode: multiplex
     acme: true

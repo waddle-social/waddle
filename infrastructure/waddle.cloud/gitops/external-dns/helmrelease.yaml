@@ -26,6 +26,7 @@ spec:
     domainFilters:
       - apps.waddle.chat
       - waddle.chat
+      - waddle.social
     policy: sync
     sources:
       - gateway-httproute
