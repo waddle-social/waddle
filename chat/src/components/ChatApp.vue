@@ -67,7 +67,6 @@ const messaging = useMessaging(
 
 const muji = useMujiRuntime(
   auth.session,
-  auth.api,
   xmppClient,
   messaging.xmppStatus,
   waddles.activeWaddleId,
@@ -568,9 +567,6 @@ onUnmounted(() => {
         :is-searching="messaging.isSearching.value"
         :muji-phase="muji.phase.value"
         :muji-pending-invite="muji.pendingInvite.value"
-        :active-calls="muji.activeCalls.value"
-        :is-loading-active-calls="muji.isLoadingActiveCalls.value"
-        :joining-listed-call-id="muji.joiningListedCallId.value"
         :muji-in-call="muji.inCall.value"
         :muji-is-switching="muji.isSwitching.value"
         :muji-current-sid="muji.sid.value"
@@ -595,9 +591,6 @@ onUnmounted(() => {
         @join-call-invite="muji.joinPendingInvite"
         @switch-call-invite="muji.switchToPendingInvite"
         @decline-call-invite="muji.declineInvite"
-        @refresh-active-calls="muji.refreshActiveCalls"
-        @join-listed-call="muji.joinListedCall"
-        @switch-listed-call="muji.switchToListedCall"
         @dismiss-call-invite="muji.dismissInvite"
         @toggle-mic="muji.toggleMicrophone"
         @toggle-camera="muji.toggleCamera"

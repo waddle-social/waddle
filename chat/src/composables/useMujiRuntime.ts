@@ -1,6 +1,5 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
-import type { ActiveCallSummary, WaddleApi } from "@/lib/waddle-api";
 import type {
   BrowserXmppClient,
   CallInviteInfo,
@@ -31,7 +30,6 @@ function stopStream(stream: MediaStream | null) {
 
 export function useMujiRuntime(
   session: Ref<WaddleSession | null>,
-  api: Ref<WaddleApi | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
   xmppStatus: Ref<XmppStatusSnapshot>,
   activeWaddleId: Ref<string | null>,
@@ -49,9 +47,6 @@ export function useMujiRuntime(
   const micEnabled = ref(true);
   const cameraEnabled = ref(true);
   const hasRemoteTracks = ref(false);
-  const activeCalls = ref<ActiveCallSummary[]>([]);
-  const isLoadingActiveCalls = ref(false);
-  const joiningListedCallId = ref<string | null>(null);
   const recoverableCall = ref<RecoverableCall | null>(null);
   let leavePromise: Promise<void> | null = null;
   let rejoinPromise: Promise<void> | null = null;
@@ -153,7 +148,6 @@ export function useMujiRuntime(
     if (event.type === "terminated") {
       if (!sid.value || sid.value === event.sid) {
         resetCallState();
-        void refreshActiveCalls();
       }
       return;
     }
@@ -198,13 +192,6 @@ export function useMujiRuntime(
       try {
         const client = xmppClient.value;
         const activeCallId = activeSid ?? context?.sid;
-        if (api.value && activeCallId) {
-          try {
-            await api.value.leaveCall(activeCallId);
-          } catch {
-            // best-effort leave registration cleanup
-          }
-        }
         if (client && context) {
           try {
             await client.sendCallLeft(context.waddleId, context.channelId, activeCallId);
@@ -217,7 +204,6 @@ export function useMujiRuntime(
         resetCallState();
         if (clearPendingInvite) pendingInvite.value = null;
         error.value = "";
-        await refreshActiveCalls();
       }
     })();
 
@@ -236,7 +222,6 @@ export function useMujiRuntime(
 
   async function startCall(video: boolean) {
     const client = xmppClient.value;
-    const apiClient = api.value;
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
     if (!client || !waddleId || !channelId) return;
@@ -245,20 +230,11 @@ export function useMujiRuntime(
     try {
       const stream = await acquireLocalMedia(video);
       localStream.value = stream;
-      let preferredSid: string | undefined;
-      if (apiClient) {
-        try {
-          const createdSession = await apiClient.createMediaSession(channelId, "publisher");
-          preferredSid = createdSession.call_id;
-        } catch (err) {
-          console.warn("Failed to register call session; falling back to invite-only flow", err);
-        }
-      }
       const result = await client.startMujiCall(
         waddleId,
         channelId,
         stream,
-        preferredSid ? { video, sid: preferredSid } : { video },
+        { video },
       );
       if (!result) throw new Error("Failed to start Muji session.");
       sid.value = result.sid;
@@ -266,74 +242,11 @@ export function useMujiRuntime(
       trackRecoverableCall(result.sid, result.serviceJid, video);
       pendingInvite.value = null;
       phase.value = "dialing";
-      void refreshActiveCalls();
     } catch (err) {
       phase.value = "error";
       error.value = normalizeError(err);
       stopStream(localStream.value);
       localStream.value = null;
-    }
-  }
-
-  async function refreshActiveCalls() {
-    const apiClient = api.value;
-    const channelId = activeChannelId.value;
-    if (!apiClient || !channelId) {
-      activeCalls.value = [];
-      return;
-    }
-
-    isLoadingActiveCalls.value = true;
-    try {
-      const response = await apiClient.listActiveCalls(channelId);
-      activeCalls.value = response.calls;
-    } catch {
-      activeCalls.value = [];
-    } finally {
-      isLoadingActiveCalls.value = false;
-    }
-  }
-
-  async function joinListedCall(callId: string, video = true) {
-    const client = xmppClient.value;
-    const apiClient = api.value;
-    const waddleId = activeWaddleId.value;
-    const channelId = activeChannelId.value;
-    if (!client || !apiClient || !waddleId || !channelId) return;
-    if (!(await ensureNotInCall("join a different call"))) return;
-
-    joiningListedCallId.value = callId;
-    error.value = "";
-    try {
-      const bootstrap = await apiClient.bootstrapCallJoin(callId, "subscriber");
-      if (bootstrap.call.state !== "active") {
-        throw new Error("This call is no longer active.");
-      }
-      if (!bootstrap.call.call_id) {
-        throw new Error("Call bootstrap response is missing call_id.");
-      }
-
-      const stream = await acquireLocalMedia(video);
-      localStream.value = stream;
-
-      const result = await client.joinMujiCall(waddleId, channelId, stream, {
-        sid: bootstrap.call.call_id,
-        video,
-      });
-      if (!result) throw new Error("Failed to join listed call.");
-      sid.value = result.sid;
-      serviceJid.value = result.serviceJid;
-      trackRecoverableCall(result.sid, result.serviceJid, video);
-      pendingInvite.value = null;
-      phase.value = "dialing";
-      await refreshActiveCalls();
-    } catch (err) {
-      phase.value = "error";
-      error.value = normalizeError(err);
-      stopStream(localStream.value);
-      localStream.value = null;
-    } finally {
-      joiningListedCallId.value = null;
     }
   }
 
@@ -364,12 +277,6 @@ export function useMujiRuntime(
       stopStream(localStream.value);
       localStream.value = null;
     }
-  }
-
-  async function switchToListedCall(callId: string, video = true) {
-    phase.value = "switching";
-    await leaveCurrentCall({ clearPendingInvite: false });
-    await joinListedCall(callId, video);
   }
 
   async function switchToPendingInvite(video = true) {
@@ -488,29 +395,6 @@ export function useMujiRuntime(
     }
   });
 
-  watch([api, session, activeChannelId], ([apiClient, activeSession, channelId], _, onCleanup) => {
-    activeCalls.value = [];
-    if (!apiClient || !activeSession || !channelId) return;
-
-    let cancelled = false;
-    const runRefresh = async () => {
-      if (cancelled) return;
-      await refreshActiveCalls();
-    };
-
-    void runRefresh();
-    if (typeof window === "undefined") return;
-
-    const intervalId = window.setInterval(() => {
-      void runRefresh();
-    }, 15000);
-
-    onCleanup(() => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    });
-  });
-
   watch(session, (value) => {
     if (!value) {
       void leaveCurrentCall();
@@ -527,15 +411,9 @@ export function useMujiRuntime(
     localStream,
     remoteStream,
     pendingInvite,
-    activeCalls,
-    isLoadingActiveCalls,
-    joiningListedCallId,
     hasRemoteTracks,
     micEnabled,
     cameraEnabled,
-    refreshActiveCalls,
-    joinListedCall,
-    switchToListedCall,
     startAudioCall: () => startCall(false),
     startVideoCall: () => startCall(true),
     joinPendingInvite,

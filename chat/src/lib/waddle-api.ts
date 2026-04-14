@@ -53,56 +53,6 @@ export interface ChannelMessage {
   expires_at: string | null;
 }
 
-export interface ActiveCallParticipant {
-  participant_id: string;
-  backend_session_id: string;
-  role: string;
-  joined_at: string;
-  updated_at: string;
-}
-
-export interface ActiveCallSummary {
-  call_id: string;
-  room_id: string;
-  backend_room_id: string;
-  backend: string;
-  state: string;
-  participant_count: number;
-  participants: ActiveCallParticipant[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateMediaSessionResponse {
-  call_id: string;
-  backend: string;
-  session_id: string;
-  room_id: string;
-  participant_id: string;
-  role: string;
-  join_url: string;
-  ice_servers: string[];
-}
-
-export interface CallBootstrapResponse {
-  call: ActiveCallSummary;
-  media_session: {
-    backend: string;
-    session_id: string;
-    room_id: string;
-    participant_id: string;
-    role: string;
-    join_url: string;
-    ice_servers: string[];
-  };
-}
-
-export interface LeaveCallResponse {
-  call_id: string;
-  removed: boolean;
-  call: ActiveCallSummary | null;
-}
-
 interface ListMembersResponse {
   members: MemberSummary[];
 }
@@ -119,11 +69,6 @@ interface SearchUsersResponse {
 interface ListPublicWaddlesResponse {
   waddles: WaddleSummary[];
   total: number;
-}
-
-interface ListActiveCallsResponse {
-  room_id: string;
-  calls: ActiveCallSummary[];
 }
 
 function trimTrailingSlash(value: string) {
@@ -362,44 +307,4 @@ export class WaddleApi {
     return expectJson<ListMessagesResponse>(response);
   }
 
-  async createMediaSession(roomId: string, role = "publisher") {
-    return this.json<CreateMediaSessionResponse>("/v1/media/sessions", {
-      method: "POST",
-      body: JSON.stringify({ room_id: roomId, role }),
-    });
-  }
-
-  async listActiveCalls(channelId: string) {
-    const response = await fetch(
-      this.url("/v1/media/calls", {
-        channel_id: channelId,
-      }),
-      {
-        credentials: "include",
-      },
-    );
-
-    return expectJson<ListActiveCallsResponse>(response);
-  }
-
-  async getActiveCall(callId: string) {
-    const response = await fetch(this.url(`/v1/media/calls/${encodeURIComponent(callId)}`), {
-      credentials: "include",
-    });
-
-    return expectJson<ActiveCallSummary>(response);
-  }
-
-  async bootstrapCallJoin(callId: string, role = "subscriber") {
-    return this.json<CallBootstrapResponse>(`/v1/media/calls/${encodeURIComponent(callId)}/bootstrap`, {
-      method: "POST",
-      body: JSON.stringify({ role }),
-    });
-  }
-
-  async leaveCall(callId: string) {
-    return this.json<LeaveCallResponse>(`/v1/media/calls/${encodeURIComponent(callId)}/leave`, {
-      method: "POST",
-    });
-  }
 }
