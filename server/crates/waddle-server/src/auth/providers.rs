@@ -28,11 +28,15 @@ pub struct AuthProviderConfig {
     pub id: String,
     pub display_name: String,
     pub kind: AuthProviderKind,
+    #[serde(default)]
+    pub dynamic_client_registration: bool,
     pub client_id: String,
     #[serde(default)]
     pub client_secret: String,
     #[serde(default)]
     pub token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod,
+    #[serde(default)]
+    pub require_dpop: bool,
     pub scopes: Vec<String>,
 
     #[serde(default)]
@@ -71,13 +75,14 @@ impl AuthProviderConfig {
                 self.id
             )));
         }
-        if self.client_id.trim().is_empty() {
+        if !self.dynamic_client_registration && self.client_id.trim().is_empty() {
             return Err(AuthError::InvalidRequest(format!(
                 "provider '{}' client_id cannot be empty",
                 self.id
             )));
         }
-        if self.token_endpoint_auth_method.requires_client_secret()
+        if !self.dynamic_client_registration
+            && self.token_endpoint_auth_method.requires_client_secret()
             && self.client_secret.trim().is_empty()
         {
             return Err(AuthError::InvalidRequest(format!(
@@ -100,6 +105,17 @@ impl AuthProviderConfig {
 
         match self.kind {
             AuthProviderKind::Oidc => {
+                if self.dynamic_client_registration
+                    && !matches!(
+                        self.token_endpoint_auth_method,
+                        AuthProviderTokenEndpointAuthMethod::ClientSecretPost
+                    )
+                {
+                    return Err(AuthError::InvalidRequest(format!(
+                        "provider '{}' dynamic_client_registration currently requires token_endpoint_auth_method=client_secret_post",
+                        self.id
+                    )));
+                }
                 if self.issuer.as_deref().unwrap_or_default().trim().is_empty() {
                     return Err(AuthError::InvalidRequest(format!(
                         "provider '{}' (oidc) requires issuer",
@@ -244,9 +260,11 @@ mod tests {
             id: "google".to_string(),
             display_name: "Google".to_string(),
             kind: AuthProviderKind::Oidc,
+            dynamic_client_registration: false,
             client_id: "client".to_string(),
             client_secret: "secret".to_string(),
             token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
+            require_dpop: false,
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -268,9 +286,11 @@ mod tests {
             id: "github".to_string(),
             display_name: "GitHub".to_string(),
             kind: AuthProviderKind::OAuth2,
+            dynamic_client_registration: false,
             client_id: "client".to_string(),
             client_secret: "secret".to_string(),
             token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
+            require_dpop: false,
             scopes: vec!["read:user".to_string(), "user:email".to_string()],
             issuer: Some("https://github.com".to_string()),
             authorization_endpoint: Some("https://github.com/login/oauth/authorize".to_string()),
@@ -333,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_registration_allows_empty_static_client_id() {
+        let mut provider = oidc_provider();
+        provider.dynamic_client_registration = true;
+        provider.client_id = "".to_string();
+        provider
+            .validate()
+            .expect("dynamic provider should be valid");
+    }
+
+    #[test]
+    fn dynamic_registration_rejects_none_auth_method() {
+        let mut provider = oidc_provider();
+        provider.dynamic_client_registration = true;
+        provider.token_endpoint_auth_method = AuthProviderTokenEndpointAuthMethod::NoAuthentication;
+        let err = provider.validate().unwrap_err().to_string();
+        assert!(err.contains("dynamic_client_registration"));
+    }
+
+    #[test]
     fn registry_rejects_duplicate_provider_ids() {
         let providers = vec![oidc_provider(), oidc_provider()];
         let err = ProviderRegistry::new(providers).unwrap_err().to_string();
@@ -355,6 +394,7 @@ mod tests {
             "id":"rawkode",
             "display_name":"rawkode.academy",
             "kind":"oidc",
+            "dynamic_client_registration": false,
             "client_id":"public-client",
             "token_endpoint_auth_method":"none",
             "scopes":["openid","profile","email"],

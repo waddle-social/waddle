@@ -11,8 +11,8 @@ use crate::auth::identity::IdentityService;
 use crate::auth::oauth2;
 use crate::auth::oidc;
 use crate::auth::{
-    localpart_to_jid, AuthError, AuthProviderConfig, AuthProviderKind, ProviderRegistry, Session,
-    SessionManager,
+    localpart_to_jid, AuthError, AuthProviderConfig, AuthProviderKind,
+    AuthProviderTokenEndpointAuthMethod, ProviderRegistry, Session, SessionManager,
 };
 use crate::config::ServerConfig;
 use crate::server::AppState;
@@ -30,6 +30,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
@@ -44,6 +45,8 @@ pub struct AuthState {
     pub pending_auth: Arc<DashMap<String, PendingAuthorization>>,
     pub device_auth: Arc<DashMap<String, DeviceAuthorization>>,
     pub xmpp_auth_codes: Arc<DashMap<String, XmppAuthCode>>,
+    pub dynamic_oidc_clients: Arc<DashMap<String, oidc::DynamicClientRegistration>>,
+    pub dynamic_oidc_client_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl AuthState {
@@ -70,7 +73,38 @@ impl AuthState {
             pending_auth: Arc::new(DashMap::new()),
             device_auth: Arc::new(DashMap::new()),
             xmpp_auth_codes: Arc::new(DashMap::new()),
+            dynamic_oidc_clients: Arc::new(DashMap::new()),
+            dynamic_oidc_client_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    async fn resolve_dynamic_oidc_registration(
+        &self,
+        provider: &AuthProviderConfig,
+        discovery: &oidc::OidcDiscovery,
+        redirect_uri: &str,
+    ) -> Result<oidc::DynamicClientRegistration, AuthError> {
+        if let Some(cached) = self.dynamic_oidc_clients.get(&provider.id) {
+            return Ok(cached.clone());
+        }
+
+        let lock = self
+            .dynamic_oidc_client_locks
+            .entry(provider.id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        if let Some(cached) = self.dynamic_oidc_clients.get(&provider.id) {
+            return Ok(cached.clone());
+        }
+
+        let registered =
+            oidc::register_dynamic_client(&self.http_client, provider, discovery, redirect_uri)
+                .await?;
+        self.dynamic_oidc_clients
+            .insert(provider.id.clone(), registered.clone());
+        Ok(registered)
     }
 
     fn callback_url(&self) -> String {
@@ -141,20 +175,32 @@ impl AuthState {
         let code_verifier = Self::create_pkce_verifier();
         let code_challenge = Self::pkce_challenge(&code_verifier);
         let redirect_uri = self.callback_url();
+        let mut client_id = provider.client_id.clone();
+        let mut client_secret = provider.client_secret.clone();
+        let mut token_endpoint_auth_method = provider.token_endpoint_auth_method;
 
-        let authorization_endpoint = match provider.kind {
-            AuthProviderKind::Oidc => {
-                let discovery = oidc::discover(
+        let oidc_discovery = match provider.kind {
+            AuthProviderKind::Oidc => Some(
+                oidc::discover(
                     &self.http_client,
                     provider.issuer.as_deref().ok_or_else(|| {
                         AuthError::InvalidRequest("oidc provider missing issuer".to_string())
                     })?,
                 )
-                .await?;
-                provider
-                    .authorization_endpoint
-                    .clone()
-                    .unwrap_or(discovery.authorization_endpoint)
+                .await?,
+            ),
+            AuthProviderKind::OAuth2 => None,
+        };
+
+        let authorization_endpoint = match provider.kind {
+            AuthProviderKind::Oidc => {
+                provider.authorization_endpoint.clone().unwrap_or_else(|| {
+                    oidc_discovery
+                        .as_ref()
+                        .expect("oidc discovery exists for oidc providers")
+                        .authorization_endpoint
+                        .clone()
+                })
             }
             AuthProviderKind::OAuth2 => {
                 provider.authorization_endpoint.clone().ok_or_else(|| {
@@ -165,6 +211,28 @@ impl AuthState {
             }
         };
 
+        if matches!(provider.kind, AuthProviderKind::Oidc) && provider.dynamic_client_registration {
+            let discovery = oidc_discovery.as_ref().ok_or_else(|| {
+                AuthError::InvalidRequest("oidc discovery unavailable for provider".to_string())
+            })?;
+            let registration = self
+                .resolve_dynamic_oidc_registration(provider, discovery, &redirect_uri)
+                .await?;
+
+            client_id = registration.client_id;
+            client_secret = registration.client_secret;
+            token_endpoint_auth_method = match registration.token_endpoint_auth_method.as_str() {
+                "client_secret_post" => AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
+                "none" => AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+                other => {
+                    return Err(AuthError::InvalidRequest(format!(
+                        "unsupported dynamic token_endpoint_auth_method '{}'",
+                        other
+                    )));
+                }
+            };
+        }
+
         let mut url = url::Url::parse(&authorization_endpoint).map_err(|e| {
             AuthError::InvalidRequest(format!("invalid authorization endpoint: {}", e))
         })?;
@@ -172,7 +240,7 @@ impl AuthState {
         {
             let mut qp = url.query_pairs_mut();
             qp.append_pair("response_type", "code");
-            qp.append_pair("client_id", &provider.client_id);
+            qp.append_pair("client_id", &client_id);
             qp.append_pair("redirect_uri", &redirect_uri);
             qp.append_pair("scope", &provider.scopes_string());
             qp.append_pair("state", &state);
@@ -189,6 +257,10 @@ impl AuthState {
                 nonce,
                 code_verifier,
                 redirect_uri,
+                client_id,
+                client_secret,
+                token_endpoint_auth_method,
+                require_dpop: provider.require_dpop,
                 flow,
                 created_at: Utc::now(),
             },
@@ -216,6 +288,10 @@ pub struct PendingAuthorization {
     pub nonce: String,
     pub code_verifier: String,
     pub redirect_uri: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod,
+    pub require_dpop: bool,
     pub flow: PendingFlow,
     pub created_at: DateTime<Utc>,
 }
@@ -521,6 +597,12 @@ pub async fn callback_handler(
 
     let identity_claims = match provider.kind {
         AuthProviderKind::Oidc => {
+            let mut provider_for_exchange = provider.clone();
+            provider_for_exchange.client_id = pending.client_id.clone();
+            provider_for_exchange.client_secret = pending.client_secret.clone();
+            provider_for_exchange.token_endpoint_auth_method = pending.token_endpoint_auth_method;
+            provider_for_exchange.require_dpop = pending.require_dpop;
+
             let issuer = provider.issuer.as_deref().ok_or_else(|| {
                 AuthError::InvalidRequest("oidc provider missing issuer".to_string())
             });
@@ -536,11 +618,12 @@ pub async fn callback_handler(
 
             let token = match oidc::exchange_authorization_code(
                 &state.http_client,
-                provider,
+                &provider_for_exchange,
                 &discovery,
                 &code,
                 &pending.redirect_uri,
                 &pending.code_verifier,
+                pending.require_dpop,
             )
             .await
             {
@@ -550,7 +633,7 @@ pub async fn callback_handler(
 
             match oidc::claims_from_token_response(
                 &state.http_client,
-                provider,
+                &provider_for_exchange,
                 &discovery,
                 &token,
                 Some(&pending.nonce),
@@ -589,6 +672,7 @@ pub async fn callback_handler(
                 &code,
                 &pending.redirect_uri,
                 &pending.code_verifier,
+                pending.require_dpop,
             )
             .await
             {

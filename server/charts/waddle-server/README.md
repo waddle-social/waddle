@@ -125,7 +125,7 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set config.baseUrl=https://xmpp.waddle.social \
   --set config.corsOrigins='https://waddle.chat,http://localhost:4321' \
   --set xmpp.domain=waddle.social \
-  --set-json secret.authProvidersJson='[{"id":"colony","display_name":"Colony","kind":"oidc","issuer":"https://colony.waddle.social","client_id":"waddle-server","client_secret":"...","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
+  --set-json secret.authProvidersJson='[{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","client_secret":"","token_endpoint_auth_method":"client_secret_post","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
 ```
 
 ## Env overrides

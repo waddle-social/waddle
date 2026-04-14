@@ -1,7 +1,13 @@
 use crate::auth::{AuthError, AuthProviderConfig, IdentityClaims};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::elliptic_curve::rand_core::OsRng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokenResponse {
@@ -25,6 +31,7 @@ pub async fn exchange_code(
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
+    require_dpop: bool,
 ) -> Result<OAuthTokenResponse, AuthError> {
     let mut params = vec![
         ("grant_type", "authorization_code"),
@@ -37,9 +44,13 @@ pub async fn exchange_code(
         params.push(("client_secret", provider.client_secret.as_str()));
     }
 
-    let res = client
-        .post(token_endpoint)
-        .form(&params)
+    let mut request = client.post(token_endpoint).form(&params);
+    if require_dpop {
+        let dpop_proof = create_dpop_proof("POST", token_endpoint)?;
+        request = request.header("DPoP", dpop_proof);
+    }
+
+    let res = request
         .send()
         .await
         .map_err(|e| AuthError::TokenExchangeFailed(e.to_string()))?;
@@ -59,6 +70,58 @@ pub async fn exchange_code(
         .map_err(|e| AuthError::TokenExchangeFailed(format!("Invalid token response: {}", e)))?;
 
     Ok(token)
+}
+
+fn create_dpop_proof(method: &str, htu: &str) -> Result<String, AuthError> {
+    let signing_key = SigningKey::random(&mut OsRng);
+    let verifying_key = signing_key.verifying_key();
+    let point = verifying_key.to_encoded_point(false);
+    let x = point
+        .x()
+        .ok_or_else(|| AuthError::TokenExchangeFailed("missing EC x coordinate".to_string()))?;
+    let y = point
+        .y()
+        .ok_or_else(|| AuthError::TokenExchangeFailed("missing EC y coordinate".to_string()))?;
+
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": URL_SAFE_NO_PAD.encode(x),
+            "y": URL_SAFE_NO_PAD.encode(y),
+        }
+    });
+
+    let issued_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| AuthError::TokenExchangeFailed(format!("invalid system time: {}", e)))?
+        .as_secs() as i64;
+    let payload = serde_json::json!({
+        "htm": method.to_uppercase(),
+        "htu": htu,
+        "iat": issued_at,
+        "jti": Uuid::new_v4().to_string(),
+    });
+
+    let header_encoded = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&header)
+            .map_err(|e| AuthError::TokenExchangeFailed(format!("invalid DPoP header: {}", e)))?,
+    );
+    let payload_encoded = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&payload)
+            .map_err(|e| AuthError::TokenExchangeFailed(format!("invalid DPoP payload: {}", e)))?,
+    );
+    let signing_input = format!("{}.{}", header_encoded, payload_encoded);
+
+    let signature: Signature = signing_key.sign(signing_input.as_bytes());
+    let signature_encoded = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    Ok(format!(
+        "{}.{}.{}",
+        header_encoded, payload_encoded, signature_encoded
+    ))
 }
 
 pub async fn fetch_userinfo(
@@ -166,9 +229,11 @@ mod tests {
             id: "rawkode".to_string(),
             display_name: "rawkode.academy".to_string(),
             kind: AuthProviderKind::Oidc,
+            dynamic_client_registration: false,
             client_id: "public-client".to_string(),
             client_secret: "super-secret".to_string(),
             token_endpoint_auth_method: auth_method,
+            require_dpop: false,
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -207,6 +272,7 @@ mod tests {
             "auth-code",
             "https://app.example/callback",
             "pkce-verifier",
+            false,
         )
         .await
         .expect("token exchange should succeed");
@@ -242,6 +308,7 @@ mod tests {
             "auth-code",
             "https://app.example/callback",
             "pkce-verifier",
+            false,
         )
         .await
         .expect("token exchange should succeed");
@@ -253,5 +320,65 @@ mod tests {
         let body =
             String::from_utf8(requests[0].body.clone()).expect("request body should be utf8");
         assert!(!body.contains("client_secret="));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_sends_valid_dpop_header_when_required() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "access-token",
+                "token_type": "Bearer"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let provider = oidc_provider_for(AuthProviderTokenEndpointAuthMethod::NoAuthentication);
+        let token_endpoint = format!("{}/token", mock_server.uri());
+        let _ = exchange_code(
+            &Client::new(),
+            &provider,
+            &token_endpoint,
+            "auth-code",
+            "https://app.example/callback",
+            "pkce-verifier",
+            true,
+        )
+        .await
+        .expect("token exchange should succeed");
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests should be available");
+        let dpop = requests[0]
+            .headers
+            .get("dpop")
+            .and_then(|value| value.to_str().ok())
+            .expect("DPoP header should be present");
+        let mut parts = dpop.split('.');
+        let header = parts.next().expect("header part exists");
+        let payload = parts.next().expect("payload part exists");
+        let signature = parts.next().expect("signature part exists");
+        assert!(parts.next().is_none(), "DPoP must have 3 JWT parts");
+        assert!(!signature.is_empty(), "signature must be present");
+
+        let header_bytes = URL_SAFE_NO_PAD
+            .decode(header)
+            .expect("header should be base64url");
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("payload should be base64url");
+        let header_json: serde_json::Value =
+            serde_json::from_slice(&header_bytes).expect("header should be JSON");
+        let payload_json: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("payload should be JSON");
+        assert_eq!(header_json["typ"], "dpop+jwt");
+        assert_eq!(header_json["alg"], "ES256");
+        assert_eq!(payload_json["htm"], "POST");
+        assert_eq!(payload_json["htu"], token_endpoint);
+        assert!(payload_json["jti"].as_str().is_some_and(|v| !v.is_empty()));
     }
 }
