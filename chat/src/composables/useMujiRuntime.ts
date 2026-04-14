@@ -28,6 +28,23 @@ function stopStream(stream: MediaStream | null) {
   for (const track of stream.getTracks()) track.stop();
 }
 
+function nickFromJid(jid: string): string {
+  const value = jid.trim();
+  if (!value) return "unknown";
+
+  const resourceIndex = value.indexOf("/");
+  if (resourceIndex >= 0 && resourceIndex < value.length - 1) {
+    return value.slice(resourceIndex + 1);
+  }
+
+  const localpartIndex = value.indexOf("@");
+  if (localpartIndex > 0) {
+    return value.slice(0, localpartIndex);
+  }
+
+  return value;
+}
+
 export function useMujiRuntime(
   session: Ref<WaddleSession | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -97,7 +114,7 @@ export function useMujiRuntime(
     if (event.type === "incoming") {
       if (!pendingInvite.value) {
         pendingInvite.value = {
-          fromNick: event.peerJid.split("@")[0] ?? "unknown",
+          fromNick: nickFromJid(event.peerJid),
           invite: { inviteId: event.sid, muji: true, jingleSid: event.sid, jingleJid: event.peerJid },
         };
       }
@@ -373,15 +390,18 @@ export function useMujiRuntime(
     await leaveCurrentCall();
   }
 
-  watch([activeWaddleId, activeChannelId], () => {
-    pendingInvite.value = null;
-    if (recoverableCall.value) {
-      const sameRoom = recoverableCall.value.waddleId === activeWaddleId.value
-        && recoverableCall.value.channelId === activeChannelId.value;
-      if (!sameRoom) recoverableCall.value = null;
+  watch([activeWaddleId, activeChannelId], ([nextWaddleId, nextChannelId], [prevWaddleId, prevChannelId]) => {
+    if (nextWaddleId !== prevWaddleId || nextChannelId !== prevChannelId) {
+      pendingInvite.value = null;
     }
+
     if (!inCall.value) return;
-    void leaveCurrentCall();
+
+    const switchedWaddle = prevWaddleId !== null && nextWaddleId !== prevWaddleId;
+    const roomDeselected = !nextWaddleId || !nextChannelId;
+    if (switchedWaddle || roomDeselected) {
+      void leaveCurrentCall();
+    }
   });
 
   watch(xmppStatus, (status) => {

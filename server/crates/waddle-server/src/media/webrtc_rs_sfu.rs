@@ -76,6 +76,7 @@ impl MediaBackend for WebrtcRsSfuBackend {
         request: MediaSessionRequest,
     ) -> Result<MediaSession, MediaBackendError> {
         let room_id = Self::validate_identifier(&request.room_id, "room_id")?;
+        let participant_id = Self::validate_identifier(&request.participant_id, "participant_id")?;
         let room_prefix =
             Self::validate_identifier(&self.config.webrtc_rs_sfu.room_prefix, "room_prefix")?;
 
@@ -86,7 +87,7 @@ impl MediaBackend for WebrtcRsSfuBackend {
             backend: self.kind().to_string(),
             session_id: session_id.clone(),
             room_id: normalized_room.clone(),
-            participant_id: request.participant_id,
+            participant_id,
             role: request.role,
             join_url: self.join_url(&normalized_room, &session_id)?,
             ice_servers: self.config.webrtc_rs_sfu.ice_servers.clone(),
@@ -133,6 +134,21 @@ mod tests {
         let result = backend.create_session(MediaSessionRequest {
             room_id: "team/sync".to_string(),
             participant_id: "user-42".to_string(),
+            role: "publisher".to_string(),
+        });
+
+        assert!(matches!(result, Err(MediaBackendError::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn rejects_unsafe_participant_id() {
+        let mut config = MediaConfig::default();
+        config.backend = MediaBackendKind::WebrtcRsSfu;
+
+        let backend = WebrtcRsSfuBackend::new(config);
+        let result = backend.create_session(MediaSessionRequest {
+            room_id: "team-sync".to_string(),
+            participant_id: "user/42".to_string(),
             role: "publisher".to_string(),
         });
 

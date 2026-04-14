@@ -240,12 +240,12 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0176 | Jingle ICE-UDP Transport | Implemented (Draft) | NAT traversal transport and ICE candidate parsing/building |
 | 0215 | External Service Discovery | Draft | TURN/STUN discovery |
 | 0272 | Multiparty Jingle (Muji) | Implemented (Experimental) | Group-call presence payload parsing/building and in-room rebroadcast |
-| 0location338 | Jingle Grouping Framework | Draft | Media bundling |
-| 0location339 | Source-Specific Media Attributes in Jingle | Draft | Simulcast |
+| 0338 | Jingle Grouping Framework | Draft | Media bundling |
+| 0339 | Source-Specific Media Attributes in Jingle | Draft | Simulcast |
 | 0320 | Use of DTLS-SRTP in Jingle Sessions | Implemented (Draft) | Encrypted media via DTLS fingerprint parsing/building |
 | **0482** | **Call Invites** | Implemented (Experimental) | Corrected invite model: invite advertises join methods; accept selects one method |
 | **0483** | **HTTP Online Meetings** | Experimental | Meeting links (Jitsi-style) | Implemented | Chat ✓ |
-| 0location353 | Jingle Message Initiation | Experimental | Call ringing |
+| 0353 | Jingle Message Initiation | Experimental | Call ringing |
 
 ---
 

@@ -36,6 +36,25 @@ type MujiSession = MediaSession & {
   end(reason?: string, silent?: boolean): void;
 };
 
+function requireMujiSessionShape(session: unknown): MujiSession {
+  if (typeof session !== "object" || session === null) {
+    throw new Error("Stanza returned an invalid media session object");
+  }
+
+  const candidate = session as Partial<MujiSession>;
+  if (
+    typeof candidate.sid !== "string"
+    || typeof candidate.start !== "function"
+    || typeof candidate.accept !== "function"
+    || typeof candidate.addTrack !== "function"
+    || typeof candidate.end !== "function"
+  ) {
+    throw new Error("Stanza media session shape mismatch");
+  }
+
+  return session as MujiSession;
+}
+
 const DISABLED_SASL_MECHANISMS = [
   "EXTERNAL",
   "SCRAM-SHA-256-PLUS",
@@ -339,7 +358,9 @@ export class BrowserXmppClient {
     if (!this.xmpp?.jingle) return null;
 
     const serviceJid = opts.serviceJid ?? sfuServiceJidFor(this.session);
-    const session = this.xmpp.jingle.createMediaSession(serviceJid, opts.sid, localStream) as MujiSession;
+    const session = requireMujiSessionShape(
+      this.xmpp.jingle.createMediaSession(serviceJid, opts.sid, localStream),
+    );
     this.mujiSessions.set(session.sid, session);
 
     await session.start({
@@ -381,7 +402,9 @@ export class BrowserXmppClient {
       return { sid: existing.sid, serviceJid };
     }
 
-    const session = this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream) as MujiSession;
+    const session = requireMujiSessionShape(
+      this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream),
+    );
     this.mujiSessions.set(session.sid, session);
     await session.start({
       offerToReceiveAudio: true,

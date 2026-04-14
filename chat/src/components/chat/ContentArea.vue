@@ -262,7 +262,8 @@ watch(
       v-if="actionError || mujiError"
       class="px-6 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
     >
-      {{ actionError || mujiError }}
+      <div v-if="actionError">{{ actionError }}</div>
+      <div v-if="mujiError && mujiError !== actionError">{{ mujiError }}</div>
     </div>
 
     <!-- Messages -->
