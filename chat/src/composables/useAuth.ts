@@ -227,8 +227,9 @@ export function useAuth(defaultServerUrl: string) {
       activeServerUrl.value,
       normalizedDefaultServerUrl,
     );
-    const sessionTransport =
-      activeServerUrl.value === normalizedDefaultServerUrl ? "cookie" : "fragment";
+    const pageOrigin = window.location.origin;
+    const serverOrigin = new URL(activeServerUrl.value).origin;
+    const sessionTransport = pageOrigin === serverOrigin ? "cookie" : "fragment";
 
     window.location.href = auth.loginUrl(nextUrl, pid, {
       sessionTransport,
