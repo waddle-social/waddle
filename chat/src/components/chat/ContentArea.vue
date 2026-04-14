@@ -42,8 +42,11 @@ const emit = defineEmits<{
   clearSearch: [];
 }>();
 
+const messagesContainer = ref<HTMLDivElement | null>(null);
 const showSearch = ref(false);
 const searchInput = ref("");
+
+defineExpose({ messagesContainer });
 
 function doSearch() {
   emit("search", searchInput.value);
@@ -156,7 +159,7 @@ watch(
     </div>
 
     <!-- Messages -->
-    <div class="flex-1 overflow-auto px-6 py-6">
+    <div ref="messagesContainer" class="flex-1 overflow-auto px-6 py-6">
       <div v-if="isLoadingMessages" class="text-center py-8 text-sm font-mono text-muted-foreground">
         Loading messages...
       </div>

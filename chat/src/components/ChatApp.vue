@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import { type ComponentPublicInstance, onMounted, onUnmounted, ref, shallowRef, watch, watchEffect } from "vue";
 import { useAuth } from "@/composables/useAuth";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
@@ -63,6 +63,12 @@ const messaging = useMessaging(
   ui.actionError,
   ui.clearActionError,
 );
+
+const contentAreaRef = ref<ComponentPublicInstance & { messagesContainer: HTMLDivElement | null } | null>(null);
+
+watchEffect(() => {
+  messaging.timelineEl.value = contentAreaRef.value?.messagesContainer ?? null;
+});
 
 const notifications = useNotifications();
 
@@ -528,6 +534,7 @@ onUnmounted(() => {
 
       <!-- Main content -->
       <ContentArea
+        ref="contentAreaRef"
         v-model:draft="messaging.draft.value"
         :waddle="waddles.currentWaddle.value"
         :channel="waddles.currentChannel.value"

@@ -207,7 +207,15 @@ const md = new Marked({
     list(token) { return token.items.map((i) => i.text).join("\n"); },
     listitem({ text }: { text: string }) { return `${text}\n`; },
     image() { return ""; },
-    link({ text }: { text: string }) { return text; },
+    link({ href, text }: { href: string; text: string }) {
+      try {
+        const url = new URL(href);
+        if (!["http:", "https:", "mailto:"].includes(url.protocol)) return text;
+      } catch {
+        return text;
+      }
+      return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" class="text-blue-500 underline hover:text-blue-400">${text}</a>`;
+    },
     // Drop raw HTML tokens so untrusted input cannot inject markup
     html() { return ""; },
   },
