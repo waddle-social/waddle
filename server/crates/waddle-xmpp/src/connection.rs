@@ -48,7 +48,7 @@ use crate::muc::{
         build_owner_set_result, parse_owner_query, OwnerAction,
     },
     parse_muc_presence, MucJoinRequest, MucLeaveRequest, MucMessage, MucPresenceAction,
-    MucRoomRegistry,
+    MucPresenceUpdateRequest, MucRoomRegistry,
 };
 use crate::parser::ParsedStanza;
 use crate::presence::{
@@ -2230,6 +2230,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     MucPresenceAction::Join(join_req) => {
                         return self.handle_muc_join(join_req).await;
                     }
+                    MucPresenceAction::Update(update_req) => {
+                        return self.handle_muc_presence_update(update_req, &pres).await;
+                    }
                     MucPresenceAction::Leave(leave_req) => {
                         return self.handle_muc_leave(leave_req).await;
                     }
@@ -2963,6 +2966,92 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             nick = %nick,
             occupant_count = occupant_count,
             "User left MUC room"
+        );
+
+        Ok(())
+    }
+
+    /// Handle an in-room MUC presence update.
+    ///
+    /// Re-broadcasts directed presence updates (e.g. Muji payload updates) to
+    /// all room occupants when the sender is already an occupant. If the sender
+    /// is not currently an occupant, this falls back to join semantics.
+    #[instrument(skip(self, update_req, incoming_presence), fields(room = %update_req.room_jid, requested_nick = %update_req.nick))]
+    async fn handle_muc_presence_update(
+        &mut self,
+        update_req: MucPresenceUpdateRequest,
+        incoming_presence: &xmpp_parsers::presence::Presence,
+    ) -> Result<(), XmppError> {
+        let Some(room_data) = self.room_registry.get_room_data(&update_req.room_jid) else {
+            debug!(
+                room = %update_req.room_jid,
+                sender = %update_req.sender_jid,
+                "Room not found for MUC presence update, treating as join"
+            );
+            return self
+                .handle_muc_join(MucJoinRequest {
+                    room_jid: update_req.room_jid,
+                    nick: update_req.nick,
+                    sender_jid: update_req.sender_jid,
+                    password: None,
+                    history: None,
+                })
+                .await;
+        };
+
+        let room = room_data.read().await;
+        let sender_occupant = room.find_occupant_by_real_jid(&update_req.sender_jid);
+
+        let Some(sender_occupant) = sender_occupant else {
+            debug!(
+                room = %update_req.room_jid,
+                sender = %update_req.sender_jid,
+                "Sender is not an occupant for MUC presence update, treating as join"
+            );
+            drop(room);
+            return self
+                .handle_muc_join(MucJoinRequest {
+                    room_jid: update_req.room_jid,
+                    nick: update_req.nick,
+                    sender_jid: update_req.sender_jid,
+                    password: None,
+                    history: None,
+                })
+                .await;
+        };
+
+        let sender_nick = sender_occupant.nick.clone();
+        let room_jid = room.room_jid.clone();
+        let recipients: Vec<FullJid> = room
+            .occupants
+            .values()
+            .map(|o| o.real_jid.clone())
+            .collect();
+        drop(room);
+
+        let from_room_jid = room_jid
+            .with_resource_str(&sender_nick)
+            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
+        let recipient_count = recipients.len();
+
+        record_muc_presence("update", &room_jid.to_string());
+
+        for recipient in recipients {
+            let mut routed_presence = incoming_presence.clone();
+            routed_presence.from = Some(jid::Jid::from(from_room_jid.clone()));
+            routed_presence.to = Some(jid::Jid::from(recipient.clone()));
+            let _ = self
+                .connection_registry
+                .send_to(&recipient, Stanza::Presence(routed_presence))
+                .await;
+        }
+
+        debug!(
+            room = %room_jid,
+            sender = %update_req.sender_jid,
+            nick = %sender_nick,
+            recipient_count = recipient_count,
+            "Rebroadcasted in-room MUC presence update"
         );
 
         Ok(())

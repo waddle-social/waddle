@@ -12,3 +12,7 @@ export function roomBareJidFor(
 ): string {
   return `${waddleId}_${channelId}@muc.${jidDomain(session.jid)}`;
 }
+
+export function sfuServiceJidFor(session: WaddleSession): string {
+  return `sfu.${jidDomain(session.jid)}`;
+}

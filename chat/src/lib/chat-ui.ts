@@ -32,7 +32,7 @@ export interface TimelineMessage {
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483: Call invite info. */
-  callInvite?: { sessionId: string; audio: boolean; video: boolean; externalUri?: string; meetingDesc?: string };
+  callInvite?: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string };
 }
 
 export interface CommunityFormData {

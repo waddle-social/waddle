@@ -11,6 +11,7 @@ use axum::{
 use futures::StreamExt;
 use routes::auth::AuthState;
 use routes::channels::ChannelState;
+use routes::media::MediaState;
 use routes::permissions::PermissionState;
 use routes::uploads::UploadState;
 use routes::waddles::WaddleState;
@@ -713,6 +714,12 @@ fn create_router(
     let upload_state = Arc::new(UploadState::new(state.clone()));
     let upload_router = routes::uploads::router(upload_state);
     let users_router = routes::users::router(waddle_state.clone());
+    let media_state = Arc::new(MediaState::new(
+        state.clone(),
+        encryption_key.as_ref().map(|s| s.as_bytes()),
+        &server_config.media,
+    ));
+    let media_router = routes::media::router(media_state);
 
     // Create server info for the /api/v1/server-info endpoint
     let server_info = ServerInfo::from_config(&server_config, xmpp_native_auth_enabled);
@@ -764,6 +771,8 @@ fn create_router(
         .merge(channels_router)
         // Merge authenticated user search
         .merge(users_router)
+        // Merge media session signaling bootstrap routes
+        .merge(media_router)
         // Merge well-known endpoints for XMPP service discovery
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload

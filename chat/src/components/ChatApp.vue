@@ -4,6 +4,7 @@ import { useAuth } from "@/composables/useAuth";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useMessaging } from "@/composables/useMessaging";
+import { useMujiRuntime } from "@/composables/useMujiRuntime";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
@@ -62,6 +63,15 @@ const messaging = useMessaging(
   ui.normalizeError,
   ui.actionError,
   ui.clearActionError,
+);
+
+const muji = useMujiRuntime(
+  auth.session,
+  xmppClient,
+  waddles.activeWaddleId,
+  waddles.activeChannelId,
+  messaging.latestCallInvite,
+  ui.normalizeError,
 );
 
 const contentAreaRef = ref<ComponentPublicInstance & { messagesContainer: HTMLDivElement | null } | null>(null);
@@ -234,6 +244,7 @@ async function bootstrap() {
 // --- Actions ---
 
 async function handleLogout() {
+  muji.endCall();
   messaging.disconnect();
   await xmppClient.value?.disconnect().catch(() => undefined);
   xmppClient.value = null;
@@ -377,6 +388,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
+  muji.endCall();
   messaging.disconnect();
   void xmppClient.value?.disconnect().catch(() => undefined);
 });
@@ -552,6 +564,14 @@ onUnmounted(() => {
         :slow-mode-cooldown="messaging.slowModeCooldown.value"
         :search-results="messaging.searchResults.value"
         :is-searching="messaging.isSearching.value"
+        :muji-phase="muji.phase.value"
+        :muji-pending-invite="muji.pendingInvite.value"
+        :muji-in-call="muji.inCall.value"
+        :muji-has-remote-tracks="muji.hasRemoteTracks.value"
+        :muji-mic-enabled="muji.micEnabled.value"
+        :muji-camera-enabled="muji.cameraEnabled.value"
+        :muji-service-jid="muji.serviceJid.value"
+        :muji-error="muji.error.value"
         @send="messaging.sendMessage"
         @typing="messaging.notifyComposing"
         @select-gif="sendGif"
@@ -562,6 +582,13 @@ onUnmounted(() => {
         @search="messaging.searchMessages"
         @clear-search="messaging.clearSearch"
         @edit-channel="openChannelEdit"
+        @start-audio-call="muji.startAudioCall"
+        @start-video-call="muji.startVideoCall"
+        @end-call="muji.endCall"
+        @join-call-invite="muji.joinPendingInvite"
+        @dismiss-call-invite="muji.dismissInvite"
+        @toggle-mic="muji.toggleMicrophone"
+        @toggle-camera="muji.toggleCamera"
       />
     </div>
 

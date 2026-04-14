@@ -5,7 +5,8 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer,
+    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
+    TestServer,
     DEFAULT_TIMEOUT,
 };
 
@@ -132,6 +133,49 @@ async fn xep0030_muc_disco_info_returns_conference_identity() {
     assert!(
         response.contains("http://jabber.org/protocol/muc"),
         "Expected MUC feature, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0030_muc_room_disco_info_advertises_calling_features() {
+    init_test_env();
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .expect("bind");
+    join_muc_room(&mut client, "calls@muc.localhost", "Alice")
+        .await
+        .expect("join room");
+
+    let response = disco_info_query(&mut client, "calls@muc.localhost", "muc-room-disco-1")
+        .await
+        .expect("disco response");
+
+    assert!(
+        response.contains("urn:xmpp:jingle:1"),
+        "Expected Jingle feature, got: {}",
+        response
+    );
+    assert!(
+        response.contains("urn:xmpp:jingle:apps:rtp:1"),
+        "Expected Jingle RTP feature, got: {}",
+        response
+    );
+    assert!(
+        response.contains("urn:xmpp:jingle:transports:ice-udp:1"),
+        "Expected Jingle ICE-UDP feature, got: {}",
+        response
+    );
+    assert!(
+        response.contains("urn:xmpp:jingle:apps:dtls:0"),
+        "Expected Jingle DTLS feature, got: {}",
+        response
+    );
+    assert!(
+        response.contains("urn:xmpp:muji:0"),
+        "Expected Muji feature, got: {}",
         response
     );
 }
