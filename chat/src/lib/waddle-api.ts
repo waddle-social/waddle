@@ -306,4 +306,5 @@ export class WaddleApi {
 
     return expectJson<ListMessagesResponse>(response);
   }
+
 }

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Hash, Settings, Search, X } from "lucide-vue-next";
+import { Hash, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
-import type { XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-client";
+import type { MujiCallPhase, XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -27,6 +27,16 @@ const props = defineProps<{
   slowModeCooldown: number;
   searchResults: { id: string; nick: string; body: string; createdAt: string }[];
   isSearching: boolean;
+  mujiPhase: MujiCallPhase;
+  mujiPendingInvite: { fromNick: string; invite: { jingleJid?: string; meetingDesc?: string } } | null;
+  mujiInCall: boolean;
+  mujiIsSwitching: boolean;
+  mujiCurrentSid: string | null;
+  mujiHasRemoteTracks: boolean;
+  mujiMicEnabled: boolean;
+  mujiCameraEnabled: boolean;
+  mujiServiceJid: string | null;
+  mujiError: string;
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +50,15 @@ const emit = defineEmits<{
   editChannel: [];
   search: [query: string];
   clearSearch: [];
+  startAudioCall: [];
+  startVideoCall: [];
+  endCall: [];
+  joinCallInvite: [video: boolean];
+  switchCallInvite: [video: boolean];
+  declineCallInvite: [];
+  dismissCallInvite: [];
+  toggleMic: [];
+  toggleCamera: [];
 }>();
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
@@ -93,6 +112,48 @@ watch(
       </div>
       <div class="flex gap-1">
         <button
+          v-if="channel && !mujiInCall"
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          title="Start audio call"
+          @click="emit('startAudioCall')"
+        >
+          <Phone class="w-3.5 h-3.5" />
+        </button>
+        <button
+          v-if="channel && !mujiInCall"
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          title="Start video call"
+          @click="emit('startVideoCall')"
+        >
+          <Video class="w-3.5 h-3.5" />
+        </button>
+        <button
+          v-if="channel && mujiInCall"
+          class="h-7 w-7 flex items-center justify-center text-destructive hover:bg-destructive/10 transition-colors"
+          title="End call"
+          @click="emit('endCall')"
+        >
+          <PhoneOff class="w-3.5 h-3.5" />
+        </button>
+        <button
+          v-if="channel && mujiInCall"
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          :title="mujiMicEnabled ? 'Mute microphone' : 'Unmute microphone'"
+          @click="emit('toggleMic')"
+        >
+          <Mic v-if="mujiMicEnabled" class="w-3.5 h-3.5" />
+          <MicOff v-else class="w-3.5 h-3.5" />
+        </button>
+        <button
+          v-if="channel && mujiInCall"
+          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          :title="mujiCameraEnabled ? 'Disable camera' : 'Enable camera'"
+          @click="emit('toggleCamera')"
+        >
+          <Video v-if="mujiCameraEnabled" class="w-3.5 h-3.5" />
+          <VideoOff v-else class="w-3.5 h-3.5" />
+        </button>
+        <button
           v-if="channel"
           class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
           :class="showSearch ? 'bg-muted' : ''"
@@ -110,6 +171,52 @@ watch(
           <Settings class="w-3.5 h-3.5" />
         </button>
       </div>
+    </div>
+
+    <div
+      v-if="mujiPendingInvite"
+      class="px-6 py-3 border-b border-foreground bg-muted/30 flex items-center justify-between gap-4"
+    >
+      <div class="min-w-0">
+        <div class="text-sm font-mono font-bold">
+          {{ mujiPendingInvite.fromNick }} invited you to a call
+          <span v-if="mujiInCall"> while you're already in a call</span>
+        </div>
+        <div class="text-xs font-mono text-muted-foreground truncate">
+          {{ mujiPendingInvite.invite.meetingDesc ?? mujiPendingInvite.invite.jingleJid ?? "Muji call invite" }}
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button
+          class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
+          @click="mujiInCall ? emit('switchCallInvite', true) : emit('joinCallInvite', true)"
+        >
+          {{ mujiInCall ? "Switch" : "Join" }}
+        </button>
+        <button
+          class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground/60 text-muted-foreground hover:text-foreground transition-colors"
+          @click="emit('declineCallInvite')"
+        >
+          Decline
+        </button>
+        <button
+          class="text-muted-foreground hover:text-foreground"
+          title="Dismiss invite"
+          @click="emit('dismissCallInvite')"
+        >
+          <X class="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+
+    <div
+      v-if="channel && mujiInCall"
+      class="px-6 py-2 border-b border-foreground bg-muted/20 text-xs font-mono text-muted-foreground"
+    >
+      <span class="font-bold text-foreground">Call:</span>
+      {{ mujiPhase }}
+      <span v-if="mujiServiceJid"> · {{ mujiServiceJid }}</span>
+      <span v-if="mujiHasRemoteTracks"> · remote media connected</span>
     </div>
 
     <!-- XEP-0431: Search bar -->
@@ -152,10 +259,11 @@ watch(
 
     <!-- Error banner -->
     <div
-      v-if="actionError"
+      v-if="actionError || mujiError"
       class="px-6 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
     >
-      {{ actionError }}
+      <div v-if="actionError">{{ actionError }}</div>
+      <div v-if="mujiError && mujiError !== actionError">{{ mujiError }}</div>
     </div>
 
     <!-- Messages -->

@@ -35,6 +35,7 @@ use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
 use crate::connection::Stanza;
+use crate::muc::MucRoomRegistry;
 use crate::registry::{ConnectionRegistry, SendResult};
 use crate::s2s::pool::{S2sConnectionPool, S2sPoolError};
 use crate::XmppError;
@@ -129,6 +130,8 @@ pub struct StanzaRouter {
     config: RouterConfig,
     /// Connection registry for local users
     connection_registry: Arc<ConnectionRegistry>,
+    /// MUC room registry for Muji/Jingle participant validation.
+    muc_room_registry: Option<Arc<MucRoomRegistry>>,
     /// S2S connection pool for remote servers (None if federation disabled)
     s2s_pool: Option<Arc<S2sConnectionPool>>,
 }
@@ -158,8 +161,15 @@ impl StanzaRouter {
         Self {
             config,
             connection_registry,
+            muc_room_registry: None,
             s2s_pool,
         }
+    }
+
+    /// Attach a MUC room registry for Muji/Jingle routing validation.
+    pub fn with_muc_room_registry(mut self, registry: Arc<MucRoomRegistry>) -> Self {
+        self.muc_room_registry = Some(registry);
+        self
     }
 
     /// Get the router configuration.
@@ -487,11 +497,7 @@ impl StanzaRouter {
 
     /// Route an IQ stanza to its destination.
     #[instrument(skip(self, iq), fields(to = ?iq.to))]
-    pub async fn route_iq(
-        &self,
-        iq: Iq,
-        _sender_jid: &FullJid,
-    ) -> Result<RoutingResult, XmppError> {
+    pub async fn route_iq(&self, iq: Iq, sender_jid: &FullJid) -> Result<RoutingResult, XmppError> {
         let to_jid = match &iq.to {
             Some(jid) => jid,
             None => {
@@ -503,7 +509,8 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_iq_local(iq).await,
-            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
+            RoutingDestination::LocalMuc => self.route_iq_local_muc(iq, Some(sender_jid)).await,
+            RoutingDestination::LocalSpaces => {
                 // MUC/Spaces IQs should be handled by their respective services
                 debug!("IQ to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
@@ -526,6 +533,22 @@ impl StanzaRouter {
             .clone()
             .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
 
+        if self.is_muc_jid(&to_jid) {
+            let sender = iq
+                .from
+                .as_ref()
+                .and_then(|jid| jid.clone().try_into_full().ok());
+            self.validate_muc_jingle_iq(&iq, sender.as_ref()).await?;
+        }
+
+        self.route_iq_local_unchecked(iq, to_jid).await
+    }
+
+    async fn route_iq_local_unchecked(
+        &self,
+        iq: Iq,
+        to_jid: Jid,
+    ) -> Result<RoutingResult, XmppError> {
         let stanza = Stanza::Iq(iq);
 
         match to_jid.try_into_full() {
@@ -562,6 +585,89 @@ impl StanzaRouter {
                 }
             }
         }
+    }
+
+    /// Route IQs addressed to the local MUC domain.
+    ///
+    /// For safety, Jingle IQs addressed to a bare room JID are rejected because
+    /// bare-JID fan-out would otherwise deliver to an arbitrary occupant resource.
+    async fn route_iq_local_muc(
+        &self,
+        iq: Iq,
+        sender_jid: Option<&FullJid>,
+    ) -> Result<RoutingResult, XmppError> {
+        let to_jid = iq
+            .to
+            .clone()
+            .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
+        self.validate_muc_jingle_iq(&iq, sender_jid).await?;
+        self.route_iq_local_unchecked(iq, to_jid).await
+    }
+
+    async fn validate_muc_jingle_iq(
+        &self,
+        iq: &Iq,
+        sender_jid: Option<&FullJid>,
+    ) -> Result<(), XmppError> {
+        if !crate::xep::is_jingle_iq(iq) {
+            return Ok(());
+        }
+
+        let to_jid = iq
+            .to
+            .as_ref()
+            .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
+
+        let to_full = to_jid.clone().try_into_full().map_err(|_| {
+            XmppError::bad_request(Some(
+                "Jingle IQ to local MUC must target a full JID".to_string(),
+            ))
+        })?;
+        let room_jid = to_full.to_bare();
+        let target_nick = to_full.resource().as_str();
+
+        let registry = self.muc_room_registry.as_ref().ok_or_else(|| {
+            XmppError::service_unavailable(Some(
+                "MUC registry unavailable for Jingle routing validation".to_string(),
+            ))
+        })?;
+        let room_data = registry.get_room_data(&room_jid).ok_or_else(|| {
+            XmppError::item_not_found(Some(format!("MUC room {} not found", room_jid)))
+        })?;
+        let room = room_data.read().await;
+
+        if room.get_occupant(target_nick).is_none() {
+            return Err(XmppError::item_not_found(Some(format!(
+                "Target occupant '{}' not found in room",
+                target_nick
+            ))));
+        }
+
+        let effective_sender = iq
+            .from
+            .as_ref()
+            .and_then(|jid| jid.clone().try_into_full().ok())
+            .or_else(|| sender_jid.cloned())
+            .ok_or_else(|| {
+                XmppError::bad_request(Some(
+                    "Jingle IQ to local MUC requires a full sender JID".to_string(),
+                ))
+            })?;
+
+        let sender_in_room = if effective_sender.to_bare() == room_jid {
+            room.get_occupant(effective_sender.resource().as_str())
+                .is_some()
+        } else {
+            room.find_occupant_by_real_jid(&effective_sender).is_some()
+        };
+
+        if !sender_in_room {
+            return Err(XmppError::forbidden(Some(
+                "Sender is not an occupant of target room".to_string(),
+            )));
+        }
+
+        Ok(())
     }
 
     /// Route IQ to a remote server via S2S.
@@ -627,6 +733,10 @@ fn iq_to_xml(iq: &Iq) -> Result<String, XmppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::muc::{MucRoomRegistry, Occupant, RoomConfig};
+    use crate::types::{Affiliation, Role};
+    use minidom::Element;
+    use tokio::sync::mpsc;
 
     fn create_test_config() -> RouterConfig {
         RouterConfig::new("waddle.social".to_string())
@@ -634,6 +744,51 @@ mod tests {
 
     fn create_test_jid(jid_str: &str) -> Jid {
         jid_str.parse().unwrap()
+    }
+
+    fn parse_iq(xml: &str) -> Iq {
+        let elem: Element = xml.parse().expect("valid xml");
+        Iq::try_from(elem).expect("valid iq")
+    }
+
+    async fn create_router_with_test_room() -> (StanzaRouter, Arc<ConnectionRegistry>) {
+        let config = create_test_config();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let muc_registry = Arc::new(MucRoomRegistry::new("muc.waddle.social".to_string()));
+
+        let room_jid: BareJid = "room@muc.waddle.social".parse().unwrap();
+        muc_registry
+            .create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                RoomConfig::default(),
+            )
+            .unwrap();
+
+        let room_data = muc_registry.get_room_data(&room_jid).expect("room data");
+        let mut room = room_data.write().await;
+        room.add_occupant(Occupant {
+            real_jid: "sender@waddle.social/resource".parse().unwrap(),
+            nick: "sender-nick".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+        room.add_occupant(Occupant {
+            real_jid: "target@waddle.social/resource".parse().unwrap(),
+            nick: "target-nick".to_string(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+        drop(room);
+
+        let router = StanzaRouter::new(config, Arc::clone(&registry), None)
+            .with_muc_room_registry(muc_registry);
+        (router, registry)
     }
 
     #[test]
@@ -809,5 +964,139 @@ mod tests {
         let result = router.route_message(message, &sender_jid).await.unwrap();
 
         assert!(matches!(result, RoutingResult::FederationDisabled));
+    }
+
+    #[tokio::test]
+    async fn test_route_iq_local_muc_bare_non_jingle_routes_to_connected_resource() {
+        let config = create_test_config();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let (tx, mut rx) = mpsc::channel(16);
+        let full_room_jid: FullJid = "room@muc.waddle.social/nick".parse().unwrap();
+        registry.register(full_room_jid, tx);
+        let router = StanzaRouter::new(config, registry, None);
+
+        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
+        let iq = parse_iq(
+            r#"<iq xmlns='jabber:client' type='get' from='sender@waddle.social/resource' to='room@muc.waddle.social' id='iq-muc-get'>
+                <query xmlns='jabber:iq:version'/>
+            </iq>"#,
+        );
+
+        let result = router.route_iq(iq, &sender_jid).await.unwrap();
+        assert!(matches!(
+            result,
+            RoutingResult::DeliveredLocal {
+                delivered_count: 1,
+                offline_count: 0
+            }
+        ));
+        assert!(rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_route_iq_local_muc_rejects_bare_jid_jingle() {
+        let config = create_test_config();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let router = StanzaRouter::new(config, registry, None);
+
+        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
+        let iq = parse_iq(
+            r#"<iq xmlns='jabber:client' type='set' from='sender@waddle.social/resource' to='room@muc.waddle.social' id='iq-jingle-1'>
+                <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate' sid='abc123'/>
+            </iq>"#,
+        );
+
+        let result = router.route_iq(iq, &sender_jid).await;
+        assert!(matches!(
+            result,
+            Err(XmppError::Stanza {
+                condition: crate::StanzaErrorCondition::BadRequest,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_route_iq_local_muc_jingle_routes_when_sender_and_target_are_room_occupants() {
+        let (router, registry) = create_router_with_test_room().await;
+        let (tx, mut rx) = mpsc::channel(16);
+        let target_room_jid: FullJid = "room@muc.waddle.social/target-nick".parse().unwrap();
+        registry.register(target_room_jid, tx);
+
+        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
+        let iq = parse_iq(
+            r#"<iq xmlns='jabber:client' type='set' from='sender@waddle.social/resource' to='room@muc.waddle.social/target-nick' id='iq-jingle-2'>
+                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
+            </iq>"#,
+        );
+
+        let result = router.route_iq(iq, &sender_jid).await.unwrap();
+        assert!(matches!(
+            result,
+            RoutingResult::DeliveredLocal {
+                delivered_count: 1,
+                offline_count: 0
+            }
+        ));
+        assert!(rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_route_iq_local_muc_jingle_rejects_non_occupant_sender() {
+        let (router, _registry) = create_router_with_test_room().await;
+        let sender_jid: FullJid = "outsider@waddle.social/resource".parse().unwrap();
+        let iq = parse_iq(
+            r#"<iq xmlns='jabber:client' type='set' from='outsider@waddle.social/resource' to='room@muc.waddle.social/target-nick' id='iq-jingle-3'>
+                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
+            </iq>"#,
+        );
+
+        let result = router.route_iq(iq, &sender_jid).await;
+        assert!(matches!(
+            result,
+            Err(XmppError::Stanza {
+                condition: crate::StanzaErrorCondition::Forbidden,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_route_iq_local_muc_jingle_rejects_missing_target_occupant() {
+        let (router, _registry) = create_router_with_test_room().await;
+        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
+        let iq = parse_iq(
+            r#"<iq xmlns='jabber:client' type='set' from='sender@waddle.social/resource' to='room@muc.waddle.social/missing-nick' id='iq-jingle-4'>
+                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
+            </iq>"#,
+        );
+
+        let result = router.route_iq(iq, &sender_jid).await;
+        assert!(matches!(
+            result,
+            Err(XmppError::Stanza {
+                condition: crate::StanzaErrorCondition::ItemNotFound,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_route_iq_local_validates_inbound_jingle_sender_membership() {
+        let (router, _registry) = create_router_with_test_room().await;
+        let iq = parse_iq(
+            r#"<iq xmlns='jabber:client' type='set' from='outsider@waddle.social/resource' to='room@muc.waddle.social/target-nick' id='iq-jingle-5'>
+                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
+            </iq>"#,
+        );
+
+        let result = router.route_iq_local(iq).await;
+        assert!(matches!(
+            result,
+            Err(XmppError::Stanza {
+                condition: crate::StanzaErrorCondition::Forbidden,
+                ..
+            })
+        ));
     }
 }

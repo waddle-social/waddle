@@ -52,20 +52,21 @@ function extractExplicitMentions(msg: ReceivedMessage, base: LiveRoomMessage): v
 }
 
 function extractCallInvite(msg: ReceivedMessage, base: LiveRoomMessage): void {
-  const cp = ext(msg).callPropose as
-    | { id?: string; audio?: boolean; video?: boolean; externalUri?: string }
+  const inviteElement = ext(msg).callInvite as
+    | { id?: string; muji?: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string }
     | undefined;
-  if (!cp) return;
+  if (!inviteElement) return;
 
-  const hasVideo = cp.video ?? false;
   const invite: CallInviteInfo = {
-    sessionId: cp.id ?? crypto.randomUUID(),
-    audio: cp.audio ?? !hasVideo,
-    video: hasVideo,
+    inviteId: inviteElement.id ?? msg.id ?? crypto.randomUUID(),
+    muji: inviteElement.muji ?? false,
   };
 
+  if (inviteElement.jingleSid) invite.jingleSid = inviteElement.jingleSid;
+  if (inviteElement.jingleJid) invite.jingleJid = inviteElement.jingleJid;
+
   const meeting = ext(msg).meeting as { url?: string; desc?: string } | undefined;
-  const resolvedUri = cp.externalUri ?? meeting?.url;
+  const resolvedUri = inviteElement.externalUri ?? meeting?.url;
   if (resolvedUri) invite.externalUri = resolvedUri;
   if (meeting?.desc) invite.meetingDesc = meeting.desc;
   base.callInvite = invite;

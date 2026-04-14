@@ -4,6 +4,8 @@ import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
   roomBareJidFor,
+  type CallInviteInfo,
+  type IncomingCallInviteEvent,
   type LiveRoomMessage,
   type RoomActivityEvent,
   type XmppStatusSnapshot,
@@ -76,6 +78,7 @@ export function useMessaging(
   const searchQuery = ref("");
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
+  const latestCallInvite = ref<IncomingCallInviteEvent | null>(null);
   let slowModeTimer: ReturnType<typeof setInterval> | null = null;
 
   let messageRequestId = 0;
@@ -114,6 +117,13 @@ export function useMessaging(
         }
 
         mergeLiveMessage(fromLiveMessage(session.value!, msg));
+        if (msg.callInvite && msg.nick !== session.value?.username) {
+          latestCallInvite.value = {
+            roomJid: msg.roomJid,
+            nick: msg.nick,
+            invite: msg.callInvite as CallInviteInfo,
+          };
+        }
 
         // Trigger notification for mentions when tab is unfocused
         const isTabHidden = typeof document !== "undefined"
@@ -646,5 +656,6 @@ export function useMessaging(
     clearChannelActivity,
     scrollToBottom,
     lastMentionActivity,
+    latestCallInvite,
   };
 }

@@ -87,17 +87,51 @@ export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string): st
   return msgId;
 }
 
-export function sendCallInvite(xmpp: Agent, roomJid: string, meetingUrl: string, video: boolean): string {
-  const msgId = crypto.randomUUID();
-  const sessionId = crypto.randomUUID();
-  const label = video ? "Video call" : "Audio call";
+export interface SendCallInviteOptions {
+  inviteId?: string;
+  sid?: string;
+  jingleJid?: string;
+  externalUri?: string;
+  video: boolean;
+  muji?: boolean;
+}
+
+export function sendCallInvite(xmpp: Agent, roomJid: string, opts: SendCallInviteOptions): string {
+  const msgId = opts.inviteId ?? crypto.randomUUID();
+  const label = opts.video ? "Video call" : "Audio call";
+  const externalUri = opts.externalUri ?? (opts.jingleJid ? `xmpp:${opts.jingleJid}` : undefined);
+  const callInvite: Record<string, unknown> = {
+    id: msgId,
+    muji: opts.muji ?? true,
+  };
+  if (opts.sid) callInvite.jingleSid = opts.sid;
+  if (opts.jingleJid) callInvite.jingleJid = opts.jingleJid;
+  if (externalUri) callInvite.externalUri = externalUri;
 
   xmpp.sendMessage({
     id: msgId, to: roomJid, type: "groupchat",
-    body: `${label}: ${meetingUrl}`,
-    callPropose: { id: sessionId, audio: true, video, externalUri: meetingUrl },
-    meeting: { type: "jitsi", url: meetingUrl, desc: label },
+    body: opts.sid ? `${label} started` : (externalUri ? `${label}: ${externalUri}` : label),
+    callInvite,
+    meeting: { type: "muji", ...(externalUri ? { url: externalUri } : {}), desc: label },
   } as Record<string, unknown>);
 
   return msgId;
+}
+
+export function sendCallReject(xmpp: Agent, roomJid: string, inviteId: string): void {
+  xmpp.sendMessage({
+    id: crypto.randomUUID(),
+    to: roomJid,
+    type: "groupchat",
+    callReject: { id: inviteId },
+  } as Record<string, unknown>);
+}
+
+export function sendCallLeft(xmpp: Agent, roomJid: string, inviteId?: string): void {
+  xmpp.sendMessage({
+    id: crypto.randomUUID(),
+    to: roomJid,
+    type: "groupchat",
+    callLeft: inviteId ? { id: inviteId } : {},
+  } as Record<string, unknown>);
 }

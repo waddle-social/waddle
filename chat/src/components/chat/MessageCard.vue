@@ -176,12 +176,12 @@ function onEditKeydown(e: KeyboardEvent) {
       <div v-else-if="message.callInvite" class="mt-1">
         <div class="inline-flex items-center gap-3 border border-foreground p-3">
           <div class="flex items-center justify-center w-8 h-8 bg-foreground text-background">
-            <Video v-if="message.callInvite.video" class="w-4 h-4" />
+            <Video v-if="message.callInvite.muji || message.callInvite.jingleSid || message.callInvite.externalUri" class="w-4 h-4" />
             <Phone v-else class="w-4 h-4" />
           </div>
           <div class="flex-1 min-w-0">
             <div class="font-mono text-sm font-bold">
-              {{ message.callInvite.meetingDesc ?? (message.callInvite.video ? "Video Call" : "Audio Call") }}
+              {{ message.callInvite.meetingDesc ?? "Call Invite" }}
             </div>
             <div v-if="message.callInvite.externalUri" class="text-xs font-mono text-muted-foreground truncate">
               {{ message.callInvite.externalUri }}

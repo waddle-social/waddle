@@ -94,11 +94,24 @@ pub struct MucLeaveRequest {
     pub status: Option<String>,
 }
 
+/// Parsed in-room MUC presence update request.
+#[derive(Debug, Clone)]
+pub struct MucPresenceUpdateRequest {
+    /// The room JID (bare)
+    pub room_jid: BareJid,
+    /// Nickname from the addressed MUC full JID resource
+    pub nick: String,
+    /// The sender's full JID
+    pub sender_jid: FullJid,
+}
+
 /// Result of parsing a presence stanza for MUC purposes.
 #[derive(Debug)]
 pub enum MucPresenceAction {
     /// User is joining a room
     Join(MucJoinRequest),
+    /// Occupant is updating in-room presence state
+    Update(MucPresenceUpdateRequest),
     /// User is leaving a room
     Leave(MucLeaveRequest),
     /// Not a MUC presence (regular presence update)
@@ -203,21 +216,20 @@ pub fn parse_muc_presence(
                     history,
                 }))
             } else {
-                // Presence to MUC JID but without MUC element
-                // Still treat as a join attempt (some clients may not include it)
+                // Directed presence to a MUC full JID without a MUC join payload.
+                // This is treated as an in-room presence update and the caller can
+                // decide whether to rebroadcast (if occupant exists) or fallback to join.
                 debug!(
                     room = %room_jid,
                     nick = %nick,
                     sender = %sender_jid,
-                    "Parsed MUC join request (no x element)"
+                    "Parsed MUC in-room presence update request"
                 );
 
-                Ok(MucPresenceAction::Join(MucJoinRequest {
+                Ok(MucPresenceAction::Update(MucPresenceUpdateRequest {
                     room_jid,
                     nick,
                     sender_jid: sender_jid.clone(),
-                    password: None,
-                    history: None,
                 }))
             }
         }
@@ -650,23 +662,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_muc_join_without_x_element() {
-        // Some clients don't include the x element
+    fn test_parse_muc_update_without_x_element() {
         let to_jid: Jid = "room@muc.example.com/nickname".parse().unwrap();
         let mut presence = Presence::new(PresenceType::None);
         presence.to = Some(to_jid);
-        // No x element!
 
         let sender = make_sender_jid();
         let result = parse_muc_presence(&presence, &sender, "muc.example.com").unwrap();
 
-        // Should still be treated as a join
         match result {
-            MucPresenceAction::Join(req) => {
+            MucPresenceAction::Update(req) => {
                 assert_eq!(req.room_jid.to_string(), "room@muc.example.com");
                 assert_eq!(req.nick, "nickname");
+                assert_eq!(req.sender_jid, sender);
             }
-            _ => panic!("Expected Join action"),
+            _ => panic!("Expected Update action"),
         }
     }
 

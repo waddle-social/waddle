@@ -1,5 +1,6 @@
 use crate::config::{ServerConfig, ServerInfo};
 use crate::db::{DatabasePool, PoolHealth};
+use crate::media::{build_media_backend, MediaBackend, MediaConfig};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -58,11 +59,23 @@ struct AcmeRuntime {
 pub struct AppState {
     /// Database pool for global and per-waddle databases
     pub db_pool: Arc<DatabasePool>,
+    /// Media backend used for call session generation.
+    pub media_backend: Arc<dyn MediaBackend>,
 }
 
 impl AppState {
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
-        Self { db_pool }
+        Self::new_with_media(db_pool, build_media_backend(&MediaConfig::default()))
+    }
+
+    pub fn new_with_media(
+        db_pool: Arc<DatabasePool>,
+        media_backend: Arc<dyn MediaBackend>,
+    ) -> Self {
+        Self {
+            db_pool,
+            media_backend,
+        }
     }
 }
 
@@ -420,7 +433,11 @@ pub async fn start_with_config(
     }
 
     // Create HTTP state (shares db_pool via Arc)
-    let state = Arc::new(AppState::new(Arc::clone(&db_pool)));
+    let media_backend = build_media_backend(&server_config.media);
+    let state = Arc::new(AppState::new_with_media(
+        Arc::clone(&db_pool),
+        media_backend,
+    ));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
@@ -533,6 +550,7 @@ async fn start_http_server(
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    info!(media_backend = %state.media_backend.kind(), "Configured media backend");
     let app = create_router(
         state,
         server_config,
@@ -659,7 +677,6 @@ fn create_router(
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
     // Create auth broker state
-    let base_url = server_config.base_url.clone();
     let encryption_key = server_config.session_key.clone();
 
     let auth_state = Arc::new(AuthState::new(
@@ -1140,6 +1157,9 @@ mod tests {
         assert!(metrics.contains("waddle_connected_users"));
         assert!(metrics.contains("waddle_messages_per_second"));
         assert!(metrics.contains("waddle_room_count"));
+        assert!(metrics.contains("waddle_call_starts_total"));
+        assert!(metrics.contains("waddle_call_failures_total"));
+        assert!(metrics.contains("waddle_active_calls"));
     }
 
     #[tokio::test]

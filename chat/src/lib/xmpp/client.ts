@@ -2,13 +2,14 @@
 import { createClient } from "stanza";
 import type { Agent } from "stanza";
 import type { ReceivedMUCPresence } from "stanza/protocol";
+import type MediaSession from "stanza/jingle/MediaSession";
 import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
-  ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle,
-  DisplayedEvent, LiveRoomMessage, ReactionEvent, RoomActivityEvent, RoomHats, XmppStatusSnapshot,
+  ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
+  LiveRoomMessage, MujiCallEvent, ReactionEvent, RoomActivityEvent, RoomHats, XmppStatusSnapshot,
 } from "./types";
-import { roomBareJidFor } from "./jid";
+import { roomBareJidFor, sfuServiceJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
 import { dispatchGroupchat, ext } from "./message-parsing";
 import * as messaging from "./messaging";
@@ -20,6 +21,39 @@ type StanzaSaslFactory = {
   disable(mechanism: string): void;
   mechanisms?: StanzaSaslMechanism[];
 };
+
+type MujiSession = MediaSession & {
+  sid: string;
+  peerID: string;
+  state: string;
+  connectionState: string;
+  pc: RTCPeerConnection;
+  includesAudio: boolean;
+  includesVideo: boolean;
+  addTrack(track: MediaStreamTrack, stream: MediaStream): Promise<void>;
+  start(opts?: RTCOfferOptions): Promise<void>;
+  accept(opts?: RTCAnswerOptions): Promise<void>;
+  end(reason?: string, silent?: boolean): void;
+};
+
+function requireMujiSessionShape(session: unknown): MujiSession {
+  if (typeof session !== "object" || session === null) {
+    throw new Error("Stanza returned an invalid media session object");
+  }
+
+  const candidate = session as Partial<MujiSession>;
+  if (
+    typeof candidate.sid !== "string"
+    || typeof candidate.start !== "function"
+    || typeof candidate.accept !== "function"
+    || typeof candidate.addTrack !== "function"
+    || typeof candidate.end !== "function"
+  ) {
+    throw new Error("Stanza media session shape mismatch");
+  }
+
+  return session as MujiSession;
+}
 
 const DISABLED_SASL_MECHANISMS = [
   "EXTERNAL",
@@ -76,6 +110,7 @@ export class BrowserXmppClient {
   private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
+  private mujiCallHandler: ((event: MujiCallEvent) => void) | null = null;
   private xmpp: Agent | null = null;
   private connectPromise: Promise<void> | null = null;
   private connected = false;
@@ -84,8 +119,17 @@ export class BrowserXmppClient {
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
+  private readonly mujiSessions = new Map<string, MujiSession>();
 
   constructor(session: WaddleSession) { this.session = session; }
+
+  private fullJid() {
+    return `${this.session.jid}/${this.resource}`;
+  }
+
+  private nextCallSid() {
+    return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
@@ -97,6 +141,7 @@ export class BrowserXmppClient {
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
   setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
+  setMujiCallHandler(h: (event: MujiCallEvent) => void) { this.mujiCallHandler = h; }
 
   // -- Connection lifecycle --
 
@@ -110,6 +155,7 @@ export class BrowserXmppClient {
     this.currentRoom = null;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
+    this.mujiSessions.clear();
     this.roomHats = {};
     this.hatsHandler?.({});
     const xmpp = createClient({
@@ -164,6 +210,7 @@ export class BrowserXmppClient {
     this.connectPromise = null;
     this.connected = false;
     this.currentRoom = null;
+    this.mujiSessions.clear();
     try { xmpp.disconnect(); } catch { /* ignore */ }
   }
 
@@ -289,9 +336,107 @@ export class BrowserXmppClient {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body) : null;
   }
-  async sendCallInvite(w: string, c: string, meetingUrl: string, video: boolean): Promise<string | null> {
+  async sendCallInvite(
+    w: string,
+    c: string,
+    opts: { sid?: string; jingleJid?: string; externalUri?: string; video: boolean; muji?: boolean },
+  ): Promise<string | null> {
     await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? messaging.sendCallInvite(this.xmpp, roomBareJidFor(this.session, w, c), meetingUrl, video) : null;
+    return this.xmpp ? messaging.sendCallInvite(this.xmpp, roomBareJidFor(this.session, w, c), opts) : null;
+  }
+  async sendCallReject(w: string, c: string, inviteId: string): Promise<void> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (this.xmpp) messaging.sendCallReject(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
+  }
+  async sendCallLeft(w: string, c: string, inviteId?: string): Promise<void> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (this.xmpp) messaging.sendCallLeft(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
+  }
+
+  async startMujiCall(
+    w: string,
+    c: string,
+    _localStream: MediaStream,
+    opts: { video: boolean; sid?: string; serviceJid?: string } = { video: true },
+  ): Promise<{ sid: string; serviceJid: string } | null> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (!this.xmpp?.jingle) return null;
+
+    const sid = opts.sid ?? this.nextCallSid();
+    const serviceJid = opts.serviceJid ?? this.fullJid();
+
+    await this.sendCallInvite(w, c, {
+      muji: true,
+      sid,
+      jingleJid: serviceJid,
+      externalUri: `xmpp:${serviceJid}?jingle;sid=${sid}`,
+      video: opts.video,
+    });
+
+    return { sid, serviceJid };
+  }
+
+  async joinMujiCall(
+    w: string,
+    c: string,
+    localStream: MediaStream,
+    invite: { sid?: string; jingleJid?: string; video?: boolean },
+  ): Promise<{ sid: string; serviceJid: string } | null> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (!this.xmpp?.jingle) return null;
+
+    const serviceJid = invite.jingleJid ?? sfuServiceJidFor(this.session);
+    const sid = invite.sid;
+    const existing = sid ? this.mujiSessions.get(sid) : undefined;
+    if (existing && existing.state === "pending") {
+      for (const track of localStream.getTracks()) {
+        if (!existing.pc.getSenders().some((sender) => sender.track?.id === track.id)) {
+          await existing.addTrack(track, localStream);
+        }
+      }
+      await existing.accept();
+      return { sid: existing.sid, serviceJid };
+    }
+
+    const session = requireMujiSessionShape(
+      this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream),
+    );
+    this.mujiSessions.set(session.sid, session);
+    await session.start({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: invite.video ?? true,
+    });
+    return { sid: session.sid, serviceJid };
+  }
+
+  endMujiCall(sid?: string) {
+    if (sid) {
+      const session = this.mujiSessions.get(sid);
+      if (!session) return;
+      session.end("success");
+      this.mujiSessions.delete(sid);
+      return;
+    }
+
+    for (const session of this.mujiSessions.values()) {
+      session.end("success");
+    }
+    this.mujiSessions.clear();
+  }
+
+  async acceptMujiCall(sid: string, localStream: MediaStream) {
+    const session = this.mujiSessions.get(sid);
+    if (!session || session.state !== "pending") return;
+    for (const track of localStream.getTracks()) {
+      if (!session.pc.getSenders().some((sender) => sender.track?.id === track.id)) {
+        await session.addTrack(track, localStream);
+      }
+    }
+    await session.accept();
   }
 
   async enablePushNotifications(opts: {
@@ -380,7 +525,79 @@ export class BrowserXmppClient {
     catch { this.roomDisconnectHandler?.(); }
   }
 
+  private wireMujiEvents(xmpp: Agent) {
+    if (!xmpp.jingle) return;
+
+    xmpp.on("jingle:incoming", (session) => {
+      const mediaSession = session as MujiSession;
+      this.mujiSessions.set(mediaSession.sid, mediaSession);
+      this.mujiCallHandler?.({
+        type: "incoming",
+        sid: mediaSession.sid,
+        peerJid: mediaSession.peerID,
+        includesAudio: mediaSession.includesAudio,
+        includesVideo: mediaSession.includesVideo,
+      });
+    });
+
+    xmpp.on("jingle:outgoing", (session) => {
+      const mediaSession = session as MujiSession;
+      this.mujiSessions.set(mediaSession.sid, mediaSession);
+      this.mujiCallHandler?.({
+        type: "outgoing",
+        sid: mediaSession.sid,
+        peerJid: mediaSession.peerID,
+      });
+    });
+
+    xmpp.on("jingle:accepted", (session) => {
+      const mediaSession = session as MujiSession;
+      this.mujiSessions.set(mediaSession.sid, mediaSession);
+      this.mujiCallHandler?.({ type: "accepted", sid: mediaSession.sid });
+    });
+
+    xmpp.on("jingle:terminated", (session, reason) => {
+      const mediaSession = session as MujiSession;
+      this.mujiSessions.delete(mediaSession.sid);
+      const event: MujiCallEvent = {
+        type: "terminated",
+        sid: mediaSession.sid,
+      };
+      if (reason?.condition) event.reason = reason.condition;
+      this.mujiCallHandler?.(event);
+    });
+
+    xmpp.jingle.on("peerTrackAdded", (session, track, stream) => {
+      const mediaSession = session as MujiSession;
+      this.mujiCallHandler?.({
+        type: "peer-track-added",
+        sid: mediaSession.sid,
+        track,
+        stream,
+      });
+    });
+
+    xmpp.jingle.on("peerTrackRemoved", (session, track) => {
+      const mediaSession = session as MujiSession;
+      this.mujiCallHandler?.({
+        type: "peer-track-removed",
+        sid: mediaSession.sid,
+        track,
+      });
+    });
+
+    xmpp.jingle.on("connectionState", (session, state) => {
+      const mediaSession = session as MujiSession;
+      this.mujiCallHandler?.({
+        type: "connection-state",
+        sid: mediaSession.sid,
+        state,
+      });
+    });
+  }
+
   private wireEvents(xmpp: Agent) {
+    this.wireMujiEvents(xmpp);
     xmpp.on("session:started", () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
@@ -394,6 +611,7 @@ export class BrowserXmppClient {
         this.currentRoom = null;
         this.roomSwitchPromise = null;
         this.roomSwitchTarget = null;
+        this.mujiSessions.clear();
         this.roomHats = {};
         this.hatsHandler?.({});
         this.stopSelfPing();
