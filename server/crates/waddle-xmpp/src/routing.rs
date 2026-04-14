@@ -75,6 +75,8 @@ pub struct RouterConfig {
     pub muc_domain: String,
     /// The Spaces subdomain (e.g., "spaces.waddle.social") for XEP-0503
     pub spaces_domain: String,
+    /// The SFU subdomain (e.g., "sfu.waddle.social")
+    pub sfu_domain: String,
     /// Whether S2S federation is enabled
     pub federation_enabled: bool,
 }
@@ -84,10 +86,12 @@ impl RouterConfig {
     pub fn new(local_domain: String) -> Self {
         let muc_domain = format!("muc.{}", local_domain);
         let spaces_domain = format!("spaces.{}", local_domain);
+        let sfu_domain = format!("sfu.{}", local_domain);
         Self {
             local_domain,
             muc_domain,
             spaces_domain,
+            sfu_domain,
             federation_enabled: false,
         }
     }
@@ -114,6 +118,8 @@ pub enum RoutingDestination {
     LocalMuc,
     /// JID is for the Spaces service on this server (XEP-0503)
     LocalSpaces,
+    /// JID is for the SFU service on this server
+    LocalSfu,
     /// JID is on a remote server (requires S2S)
     Remote {
         /// The remote domain
@@ -203,6 +209,8 @@ impl StanzaRouter {
             RoutingDestination::LocalMuc
         } else if domain == self.config.spaces_domain {
             RoutingDestination::LocalSpaces
+        } else if domain == self.config.sfu_domain {
+            RoutingDestination::LocalSfu
         } else {
             RoutingDestination::Remote {
                 domain: domain.to_string(),
@@ -217,12 +225,23 @@ impl StanzaRouter {
             RoutingDestination::Local
                 | RoutingDestination::LocalMuc
                 | RoutingDestination::LocalSpaces
+                | RoutingDestination::LocalSfu
         )
     }
 
     /// Check if a JID is for the local MUC service.
     pub fn is_muc_jid(&self, jid: &Jid) -> bool {
         matches!(self.get_destination(jid), RoutingDestination::LocalMuc)
+    }
+
+    /// Check if a JID is for the local SFU service.
+    pub fn is_sfu_jid(&self, jid: &Jid) -> bool {
+        jid.domain().as_str() == self.config.sfu_domain
+    }
+
+    /// Return the SFU domain for this server.
+    pub fn sfu_domain(&self) -> &str {
+        &self.config.sfu_domain
     }
 
     /// Check if a JID requires S2S federation.
@@ -250,8 +269,10 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_message_local(message).await,
-            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
-                // MUC/Spaces messages should be handled by their respective services,
+            RoutingDestination::LocalMuc
+            | RoutingDestination::LocalSpaces
+            | RoutingDestination::LocalSfu => {
+                // MUC/Spaces/SFU messages should be handled by their respective services,
                 // not by this router directly. Return as local.
                 debug!("Message to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
@@ -384,8 +405,10 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_presence_local(presence).await,
-            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
-                // MUC/Spaces presence should be handled by their respective services
+            RoutingDestination::LocalMuc
+            | RoutingDestination::LocalSpaces
+            | RoutingDestination::LocalSfu => {
+                // MUC/Spaces/SFU presence should be handled by their respective services
                 debug!("Presence to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
@@ -513,6 +536,13 @@ impl StanzaRouter {
             RoutingDestination::LocalSpaces => {
                 // MUC/Spaces IQs should be handled by their respective services
                 debug!("IQ to local service should be handled by service handler");
+                Ok(RoutingResult::DeliveredLocal {
+                    delivered_count: 0,
+                    offline_count: 0,
+                })
+            }
+            RoutingDestination::LocalSfu => {
+                debug!("IQ to local SFU service — not yet wired");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
                     offline_count: 0,
@@ -1098,5 +1128,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn routes_sfu_domain_to_local_sfu() {
+        let config = RouterConfig::new("waddle.social".to_string());
+        let registry = Arc::new(ConnectionRegistry::new());
+        let router = StanzaRouter::new(config, registry, None);
+        let dest = router.get_destination_for_domain("sfu.waddle.social");
+        assert_eq!(dest, RoutingDestination::LocalSfu);
+    }
+
+    #[test]
+    fn sfu_domain_does_not_match_muc_or_local() {
+        let config = RouterConfig::new("waddle.social".to_string());
+        let registry = Arc::new(ConnectionRegistry::new());
+        let router = StanzaRouter::new(config, registry, None);
+        assert_eq!(router.get_destination_for_domain("waddle.social"), RoutingDestination::Local);
+        assert_eq!(router.get_destination_for_domain("muc.waddle.social"), RoutingDestination::LocalMuc);
+        assert_eq!(router.get_destination_for_domain("sfu.waddle.social"), RoutingDestination::LocalSfu);
     }
 }
