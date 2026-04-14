@@ -3,7 +3,11 @@ import { jwt, oidcProvider } from "better-auth/plugins";
 import { env } from "cloudflare:workers";
 
 import { database } from "./auth-database";
-import { buildTrustedOidcClients, trustedOidcOrigins } from "./oidc";
+import {
+  buildTrustedOidcClients,
+  SERVER_OIDC_CLIENT_ID,
+  trustedOidcOrigins,
+} from "./oidc";
 
 function createAuth(
   secret: string,
@@ -15,11 +19,23 @@ function createAuth(
     secret,
     database,
     trustedOrigins: trustedOidcOrigins,
+    user: {
+      additionalFields: {
+        githubUsername: {
+          type: "string",
+          required: false,
+        },
+      },
+    },
     socialProviders: {
       github: {
         clientId: env.GITHUB_CLIENT_ID,
         clientSecret: githubClientSecret,
         scope: ["read:user", "user:email"],
+        mapProfileToUser: (profile) => ({
+          githubUsername: profile.login,
+        }),
+        overrideUserInfoOnSignIn: true,
       },
     },
     plugins: [
@@ -31,6 +47,21 @@ function createAuth(
         consentPage: "/oauth/consent",
         allowDynamicClientRegistration: true,
         trustedClients: buildTrustedOidcClients(serverOidcClientSecret),
+        getAdditionalUserInfoClaim: (user, _scopes, client) => {
+          if (client.clientId !== SERVER_OIDC_CLIENT_ID) {
+            return {};
+          }
+
+          const githubUsername =
+            typeof user.githubUsername === "string"
+              ? user.githubUsername.trim()
+              : "";
+          if (!githubUsername) {
+            return {};
+          }
+
+          return { preferred_username: githubUsername };
+        },
         useJWTPlugin: true,
       }),
     ],

@@ -60,12 +60,15 @@ impl IdentityService {
         let issuer = Self::identity_issuer(provider, claims)?;
 
         if let Some(existing) = self.find_by_issuer_subject(&issuer, subject).await? {
-            self.update_identity_last_login(provider, &issuer, subject)
+            let user = self
+                .reconcile_existing_user(provider, claims, &issuer, &existing)
+                .await?;
+            self.update_identity_last_login(provider, claims, &issuer, subject)
                 .await?;
             return Ok(LinkedIdentity {
                 issuer,
                 subject: subject.to_string(),
-                user: existing,
+                user,
             });
         }
 
@@ -263,6 +266,77 @@ impl IdentityService {
         ))
     }
 
+    async fn reconcile_existing_user(
+        &self,
+        provider: &AuthProviderConfig,
+        claims: &IdentityClaims,
+        issuer: &str,
+        existing: &UserRecord,
+    ) -> Result<UserRecord, AuthError> {
+        let base = Self::derive_base_username(provider, claims, issuer);
+
+        for i in 0..200 {
+            let username = if i == 0 {
+                base.clone()
+            } else {
+                format!("{}{}", base, i)
+            };
+            let xmpp_localpart = username_to_localpart(&username);
+            let now = Utc::now().to_rfc3339();
+
+            let conn = self
+                .db
+                .guard()
+                .await
+                .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+            let result = conn
+                .execute(
+                    r#"
+                    UPDATE users
+                    SET username = ?, xmpp_localpart = ?, display_name = ?, avatar_url = ?, primary_email = ?, updated_at = ?
+                    WHERE id = ?
+                    "#,
+                    libsql::params![
+                        username.clone(),
+                        xmpp_localpart.clone(),
+                        claims.name.clone(),
+                        claims.avatar_url.clone(),
+                        claims.email.clone(),
+                        now.as_str(),
+                        existing.id.as_str()
+                    ],
+                )
+                .await;
+
+            match result {
+                Ok(_) => {
+                    return Ok(UserRecord {
+                        id: existing.id.clone(),
+                        username,
+                        xmpp_localpart,
+                        display_name: claims.name.clone(),
+                        avatar_url: claims.avatar_url.clone(),
+                        primary_email: claims.email.clone(),
+                    });
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("UNIQUE") || msg.contains("constraint") {
+                        continue;
+                    }
+                    return Err(AuthError::DatabaseError(format!(
+                        "Failed to update user from identity claims: {}",
+                        err
+                    )));
+                }
+            }
+        }
+
+        Err(AuthError::DatabaseError(
+            "Failed to allocate unique username".to_string(),
+        ))
+    }
+
     async fn insert_identity(
         &self,
         provider: &AuthProviderConfig,
@@ -309,10 +383,13 @@ impl IdentityService {
     async fn update_identity_last_login(
         &self,
         provider: &AuthProviderConfig,
+        claims: &IdentityClaims,
         issuer: &str,
         subject: &str,
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
+        let raw = serde_json::to_string(&claims.raw_claims)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to serialize claims: {}", e)))?;
 
         let conn = self
             .db
@@ -320,8 +397,18 @@ impl IdentityService {
             .await
             .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
         conn.execute(
-            "UPDATE auth_identities SET last_login_at = ?, provider_id = ? WHERE issuer = ? AND subject = ?",
-            libsql::params![now.as_str(), provider.id.as_str(), issuer, subject],
+            "UPDATE auth_identities
+             SET last_login_at = ?, provider_id = ?, email = ?, email_verified = ?, raw_claims_json = ?
+             WHERE issuer = ? AND subject = ?",
+            libsql::params![
+                now.as_str(),
+                provider.id.as_str(),
+                claims.email.clone(),
+                claims.email_verified.map(|v| if v { 1 } else { 0 }),
+                raw.as_str(),
+                issuer,
+                subject
+            ],
         )
         .await
         .map_err(|e| {
@@ -336,7 +423,9 @@ impl IdentityService {
 mod tests {
     use super::*;
     use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
+    use crate::db::{Database, MigrationRunner};
     use serde_json::json;
+    use std::sync::Arc;
 
     fn provider_with_username_claim(claim: Option<&str>) -> AuthProviderConfig {
         AuthProviderConfig {
@@ -373,6 +462,16 @@ mod tests {
             avatar_url: None,
             raw_claims: json!({}),
         }
+    }
+
+    async fn create_test_db() -> Arc<Database> {
+        let db = Database::in_memory("test-identity-service")
+            .await
+            .expect("failed to create test database");
+        let db = Arc::new(db);
+        let runner = MigrationRunner::global();
+        runner.run(&db).await.expect("failed to run migrations");
+        db
     }
 
     #[test]
@@ -445,5 +544,182 @@ mod tests {
 
         let issuer = IdentityService::identity_issuer(&provider, &claims).expect("issuer");
         assert_eq!(issuer, "https://issuer.example");
+    }
+
+    #[tokio::test]
+    async fn existing_identity_updates_username_and_claims_on_login() {
+        let db = create_test_db().await;
+        let service = IdentityService::new(Arc::clone(&db));
+        let provider = provider_with_username_claim(Some("preferred_username"));
+
+        {
+            let conn = db.guard().await.expect("db guard");
+            let now = Utc::now().to_rfc3339();
+
+            conn.execute(
+                r#"
+                INSERT INTO users (id, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                libsql::params![
+                    "user-1",
+                    "example.person",
+                    "example.person",
+                    "Example Person",
+                    Option::<String>::None,
+                    "example.person@waddle.test",
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .await
+            .expect("insert user");
+
+            conn.execute(
+                r#"
+                INSERT INTO auth_identities (
+                    id, user_id, provider_id, issuer, subject, email, email_verified,
+                    raw_claims_json, created_at, last_login_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                libsql::params![
+                    "identity-1",
+                    "user-1",
+                    "provider",
+                    "https://issuer.example",
+                    "sub-1234",
+                    "example.person@waddle.test",
+                    1,
+                    "{}",
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .await
+            .expect("insert identity");
+        }
+
+        let mut claims = claims();
+        claims.preferred_username = Some("rawkode".to_string());
+        claims.name = Some("Rawkode".to_string());
+        claims.email = Some("rawkode@waddle.social".to_string());
+        claims.raw_claims = json!({
+            "sub": "sub-1234",
+            "preferred_username": "rawkode",
+        });
+
+        let linked = service
+            .resolve_or_create_user(&provider, &claims)
+            .await
+            .expect("resolve identity");
+        assert_eq!(linked.user.username, "rawkode");
+        assert_eq!(linked.user.xmpp_localpart, "rawkode");
+
+        let conn = db.guard().await.expect("db guard");
+        let mut rows = conn
+            .query(
+                "SELECT username, xmpp_localpart, primary_email FROM users WHERE id = ?",
+                libsql::params!["user-1"],
+            )
+            .await
+            .expect("query user");
+        let row = rows.next().await.expect("read row").expect("row exists");
+        let username: String = row.get(0).expect("username");
+        let xmpp_localpart: String = row.get(1).expect("xmpp_localpart");
+        let primary_email: Option<String> = row.get(2).expect("primary_email");
+        assert_eq!(username, "rawkode");
+        assert_eq!(xmpp_localpart, "rawkode");
+        assert_eq!(primary_email.as_deref(), Some("rawkode@waddle.social"));
+
+        let mut rows = conn
+            .query(
+                "SELECT email, raw_claims_json FROM auth_identities WHERE issuer = ? AND subject = ?",
+                libsql::params!["https://issuer.example", "sub-1234"],
+            )
+            .await
+            .expect("query identity");
+        let row = rows.next().await.expect("read row").expect("row exists");
+        let identity_email: Option<String> = row.get(0).expect("identity email");
+        let raw_claims_json: String = row.get(1).expect("raw claims");
+        assert_eq!(identity_email.as_deref(), Some("rawkode@waddle.social"));
+        assert!(raw_claims_json.contains("\"preferred_username\":\"rawkode\""));
+    }
+
+    #[tokio::test]
+    async fn existing_identity_uses_suffix_when_username_conflicts() {
+        let db = create_test_db().await;
+        let service = IdentityService::new(Arc::clone(&db));
+        let provider = provider_with_username_claim(Some("preferred_username"));
+
+        {
+            let conn = db.guard().await.expect("db guard");
+            let now = Utc::now().to_rfc3339();
+
+            conn.execute(
+                r#"
+                INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+                libsql::params![
+                    "user-conflict",
+                    "rawkode",
+                    "rawkode",
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .await
+            .expect("insert conflicting user");
+
+            conn.execute(
+                r#"
+                INSERT INTO users (id, username, xmpp_localpart, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+                libsql::params![
+                    "user-1",
+                    "example.person",
+                    "example.person",
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .await
+            .expect("insert identity user");
+
+            conn.execute(
+                r#"
+                INSERT INTO auth_identities (
+                    id, user_id, provider_id, issuer, subject, raw_claims_json, created_at, last_login_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                libsql::params![
+                    "identity-1",
+                    "user-1",
+                    "provider",
+                    "https://issuer.example",
+                    "sub-1234",
+                    "{}",
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .await
+            .expect("insert identity");
+        }
+
+        let mut claims = claims();
+        claims.preferred_username = Some("rawkode".to_string());
+        claims.raw_claims = json!({
+            "sub": "sub-1234",
+            "preferred_username": "rawkode",
+        });
+
+        let linked = service
+            .resolve_or_create_user(&provider, &claims)
+            .await
+            .expect("resolve identity");
+        assert_eq!(linked.user.username, "rawkode1");
+        assert_eq!(linked.user.xmpp_localpart, "rawkode1");
     }
 }
