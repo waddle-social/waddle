@@ -7,7 +7,7 @@ spec:
   client_id: ${WADDLE_TELEPORT_GITHUB_CLIENT_ID}
   client_secret: secret://teleport-github-connector/clientSecret
   display: GitHub
-  redirect_url: https://teleport.waddle.social/v1/webapi/github/callback
+  redirect_url: https://teleport.waddle.chat/v1/webapi/github/callback
   teams_to_roles:
     - organization: waddle-social
       team: infra

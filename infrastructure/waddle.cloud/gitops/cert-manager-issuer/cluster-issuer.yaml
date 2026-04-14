@@ -16,4 +16,5 @@ spec:
               key: api-token
         selector:
           dnsZones:
+            - waddle.chat
             - waddle.social

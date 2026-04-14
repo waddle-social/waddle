@@ -24,8 +24,8 @@ spec:
             name: cloudflare-api-token
             key: api-token
     domainFilters:
-      - apps.waddle.social
-      - waddle.social
+      - apps.waddle.chat
+      - waddle.chat
     policy: sync
     sources:
       - gateway-httproute
