@@ -354,11 +354,20 @@ export class BrowserXmppClient {
   }
   async discoverWaddles(): Promise<DiscoveredWaddle[]> {
     await this.connect();
-    return this.xmpp ? discovery.discoverWaddles(this.xmpp, this.session.jid) : [];
+    return this.xmpp
+      ? discovery.discoverWaddles(this.xmpp, this.session.jid, this.session.xmpp_websocket_url)
+      : [];
   }
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
     await this.connect();
-    return this.xmpp ? discovery.discoverChannels(this.xmpp, this.session.jid, waddleId) : [];
+    return this.xmpp
+      ? discovery.discoverChannels(
+          this.xmpp,
+          this.session.jid,
+          this.session.xmpp_websocket_url,
+          waddleId,
+        )
+      : [];
   }
 
   // -- Private --

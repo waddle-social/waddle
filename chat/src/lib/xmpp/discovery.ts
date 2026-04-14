@@ -35,8 +35,24 @@ function parseWaddleName(infoResult: DiscoInfoResult): string | null {
   );
 }
 
-export async function discoverWaddles(xmpp: Agent, jid: string): Promise<DiscoveredWaddle[]> {
-  const spacesDomain = `spaces.${jidDomain(jid)}`;
+function spacesServiceDomain(jid: string, xmppWebsocketUrl: string): string {
+  try {
+    const host = new URL(xmppWebsocketUrl).hostname;
+    if (host) {
+      return `spaces.${host}`;
+    }
+  } catch {
+    // Fall back to JID-derived domain if websocket URL is malformed.
+  }
+  return `spaces.${jidDomain(jid)}`;
+}
+
+export async function discoverWaddles(
+  xmpp: Agent,
+  jid: string,
+  xmppWebsocketUrl: string,
+): Promise<DiscoveredWaddle[]> {
+  const spacesDomain = spacesServiceDomain(jid, xmppWebsocketUrl);
   const response = await xmpp.getDiscoItems(spacesDomain, "");
 
   const discovered = (response.items ?? [])
@@ -62,9 +78,10 @@ export async function discoverWaddles(xmpp: Agent, jid: string): Promise<Discove
 export async function discoverChannels(
   xmpp: Agent,
   jid: string,
+  xmppWebsocketUrl: string,
   waddleId: string,
 ): Promise<DiscoveredChannel[]> {
-  const spacesDomain = `spaces.${jidDomain(jid)}`;
+  const spacesDomain = spacesServiceDomain(jid, xmppWebsocketUrl);
   const response = await xmpp.getDiscoItems(spacesDomain, waddleId);
 
   const prefix = `${waddleId}_`;
