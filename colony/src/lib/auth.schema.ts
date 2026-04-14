@@ -17,7 +17,7 @@ export const auth = betterAuth({
     additionalFields: {
       githubUsername: {
         type: "string",
-        required: false,
+        required: true,
       },
     },
   },

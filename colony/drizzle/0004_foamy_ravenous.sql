@@ -1,1 +1,1 @@
-ALTER TABLE `user` ADD `github_username` text;
+ALTER TABLE `user` ADD `github_username` text NOT NULL;

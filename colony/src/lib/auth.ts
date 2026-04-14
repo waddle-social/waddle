@@ -23,7 +23,7 @@ function createAuth(
       additionalFields: {
         githubUsername: {
           type: "string",
-          required: false,
+          required: true,
         },
       },
     },
