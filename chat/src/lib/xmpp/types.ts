@@ -40,12 +40,38 @@ export interface SharedFileInfo {
 }
 
 export interface CallInviteInfo {
-  sessionId: string;
-  audio: boolean;
-  video: boolean;
+  inviteId: string;
+  muji: boolean;
+  jingleSid?: string;
+  jingleJid?: string;
   externalUri?: string;
   meetingDesc?: string;
 }
+
+export interface IncomingCallInviteEvent {
+  roomJid: string;
+  nick: string;
+  invite: CallInviteInfo;
+}
+
+export type MujiCallPhase =
+  | "idle"
+  | "acquiring-media"
+  | "dialing"
+  | "ringing"
+  | "active"
+  | "ending"
+  | "error";
+
+export type MujiCallEvent =
+  | { type: "incoming"; sid: string; peerJid: string; includesAudio: boolean; includesVideo: boolean }
+  | { type: "outgoing"; sid: string; peerJid: string }
+  | { type: "accepted"; sid: string }
+  | { type: "terminated"; sid: string; reason?: string }
+  | { type: "connection-state"; sid: string; state: string }
+  | { type: "peer-track-added"; sid: string; track: MediaStreamTrack; stream: MediaStream }
+  | { type: "peer-track-removed"; sid: string; track: MediaStreamTrack }
+  | { type: "error"; detail: string; sid?: string };
 
 export type ChatStateType = "active" | "composing" | "paused" | "inactive" | "gone";
 

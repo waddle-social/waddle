@@ -3,6 +3,7 @@ pub mod auth; // Provider auth broker, session management
 pub mod auth_page; // Web-based auth page for XMPP credentials
 pub mod channels; // Channel CRUD and permissions
 pub mod device; // OAuth Device Flow for CLI
+pub mod media; // Media backend abstraction and SFU session APIs
 pub mod permissions; // Zanzibar-style permission system
 pub mod uploads; // File upload endpoints (XEP-0363)
 pub mod users; // Authenticated user search

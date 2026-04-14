@@ -283,11 +283,14 @@ impl<S: AppState> XmppServer<S> {
 
             // Create a StanzaRouter for routing inbound S2S stanzas to local users
             let router_config = RouterConfig::new(self.config.domain.clone()).with_federation(true);
-            let stanza_router = Arc::new(StanzaRouter::new(
-                router_config,
-                Arc::clone(&self.connection_registry),
-                None, // S2S pool not needed for inbound routing
-            ));
+            let stanza_router = Arc::new(
+                StanzaRouter::new(
+                    router_config,
+                    Arc::clone(&self.connection_registry),
+                    None, // S2S pool not needed for inbound routing
+                )
+                .with_muc_room_registry(Arc::clone(&self.room_registry)),
+            );
 
             let s2s_listener = S2sListener::new(
                 s2s_config,

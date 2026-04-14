@@ -70,6 +70,11 @@ Before the first login, copy [local/waddle.env.example](/Users/icepuma/developme
   - Shorthand examples: `debug`, `info`, `warn`, `error`
   - Full filter examples: `info,waddle_server=debug,waddle_xmpp=debug`
 - Default logging filter (when neither env var is set): `info,waddle_server=debug,waddle_xmpp=debug`
+- `WADDLE_MEDIA_BACKEND`: Media backend selector (`disabled` or `webrtc-rs-sfu`).
+- `WADDLE_MEDIA_PUBLIC_BASE_URL`: Public base URL used to generate media join endpoints.
+- `WADDLE_MEDIA_SFU_SIGNALING_PATH`: Path prefix used for SFU signaling URLs (default `/v1/media/sfu`).
+- `WADDLE_MEDIA_SFU_ROOM_PREFIX`: Prefix applied to generated SFU room ids (default `waddle`).
+- `WADDLE_MEDIA_SFU_ICE_SERVERS_JSON`: JSON array of ICE/STUN/TURN servers.
 
 ### Container Image
 

@@ -1,32 +1,33 @@
 //! XEP-0482: Call Invites
 //!
-//! Structured call invitations for audio/video calls. Allows inviting
-//! users to calls with accept/reject/retract semantics.
+//! Structured call invitations using invite semantics and explicit join methods.
 //!
 //! ## XML Format
 //!
 //! Invite to a call:
 //! ```xml
 //! <message to='juliet@example.com' id='call-1'>
-//!   <propose xmlns='urn:xmpp:call-invites:0' id='session-123'>
-//!     <audio/>
-//!     <video/>
+//!   <invite xmlns='urn:xmpp:call-invites:0'>
+//!     <muji/>
+//!     <jingle sid='jingle-session-123' jid='romeo@example.com/desktop'/>
 //!     <external uri='https://meet.example.com/room-abc'/>
-//!   </propose>
+//!   </invite>
 //! </message>
 //! ```
 //!
-//! Accept:
+//! Accept with chosen method:
 //! ```xml
 //! <message to='romeo@example.com'>
-//!   <accept xmlns='urn:xmpp:call-invites:0' id='session-123'/>
+//!   <accept xmlns='urn:xmpp:call-invites:0' id='call-1'>
+//!     <external uri='https://meet.example.com/room-abc'/>
+//!   </accept>
 //! </message>
 //! ```
 //!
-//! Reject:
+//! Leave:
 //! ```xml
 //! <message to='romeo@example.com'>
-//!   <reject xmlns='urn:xmpp:call-invites:0' id='session-123'/>
+//!   <left xmlns='urn:xmpp:call-invites:0' id='call-1'/>
 //! </message>
 //! ```
 
@@ -36,76 +37,85 @@ use xmpp_parsers::message::Message;
 /// Namespace for XEP-0482 Call Invites.
 pub const NS_CALL_INVITES: &str = "urn:xmpp:call-invites:0";
 
-/// Media types available in a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CallMedia {
-    /// Audio only.
-    Audio,
-    /// Video (implies audio).
-    Video,
+/// A call join method advertised by an invitation or selected in acceptance.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallJoinMethod {
+    /// Join via Muji.
+    Muji,
+    /// Join via Jingle session reference.
+    Jingle {
+        /// Jingle session identifier.
+        sid: String,
+        /// Optional JID of the session endpoint.
+        jid: Option<String>,
+    },
+    /// Join an external meeting URL.
+    External {
+        /// External URI (for example, HTTPS meeting link).
+        uri: String,
+    },
 }
 
-/// A call invitation.
+/// A call invitation containing one or more available join methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallPropose {
-    /// Unique session identifier.
-    pub session_id: String,
-    /// Available media types.
-    pub media: Vec<CallMedia>,
-    /// Optional external meeting URL.
-    pub external_uri: Option<String>,
+pub struct CallInvite {
+    /// Available join methods offered to recipients.
+    pub methods: Vec<CallJoinMethod>,
 }
 
-impl CallPropose {
-    /// Create an audio call proposal.
-    pub fn audio(session_id: impl Into<String>) -> Self {
+impl CallInvite {
+    /// Create an invitation with a single Muji join method.
+    pub fn muji() -> Self {
         Self {
-            session_id: session_id.into(),
-            media: vec![CallMedia::Audio],
-            external_uri: None,
+            methods: vec![CallJoinMethod::Muji],
         }
     }
 
-    /// Create a video call proposal.
-    pub fn video(session_id: impl Into<String>) -> Self {
+    /// Create an invitation with a single external meeting URI.
+    pub fn external(uri: impl Into<String>) -> Self {
         Self {
-            session_id: session_id.into(),
-            media: vec![CallMedia::Audio, CallMedia::Video],
-            external_uri: None,
+            methods: vec![CallJoinMethod::External { uri: uri.into() }],
         }
     }
 
-    /// Set an external meeting URI.
-    pub fn with_external_uri(mut self, uri: impl Into<String>) -> Self {
-        self.external_uri = Some(uri.into());
+    /// Add another join method to this invitation.
+    pub fn with_method(mut self, method: CallJoinMethod) -> Self {
+        self.methods.push(method);
         self
     }
-
-    /// Returns `true` if this includes video.
-    pub fn has_video(&self) -> bool {
-        self.media.contains(&CallMedia::Video)
-    }
 }
 
-/// A call action (accept, reject, retract).
+/// A call acceptance with the chosen join method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallAccept {
+    /// Invite message ID being accepted.
+    pub invite_id: String,
+    /// Chosen join method.
+    pub method: CallJoinMethod,
+}
+
+/// A call action (invite, accept, reject, retract, left).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallAction {
-    /// Propose a call.
-    Propose(CallPropose),
-    /// Accept a call invitation.
-    Accept(String),
+    /// Invite others to a call with one or more join methods.
+    Invite(CallInvite),
+    /// Accept a call invitation and provide the chosen join method.
+    Accept(CallAccept),
     /// Reject a call invitation.
     Reject(String),
-    /// Retract (cancel) a call invitation.
+    /// Retract (cancel) a previously sent call invitation.
     Retract(String),
+    /// Signal that the participant has left the call.
+    Left(String),
 }
 
 impl CallAction {
-    /// Get the session ID for any action.
-    pub fn session_id(&self) -> &str {
+    /// Get the invite message ID for actions that reference one.
+    pub fn invite_id(&self) -> Option<&str> {
         match self {
-            Self::Propose(p) => &p.session_id,
-            Self::Accept(id) | Self::Reject(id) | Self::Retract(id) => id,
+            Self::Invite(_) => None,
+            Self::Accept(accept) => Some(accept.invite_id.as_str()),
+            Self::Reject(id) | Self::Retract(id) | Self::Left(id) => Some(id),
         }
     }
 }
@@ -115,9 +125,9 @@ pub trait CallInviteCarrier {
     /// Extract the call action from this carrier.
     fn call_action(&self) -> Option<CallAction>;
 
-    /// Returns `true` if this is a call proposal.
-    fn is_call_propose(&self) -> bool {
-        matches!(self.call_action(), Some(CallAction::Propose(_)))
+    /// Returns `true` if this is a call invitation.
+    fn is_call_invite(&self) -> bool {
+        matches!(self.call_action(), Some(CallAction::Invite(_)))
     }
 
     /// Returns `true` if this has any call-related element.
@@ -146,32 +156,17 @@ pub fn extract_call_action(msg: &Message) -> Option<CallAction> {
     let elem = msg.payloads.iter().find(|e| e.ns() == NS_CALL_INVITES)?;
 
     match elem.name() {
-        "propose" => {
-            let session_id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
-            let mut media = Vec::new();
-            for child in elem.children() {
-                match child.name() {
-                    "audio" => media.push(CallMedia::Audio),
-                    "video" => media.push(CallMedia::Video),
-                    _ => {}
-                }
+        "invite" => {
+            let methods = parse_join_methods(elem);
+            if methods.is_empty() {
+                return None;
             }
-            let external_uri = elem
-                .children()
-                .find(|c| c.name() == "external")
-                .and_then(|c| c.attr("uri"))
-                .filter(|u| !u.is_empty())
-                .map(|u| u.to_owned());
-
-            Some(CallAction::Propose(CallPropose {
-                session_id,
-                media,
-                external_uri,
-            }))
+            Some(CallAction::Invite(CallInvite { methods }))
         }
         "accept" => {
-            let id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
-            Some(CallAction::Accept(id))
+            let invite_id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
+            let method = parse_join_methods(elem).into_iter().next()?;
+            Some(CallAction::Accept(CallAccept { invite_id, method }))
         }
         "reject" => {
             let id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
@@ -181,58 +176,104 @@ pub fn extract_call_action(msg: &Message) -> Option<CallAction> {
             let id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
             Some(CallAction::Retract(id))
         }
+        "left" => {
+            let id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
+            Some(CallAction::Left(id))
+        }
         _ => None,
     }
 }
 
-// ── Building ─────────────────────────────────────────────────────────
+fn parse_join_methods(elem: &Element) -> Vec<CallJoinMethod> {
+    let mut methods = Vec::new();
 
-/// Build a `<propose/>` element.
-pub fn build_propose_element(propose: &CallPropose) -> Element {
-    let mut elem = Element::builder("propose", NS_CALL_INVITES)
-        .attr("id", propose.session_id.as_str())
-        .build();
-
-    for media in &propose.media {
-        match media {
-            CallMedia::Audio => {
-                elem.append_child(Element::builder("audio", NS_CALL_INVITES).build());
+    for child in elem.children() {
+        match child.name() {
+            "muji" => methods.push(CallJoinMethod::Muji),
+            "jingle" => {
+                if let Some(sid) = child.attr("sid").filter(|s| !s.is_empty()) {
+                    let jid = child
+                        .attr("jid")
+                        .filter(|j| !j.is_empty())
+                        .map(|j| j.to_owned());
+                    methods.push(CallJoinMethod::Jingle {
+                        sid: sid.to_owned(),
+                        jid,
+                    });
+                }
             }
-            CallMedia::Video => {
-                elem.append_child(Element::builder("video", NS_CALL_INVITES).build());
+            "external" => {
+                if let Some(uri) = child.attr("uri").filter(|u| !u.is_empty()) {
+                    methods.push(CallJoinMethod::External {
+                        uri: uri.to_owned(),
+                    });
+                }
             }
+            _ => {}
         }
     }
 
-    if let Some(ref uri) = propose.external_uri {
-        let ext = Element::builder("external", NS_CALL_INVITES)
-            .attr("uri", uri.as_str())
-            .build();
-        elem.append_child(ext);
+    methods
+}
+
+// ── Building ─────────────────────────────────────────────────────────
+
+/// Build an `<invite/>` element.
+pub fn build_invite_element(invite: &CallInvite) -> Element {
+    let mut elem = Element::builder("invite", NS_CALL_INVITES).build();
+
+    for method in &invite.methods {
+        elem.append_child(build_join_method_element(method));
     }
 
     elem
 }
 
-/// Build an `<accept/>` element.
-pub fn build_accept_element(session_id: &str) -> Element {
-    Element::builder("accept", NS_CALL_INVITES)
-        .attr("id", session_id)
-        .build()
+/// Build an `<accept/>` element with the chosen join method.
+pub fn build_accept_element(invite_id: &str, method: &CallJoinMethod) -> Element {
+    let mut elem = Element::builder("accept", NS_CALL_INVITES)
+        .attr("id", invite_id)
+        .build();
+
+    elem.append_child(build_join_method_element(method));
+    elem
 }
 
 /// Build a `<reject/>` element.
-pub fn build_reject_element(session_id: &str) -> Element {
+pub fn build_reject_element(invite_id: &str) -> Element {
     Element::builder("reject", NS_CALL_INVITES)
-        .attr("id", session_id)
+        .attr("id", invite_id)
         .build()
 }
 
 /// Build a `<retract/>` element.
-pub fn build_retract_element(session_id: &str) -> Element {
+pub fn build_retract_element(invite_id: &str) -> Element {
     Element::builder("retract", NS_CALL_INVITES)
-        .attr("id", session_id)
+        .attr("id", invite_id)
         .build()
+}
+
+/// Build a `<left/>` element.
+pub fn build_left_element(invite_id: &str) -> Element {
+    Element::builder("left", NS_CALL_INVITES)
+        .attr("id", invite_id)
+        .build()
+}
+
+fn build_join_method_element(method: &CallJoinMethod) -> Element {
+    match method {
+        CallJoinMethod::Muji => Element::builder("muji", NS_CALL_INVITES).build(),
+        CallJoinMethod::Jingle { sid, jid } => {
+            let mut builder = Element::builder("jingle", NS_CALL_INVITES).attr("sid", sid.as_str());
+            if let Some(jid) = jid {
+                builder = builder.attr("jid", jid.as_str());
+            }
+            builder.build()
+        }
+        CallJoinMethod::External { uri } => Element::builder("external", NS_CALL_INVITES)
+            .attr("uri", uri.as_str())
+            .build(),
+    }
 }
 
 #[cfg(test)]
@@ -240,71 +281,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_propose() {
+    fn test_parse_invite() {
         let xml = "<message xmlns='jabber:client'>\
-                    <propose xmlns='urn:xmpp:call-invites:0' id='sess-1'>\
-                      <audio/>\
-                      <video/>\
+                    <invite xmlns='urn:xmpp:call-invites:0'>\
+                      <muji/>\
+                      <jingle sid='sid-1' jid='romeo@example.com/desktop'/>\
                       <external uri='https://meet.example.com/room'/>\
-                    </propose>\
+                    </invite>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         let action = extract_call_action(&msg).expect("has action");
         match action {
-            CallAction::Propose(p) => {
-                assert_eq!(p.session_id, "sess-1");
-                assert!(p.has_video());
-                assert_eq!(p.media.len(), 2);
-                assert_eq!(
-                    p.external_uri.as_deref(),
-                    Some("https://meet.example.com/room")
-                );
+            CallAction::Invite(invite) => {
+                assert_eq!(invite.methods.len(), 3);
+                assert!(invite.methods.contains(&CallJoinMethod::Muji));
+                assert!(invite.methods.iter().any(|m| {
+                    matches!(
+                        m,
+                        CallJoinMethod::Jingle { sid, jid } if sid == "sid-1" && jid.as_deref() == Some("romeo@example.com/desktop")
+                    )
+                }));
+                assert!(invite.methods.iter().any(|m| {
+                    matches!(
+                        m,
+                        CallJoinMethod::External { uri } if uri == "https://meet.example.com/room"
+                    )
+                }));
             }
-            _ => panic!("Expected Propose"),
+            _ => panic!("Expected Invite"),
         }
     }
 
     #[test]
-    fn test_parse_accept() {
+    fn test_parse_accept_with_method() {
         let xml = "<message xmlns='jabber:client'>\
-                    <accept xmlns='urn:xmpp:call-invites:0' id='sess-1'/>\
+                    <accept xmlns='urn:xmpp:call-invites:0' id='call-1'>\
+                      <external uri='https://meet.example.com/room'/>\
+                    </accept>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         assert!(matches!(
             extract_call_action(&msg),
-            Some(CallAction::Accept(id)) if id == "sess-1"
+            Some(CallAction::Accept(CallAccept { invite_id, method: CallJoinMethod::External { uri } }))
+                if invite_id == "call-1" && uri == "https://meet.example.com/room"
         ));
     }
 
     #[test]
     fn test_parse_reject() {
         let xml = "<message xmlns='jabber:client'>\
-                    <reject xmlns='urn:xmpp:call-invites:0' id='sess-1'/>\
+                    <reject xmlns='urn:xmpp:call-invites:0' id='call-1'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         assert!(matches!(
             extract_call_action(&msg),
-            Some(CallAction::Reject(id)) if id == "sess-1"
+            Some(CallAction::Reject(id)) if id == "call-1"
         ));
     }
 
     #[test]
     fn test_parse_retract() {
         let xml = "<message xmlns='jabber:client'>\
-                    <retract xmlns='urn:xmpp:call-invites:0' id='sess-1'/>\
+                    <retract xmlns='urn:xmpp:call-invites:0' id='call-1'/>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         assert!(matches!(
             extract_call_action(&msg),
-            Some(CallAction::Retract(id)) if id == "sess-1"
+            Some(CallAction::Retract(id)) if id == "call-1"
+        ));
+    }
+
+    #[test]
+    fn test_parse_left() {
+        let xml = "<message xmlns='jabber:client'>\
+                    <left xmlns='urn:xmpp:call-invites:0' id='call-1'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert!(matches!(
+            extract_call_action(&msg),
+            Some(CallAction::Left(id)) if id == "call-1"
         ));
     }
 
@@ -315,61 +380,81 @@ mod tests {
     }
 
     #[test]
-    fn test_build_propose() {
-        let propose = CallPropose::video("s-1").with_external_uri("https://meet.example.com/room");
-        let elem = build_propose_element(&propose);
+    fn test_build_invite() {
+        let invite = CallInvite::muji()
+            .with_method(CallJoinMethod::Jingle {
+                sid: "sid-1".into(),
+                jid: Some("romeo@example.com/desktop".into()),
+            })
+            .with_method(CallJoinMethod::External {
+                uri: "https://meet.example.com/room".into(),
+            });
+        let elem = build_invite_element(&invite);
 
-        assert_eq!(elem.name(), "propose");
-        assert_eq!(elem.attr("id"), Some("s-1"));
-        assert!(elem.children().any(|c| c.name() == "audio"));
-        assert!(elem.children().any(|c| c.name() == "video"));
+        assert_eq!(elem.name(), "invite");
+        assert!(elem.children().any(|c| c.name() == "muji"));
+        assert!(elem
+            .children()
+            .any(|c| c.name() == "jingle" && c.attr("sid") == Some("sid-1")));
         assert!(elem.children().any(|c| c.name() == "external"));
     }
 
     #[test]
-    fn test_build_accept_reject_retract() {
-        let accept = build_accept_element("s-1");
+    fn test_build_accept_reject_retract_left() {
+        let accept = build_accept_element(
+            "call-1",
+            &CallJoinMethod::External {
+                uri: "https://meet.example.com/room".into(),
+            },
+        );
         assert_eq!(accept.name(), "accept");
-        assert_eq!(accept.attr("id"), Some("s-1"));
+        assert_eq!(accept.attr("id"), Some("call-1"));
+        assert!(accept.children().any(|c| c.name() == "external"));
 
-        let reject = build_reject_element("s-2");
+        let reject = build_reject_element("call-2");
         assert_eq!(reject.name(), "reject");
 
-        let retract = build_retract_element("s-3");
+        let retract = build_retract_element("call-3");
         assert_eq!(retract.name(), "retract");
+
+        let left = build_left_element("call-4");
+        assert_eq!(left.name(), "left");
     }
 
     #[test]
-    fn test_call_action_session_id() {
-        let propose = CallAction::Propose(CallPropose::audio("s-1"));
-        assert_eq!(propose.session_id(), "s-1");
+    fn test_call_action_invite_id() {
+        let invite = CallAction::Invite(CallInvite::external("https://meet.example.com/room"));
+        assert_eq!(invite.invite_id(), None);
 
-        let accept = CallAction::Accept("s-2".into());
-        assert_eq!(accept.session_id(), "s-2");
+        let accept = CallAction::Accept(CallAccept {
+            invite_id: "call-1".into(),
+            method: CallJoinMethod::Muji,
+        });
+        assert_eq!(accept.invite_id(), Some("call-1"));
     }
 
     #[test]
     fn test_call_invite_carrier_trait() {
         let xml = "<message xmlns='jabber:client'>\
-                    <propose xmlns='urn:xmpp:call-invites:0' id='s-1'>\
-                      <audio/>\
-                    </propose>\
+                    <invite xmlns='urn:xmpp:call-invites:0'>\
+                      <muji/>\
+                    </invite>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
         assert!(msg.has_call_element());
-        assert!(msg.is_call_propose());
+        assert!(msg.is_call_invite());
     }
 
     #[test]
-    fn test_propose_builders() {
-        let audio = CallPropose::audio("s-1");
-        assert!(!audio.has_video());
-        assert_eq!(audio.media.len(), 1);
+    fn test_accept_requires_method() {
+        let xml = "<message xmlns='jabber:client'>\
+                    <accept xmlns='urn:xmpp:call-invites:0' id='call-1'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
 
-        let video = CallPropose::video("s-2");
-        assert!(video.has_video());
-        assert_eq!(video.media.len(), 2);
+        assert!(extract_call_action(&msg).is_none());
     }
 }

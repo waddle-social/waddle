@@ -257,6 +257,31 @@ impl Feature {
         Self::new("urn:xmpp:occupant-id:0")
     }
 
+    /// XEP-0166 Jingle feature.
+    pub fn jingle() -> Self {
+        Self::new("urn:xmpp:jingle:1")
+    }
+
+    /// XEP-0167 Jingle RTP feature.
+    pub fn jingle_rtp() -> Self {
+        Self::new("urn:xmpp:jingle:apps:rtp:1")
+    }
+
+    /// XEP-0176 Jingle ICE-UDP feature.
+    pub fn jingle_ice_udp() -> Self {
+        Self::new("urn:xmpp:jingle:transports:ice-udp:1")
+    }
+
+    /// XEP-0320 Jingle DTLS-SRTP feature.
+    pub fn jingle_dtls() -> Self {
+        Self::new("urn:xmpp:jingle:apps:dtls:0")
+    }
+
+    /// XEP-0272 Muji feature.
+    pub fn muji() -> Self {
+        Self::new("urn:xmpp:muji:0")
+    }
+
     /// MUC room features (XEP-0045)
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
@@ -543,6 +568,11 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
+        Feature::jingle(),
+        Feature::jingle_rtp(),
+        Feature::jingle_ice_udp(),
+        Feature::jingle_dtls(),
+        Feature::muji(),
         Feature::replies(),
         Feature::waddle_github(),
         Feature::vcard(),
@@ -661,6 +691,11 @@ mod tests {
     fn test_muc_room_features() {
         let features = muc_room_features(true, true, false);
         assert!(features.contains(&Feature::muc()));
+        assert!(features.contains(&Feature::jingle()));
+        assert!(features.contains(&Feature::jingle_rtp()));
+        assert!(features.contains(&Feature::jingle_ice_udp()));
+        assert!(features.contains(&Feature::jingle_dtls()));
+        assert!(features.contains(&Feature::muji()));
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));

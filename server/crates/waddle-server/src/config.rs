@@ -1,6 +1,7 @@
 //! Server configuration.
 
 use crate::auth::providers::AuthProviderConfig;
+use crate::media::{MediaBackendKind, MediaConfig, WebrtcRsSfuConfig};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
@@ -85,6 +86,8 @@ pub struct ServerConfig {
     /// When true, all spaces are publicly discoverable (single-tenant mode).
     /// Controlled by `WADDLE_SINGLE_TENANT` env var.
     pub single_tenant: bool,
+    /// Media backend configuration.
+    pub media: MediaConfig,
 }
 
 impl Default for ServerConfig {
@@ -95,6 +98,7 @@ impl Default for ServerConfig {
             session_key: None,
             auth: AuthConfig::default(),
             single_tenant: false,
+            media: MediaConfig::default(),
         }
     }
 }
@@ -114,12 +118,41 @@ impl ServerConfig {
             .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
 
+        let media_backend = std::env::var("WADDLE_MEDIA_BACKEND")
+            .unwrap_or_else(|_| "disabled".to_string())
+            .parse::<MediaBackendKind>()?;
+        let media_public_base_url =
+            std::env::var("WADDLE_MEDIA_PUBLIC_BASE_URL").unwrap_or_else(|_| base_url.clone());
+        let media_signaling_path = std::env::var("WADDLE_MEDIA_SFU_SIGNALING_PATH")
+            .unwrap_or_else(|_| "/v1/media/sfu".to_string());
+        let media_room_prefix =
+            std::env::var("WADDLE_MEDIA_SFU_ROOM_PREFIX").unwrap_or_else(|_| "waddle".to_string());
+        let media_ice_servers = std::env::var("WADDLE_MEDIA_SFU_ICE_SERVERS_JSON")
+            .ok()
+            .map(|raw| {
+                serde_json::from_str::<Vec<String>>(&raw)
+                    .map_err(|e| format!("invalid WADDLE_MEDIA_SFU_ICE_SERVERS_JSON array: {}", e))
+            })
+            .transpose()?
+            .unwrap_or_else(|| vec!["stun:stun.l.google.com:19302".to_string()]);
+
+        let media = MediaConfig {
+            backend: media_backend,
+            public_base_url: media_public_base_url,
+            webrtc_rs_sfu: WebrtcRsSfuConfig {
+                signaling_path: media_signaling_path,
+                room_prefix: media_room_prefix,
+                ice_servers: media_ice_servers,
+            },
+        };
+
         Ok(Self {
             mode,
             base_url,
             session_key,
             auth,
             single_tenant,
+            media,
         })
     }
 
@@ -147,6 +180,7 @@ impl ServerConfig {
                 "disabled"
             }
         );
+        info!("Media backend: {}", self.media.backend);
     }
 
     #[cfg(test)]
@@ -157,6 +191,7 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             single_tenant: false,
+            media: MediaConfig::default(),
         }
     }
 
@@ -168,6 +203,7 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             single_tenant: false,
+            media: MediaConfig::default(),
         }
     }
 }
