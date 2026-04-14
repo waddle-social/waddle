@@ -845,8 +845,12 @@ async fn handle_iq(
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string());
                         let identities = vec![Identity::muc_room(Some(&room_name))];
-                        let features =
-                            vec![Feature::muc(), Feature::replies(), Feature::waddle_github()];
+                        let features = vec![
+                            Feature::muc(),
+                            Feature::mam(),
+                            Feature::replies(),
+                            Feature::waddle_github(),
+                        ];
                         let response =
                             build_disco_info_response(request_iq, &identities, &features, None);
                         return vec![iq_to_xml(response)];
@@ -2155,6 +2159,14 @@ mod tests {
         let muc_response = muc_responses.first().expect("muc disco response");
         assert!(muc_response.contains("urn:xmpp:reply:0"));
         assert!(muc_response.contains("urn:waddle:github:0"));
+
+        let room_query = r#"<iq xmlns="jabber:client" id="room1" type="get" to="room@muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
+        let room_responses =
+            handle_iq(room_query, server_domain, muc_domain, state.as_ref(), &None).await;
+        let room_response = room_responses.first().expect("room disco response");
+        assert!(room_response.contains("urn:xmpp:mam:2"));
+        assert!(room_response.contains("urn:xmpp:reply:0"));
+        assert!(room_response.contains("urn:waddle:github:0"));
     }
 
     #[tokio::test]
