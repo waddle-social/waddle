@@ -26,6 +26,8 @@ spec:
     xmpp:
       domain: waddle.social
       mamDbPath: /data/mam.db
+      tls:
+        secretName: waddle-xmpp-tls
     persistence:
       storageClassName: openebs-mayastor
     service:
