@@ -1,4 +1,5 @@
 -- Seed the code-whitelisted Chat OIDC client so oauth_access_token foreign keys resolve.
+-- redirect_urls are intentionally environment-agnostic in migrations.
 INSERT INTO oauth_application (
   id,
   name,
@@ -15,7 +16,7 @@ VALUES (
   'Waddle Chat',
   '{"firstParty":true,"product":"chat"}',
   'waddle-chat',
-  '["http://localhost:4321/api/auth/oauth2/callback/colony","https://waddle.chat/api/auth/oauth2/callback/colony"]',
+  '[]',
   'public',
   0,
   unixepoch() * 1000,

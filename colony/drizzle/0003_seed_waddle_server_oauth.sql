@@ -1,3 +1,4 @@
+-- redirect_urls are synchronized at runtime from WADDLE_SERVER_OIDC_REDIRECT_URLS.
 DELETE FROM oauth_application
 WHERE client_id = 'waddle-chat';
 
@@ -17,7 +18,7 @@ VALUES (
   'Waddle Server',
   '{"firstParty":true,"product":"server"}',
   'waddle-server',
-  '["http://localhost:3000/api/auth/callback","https://server.waddle.social/api/auth/callback"]',
+  '[]',
   'web',
   0,
   unixepoch() * 1000,
