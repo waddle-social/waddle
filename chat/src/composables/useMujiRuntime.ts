@@ -112,6 +112,15 @@ export function useMujiRuntime(
 
   function applyMujiEvent(event: MujiCallEvent) {
     if (event.type === "incoming") {
+      if (localStream.value && (phase.value === "dialing" || phase.value === "active")) {
+        sid.value = event.sid;
+        serviceJid.value = event.peerJid;
+        void xmppClient.value?.acceptMujiCall(event.sid, localStream.value).catch((err) => {
+          phase.value = "error";
+          error.value = normalizeError(err);
+        });
+        return;
+      }
       if (!pendingInvite.value) {
         pendingInvite.value = {
           fromNick: nickFromJid(event.peerJid),

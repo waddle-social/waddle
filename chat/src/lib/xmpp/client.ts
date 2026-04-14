@@ -123,6 +123,14 @@ export class BrowserXmppClient {
 
   constructor(session: WaddleSession) { this.session = session; }
 
+  private fullJid() {
+    return `${this.session.jid}/${this.resource}`;
+  }
+
+  private nextCallSid() {
+    return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  }
+
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
   setChatStateHandler(h: (event: ChatStateEvent) => void) { this.chatStateHandler = h; }
@@ -350,33 +358,25 @@ export class BrowserXmppClient {
   async startMujiCall(
     w: string,
     c: string,
-    localStream: MediaStream,
+    _localStream: MediaStream,
     opts: { video: boolean; sid?: string; serviceJid?: string } = { video: true },
   ): Promise<{ sid: string; serviceJid: string } | null> {
     await this.connect();
     await this.switchRoom(w, c);
     if (!this.xmpp?.jingle) return null;
 
-    const serviceJid = opts.serviceJid ?? sfuServiceJidFor(this.session);
-    const session = requireMujiSessionShape(
-      this.xmpp.jingle.createMediaSession(serviceJid, opts.sid, localStream),
-    );
-    this.mujiSessions.set(session.sid, session);
-
-    await session.start({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: opts.video,
-    });
+    const sid = opts.sid ?? this.nextCallSid();
+    const serviceJid = opts.serviceJid ?? this.fullJid();
 
     await this.sendCallInvite(w, c, {
       muji: true,
-      sid: session.sid,
+      sid,
       jingleJid: serviceJid,
-      externalUri: `xmpp:${serviceJid}?jingle;sid=${session.sid}`,
+      externalUri: `xmpp:${serviceJid}?jingle;sid=${sid}`,
       video: opts.video,
     });
 
-    return { sid: session.sid, serviceJid };
+    return { sid, serviceJid };
   }
 
   async joinMujiCall(
@@ -426,6 +426,17 @@ export class BrowserXmppClient {
       session.end("success");
     }
     this.mujiSessions.clear();
+  }
+
+  async acceptMujiCall(sid: string, localStream: MediaStream) {
+    const session = this.mujiSessions.get(sid);
+    if (!session || session.state !== "pending") return;
+    for (const track of localStream.getTracks()) {
+      if (!session.pc.getSenders().some((sender) => sender.track?.id === track.id)) {
+        await session.addTrack(track, localStream);
+      }
+    }
+    await session.accept();
   }
 
   async enablePushNotifications(opts: {
