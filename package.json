@@ -1,0 +1,8 @@
+{
+  "name": "waddle-workspace",
+  "private": true,
+  "workspaces": [
+    "chat",
+    "colony"
+  ]
+}
