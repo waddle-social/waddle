@@ -355,18 +355,13 @@ export class BrowserXmppClient {
   async discoverWaddles(): Promise<DiscoveredWaddle[]> {
     await this.connect();
     return this.xmpp
-      ? discovery.discoverWaddles(this.xmpp, this.session.jid, this.session.xmpp_websocket_url)
+      ? discovery.discoverWaddles(this.xmpp, this.session.jid)
       : [];
   }
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
     await this.connect();
     return this.xmpp
-      ? discovery.discoverChannels(
-          this.xmpp,
-          this.session.jid,
-          this.session.xmpp_websocket_url,
-          waddleId,
-        )
+      ? discovery.discoverChannels(this.xmpp, this.session.jid, waddleId)
       : [];
   }
 

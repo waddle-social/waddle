@@ -7,7 +7,7 @@ This document specifies the HTTP API for Waddle Social, covering endpoints, auth
 ## Base URL
 
 ```
-Production: https://xmpp.waddle.chat/v1
+Production: https://xmpp.waddle.social/v1
 Development: http://localhost:3000/v1
 ```
 
@@ -282,7 +282,7 @@ GET    /waddles/:id/presence      Get Waddle presence
 
 ```http
 POST /v1/waddles HTTP/1.1
-Host: xmpp.waddle.chat
+Host: xmpp.waddle.social
 Authorization: Bearer eyJ...
 Content-Type: application/json
 
@@ -315,7 +315,7 @@ Response:
 
 ```http
 POST /v1/channels/ch_general/messages HTTP/1.1
-Host: xmpp.waddle.chat
+Host: xmpp.waddle.social
 Authorization: Bearer eyJ...
 Content-Type: application/json
 
@@ -329,7 +329,7 @@ Content-Type: application/json
 
 ```http
 GET /v1/channels/ch_general/messages?limit=50&before=msg_xyz HTTP/1.1
-Host: xmpp.waddle.chat
+Host: xmpp.waddle.social
 Authorization: Bearer eyJ...
 ```
 
