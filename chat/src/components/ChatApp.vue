@@ -151,6 +151,21 @@ async function sendGif(url: string) {
   await messaging.sendMessage(url);
 }
 
+function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }) {
+  muji.pendingInvite.value = {
+    fromNick: "",
+    invite: {
+      inviteId: invite.inviteId,
+      muji: invite.muji,
+      jingleSid: invite.jingleSid,
+      jingleJid: invite.jingleJid,
+      externalUri: invite.externalUri,
+      meetingDesc: invite.meetingDesc,
+    },
+  };
+  muji.joinPendingInvite(true);
+}
+
 // --- Deep linking ---
 
 function updateUrl() {
@@ -594,6 +609,7 @@ onUnmounted(() => {
         @dismiss-call-invite="muji.dismissInvite"
         @toggle-mic="muji.toggleMicrophone"
         @toggle-camera="muji.toggleCamera"
+        @join-call-from-message="joinCallFromMessage"
       />
     </div>
 

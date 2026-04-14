@@ -24,6 +24,7 @@ const emit = defineEmits<{
   edit: [messageId: string, newBody: string];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
+  joinCall: [invite: NonNullable<TimelineMessage["callInvite"]>];
 }>();
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
@@ -187,13 +188,10 @@ function onEditKeydown(e: KeyboardEvent) {
               {{ message.callInvite.externalUri }}
             </div>
           </div>
-          <a
-            v-if="message.callInvite.externalUri"
-            :href="message.callInvite.externalUri"
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
             class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
-          >Join</a>
+            @click="emit('joinCall', message.callInvite!)"
+          >Join</button>
         </div>
       </div>
 

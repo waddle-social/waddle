@@ -59,6 +59,7 @@ const emit = defineEmits<{
   dismissCallInvite: [];
   toggleMic: [];
   toggleCamera: [];
+  joinCallFromMessage: [invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }];
 }>();
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
@@ -290,6 +291,7 @@ watch(
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
+          @join-call="(invite) => emit('joinCallFromMessage', invite)"
         />
       </div>
     </div>
