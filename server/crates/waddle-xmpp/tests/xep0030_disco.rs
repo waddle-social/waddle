@@ -6,8 +6,7 @@ mod common;
 
 use common::{
     disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer,
-    DEFAULT_TIMEOUT,
+    TestServer, DEFAULT_TIMEOUT,
 };
 
 // =========================================================================

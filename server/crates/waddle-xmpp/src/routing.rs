@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use jid::{BareJid, FullJid, Jid};
 use tracing::{debug, info, instrument, warn};
-use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
@@ -609,7 +609,7 @@ impl StanzaRouter {
         iq: &Iq,
         sender_jid: Option<&FullJid>,
     ) -> Result<(), XmppError> {
-        if !is_jingle_iq(iq) {
+        if !crate::xep::is_jingle_iq(iq) {
             return Ok(());
         }
 
@@ -728,14 +728,6 @@ fn iq_to_xml(iq: &Iq) -> Result<String, XmppError> {
     use minidom::Element;
     let element: Element = iq.clone().into();
     Ok(String::from(&element))
-}
-
-fn is_jingle_iq(iq: &Iq) -> bool {
-    matches!(
-        &iq.payload,
-        IqType::Get(payload) | IqType::Set(payload)
-            if payload.name() == "jingle" && payload.ns() == "urn:xmpp:jingle:1"
-    )
 }
 
 #[cfg(test)]

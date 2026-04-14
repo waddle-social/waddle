@@ -1,6 +1,6 @@
 //! Media session APIs backed by pluggable media backends.
 
-use crate::auth::SessionManager;
+use crate::auth::{AuthError, SessionManager};
 use crate::media::{
     build_media_backend, MediaBackend, MediaBackendError, MediaConfig, MediaSessionRequest,
 };
@@ -90,6 +90,32 @@ fn media_error_to_response(err: MediaBackendError) -> (StatusCode, Json<ErrorRes
     }
 }
 
+fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
+    match err {
+        AuthError::SessionNotFound(_) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "session_not_found".to_string(),
+                message: "session not found".to_string(),
+            }),
+        ),
+        AuthError::SessionExpired => (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "session_expired".to_string(),
+                message: "session expired".to_string(),
+            }),
+        ),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "auth_error".to_string(),
+                message: other.to_string(),
+            }),
+        ),
+    }
+}
+
 #[instrument(skip(state))]
 async fn media_backend_handler(State(state): State<Arc<MediaState>>) -> impl IntoResponse {
     (
@@ -114,14 +140,7 @@ async fn create_media_session_handler(
         Ok(session) => session,
         Err(err) => {
             warn!(error = %err, "media session auth failed");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "unauthorized".to_string(),
-                    message: err.to_string(),
-                }),
-            )
-                .into_response();
+            return auth_error_to_response(err).into_response();
         }
     };
 

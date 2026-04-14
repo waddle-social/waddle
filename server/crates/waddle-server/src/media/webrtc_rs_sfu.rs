@@ -2,6 +2,7 @@ use super::{
     next_media_session_id, MediaBackend, MediaBackendError, MediaBackendKind, MediaConfig,
     MediaSession, MediaSessionRequest,
 };
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct WebrtcRsSfuBackend {
@@ -13,14 +14,55 @@ impl WebrtcRsSfuBackend {
         Self { config }
     }
 
-    fn join_url(&self, room_id: &str, session_id: &str) -> String {
-        let base = self.config.public_base_url.trim_end_matches('/');
-        let path = self
+    fn validate_identifier(value: &str, field_name: &str) -> Result<String, MediaBackendError> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(MediaBackendError::InvalidRequest(format!(
+                "{field_name} cannot be empty"
+            )));
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(MediaBackendError::InvalidRequest(format!(
+                "{field_name} must only contain ASCII letters, numbers, '-' or '_'"
+            )));
+        }
+
+        Ok(trimmed.to_owned())
+    }
+
+    fn join_url(&self, room_id: &str, session_id: &str) -> Result<String, MediaBackendError> {
+        let mut url = Url::parse(&self.config.public_base_url).map_err(|err| {
+            MediaBackendError::InvalidRequest(format!("invalid public_base_url: {err}"))
+        })?;
+
+        let path_segments = self
             .config
             .webrtc_rs_sfu
             .signaling_path
-            .trim_start_matches('/');
-        format!("{base}/{path}/{room_id}?session={session_id}")
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            MediaBackendError::InvalidRequest(
+                "public_base_url must be an absolute URL with a hierarchical path".to_string(),
+            )
+        })?;
+
+        segments.clear();
+        for segment in &path_segments {
+            segments.push(segment);
+        }
+        segments.push(room_id);
+        drop(segments);
+
+        url.query_pairs_mut().append_pair("session", session_id);
+        Ok(url.to_string())
     }
 }
 
@@ -33,17 +75,11 @@ impl MediaBackend for WebrtcRsSfuBackend {
         &self,
         request: MediaSessionRequest,
     ) -> Result<MediaSession, MediaBackendError> {
-        if request.room_id.trim().is_empty() {
-            return Err(MediaBackendError::InvalidRequest(
-                "room_id cannot be empty".to_string(),
-            ));
-        }
+        let room_id = Self::validate_identifier(&request.room_id, "room_id")?;
+        let room_prefix =
+            Self::validate_identifier(&self.config.webrtc_rs_sfu.room_prefix, "room_prefix")?;
 
-        let normalized_room = format!(
-            "{}-{}",
-            self.config.webrtc_rs_sfu.room_prefix,
-            request.room_id.trim()
-        );
+        let normalized_room = format!("{room_prefix}-{room_id}");
         let session_id = next_media_session_id();
 
         Ok(MediaSession {
@@ -52,7 +88,7 @@ impl MediaBackend for WebrtcRsSfuBackend {
             room_id: normalized_room.clone(),
             participant_id: request.participant_id,
             role: request.role,
-            join_url: self.join_url(&normalized_room, &session_id),
+            join_url: self.join_url(&normalized_room, &session_id)?,
             ice_servers: self.config.webrtc_rs_sfu.ice_servers.clone(),
         })
     }
@@ -86,5 +122,20 @@ mod tests {
             .join_url
             .starts_with("https://calls.waddle.test/sfu/signal/room-team-sync?session="));
         assert!(!session.ice_servers.is_empty());
+    }
+
+    #[test]
+    fn rejects_unsafe_room_id() {
+        let mut config = MediaConfig::default();
+        config.backend = MediaBackendKind::WebrtcRsSfu;
+
+        let backend = WebrtcRsSfuBackend::new(config);
+        let result = backend.create_session(MediaSessionRequest {
+            room_id: "team/sync".to_string(),
+            participant_id: "user-42".to_string(),
+            role: "publisher".to_string(),
+        });
+
+        assert!(matches!(result, Err(MediaBackendError::InvalidRequest(_))));
     }
 }

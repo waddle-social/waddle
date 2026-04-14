@@ -165,7 +165,11 @@ pub fn extract_call_action(msg: &Message) -> Option<CallAction> {
         }
         "accept" => {
             let invite_id = elem.attr("id").filter(|s| !s.is_empty())?.to_owned();
-            let method = parse_join_methods(elem).into_iter().next()?;
+            let mut methods = parse_join_methods(elem).into_iter();
+            let method = methods.next()?;
+            if methods.next().is_some() {
+                return None;
+            }
             Some(CallAction::Accept(CallAccept { invite_id, method }))
         }
         "reject" => {
@@ -188,6 +192,10 @@ fn parse_join_methods(elem: &Element) -> Vec<CallJoinMethod> {
     let mut methods = Vec::new();
 
     for child in elem.children() {
+        if child.ns() != NS_CALL_INVITES {
+            continue;
+        }
+
         match child.name() {
             "muji" => methods.push(CallJoinMethod::Muji),
             "jingle" => {
@@ -451,6 +459,33 @@ mod tests {
     fn test_accept_requires_method() {
         let xml = "<message xmlns='jabber:client'>\
                     <accept xmlns='urn:xmpp:call-invites:0' id='call-1'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert!(extract_call_action(&msg).is_none());
+    }
+
+    #[test]
+    fn test_accept_rejects_multiple_methods() {
+        let xml = "<message xmlns='jabber:client'>\
+                    <accept xmlns='urn:xmpp:call-invites:0' id='call-1'>\
+                      <muji/>\
+                      <external uri='https://meet.example.com/room'/>\
+                    </accept>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        assert!(extract_call_action(&msg).is_none());
+    }
+
+    #[test]
+    fn test_join_methods_ignore_foreign_namespace_children() {
+        let xml = "<message xmlns='jabber:client'>\
+                    <invite xmlns='urn:xmpp:call-invites:0'>\
+                      <muji xmlns='urn:xmpp:muji:0'/>\
+                    </invite>\
                     </message>";
         let msg =
             Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");

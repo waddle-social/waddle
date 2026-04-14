@@ -14,6 +14,7 @@ pub enum JingleAction {
     SessionInitiate,
     SessionAccept,
     SessionTerminate,
+    SessionInfo,
     TransportInfo,
     ContentAdd,
     ContentRemove,
@@ -25,6 +26,7 @@ impl JingleAction {
             "session-initiate" => Some(Self::SessionInitiate),
             "session-accept" => Some(Self::SessionAccept),
             "session-terminate" => Some(Self::SessionTerminate),
+            "session-info" => Some(Self::SessionInfo),
             "transport-info" => Some(Self::TransportInfo),
             "content-add" => Some(Self::ContentAdd),
             "content-remove" => Some(Self::ContentRemove),
@@ -37,6 +39,7 @@ impl JingleAction {
             Self::SessionInitiate => "session-initiate",
             Self::SessionAccept => "session-accept",
             Self::SessionTerminate => "session-terminate",
+            Self::SessionInfo => "session-info",
             Self::TransportInfo => "transport-info",
             Self::ContentAdd => "content-add",
             Self::ContentRemove => "content-remove",
@@ -456,5 +459,16 @@ mod tests {
         assert_eq!(reparsed.action, JingleAction::SessionInitiate);
         assert_eq!(reparsed.sid, "sid-123");
         assert_eq!(reparsed.contents.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_jingle_session_info() {
+        let xml = "<iq xmlns='jabber:client' type='set' id='j2'>\
+                     <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='sid-2'/>\
+                   </iq>";
+        let iq = Iq::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid iq");
+        let parsed = parse_jingle_iq(&iq).expect("jingle should parse");
+        assert_eq!(parsed.action, JingleAction::SessionInfo);
+        assert_eq!(parsed.action.as_str(), "session-info");
     }
 }
