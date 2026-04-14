@@ -76,7 +76,6 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=build /out/waddle-server /usr/local/bin/waddle-server
-COPY certs ./certs
 
 EXPOSE 3000 5222 5269
 
