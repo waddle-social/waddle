@@ -671,12 +671,9 @@ fn create_router(
     // Create connection registry for WebSocket message routing
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
-    // Create MUC room registry with the MUC domain
-    let domain = url::Url::parse(&base_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "localhost".to_string());
-    let muc_domain = format!("muc.{}", domain);
+    // Create MUC room registry with the XMPP domain (not the HTTP base_url host)
+    let xmpp_domain = auth_state.xmpp_domain.clone();
+    let muc_domain = format!("muc.{}", xmpp_domain);
     let muc_registry = Arc::new(MucRoomRegistry::new(muc_domain));
 
     // GitHub link enricher for message embeds (fail-open, reads GITHUB_TOKEN from env)
