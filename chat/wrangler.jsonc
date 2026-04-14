@@ -24,6 +24,6 @@
     "enabled": true
   },
   "vars": {
-    "SERVER_BASE_URL": "https://xmpp.waddle.chat"
+    "SERVER_BASE_URL": "https://xmpp.waddle.social"
   }
 }
