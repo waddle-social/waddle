@@ -90,7 +90,7 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// Handle an XMPP WebSocket connection
 async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
-    let domain = extract_domain(&state.auth_state.base_url);
+    let domain = state.auth_state.xmpp_domain.clone();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -1738,14 +1738,6 @@ fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
         }
     }
     ("default".to_string(), "default".to_string())
-}
-
-/// Extract domain from base URL
-fn extract_domain(base_url: &str) -> String {
-    url::Url::parse(base_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "localhost".to_string())
 }
 
 #[cfg(test)]
