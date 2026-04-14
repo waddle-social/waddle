@@ -432,11 +432,9 @@ mod tests {
             id: "provider".to_string(),
             display_name: "Provider".to_string(),
             kind: AuthProviderKind::Oidc,
-            dynamic_client_registration: false,
             client_id: "client".to_string(),
             client_secret: "secret".to_string(),
             token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::ClientSecretPost,
-            require_dpop: false,
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
