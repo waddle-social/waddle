@@ -25,6 +25,7 @@ pub async fn exchange_code(
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
+    dpop_proof: Option<&str>,
 ) -> Result<OAuthTokenResponse, AuthError> {
     let mut params = vec![
         ("grant_type", "authorization_code"),
@@ -37,9 +38,12 @@ pub async fn exchange_code(
         params.push(("client_secret", provider.client_secret.as_str()));
     }
 
-    let res = client
-        .post(token_endpoint)
-        .form(&params)
+    let mut request = client.post(token_endpoint).form(&params);
+    if let Some(dpop_proof) = dpop_proof {
+        request = request.header("DPoP", dpop_proof);
+    }
+
+    let res = request
         .send()
         .await
         .map_err(|e| AuthError::TokenExchangeFailed(e.to_string()))?;
@@ -166,9 +170,11 @@ mod tests {
             id: "rawkode".to_string(),
             display_name: "rawkode.academy".to_string(),
             kind: AuthProviderKind::Oidc,
+            dynamic_client_registration: false,
             client_id: "public-client".to_string(),
             client_secret: "super-secret".to_string(),
             token_endpoint_auth_method: auth_method,
+            require_dpop: false,
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -207,6 +213,7 @@ mod tests {
             "auth-code",
             "https://app.example/callback",
             "pkce-verifier",
+            None,
         )
         .await
         .expect("token exchange should succeed");
@@ -242,6 +249,7 @@ mod tests {
             "auth-code",
             "https://app.example/callback",
             "pkce-verifier",
+            None,
         )
         .await
         .expect("token exchange should succeed");

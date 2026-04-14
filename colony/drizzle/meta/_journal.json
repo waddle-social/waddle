@@ -36,6 +36,13 @@
       "when": 1776167495954,
       "tag": "0004_foamy_ravenous",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1776180000000,
+      "tag": "0005_dynamic_client_registration",
+      "breakpoints": true
     }
   ]
 }

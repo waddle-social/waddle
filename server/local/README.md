@@ -13,7 +13,7 @@
 ## Usage
 
 1. Copy `local/waddle.env.example` to `local/waddle.env`.
-2. Edit `local/waddle.env` and replace the `replace-me` secret inside `WADDLE_AUTH_PROVIDERS_JSON`.
+2. Edit `local/waddle.env` and update `WADDLE_AUTH_PROVIDERS_JSON` for your issuer/domain.
 3. Generate local TLS certs: `./scripts/generate-local-certs.sh`
 4. Run `cuenv task dev`.
 

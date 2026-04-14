@@ -15,6 +15,25 @@ pub struct OidcDiscovery {
     pub token_endpoint: String,
     pub userinfo_endpoint: Option<String>,
     pub jwks_uri: String,
+    pub registration_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicClientRegistration {
+    pub client_id: String,
+    pub client_secret: String,
+    pub token_endpoint_auth_method: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DynamicRegistrationRequest {
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    token_endpoint_auth_method: String,
+    client_name: String,
+    scope: String,
+    metadata: Value,
 }
 
 pub async fn discover(client: &Client, issuer: &str) -> Result<OidcDiscovery, AuthError> {
@@ -48,6 +67,7 @@ pub async fn exchange_authorization_code(
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
+    dpop_proof: Option<&str>,
 ) -> Result<OAuthTokenResponse, AuthError> {
     let token_endpoint = provider
         .token_endpoint
@@ -61,8 +81,84 @@ pub async fn exchange_authorization_code(
         code,
         redirect_uri,
         code_verifier,
+        dpop_proof,
     )
     .await
+}
+
+pub async fn register_dynamic_client(
+    client: &Client,
+    provider: &AuthProviderConfig,
+    discovery: &OidcDiscovery,
+    redirect_uri: &str,
+) -> Result<DynamicClientRegistration, AuthError> {
+    let registration_endpoint = discovery.registration_endpoint.as_deref().ok_or_else(|| {
+        AuthError::InvalidRequest(format!(
+            "provider '{}' discovery missing registration_endpoint",
+            provider.id
+        ))
+    })?;
+
+    let requested_auth_method = match provider.token_endpoint_auth_method {
+        crate::auth::providers::AuthProviderTokenEndpointAuthMethod::ClientSecretPost => {
+            "client_secret_post"
+        }
+        crate::auth::providers::AuthProviderTokenEndpointAuthMethod::NoAuthentication => "none",
+    };
+
+    let req = DynamicRegistrationRequest {
+        redirect_uris: vec![redirect_uri.to_string()],
+        grant_types: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
+        response_types: vec!["code".to_string()],
+        token_endpoint_auth_method: requested_auth_method.to_string(),
+        client_name: provider.display_name.clone(),
+        scope: provider.scopes_string(),
+        metadata: serde_json::json!({
+            "providerId": provider.id,
+            "requireDpop": provider.require_dpop,
+        }),
+    };
+
+    let res = client
+        .post(registration_endpoint)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| AuthError::AuthorizationFailed(e.to_string()))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(AuthError::AuthorizationFailed(format!(
+            "dynamic registration {}: {}",
+            status, body
+        )));
+    }
+
+    let payload = res.json::<DynamicClientRegistration>().await.map_err(|e| {
+        AuthError::AuthorizationFailed(format!("Invalid registration payload: {}", e))
+    })?;
+
+    if payload.client_id.trim().is_empty() {
+        return Err(AuthError::AuthorizationFailed(
+            "dynamic registration returned empty client_id".to_string(),
+        ));
+    }
+    if payload.client_secret.trim().is_empty() {
+        return Err(AuthError::AuthorizationFailed(
+            "dynamic registration returned empty client_secret".to_string(),
+        ));
+    }
+    if payload.token_endpoint_auth_method.trim().is_empty() {
+        return Err(AuthError::AuthorizationFailed(
+            "dynamic registration returned empty token_endpoint_auth_method".to_string(),
+        ));
+    }
+
+    Ok(payload)
 }
 
 async fn fetch_jwks(client: &Client, jwks_uri: &str) -> Result<JwkSet, AuthError> {
