@@ -21,7 +21,7 @@ spec:
       repository: ghcr.io/waddle-social/waddle
       tag: main
     config:
-      baseUrl: https://xmpp.waddle.social
+      baseUrl: https://xmpp.waddle.chat
       corsOrigins: https://waddle.chat,http://localhost:4321
     xmpp:
       domain: waddle.social
