@@ -48,12 +48,18 @@ const scopes = Astro.url.searchParams.get("scope")?.split(" ") ?? [];
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             accept,
-            scope: params.get("scope") ?? undefined,
+            consent_code: params.get("consent_code") ?? undefined,
           }),
         });
-        const data: { url?: string } = await res.json();
-        if (data.url) {
-          window.location.href = data.url;
+
+        if (!res.ok) {
+          return;
+        }
+
+        const data: { redirectURI?: string; url?: string } = await res.json();
+        const redirectTo = data.redirectURI ?? data.url;
+        if (redirectTo) {
+          window.location.href = redirectTo;
         }
       }
 
