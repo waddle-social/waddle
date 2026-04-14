@@ -60,6 +60,8 @@ export type MujiCallPhase =
   | "dialing"
   | "ringing"
   | "active"
+  | "switching"
+  | "reconnecting"
   | "ending"
   | "error";
 

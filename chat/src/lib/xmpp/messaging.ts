@@ -117,3 +117,21 @@ export function sendCallInvite(xmpp: Agent, roomJid: string, opts: SendCallInvit
 
   return msgId;
 }
+
+export function sendCallReject(xmpp: Agent, roomJid: string, inviteId: string): void {
+  xmpp.sendMessage({
+    id: crypto.randomUUID(),
+    to: roomJid,
+    type: "groupchat",
+    callReject: { id: inviteId },
+  } as Record<string, unknown>);
+}
+
+export function sendCallLeft(xmpp: Agent, roomJid: string, inviteId?: string): void {
+  xmpp.sendMessage({
+    id: crypto.randomUUID(),
+    to: roomJid,
+    type: "groupchat",
+    callLeft: inviteId ? { id: inviteId } : {},
+  } as Record<string, unknown>);
+}

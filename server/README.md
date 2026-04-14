@@ -120,6 +120,7 @@ See [docs/adrs/](docs/adrs/) for detailed architectural decisions.
 - **[Architecture Decisions](docs/adrs/)**: ADRs documenting key technical choices
 - **[Feature RFCs](docs/rfcs/)**: Proposals for new features
 - **[Technical Specs](docs/specs/)**: Detailed API and protocol specifications
+- **[Call Stack Operator Runbook](docs/specs/call-stack-operator-runbook.md)**: Rollout, verification, and troubleshooting for media/call operations
 - **[Rust Crates](docs/RUST_CRATES.md)**: Recommended dependencies
 
 ## MVP Milestones

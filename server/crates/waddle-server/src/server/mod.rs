@@ -1149,6 +1149,9 @@ mod tests {
         assert!(metrics.contains("waddle_connected_users"));
         assert!(metrics.contains("waddle_messages_per_second"));
         assert!(metrics.contains("waddle_room_count"));
+        assert!(metrics.contains("waddle_call_starts_total"));
+        assert!(metrics.contains("waddle_call_failures_total"));
+        assert!(metrics.contains("waddle_active_calls"));
     }
 
     #[tokio::test]

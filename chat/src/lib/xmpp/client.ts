@@ -317,6 +317,16 @@ export class BrowserXmppClient {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp ? messaging.sendCallInvite(this.xmpp, roomBareJidFor(this.session, w, c), opts) : null;
   }
+  async sendCallReject(w: string, c: string, inviteId: string): Promise<void> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (this.xmpp) messaging.sendCallReject(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
+  }
+  async sendCallLeft(w: string, c: string, inviteId?: string): Promise<void> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (this.xmpp) messaging.sendCallLeft(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
+  }
 
   async startMujiCall(
     w: string,

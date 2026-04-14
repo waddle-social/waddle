@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Hash, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
-import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
+import { Hash, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff, RefreshCw } from "lucide-vue-next";
+import type { ActiveCallSummary, ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { MujiCallPhase, XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
@@ -29,7 +29,12 @@ const props = defineProps<{
   isSearching: boolean;
   mujiPhase: MujiCallPhase;
   mujiPendingInvite: { fromNick: string; invite: { jingleJid?: string; meetingDesc?: string } } | null;
+  activeCalls: ActiveCallSummary[];
+  isLoadingActiveCalls: boolean;
+  joiningListedCallId: string | null;
   mujiInCall: boolean;
+  mujiIsSwitching: boolean;
+  mujiCurrentSid: string | null;
   mujiHasRemoteTracks: boolean;
   mujiMicEnabled: boolean;
   mujiCameraEnabled: boolean;
@@ -52,6 +57,11 @@ const emit = defineEmits<{
   startVideoCall: [];
   endCall: [];
   joinCallInvite: [video: boolean];
+  switchCallInvite: [video: boolean];
+  declineCallInvite: [];
+  refreshActiveCalls: [];
+  joinListedCall: [callId: string, video: boolean];
+  switchListedCall: [callId: string, video: boolean];
   dismissCallInvite: [];
   toggleMic: [];
   toggleCamera: [];
@@ -71,6 +81,10 @@ function closeSearch() {
   showSearch.value = false;
   searchInput.value = "";
   emit("clearSearch");
+}
+
+function formatCallTimestamp(value: string) {
+  return formatStamp(value);
 }
 
 // XEP-0333: Send displayed marker for the latest non-self message
@@ -176,6 +190,7 @@ watch(
       <div class="min-w-0">
         <div class="text-sm font-mono font-bold">
           {{ mujiPendingInvite.fromNick }} invited you to a call
+          <span v-if="mujiInCall"> while you're already in a call</span>
         </div>
         <div class="text-xs font-mono text-muted-foreground truncate">
           {{ mujiPendingInvite.invite.meetingDesc ?? mujiPendingInvite.invite.jingleJid ?? "Muji call invite" }}
@@ -184,9 +199,15 @@ watch(
       <div class="flex items-center gap-2">
         <button
           class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
-          @click="emit('joinCallInvite', true)"
+          @click="mujiInCall ? emit('switchCallInvite', true) : emit('joinCallInvite', true)"
         >
-          Join
+          {{ mujiInCall ? "Switch" : "Join" }}
+        </button>
+        <button
+          class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground/60 text-muted-foreground hover:text-foreground transition-colors"
+          @click="emit('declineCallInvite')"
+        >
+          Decline
         </button>
         <button
           class="text-muted-foreground hover:text-foreground"
@@ -199,13 +220,68 @@ watch(
     </div>
 
     <div
-      v-if="channel && (mujiInCall || mujiPhase === 'dialing' || mujiPhase === 'ringing')"
+      v-if="channel && mujiInCall"
       class="px-6 py-2 border-b border-foreground bg-muted/20 text-xs font-mono text-muted-foreground"
     >
       <span class="font-bold text-foreground">Call:</span>
       {{ mujiPhase }}
       <span v-if="mujiServiceJid"> · {{ mujiServiceJid }}</span>
       <span v-if="mujiHasRemoteTracks"> · remote media connected</span>
+    </div>
+
+    <div
+      v-if="channel"
+      class="px-6 py-3 border-b border-foreground bg-muted/10 space-y-2"
+    >
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-mono font-bold uppercase tracking-wider">Active calls</span>
+        <button
+          class="h-6 px-2 text-[10px] font-mono uppercase tracking-wider border border-foreground/60 hover:bg-foreground hover:text-background transition-colors flex items-center gap-1"
+          :disabled="isLoadingActiveCalls"
+          @click="emit('refreshActiveCalls')"
+        >
+          <RefreshCw class="w-3 h-3" :class="isLoadingActiveCalls ? 'animate-spin' : ''" />
+          Refresh
+        </button>
+      </div>
+
+      <div v-if="isLoadingActiveCalls && activeCalls.length === 0" class="text-xs font-mono text-muted-foreground">
+        Loading active calls...
+      </div>
+
+      <div v-else-if="activeCalls.length > 0" class="space-y-2">
+        <div
+          v-for="call in activeCalls"
+          :key="call.call_id"
+          class="border border-foreground/30 px-3 py-2 flex items-center justify-between gap-3"
+        >
+          <div class="min-w-0 space-y-1">
+            <div class="text-xs font-mono">
+              <span class="font-bold uppercase">{{ call.state }}</span>
+              · {{ call.participant_count }} participant{{ call.participant_count === 1 ? "" : "s" }}
+            </div>
+            <div class="text-[10px] font-mono text-muted-foreground truncate">
+              Created {{ formatCallTimestamp(call.created_at) }} · Updated {{ formatCallTimestamp(call.updated_at) }}
+            </div>
+          </div>
+          <button
+            class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            :disabled="mujiIsSwitching || !!joiningListedCallId || (mujiInCall && mujiCurrentSid === call.call_id)"
+            @click="mujiInCall ? emit('switchListedCall', call.call_id, true) : emit('joinListedCall', call.call_id, true)"
+          >
+            {{
+              joiningListedCallId === call.call_id
+                ? "Joining..."
+                : mujiInCall
+                  ? "Switch"
+                  : "Join"
+            }}
+          </button>
+        </div>
+      </div>
+      <div v-else class="text-xs font-mono text-muted-foreground">
+        No active calls in this channel.
+      </div>
     </div>
 
     <!-- XEP-0431: Search bar -->
