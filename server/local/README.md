@@ -6,7 +6,7 @@
 
 - `waddle.env.example`: template for the local runtime config
 - `waddle.env`: ignored local runtime config used directly by `cuenv task dev`
-- `certs/`: checked-in self-signed certs for local XMPP startup
+- `certs/`: self-signed TLS certs for local XMPP startup (gitignored; generate with `server/scripts/generate-local-certs.sh`)
 - `data/`: local SQLite database files
 - `uploads/`: local upload storage
 
@@ -14,6 +14,7 @@
 
 1. Copy `local/waddle.env.example` to `local/waddle.env`.
 2. Edit `local/waddle.env` and replace the `replace-me` secret inside `WADDLE_AUTH_PROVIDERS_JSON`.
-3. Run `cuenv task dev`.
+3. Generate local TLS certs: `./scripts/generate-local-certs.sh`
+4. Run `cuenv task dev`.
 
 For local `chat`, point `SERVER_BASE_URL` at `http://localhost:3000`.
