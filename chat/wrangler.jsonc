@@ -16,7 +16,7 @@
   "preview_urls": false,
   "routes": [
     {
-      "pattern": "chat.waddle.social",
+      "pattern": "waddle.chat",
       "custom_domain": true
     }
   ],
@@ -24,6 +24,6 @@
     "enabled": true
   },
   "vars": {
-    "SERVER_BASE_URL": "https://api.waddle.social"
+    "SERVER_BASE_URL": "https://xmpp.waddle.chat"
   }
 }

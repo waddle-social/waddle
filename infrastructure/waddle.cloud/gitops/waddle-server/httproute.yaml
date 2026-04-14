@@ -7,9 +7,9 @@ spec:
   parentRefs:
     - name: waddle-gateway
       namespace: default
-      sectionName: https-api
+      sectionName: https-xmpp
   hostnames:
-    - api.waddle.social
+    - xmpp.waddle.chat
   rules:
     - backendRefs:
         - name: waddle-server

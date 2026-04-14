@@ -29,6 +29,13 @@
       "when": 1774123200000,
       "tag": "0003_seed_waddle_server_oauth",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1776167495954,
+      "tag": "0004_foamy_ravenous",
+      "breakpoints": true
     }
   ]
 }

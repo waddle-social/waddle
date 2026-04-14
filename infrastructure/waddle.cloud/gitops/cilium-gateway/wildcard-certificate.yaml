@@ -9,4 +9,4 @@ spec:
     name: letsencrypt-production
     kind: ClusterIssuer
   dnsNames:
-    - "*.apps.waddle.social"
+    - "*.apps.waddle.chat"
