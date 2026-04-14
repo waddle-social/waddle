@@ -10,7 +10,7 @@ declare namespace Cloudflare {
 		ASSETS: Fetcher;
 		BETTER_AUTH_URL: "https://colony.waddle.social";
 		GITHUB_CLIENT_ID: "Ov23liag5CB15O5sIQ60";
-		WADDLE_SERVER_OIDC_REDIRECT_URLS: "https://xmpp.waddle.chat/api/auth/callback";
+		WADDLE_SERVER_OIDC_REDIRECT_URLS: "https://xmpp.waddle.social/api/auth/callback";
 	}
 }
 interface Env extends Cloudflare.Env {}

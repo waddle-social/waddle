@@ -27,18 +27,18 @@ spec:
     - name: https-xmpp
       protocol: HTTPS
       port: 443
-      hostname: xmpp.waddle.chat
+      hostname: xmpp.waddle.social
       tls:
         mode: Terminate
         certificateRefs:
-          - name: xmpp-waddle-chat-tls
+          - name: xmpp-waddle-social-tls
       allowedRoutes:
         namespaces:
           from: All
     - name: http-xmpp
       protocol: HTTP
       port: 80
-      hostname: xmpp.waddle.chat
+      hostname: xmpp.waddle.social
       allowedRoutes:
         namespaces:
           from: All

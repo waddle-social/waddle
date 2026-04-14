@@ -9,7 +9,7 @@ spec:
       namespace: default
       sectionName: https-xmpp
   hostnames:
-    - xmpp.waddle.chat
+    - xmpp.waddle.social
   rules:
     - backendRefs:
         - name: waddle-server

@@ -9,7 +9,7 @@ spec:
       namespace: default
       sectionName: http-xmpp
   hostnames:
-    - xmpp.waddle.chat
+    - xmpp.waddle.social
   rules:
     - filters:
         - type: RequestRedirect

@@ -117,13 +117,13 @@ helm upgrade --install waddle ./charts/waddle-server \
   --set-json secret.authProvidersJson='[{"id":"rawkode","display_name":"rawkode.academy","kind":"oidc","issuer":"https://id.rawkode.academy/auth","client_id":"...","token_endpoint_auth_method":"none","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
 ```
 
-Example provider config (Colony + chat custom domain `waddle.chat` with API at `xmpp.waddle.chat`):
+Example provider config (Colony + chat custom domain `waddle.chat` with API at `xmpp.waddle.social`):
 
 ```bash
 helm upgrade --install waddle ./charts/waddle-server \
   --namespace waddle \
-  --set config.baseUrl=https://xmpp.waddle.chat \
-  --set config.corsOrigins='https://waddle.chat,http://localhost:4321,https://xmpp.waddle.chat' \
+  --set config.baseUrl=https://xmpp.waddle.social \
+  --set config.corsOrigins='https://waddle.chat,http://localhost:4321' \
   --set xmpp.domain=waddle.social \
   --set-json secret.authProvidersJson='[{"id":"colony","display_name":"Colony","kind":"oidc","issuer":"https://colony.waddle.social","client_id":"waddle-server","client_secret":"...","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]'
 ```
