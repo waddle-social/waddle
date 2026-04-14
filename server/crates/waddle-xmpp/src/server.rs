@@ -217,7 +217,7 @@ impl<S: AppState> XmppServer<S> {
             return Ok(TlsAcceptor::from(server_config.clone()));
         }
 
-        use rustls_pemfile::{certs, pkcs8_private_keys};
+        use rustls_pemfile::{certs, read_one, Item};
         use std::fs::File;
         use std::io::BufReader;
         use tokio_rustls::rustls::pki_types::PrivateKeyDer;
@@ -239,18 +239,32 @@ impl<S: AppState> XmppServer<S> {
             .filter_map(|r| r.ok())
             .collect();
 
-        let keys: Vec<_> = pkcs8_private_keys(&mut BufReader::new(key_file))
-            .filter_map(|r| r.ok())
-            .collect();
+        let mut key_reader = BufReader::new(key_file);
+        let mut key: Option<PrivateKeyDer<'static>> = None;
+        loop {
+            let Some(item) = read_one(&mut key_reader)
+                .map_err(|e| XmppError::config(format!("Failed to read key file: {}", e)))?
+            else {
+                break;
+            };
 
-        let key = keys
-            .into_iter()
-            .next()
-            .ok_or_else(|| XmppError::config("No private key found"))?;
+            key = match item {
+                Item::Pkcs8Key(pkcs8) => Some(PrivateKeyDer::Pkcs8(pkcs8)),
+                Item::Pkcs1Key(pkcs1) => Some(PrivateKeyDer::Pkcs1(pkcs1)),
+                Item::Sec1Key(sec1) => Some(PrivateKeyDer::Sec1(sec1)),
+                _ => None,
+            };
+
+            if key.is_some() {
+                break;
+            }
+        }
+
+        let key = key.ok_or_else(|| XmppError::config("No private key found"))?;
 
         let server_config = RustlsServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, PrivateKeyDer::Pkcs8(key))
+            .with_single_cert(certs, key)
             .map_err(|e| XmppError::config(format!("TLS config error: {}", e)))?;
 
         Ok(TlsAcceptor::from(Arc::new(server_config)))
