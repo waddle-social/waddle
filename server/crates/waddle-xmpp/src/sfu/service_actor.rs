@@ -10,7 +10,7 @@ use crate::xep::xep0166::NS_JINGLE;
 use jid::FullJid;
 use kameo::Actor;
 use minidom::Element;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use xmpp_parsers::iq::{Iq, IqType};
@@ -34,6 +34,62 @@ impl SfuServiceActor {
             registry,
             udp_addr,
         }
+    }
+
+    async fn resolve_candidate_addr(&self) -> SocketAddr {
+        if let Ok(raw_addr) = std::env::var("WADDLE_SFU_CANDIDATE_ADDR") {
+            match raw_addr.parse::<SocketAddr>() {
+                Ok(candidate_addr) => return candidate_addr,
+                Err(err) => warn!(
+                    value = %raw_addr,
+                    error = %err,
+                    "Ignoring invalid WADDLE_SFU_CANDIDATE_ADDR"
+                ),
+            }
+        }
+
+        if !self.udp_addr.ip().is_unspecified() {
+            return self.udp_addr;
+        }
+
+        match tokio::net::lookup_host((self.sfu_domain.as_str(), self.udp_addr.port())).await {
+            Ok(addresses) => {
+                let resolved: Vec<SocketAddr> = addresses
+                    .filter(|addr| {
+                        let ip = addr.ip();
+                        !ip.is_unspecified() && !ip.is_loopback()
+                    })
+                    .collect();
+                if let Some(candidate_addr) = resolved
+                    .iter()
+                    .copied()
+                    .find(|addr| addr.is_ipv4())
+                    .or_else(|| resolved.first().copied())
+                {
+                    info!(
+                        domain = %self.sfu_domain,
+                        candidate = %candidate_addr,
+                        "Resolved SFU candidate address from domain"
+                    );
+                    return candidate_addr;
+                }
+            }
+            Err(err) => {
+                warn!(
+                    domain = %self.sfu_domain,
+                    error = %err,
+                    "Failed to resolve SFU candidate address from domain"
+                );
+            }
+        }
+
+        let fallback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), self.udp_addr.port());
+        warn!(
+            bind_addr = %self.udp_addr,
+            fallback = %fallback,
+            "Falling back to loopback SFU candidate address; set WADDLE_SFU_CANDIDATE_ADDR for production"
+        );
+        fallback
     }
 
     async fn handle_session_initiate(
@@ -70,9 +126,10 @@ impl SfuServiceActor {
             Some(r) => r,
             None => {
                 info!(room = %room_key.0, "Creating new SFU room actor");
+                let candidate_addr = self.resolve_candidate_addr().await;
                 let actor_ref = kameo::spawn(SfuRoomActor::new(
                     room_key.clone(),
-                    self.udp_addr,
+                    candidate_addr,
                     Arc::clone(&self.registry.peer_store),
                 ));
                 self.registry.insert_room(room_key, actor_ref.clone()).await;

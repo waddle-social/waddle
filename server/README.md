@@ -80,6 +80,8 @@ Before the first login, copy [local/waddle.env.example](/Users/icepuma/developme
 - `WADDLE_MEDIA_EMBEDDED_MAX_ROOMS`: Hard cap on concurrent embedded SFU rooms (default `128`).
 - `WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM`: Hard cap per embedded SFU room (default `32`).
 - `WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS`: Hard cap on total embedded SFU sessions (default `1024`).
+- `WADDLE_SFU_UDP_ADDR`: UDP bind address for XMPP-native SFU media (default `0.0.0.0:10000`).
+- `WADDLE_SFU_CANDIDATE_ADDR`: Optional advertised ICE host candidate address (`ip:port`) used by SFU Jingle answers. Set this in production when binding SFU on `0.0.0.0`.
 
 ### Container Image
 
