@@ -75,6 +75,11 @@ impl Identity {
     pub fn spaces_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
+
+    /// SFU service identity (category="component", type="generic").
+    pub fn sfu_service(name: Option<&str>) -> Self {
+        Self::new("component", "generic", name)
+    }
 }
 
 /// Feature element for disco#info response.
@@ -548,6 +553,20 @@ pub fn spaces_service_features() -> Vec<Feature> {
         Feature::new("http://jabber.org/protocol/pubsub#multi-items"),
         Feature::new("http://jabber.org/protocol/pubsub#item-ids"),
         Feature::new("http://jabber.org/protocol/pubsub#manage-subscriptions"),
+    ]
+}
+
+/// Get features for the SFU service component.
+///
+/// Advertises Jingle signaling support for multi-party media via Muji.
+pub fn sfu_service_features() -> Vec<Feature> {
+    vec![
+        Feature::disco_info(),
+        Feature::jingle(),
+        Feature::jingle_rtp(),
+        Feature::jingle_ice_udp(),
+        Feature::jingle_dtls(),
+        Feature::muji(),
     ]
 }
 

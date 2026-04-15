@@ -66,6 +66,11 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
+    /// Create an SFU service item.
+    pub fn sfu_service(domain: &str, name: Option<&str>) -> Self {
+        Self::new(domain, name, None)
+    }
+
     /// Create a Spaces node item (waddle as a space).
     pub fn spaces_node(jid: &str, node: &str, name: Option<&str>) -> Self {
         Self {

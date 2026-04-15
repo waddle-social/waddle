@@ -24,7 +24,8 @@ use crate::disco::{
     build_disco_info_response_with_extensions, build_disco_items_response,
     build_server_info_abuse_form, is_disco_info_query, is_disco_items_query, muc_room_features,
     muc_service_features, parse_disco_info_query, parse_disco_items_query, pubsub_service_features,
-    server_features, spaces_service_features, upload_service_features, DiscoItem, Identity,
+    server_features, sfu_service_features, spaces_service_features, upload_service_features,
+    DiscoItem, Identity,
 };
 use crate::isr::{
     build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore,
@@ -4020,6 +4021,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
+        let sfu_domain = format!("sfu.{}", self.domain);
 
         // Determine what entity is being queried
         let (identities, features, extensions) = match query.target.as_deref() {
@@ -4099,6 +4101,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         vec![],
                     )
                 }
+            }
+            // Query to SFU domain
+            Some(target) if target == sfu_domain => {
+                debug!(domain = %sfu_domain, "disco#info query to SFU domain");
+                (
+                    vec![Identity::sfu_service(Some("Waddle SFU"))],
+                    sfu_service_features(),
+                    vec![],
+                )
             }
             // Query to MUC room
             Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
@@ -4265,6 +4276,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
+        let sfu_domain = format!("sfu.{}", self.domain);
 
         // Determine what entity is being queried
         let items = match query.target.as_deref() {
@@ -4276,6 +4288,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
                     DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
+                    DiscoItem::sfu_service(&sfu_domain, Some("Waddle SFU")),
                 ]
             }
             // Query to MUC domain - return room list
@@ -4337,6 +4350,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
                     DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
+                    DiscoItem::sfu_service(&sfu_domain, Some("Waddle SFU")),
                 ]
             }
         };
