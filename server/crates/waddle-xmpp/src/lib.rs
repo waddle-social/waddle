@@ -41,6 +41,7 @@ pub mod roster;
 pub mod routing;
 pub mod s2s;
 pub mod server;
+pub mod sfu;
 pub mod stream;
 pub mod stream_management;
 pub mod xep;
