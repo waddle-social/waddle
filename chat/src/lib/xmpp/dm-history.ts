@@ -8,22 +8,40 @@ function localpart(jid: string): string {
   return barePeerJid(jid).split("@")[0] ?? "unknown";
 }
 
+function isItemNotFound(err: unknown): boolean {
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    if (e.condition === "item-not-found") return true;
+    if (typeof e.error === "object" && e.error !== null) {
+      const inner = e.error as Record<string, unknown>;
+      if (inner.condition === "item-not-found") return true;
+    }
+  }
+  return false;
+}
+
 export async function queryPersonalMam(
   xmpp: Agent,
   selfBareJid: string,
   peerBareJid: string,
   max: number,
 ): Promise<LiveDmMessage[]> {
-  const result = await xmpp.searchHistory(selfBareJid, {
-    paging: { max },
-    form: {
-      type: "submit",
-      fields: [
-        { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
-        { name: "with", value: peerBareJid },
-      ],
-    },
-  });
+  let result;
+  try {
+    result = await xmpp.searchHistory(selfBareJid, {
+      paging: { max },
+      form: {
+        type: "submit",
+        fields: [
+          { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
+          { name: "with", value: peerBareJid },
+        ],
+      },
+    });
+  } catch (err) {
+    if (isItemNotFound(err)) return [];
+    throw err;
+  }
 
   const collected: LiveDmMessage[] = [];
   if (!result.results) return collected;

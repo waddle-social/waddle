@@ -1183,23 +1183,34 @@ async fn handle_iq(
             };
 
             let room_target = target.split('/').next().unwrap_or(target.as_str());
-            let Ok(room_jid) = room_target.parse::<BareJid>() else {
+            let Ok(target_bare) = room_target.parse::<BareJid>() else {
                 return vec![build_iq_error_xml(&id, "modify", "jid-malformed")];
             };
 
-            if !muc_registry.is_muc_jid(&room_jid) {
+            // Determine whether this is a personal archive query (to=self) or a
+            // MUC room archive query.  Personal queries are allowed when the
+            // target JID matches the authenticated user's bare JID.
+            let sender_bare: Option<BareJid> = authenticated_session
+                .as_ref()
+                .and_then(|session| format!("{}@{}", session.xmpp_localpart, domain).parse().ok());
+
+            let is_personal = sender_bare
+                .as_ref()
+                .is_some_and(|bare| *bare == target_bare);
+
+            if !is_personal && !muc_registry.is_muc_jid(&target_bare) {
                 return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
             }
 
             let (query_id, query) = match parse_mam_query(request_iq) {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    warn!(error = %err, room = %room_jid, "Invalid MAM query");
+                    warn!(error = %err, target = %target_bare, "Invalid MAM query");
                     return vec![build_iq_error_xml(&id, "modify", "bad-request")];
                 }
             };
 
-            let archive_jid = room_jid.to_string();
+            let archive_jid = target_bare.to_string();
             let mut result = match state
                 .mam_storage
                 .query_messages(archive_jid.as_str(), &query)
@@ -1207,7 +1218,7 @@ async fn handle_iq(
             {
                 Ok(result) => result,
                 Err(err) => {
-                    warn!(error = %err, room = %room_jid, "MAM query failed");
+                    warn!(error = %err, target = %target_bare, "MAM query failed");
                     return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
                 }
             };
@@ -1390,6 +1401,9 @@ async fn handle_message(
             let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
             let has_github_embed = message_has_github_embed(&prototype);
 
+            // Archive body-bearing DMs to both sender's and recipient's personal MAM.
+            archive_direct_message(state, sender_jid, to_jid, &prototype).await;
+
             // Route the enriched message
             if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
                 let mut msg = prototype.clone();
@@ -1477,6 +1491,69 @@ async fn archive_groupchat_message(
             );
             None
         }
+    }
+}
+
+/// Archive a direct (type="chat") message to both the sender's and recipient's
+/// personal MAM archives.  Only messages with a `<body>` are stored.
+async fn archive_direct_message(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    to_jid: &jid::Jid,
+    message: &xmpp_parsers::message::Message,
+) {
+    let Some(body) = prototype_body(message)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
+    let origin_id = extract_origin_id(message);
+
+    let archived = ArchivedMessage {
+        id: String::new(),
+        timestamp: Utc::now(),
+        from: sender_jid.to_bare().to_string(),
+        to: to_jid.to_bare().to_string(),
+        body,
+        stanza_id: message.id.clone(),
+        thread_id: message.thread.as_ref().map(|thread| thread.0.clone()),
+        reply_to_id,
+        reply_to_jid,
+        origin_id,
+        message_type: mam_message_type(&message.type_),
+    };
+
+    // Store in sender's personal archive
+    let sender_bare = sender_jid.to_bare().to_string();
+    if let Err(err) = state
+        .mam_storage
+        .store_message(sender_bare.as_str(), &archived)
+        .await
+    {
+        warn!(
+            from = %sender_jid,
+            to = %to_jid,
+            error = %err,
+            "Failed to archive DM to sender's personal MAM"
+        );
+    }
+
+    // Store in recipient's personal archive
+    let recipient_bare = to_jid.to_bare().to_string();
+    if let Err(err) = state
+        .mam_storage
+        .store_message(recipient_bare.as_str(), &archived)
+        .await
+    {
+        warn!(
+            from = %sender_jid,
+            to = %to_jid,
+            error = %err,
+            "Failed to archive DM to recipient's personal MAM"
+        );
     }
 }
 

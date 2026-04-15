@@ -14,6 +14,7 @@ export function useUiState() {
   const showMembers = ref(false);
   const confirmDeleteWaddle = ref(false);
   const confirmDeleteChannel = ref(false);
+  const showNewDm = ref(false);
   const confirmRemoveMember = ref<string | null>(null);
   const actionError = ref("");
 
@@ -37,6 +38,7 @@ export function useUiState() {
     showWaddleSettings,
     showMembers,
     confirmDeleteWaddle,
+    showNewDm,
     confirmDeleteChannel,
     confirmRemoveMember,
     actionError,

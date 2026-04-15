@@ -25,6 +25,7 @@ const props = defineProps<{
   canManageChannels: boolean;
   typingUsers: string[];
   currentUser?: string;
+  selfDomain?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
   tenorApiKey: string;
@@ -100,8 +101,10 @@ function presenceText(show?: string): string {
 }
 
 function onAvatarClick(author: string) {
-  const authorJid = props.authorJidByNick?.[author];
-  if (!authorJid || author === props.currentUser) return;
+  if (author === props.currentUser) return;
+  const authorJid = props.authorJidByNick?.[author]
+    ?? (props.selfDomain ? `${author}@${props.selfDomain}` : null);
+  if (!authorJid) return;
   popoverAuthor.value = { username: author, jid: authorJid };
 }
 

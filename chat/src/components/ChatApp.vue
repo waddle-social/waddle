@@ -25,6 +25,7 @@ import BrowsePublicWaddlesDialog from "@/components/modals/BrowsePublicWaddlesDi
 import CreateChannelDialog from "@/components/modals/CreateChannelDialog.vue";
 import WaddleSettingsDialog from "@/components/modals/WaddleSettingsDialog.vue";
 import EditChannelDialog from "@/components/modals/EditChannelDialog.vue";
+import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/waddle-api";
@@ -136,6 +137,7 @@ const activeIsSearching = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.isSearching.value : messaging.isSearching.value,
 );
 
+const selfDomain = computed(() => session.value?.jid.split("@")[1] ?? "");
 const memberJidByNick = ref<Record<string, string>>({});
 const activeDmPeer = computed(() => {
   const active = dmConversations.activePeerJid.value;
@@ -470,6 +472,11 @@ async function selectDm(peerJid: string) {
   await handleOpenDm(peerJid);
 }
 
+async function handleNewDm(username: string) {
+  if (!selfDomain.value) return;
+  await handleOpenDm(`${username}@${selfDomain.value}`);
+}
+
 async function handleCreateWaddle() {
   const created = await waddles.createWaddle();
   if (created) {
@@ -680,6 +687,7 @@ onUnmounted(() => {
           :active-peer-jid="dmConversations.activePeerJid.value"
           class="!w-full !border-r-0 !flex-1"
           @select-dm="selectDm"
+          @new-dm="ui.showNewDm.value = true"
         />
         <ProfilePanel
           v-if="connectionStore.session"
@@ -768,6 +776,7 @@ onUnmounted(() => {
           :conversations="dmConversations.conversations.value"
           :active-peer-jid="dmConversations.activePeerJid.value"
           @select-dm="selectDm"
+          @new-dm="ui.showNewDm.value = true"
         />
       </div>
 
@@ -787,6 +796,7 @@ onUnmounted(() => {
         :can-manage-channels="waddles.canManageChannels.value"
         :typing-users="activeTypingUsers"
         :current-user="connectionStore.session?.username"
+        :self-domain="selfDomain"
         :avatar-url-by-author="avatarUrlByAuthor"
         :author-jid-by-nick="memberJidByNick"
         :tenor-api-key="tenorApiKey"
@@ -834,6 +844,10 @@ onUnmounted(() => {
     </div>
 
     <!-- Dialogs -->
+    <NewDmDialog
+      v-model:open="ui.showNewDm.value"
+      @submit="handleNewDm"
+    />
     <CreateWaddleDialog
       v-model:open="ui.showCreateWaddle.value"
       :form="waddles.createWaddleForm.value"

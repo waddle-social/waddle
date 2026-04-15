@@ -2,7 +2,7 @@ import type { Agent } from "stanza";
 import type { ChatStateType } from "./types";
 
 export function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
-  xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state });
+  xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state, processingHints: { noStore: true } });
 }
 
 export function sendDmDisplayed(xmpp: Agent, peerJid: string, messageId: string): void {
@@ -10,6 +10,7 @@ export function sendDmDisplayed(xmpp: Agent, peerJid: string, messageId: string)
     to: peerJid,
     type: "chat",
     marker: { type: "displayed", id: messageId },
+    processingHints: { noStore: true },
   });
 }
 
@@ -19,6 +20,7 @@ export function sendDmReaction(xmpp: Agent, peerJid: string, messageId: string, 
     to: peerJid,
     type: "chat",
     reactions: { id: messageId, items: emojis },
+    processingHints: { store: true },
   } as Record<string, unknown>);
 }
 
@@ -29,6 +31,7 @@ export function sendDmRetraction(xmpp: Agent, peerJid: string, retractsId: strin
     type: "chat",
     body: "This person attempted to retract a previous message.",
     retract: { id: retractsId },
+    processingHints: { store: true },
   } as Record<string, unknown>);
 }
 
@@ -36,7 +39,7 @@ export function sendDmCorrection(xmpp: Agent, peerJid: string, body: string, rep
   const text = body.trim();
   if (!text) return null;
   const msgId = crypto.randomUUID();
-  xmpp.sendMessage({ id: msgId, to: peerJid, type: "chat", body: text, replace: replacesId });
+  xmpp.sendMessage({ id: msgId, to: peerJid, type: "chat", body: text, replace: replacesId, processingHints: { store: true } });
   return msgId;
 }
 
@@ -51,6 +54,7 @@ export function sendDirectMessage(xmpp: Agent, peerJid: string, body: string): s
     body: text,
     receipt: { type: "request" },
     marker: { type: "markable" },
+    processingHints: { store: true },
   } as Record<string, unknown>);
   return msgId;
 }
@@ -77,6 +81,7 @@ export function sendDmCallInvite(
     body: opts.sid ? `${label} started` : (externalUri ? `${label}: ${externalUri}` : label),
     callInvite,
     meeting: { type: "dm", ...(externalUri ? { url: externalUri } : {}), desc: label },
+    processingHints: { store: true },
   } as Record<string, unknown>);
   return msgId;
 }

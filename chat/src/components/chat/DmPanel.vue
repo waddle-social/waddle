@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MessageCircle } from "lucide-vue-next";
+import { MessageCircle, Plus } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { formatStamp } from "@/composables/useMessaging";
 import type { DmConversation } from "@/lib/xmpp-client";
@@ -11,6 +11,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectDm: [peerJid: string];
+  newDm: [];
 }>();
 
 function preview(text?: string): string {
@@ -29,9 +30,18 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
 
 <template>
   <div class="w-[248px] border-r border-border glass-panel flex flex-col flex-shrink-0">
-    <div class="h-14 px-4 flex items-center gap-2 border-b border-border">
-      <MessageCircle class="w-4 h-4 text-primary/70" />
-      <h2 class="text-[14px] font-display font-bold tracking-tight text-sidebar-foreground">Direct Messages</h2>
+    <div class="h-14 px-4 flex items-center justify-between border-b border-border">
+      <div class="flex items-center gap-2">
+        <MessageCircle class="w-4 h-4 text-primary/70" />
+        <h2 class="text-[14px] font-display font-bold tracking-tight text-sidebar-foreground">Direct Messages</h2>
+      </div>
+      <button
+        class="h-7 w-7 flex items-center justify-center rounded-lg text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground transition-all duration-200"
+        title="New message"
+        @click="emit('newDm')"
+      >
+        <Plus class="w-4 h-4" />
+      </button>
     </div>
 
     <div class="flex-1 overflow-auto py-3 px-2">
