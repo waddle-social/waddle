@@ -22,6 +22,7 @@ export function sendReaction(xmpp: Agent, roomJid: string, messageId: string, em
     to: roomJid,
     type: "groupchat",
     reactions: { id: messageId, items: emojis },
+    processingHints: { store: true },
   } as Record<string, unknown>);
 }
 
@@ -32,6 +33,7 @@ export function sendRetraction(xmpp: Agent, roomJid: string, retractsId: string)
     type: "groupchat",
     body: "This person attempted to retract a previous message.",
     retract: { id: retractsId },
+    processingHints: { store: true },
   } as Record<string, unknown>);
 }
 
@@ -44,6 +46,7 @@ export function sendModeration(xmpp: Agent, roomJid: string, targetId: string, r
       id: targetId,
       moderated: { retract: true, ...(reason ? { reason } : {}) },
     },
+    processingHints: { store: true },
   } as Record<string, unknown>);
 }
 
@@ -134,6 +137,7 @@ export function sendCallInvite(xmpp: Agent, roomJid: string, opts: SendCallInvit
     body: opts.sid ? `${label} started` : (externalUri ? `${label}: ${externalUri}` : label),
     callInvite,
     meeting: { type: "muji", ...(externalUri ? { url: externalUri } : {}), desc: label },
+    processingHints: { store: true },
   } as Record<string, unknown>);
 
   return msgId;

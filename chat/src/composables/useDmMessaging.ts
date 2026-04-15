@@ -163,6 +163,8 @@ export function useDmMessaging(
       if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
       const regular: LiveDmMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+      const retractionUpdates: string[] = [];
+      const correctionUpdates: { targetId: string; body: string; markup?: LiveDmMessage["markup"] }[] = [];
       for (const msg of mamResults) {
         if (msg._reactionTarget && msg._reactionEmojis) {
           reactionUpdates.push({
@@ -170,11 +172,36 @@ export function useDmMessaging(
             nick: msg.nick,
             emojis: msg._reactionEmojis,
           });
-        } else if (msg.body || msg.callInvite || msg.sharedFile) {
+        } else if (msg.retractsId) {
+          retractionUpdates.push(msg.retractsId);
+        } else if (msg.replacesId) {
+          correctionUpdates.push({
+            targetId: msg.replacesId,
+            body: msg.body,
+            markup: msg.markup,
+          });
+        } else if (msg.body || msg.callInvite || msg.sharedFile || msg.isSticker) {
           regular.push(msg);
         }
       }
       const timeline = regular.map((m) => fromLiveDmMessage(session.value!, m));
+      for (const update of correctionUpdates) {
+        const target = timeline.find((m) => m.id === update.targetId);
+        if (!target) continue;
+        target.body = update.body.trim();
+        target.isEdited = true;
+        if (update.markup && update.markup.length > 0) {
+          target.markup = update.markup;
+        } else {
+          delete target.markup;
+        }
+      }
+      for (const retractsId of retractionUpdates) {
+        const target = timeline.find((m) => m.id === retractsId);
+        if (!target) continue;
+        target.body = "";
+        target.isRetracted = true;
+      }
       for (const update of reactionUpdates) {
         const target = timeline.find((m) => m.id === update.targetId);
         if (!target) continue;

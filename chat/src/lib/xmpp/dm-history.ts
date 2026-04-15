@@ -2,7 +2,7 @@ import type { Agent } from "stanza";
 import type { ReceivedMessage } from "stanza/protocol";
 import type { LiveDmMessage } from "./types";
 import { barePeerJid } from "./jid";
-import { ext, extractMessageExtensions } from "./message-parsing";
+import { dispatchChat } from "./dm-parsing";
 
 function localpart(jid: string): string {
   return barePeerJid(jid).split("@")[0] ?? "unknown";
@@ -18,6 +18,16 @@ function isItemNotFound(err: unknown): boolean {
     }
   }
   return false;
+}
+
+function withArchivedMessageId(
+  mamResultId: string | undefined,
+  innerMsg: ReceivedMessage,
+): ReceivedMessage {
+  return {
+    ...innerMsg,
+    id: innerMsg.id ?? mamResultId ?? crypto.randomUUID(),
+  } as ReceivedMessage;
 }
 
 export async function queryPersonalMam(
@@ -48,37 +58,54 @@ export async function queryPersonalMam(
 
   for (const mamResult of result.results) {
     const innerMsg = mamResult.item?.message;
-    if (!innerMsg?.body && !innerMsg?.subject) continue;
+    if (!innerMsg) continue;
 
-    const fromJid = barePeerJid(innerMsg.from ?? "");
-    const toJid = barePeerJid(innerMsg.to ?? "");
+    const archivedMsg = withArchivedMessageId(mamResult.id, innerMsg as ReceivedMessage);
+    const fromJid = barePeerJid(archivedMsg.from ?? "");
+    const toJid = barePeerJid(archivedMsg.to ?? "");
     const peerJid = fromJid === selfBareJid ? toJid : fromJid;
     if (!peerJid || peerJid !== peerBareJid) continue;
 
-    const archiveId = mamResult.id ?? innerMsg.id ?? crypto.randomUUID();
     const timestamp = mamResult.item.delay?.timestamp
       ? mamResult.item.delay.timestamp.toISOString()
       : new Date().toISOString();
+    let parsedMessage: LiveDmMessage | null = null;
+    let reactionUpdate: { targetId: string; emojis: string[] } | null = null;
 
-    const msg: LiveDmMessage = {
-      id: archiveId,
-      peerJid,
-      fromJid,
-      nick: localpart(fromJid),
-      body: innerMsg.body ?? innerMsg.subject ?? "",
-      createdAt: timestamp,
-      type: "message",
-    };
+    dispatchChat(archivedMsg, {
+      selfBareJid,
+      onMessage: (msg) => {
+        parsedMessage = { ...msg, createdAt: timestamp };
+      },
+      onReaction: (event) => {
+        reactionUpdate = {
+          targetId: event.messageId,
+          emojis: event.emojis,
+        };
+      },
+      onChatState: null,
+      onDisplayed: null,
+    });
 
-    const reactions = ext(innerMsg).reactions as { id?: string; items?: string[] } | undefined;
-    if (reactions?.id) {
-      msg.body = "";
-      msg._reactionTarget = reactions.id;
-      msg._reactionEmojis = (reactions.items ?? []).filter((t) => t.length > 0);
+    if (parsedMessage) {
+      collected.push(parsedMessage);
+      continue;
     }
 
-    extractMessageExtensions(innerMsg as ReceivedMessage, msg);
-    collected.push(msg);
+    if (reactionUpdate) {
+      const { targetId, emojis } = reactionUpdate;
+      collected.push({
+        id: archivedMsg.id ?? crypto.randomUUID(),
+        peerJid,
+        fromJid,
+        nick: localpart(fromJid),
+        body: "",
+        createdAt: timestamp,
+        type: "message",
+        _reactionTarget: targetId,
+        _reactionEmojis: emojis,
+      });
+    }
   }
 
   return collected;
@@ -111,7 +138,7 @@ export async function searchDmMessages(
     const fromJid = barePeerJid(innerMsg.from ?? "");
     if (!fromJid) continue;
     results.push({
-      id: mamResult.id ?? innerMsg.id ?? crypto.randomUUID(),
+      id: innerMsg.id ?? mamResult.id ?? crypto.randomUUID(),
       nick: localpart(fromJid),
       body: innerMsg.body,
       createdAt: mamResult.item.delay?.timestamp

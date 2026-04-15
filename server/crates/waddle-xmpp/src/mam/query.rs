@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
@@ -194,47 +194,7 @@ pub fn build_result_messages(
 
 /// Build a single MAM result message.
 fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage) -> Message {
-    // Build the inner message element with the original message type.
-    let msg_type = if archived.message_type.is_empty() {
-        "chat"
-    } else {
-        &archived.message_type
-    };
-    let mut inner_builder = Element::builder("message", "jabber:client")
-        .attr("from", &archived.from)
-        .attr("to", &archived.to)
-        .attr("type", msg_type)
-        .append(
-            Element::builder("body", "jabber:client")
-                .append(archived.body.clone())
-                .build(),
-        );
-
-    if let Some(thread_id) = archived.thread_id.as_deref() {
-        inner_builder = inner_builder.append(
-            Element::builder("thread", "jabber:client")
-                .append(thread_id)
-                .build(),
-        );
-    }
-
-    if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
-        let mut reply_builder = Element::builder("reply", NS_REPLY).attr("id", reply_to_id);
-        if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
-            reply_builder = reply_builder.attr("to", reply_to_jid);
-        }
-        inner_builder = inner_builder.append(reply_builder.build());
-    }
-
-    if let Some(origin_id) = archived.origin_id.as_deref() {
-        inner_builder = inner_builder.append(
-            Element::builder("origin-id", STANZA_ID_NS)
-                .attr("id", origin_id)
-                .build(),
-        );
-    }
-
-    let inner_msg = inner_builder.build();
+    let inner_msg: Element = archived_inner_message(archived).into();
 
     // Build the delay element
     let delay = Element::builder("delay", DELAY_NS)
@@ -265,6 +225,65 @@ fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage
     msg.payloads.push(result);
 
     msg
+}
+
+fn archived_inner_message(archived: &ArchivedMessage) -> Element {
+    if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
+        match stanza_xml.parse::<Element>() {
+            Ok(element) => return element,
+            Err(error) => {
+                warn!(archive_id = %archived.id, error = %error, "Failed to parse archived stanza XML");
+            }
+        }
+    }
+
+    build_legacy_inner_message(archived)
+}
+
+fn build_legacy_inner_message(archived: &ArchivedMessage) -> Element {
+    let msg_type = if archived.message_type.is_empty() {
+        "chat"
+    } else {
+        &archived.message_type
+    };
+    let mut inner_builder = Element::builder("message", "jabber:client")
+        .attr("from", &archived.from)
+        .attr("to", &archived.to)
+        .attr("type", msg_type);
+
+    if let Some(stanza_id) = archived.stanza_id.as_deref() {
+        inner_builder = inner_builder.attr("id", stanza_id);
+    }
+    if !archived.body.is_empty() {
+        inner_builder = inner_builder.append(
+            Element::builder("body", "jabber:client")
+                .append(archived.body.clone())
+                .build(),
+        );
+    }
+    if let Some(thread_id) = archived.thread_id.as_deref() {
+        inner_builder = inner_builder.append(
+            Element::builder("thread", "jabber:client")
+                .append(thread_id)
+                .build(),
+        );
+    }
+    if let Some(reply_to_id) = archived.reply_to_id.as_deref() {
+        let mut reply_builder = Element::builder("reply", NS_REPLY).attr("id", reply_to_id);
+        if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
+            reply_builder = reply_builder.attr("to", reply_to_jid);
+        }
+        inner_builder = inner_builder.append(reply_builder.build());
+    }
+    if let Some(origin_id) = archived.origin_id.as_deref() {
+        inner_builder = inner_builder.append(
+            Element::builder("origin-id", STANZA_ID_NS)
+                .attr("id", origin_id)
+                .build(),
+        );
+    }
+
+    inner_builder.build()
 }
 
 /// Build the MAM fin (completion) IQ response.
@@ -402,5 +421,43 @@ mod tests {
         assert!(inner_msg
             .children()
             .any(|c| c.name() == "origin-id" && c.ns() == STANZA_ID_NS));
+    }
+
+    #[test]
+    fn test_build_result_message_preserves_stanza_payload() {
+        let archived = ArchivedMessage {
+            id: "msg-124".to_string(),
+            timestamp: Utc::now(),
+            from: "room@conference.example.com/alice".to_string(),
+            to: "room@conference.example.com".to_string(),
+            body: String::new(),
+            message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='reaction-1'><reactions xmlns='urn:xmpp:reactions:0' id='msg-1'><reaction>👍</reaction></reactions></message>".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let msg = build_result_message("query-2", "user@example.com", &archived);
+        let result = msg
+            .payloads
+            .iter()
+            .find(|p| p.name() == "result" && p.ns() == MAM_NS)
+            .expect("result payload");
+        let forwarded = result
+            .children()
+            .find(|c| c.name() == "forwarded" && c.ns() == FORWARD_NS)
+            .expect("forwarded element");
+        let inner_msg = forwarded
+            .children()
+            .find(|c| c.name() == "message" && c.ns() == "jabber:client")
+            .expect("inner message");
+        let reactions = inner_msg
+            .children()
+            .find(|c| c.name() == "reactions" && c.ns() == "urn:xmpp:reactions:0")
+            .expect("reactions payload");
+
+        assert_eq!(inner_msg.attr("id"), Some("reaction-1"));
+        assert_eq!(reactions.attr("id"), Some("msg-1"));
     }
 }

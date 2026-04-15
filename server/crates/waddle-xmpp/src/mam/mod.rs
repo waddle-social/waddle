@@ -51,6 +51,8 @@ pub struct ArchivedMessage {
     /// Defaults to "chat" if not set.
     #[serde(default = "default_message_type")]
     pub message_type: String,
+    /// Preserved full stanza XML for faithful replay of archived timeline events.
+    pub stanza_xml: Option<String>,
 }
 
 fn default_message_type() -> String {
@@ -71,6 +73,7 @@ impl Default for ArchivedMessage {
             reply_to_jid: None,
             origin_id: None,
             message_type: default_message_type(),
+            stanza_xml: None,
         }
     }
 }

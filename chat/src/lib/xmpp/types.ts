@@ -33,6 +33,8 @@ export interface LiveRoomMessage {
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483 */
   callInvite?: CallInviteInfo;
+  _reactionTarget?: string;
+  _reactionEmojis?: string[];
 }
 
 /** A direct message received/sent via type:"chat" stanzas */

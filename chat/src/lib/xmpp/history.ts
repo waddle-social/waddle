@@ -2,7 +2,17 @@
 import type { Agent } from "stanza";
 import type { ReceivedMessage } from "stanza/protocol";
 import type { LiveRoomMessage } from "./types";
-import { ext, extractMessageExtensions } from "./message-parsing";
+import { dispatchGroupchat } from "./message-parsing";
+
+function withArchivedMessageId(
+  mamResultId: string | undefined,
+  innerMsg: ReceivedMessage,
+): ReceivedMessage {
+  return {
+    ...innerMsg,
+    id: innerMsg.id ?? mamResultId ?? crypto.randomUUID(),
+  } as ReceivedMessage;
+}
 
 /** Query message archive for a room. Throws on IQ/transport errors. */
 export async function queryMam(
@@ -16,32 +26,51 @@ export async function queryMam(
   if (result.results) {
     for (const mamResult of result.results) {
       const innerMsg = mamResult.item?.message;
-      if (!innerMsg?.body) continue;
+      if (!innerMsg) continue;
 
-      const from = innerMsg.from ?? "";
-      const nick = from.split("/")[1] ?? "unknown";
-      const archiveId = mamResult.id ?? crypto.randomUUID();
       const timestamp = mamResult.item.delay?.timestamp
         ? mamResult.item.delay.timestamp.toISOString()
         : new Date().toISOString();
+      const archivedMsg = withArchivedMessageId(mamResult.id, innerMsg as ReceivedMessage);
+      let parsedMessage: LiveRoomMessage | null = null;
+      let reactionUpdate: { targetId: string; emojis: string[]; nick: string } | null = null;
 
-      const msg: LiveRoomMessage = {
-        id: archiveId, roomJid, nick, body: innerMsg.body,
-        createdAt: timestamp, type: "message",
-      };
+      dispatchGroupchat(archivedMsg, {
+        currentRoom: roomJid,
+        selfNick: "",
+        onMessage: (msg) => {
+          parsedMessage = { ...msg, createdAt: timestamp };
+        },
+        onReaction: (event) => {
+          reactionUpdate = {
+            targetId: event.messageId,
+            emojis: event.emojis,
+            nick: event.nick,
+          };
+        },
+        onChatState: null,
+        onDisplayed: null,
+        onActivity: null,
+      });
 
-      // XEP-0444: Reactions in archive
-      const reactions = ext(innerMsg).reactions as { id?: string; items?: string[] } | undefined;
-      if (reactions?.id) {
-        msg.body = "";
-        msg.type = "subject";
-        (msg as LiveRoomMessage & { _reactionTarget?: string })._reactionTarget = reactions.id;
-        (msg as LiveRoomMessage & { _reactionEmojis?: string[] })._reactionEmojis =
-          (reactions.items ?? []).filter((t) => t.length > 0);
+      if (parsedMessage) {
+        collected.push(parsedMessage);
+        continue;
       }
 
-      extractMessageExtensions(innerMsg as ReceivedMessage, msg);
-      collected.push(msg);
+      if (reactionUpdate) {
+        const { nick, targetId, emojis } = reactionUpdate;
+        collected.push({
+          id: archivedMsg.id ?? crypto.randomUUID(),
+          roomJid,
+          nick,
+          body: "",
+          createdAt: timestamp,
+          type: "subject",
+          _reactionTarget: targetId,
+          _reactionEmojis: emojis,
+        });
+      }
     }
   }
   return collected;
@@ -75,7 +104,7 @@ export async function searchMessages(
 
       const from = innerMsg.from ?? "";
       results.push({
-        id: mamResult.id ?? crypto.randomUUID(),
+        id: innerMsg.id ?? mamResult.id ?? crypto.randomUUID(),
         nick: from.split("/")[1] ?? "unknown",
         body: innerMsg.body,
         createdAt: mamResult.item.delay?.timestamp

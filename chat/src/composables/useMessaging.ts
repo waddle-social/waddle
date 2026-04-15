@@ -386,25 +386,53 @@ export function useMessaging(
         return;
       }
 
-      // Separate regular messages from reaction updates
+      // Separate regular messages from timeline updates
       const regularMessages: LiveRoomMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
+      const retractionUpdates: string[] = [];
+      const correctionUpdates: { targetId: string; body: string; markup?: MarkupSpan[] }[] = [];
 
       for (const msg of mamResults) {
-        const reactionMsg = msg as LiveRoomMessage & { _reactionTarget?: string; _reactionEmojis?: string[] };
-        if (reactionMsg._reactionTarget && reactionMsg._reactionEmojis) {
+        if (msg._reactionTarget && msg._reactionEmojis) {
           reactionUpdates.push({
-            targetId: reactionMsg._reactionTarget,
+            targetId: msg._reactionTarget,
             nick: msg.nick,
-            emojis: reactionMsg._reactionEmojis,
+            emojis: msg._reactionEmojis,
           });
-        } else if (msg.body || msg.callInvite || msg.sharedFile) {
+        } else if (msg.retractsId) {
+          retractionUpdates.push(msg.retractsId);
+        } else if (msg.replacesId) {
+          correctionUpdates.push({
+            targetId: msg.replacesId,
+            body: msg.body,
+            markup: msg.markup,
+          });
+        } else if (msg.body || msg.callInvite || msg.sharedFile || msg.isSticker) {
           regularMessages.push(msg);
         }
       }
 
       // Convert to timeline messages
       const timeline = regularMessages.map((m) => fromLiveMessage(session.value!, m));
+
+      for (const update of correctionUpdates) {
+        const target = timeline.find((m) => m.id === update.targetId);
+        if (!target) continue;
+        target.body = update.body.trim();
+        target.isEdited = true;
+        if (update.markup && update.markup.length > 0) {
+          target.markup = update.markup;
+        } else {
+          delete target.markup;
+        }
+      }
+
+      for (const retractsId of retractionUpdates) {
+        const target = timeline.find((m) => m.id === retractsId);
+        if (!target) continue;
+        target.body = "";
+        target.isRetracted = true;
+      }
 
       // Apply reactions from MAM history
       for (const update of reactionUpdates) {

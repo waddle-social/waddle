@@ -173,6 +173,12 @@ impl LibSqlMamStorage {
             "ALTER TABLE mam_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'chat'",
         )
         .await?;
+        Self::ensure_column(
+            conn,
+            "stanza_xml",
+            "ALTER TABLE mam_messages ADD COLUMN stanza_xml TEXT",
+        )
+        .await?;
 
         conn.execute_batch(
             r#"
@@ -244,6 +250,8 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     origin_id TEXT,
     -- Message type ("chat", "groupchat", ...)
     message_type TEXT NOT NULL DEFAULT 'chat',
+    -- Full normalized stanza XML for faithful MAM replay
+    stanza_xml TEXT,
     -- Created timestamp for internal tracking
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -292,14 +300,15 @@ impl MamStorage for LibSqlMamStorage {
         } else {
             message.message_type.as_str()
         };
+        let stanza_xml = message.stanza_xml.as_deref();
 
         conn.execute(
             r#"
             INSERT INTO mam_messages (
                 id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                thread_id, reply_to_id, reply_to_jid, origin_id, message_type
+                thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             "#,
             (
                 archive_id.as_str(),
@@ -314,6 +323,7 @@ impl MamStorage for LibSqlMamStorage {
                 reply_to_jid,
                 origin_id,
                 message_type,
+                stanza_xml,
             ),
         )
         .await?;
@@ -338,7 +348,7 @@ impl MamStorage for LibSqlMamStorage {
             r#"
             SELECT
                 id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                thread_id, reply_to_id, reply_to_jid, origin_id, message_type
+                thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml
             FROM mam_messages
             WHERE room_jid = ?1
             "#,
@@ -474,6 +484,7 @@ impl MamStorage for LibSqlMamStorage {
             let reply_to_jid: Option<String> = row.get(9).ok();
             let origin_id: Option<String> = row.get(10).ok();
             let message_type: String = row.get(11).unwrap_or_else(|_| "chat".to_string());
+            let stanza_xml: Option<String> = row.get(12).ok();
 
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                 .map_err(|e| MamStorageError::Serialization(format!("Invalid timestamp: {}", e)))?
@@ -491,6 +502,7 @@ impl MamStorage for LibSqlMamStorage {
                 reply_to_jid,
                 origin_id,
                 message_type,
+                stanza_xml,
             });
         }
 
@@ -540,7 +552,7 @@ impl MamStorage for LibSqlMamStorage {
                 r#"
                 SELECT
                     id, room_jid, timestamp, from_jid, to_jid, body, stanza_id,
-                    thread_id, reply_to_id, reply_to_jid, origin_id, message_type
+                    thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml
                 FROM mam_messages
                 WHERE id = ?1
                 "#,
@@ -560,6 +572,7 @@ impl MamStorage for LibSqlMamStorage {
             let reply_to_jid: Option<String> = row.get(9).ok();
             let origin_id: Option<String> = row.get(10).ok();
             let message_type: String = row.get(11).unwrap_or_else(|_| "chat".to_string());
+            let stanza_xml: Option<String> = row.get(12).ok();
 
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                 .map_err(|e| MamStorageError::Serialization(format!("Invalid timestamp: {}", e)))?
@@ -577,6 +590,7 @@ impl MamStorage for LibSqlMamStorage {
                 reply_to_jid,
                 origin_id,
                 message_type,
+                stanza_xml,
             }))
         } else {
             Ok(None)
@@ -687,6 +701,9 @@ mod tests {
             reply_to_jid: Some("bob@example.com".to_string()),
             origin_id: Some("origin-abc".to_string()),
             message_type: "groupchat".to_string(),
+            stanza_xml: Some(
+                "<message xmlns='jabber:client' from='room@conference.example.com/alice' to='room@conference.example.com' type='groupchat' id='archive-stanza-1'><body>Reply body</body></message>".to_string(),
+            ),
         };
 
         let archive_id = storage
@@ -705,6 +722,7 @@ mod tests {
         assert_eq!(retrieved.reply_to_jid.as_deref(), Some("bob@example.com"));
         assert_eq!(retrieved.origin_id.as_deref(), Some("origin-abc"));
         assert_eq!(retrieved.message_type, "groupchat");
+        assert!(retrieved.stanza_xml.is_some());
     }
 
     #[tokio::test]

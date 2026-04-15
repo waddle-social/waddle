@@ -1608,36 +1608,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         drop(room); // Release the read lock before archival and sending
 
-        // Archive the message to MAM storage (only if it has a body)
-        let archive_id = if muc_msg.has_body() {
-            // Build the sender's MUC JID (room JID + nick resource)
+        // Archive user-visible room timeline events so refresh and MAM replay stay faithful.
+        let archive_id = if should_archive_timeline_message(&muc_msg.message) {
             let muc_sender_jid = format!("{}/{}", room_jid, sender_nick);
-            let reply_ref = parse_reply_from_message(&muc_msg.message);
-            let thread_id = thread_id_from_message(&muc_msg.message);
-            let origin_id = extract_origin_id(&muc_msg.message);
-
-            // Extract the body text for archival
-            let body = muc_msg
-                .message
-                .bodies
-                .get("")
-                .or_else(|| muc_msg.message.bodies.values().next())
-                .map(|b| b.0.clone())
-                .unwrap_or_default();
-
-            let archived_msg = ArchivedMessage {
-                id: String::new(), // Let storage generate ID
-                timestamp: Utc::now(),
-                from: muc_sender_jid,
-                to: room_jid.to_string(),
-                body,
-                stanza_id: muc_msg.message.id.clone(),
-                thread_id,
-                reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
-                reply_to_jid: reply_ref.and_then(|reply| reply.to),
-                origin_id,
-                message_type: "groupchat".to_string(),
-            };
+            let archived_msg = build_archived_message(
+                &muc_msg.message,
+                &muc_sender_jid,
+                &room_jid.to_string(),
+                String::new(),
+                Utc::now(),
+            );
 
             match self
                 .mam_storage
@@ -1880,30 +1860,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return Ok(());
         }
 
-        // Archive 1:1 messages to both sender's and recipient's personal MAM archives.
-        // Messages with a body are archived so clients can retrieve conversation history.
-        let body_text = msg.bodies.get("").or_else(|| msg.bodies.values().next());
-        if let Some(body) = body_text {
-            let reply_ref = parse_reply_from_message(&msg);
-            let thread_id = thread_id_from_message(&msg);
-            let origin_id = extract_origin_id(&msg);
+        // Archive all supported direct-message timeline events so personal MAM is complete.
+        if should_archive_timeline_message(&msg) {
             let archive_id = uuid::Uuid::new_v4().to_string();
             let now = Utc::now();
 
-            // Archive under sender's personal archive (keyed by sender bare JID)
-            let sender_archived = ArchivedMessage {
-                id: archive_id.clone(),
-                timestamp: now,
-                from: sender_jid.to_string(),
-                to: recipient_bare.to_string(),
-                body: body.0.clone(),
-                stanza_id: msg.id.clone(),
-                thread_id: thread_id.clone(),
-                reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
-                reply_to_jid: reply_ref.as_ref().and_then(|reply| reply.to.clone()),
-                origin_id: origin_id.clone(),
-                message_type: message_type_to_string(&msg.type_),
-            };
+            let sender_archived = build_archived_message(
+                &msg_with_from,
+                &sender_jid.to_string(),
+                &recipient_bare.to_string(),
+                archive_id.clone(),
+                now,
+            );
             if let Err(e) = self
                 .mam_storage
                 .store_message(&sender_bare.to_string(), &sender_archived)
@@ -1917,19 +1885,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             // Archive under recipient's personal archive (keyed by recipient bare JID)
             let recipient_archive_id = uuid::Uuid::new_v4().to_string();
-            let recipient_archived = ArchivedMessage {
-                id: recipient_archive_id.clone(),
-                timestamp: now,
-                from: sender_jid.to_string(),
-                to: recipient_bare.to_string(),
-                body: body.0.clone(),
-                stanza_id: msg.id.clone(),
-                thread_id,
-                reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
-                reply_to_jid: reply_ref.and_then(|reply| reply.to),
-                origin_id,
-                message_type: message_type_to_string(&msg.type_),
-            };
+            let recipient_archived = build_archived_message(
+                &msg_with_from,
+                &sender_jid.to_string(),
+                &recipient_bare.to_string(),
+                recipient_archive_id.clone(),
+                now,
+            );
             if let Err(e) = self
                 .mam_storage
                 .store_message(&recipient_bare.to_string(), &recipient_archived)
@@ -2585,44 +2547,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ) -> Result<(), XmppError> {
         use jid::Jid;
         use minidom::Element;
-        use xmpp_parsers::message::{Body, Message, MessageType as MsgType};
+        use xmpp_parsers::message::MessageType as MsgType;
 
         // Delay namespace (XEP-0203)
         const DELAY_NS: &str = "urn:xmpp:delay";
 
-        // Build the from JID (room@domain/sender_nick)
-        // The 'from' in archived message is typically the full room JID with nick
-        let from_jid: Jid = archived
-            .from
-            .parse()
-            .unwrap_or_else(|_| Jid::from(room_jid.clone()));
-
-        // Create the history message
-        let mut message = Message::new(Some(Jid::from(to_jid.clone())));
+        let mut message = replay_archived_message(archived, Some(room_jid));
         message.type_ = MsgType::Groupchat;
-        message.from = Some(from_jid);
-        message.id = Some(archived.id.clone());
-        message
-            .bodies
-            .insert(String::new(), Body(archived.body.clone()));
-        if let Some(thread_id) = archived.thread_id.as_ref() {
-            message.thread = Some(xmpp_parsers::message::Thread(thread_id.clone()));
-        }
-        if let Some(reply_to_id) = archived.reply_to_id.as_ref() {
-            let mut reply_builder = Element::builder("reply", crate::xep::xep0461::NS_REPLY)
-                .attr("id", reply_to_id.as_str());
-            if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
-                reply_builder = reply_builder.attr("to", reply_to_jid);
-            }
-            message.payloads.push(reply_builder.build());
-        }
-        if let Some(origin_id) = archived.origin_id.as_deref() {
-            message.payloads.push(
-                Element::builder("origin-id", crate::mam::STANZA_ID_NS)
-                    .attr("id", origin_id)
-                    .build(),
-            );
-        }
+        message.to = Some(Jid::from(to_jid.clone()));
 
         // Add delay element per XEP-0203
         let delay = Element::builder("delay", DELAY_NS)
@@ -7390,6 +7322,168 @@ fn message_type_to_string(msg_type: &MessageType) -> String {
         MessageType::Normal => "normal",
     }
     .to_string()
+}
+
+fn should_archive_timeline_message(msg: &xmpp_parsers::message::Message) -> bool {
+    if matches!(msg.type_, MessageType::Error) || crate::xep::should_skip_storage(msg) {
+        return false;
+    }
+
+    if !msg.bodies.is_empty() || !msg.subjects.is_empty() {
+        return true;
+    }
+
+    crate::xep::is_reaction_message(msg)
+        || crate::xep::is_retraction_message(msg)
+        || crate::xep::is_moderation_request_message(msg)
+        || crate::xep::is_moderation_result_message(msg)
+        || crate::xep::has_file_sharing(msg)
+        || crate::xep::is_sticker_message(msg)
+        || matches!(
+            crate::xep::extract_call_action(msg),
+            Some(crate::xep::CallAction::Invite(_))
+        )
+}
+
+fn archived_body_text(msg: &xmpp_parsers::message::Message) -> String {
+    msg.bodies
+        .get("")
+        .or_else(|| msg.bodies.values().next())
+        .map(|body| body.0.clone())
+        .or_else(|| {
+            msg.subjects
+                .get("")
+                .or_else(|| msg.subjects.values().next())
+                .map(|subject| subject.0.clone())
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_message_for_archive(
+    msg: &xmpp_parsers::message::Message,
+    from: &str,
+    to: &str,
+) -> xmpp_parsers::message::Message {
+    let mut normalized = msg.clone();
+
+    if let Ok(from_jid) = from.parse() {
+        normalized.from = Some(from_jid);
+    }
+    if let Ok(to_jid) = to.parse() {
+        normalized.to = Some(to_jid);
+    }
+
+    normalized
+}
+
+fn build_archived_message(
+    msg: &xmpp_parsers::message::Message,
+    from: &str,
+    to: &str,
+    id: String,
+    timestamp: chrono::DateTime<Utc>,
+) -> ArchivedMessage {
+    let normalized = normalize_message_for_archive(msg, from, to);
+    let reply_ref = parse_reply_from_message(&normalized);
+    let thread_id = thread_id_from_message(&normalized);
+    let origin_id = extract_origin_id(&normalized);
+    let stanza_xml = match crate::parser::stanza_to_string(normalized.clone()) {
+        Ok(xml) => Some(xml),
+        Err(error) => {
+            warn!(from = %from, to = %to, error = %error, "Failed to serialize archived stanza");
+            None
+        }
+    };
+
+    ArchivedMessage {
+        id,
+        timestamp,
+        from: from.to_string(),
+        to: to.to_string(),
+        body: archived_body_text(&normalized),
+        stanza_id: normalized.id.clone(),
+        thread_id,
+        reply_to_id: reply_ref.as_ref().map(|reply| reply.id.clone()),
+        reply_to_jid: reply_ref.and_then(|reply| reply.to),
+        origin_id,
+        message_type: message_type_to_string(&normalized.type_),
+        stanza_xml,
+    }
+}
+
+fn replay_archived_message(
+    archived: &ArchivedMessage,
+    room_jid: Option<&jid::BareJid>,
+) -> xmpp_parsers::message::Message {
+    if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
+        match stanza_xml.parse::<minidom::Element>() {
+            Ok(element) => match xmpp_parsers::message::Message::try_from(element) {
+                Ok(message) => return message,
+                Err(error) => {
+                    warn!(archive_id = %archived.id, error = %error, "Failed to parse archived stanza as message");
+                }
+            },
+            Err(error) => {
+                warn!(archive_id = %archived.id, error = %error, "Failed to parse archived stanza XML");
+            }
+        }
+    }
+
+    build_legacy_replayed_message(archived, room_jid)
+}
+
+fn build_legacy_replayed_message(
+    archived: &ArchivedMessage,
+    room_jid: Option<&jid::BareJid>,
+) -> xmpp_parsers::message::Message {
+    use jid::Jid;
+    use minidom::Element;
+    use xmpp_parsers::message::{Body, Message, Thread};
+
+    let to_jid = archived.to.parse().ok();
+    let mut message = Message::new(to_jid);
+    message.type_ = match archived.message_type.as_str() {
+        "groupchat" => MessageType::Groupchat,
+        "headline" => MessageType::Headline,
+        "error" => MessageType::Error,
+        "normal" => MessageType::Normal,
+        _ => MessageType::Chat,
+    };
+    message.from = archived
+        .from
+        .parse()
+        .ok()
+        .or_else(|| room_jid.cloned().map(Jid::from));
+    if let Some(stanza_id) = archived.stanza_id.as_ref() {
+        message.id = Some(stanza_id.clone());
+    } else if !archived.id.is_empty() {
+        message.id = Some(archived.id.clone());
+    }
+    if !archived.body.is_empty() {
+        message
+            .bodies
+            .insert(String::new(), Body(archived.body.clone()));
+    }
+    if let Some(thread_id) = archived.thread_id.as_ref() {
+        message.thread = Some(Thread(thread_id.clone()));
+    }
+    if let Some(reply_to_id) = archived.reply_to_id.as_ref() {
+        let mut reply_builder =
+            Element::builder("reply", crate::xep::xep0461::NS_REPLY).attr("id", reply_to_id);
+        if let Some(reply_to_jid) = archived.reply_to_jid.as_deref() {
+            reply_builder = reply_builder.attr("to", reply_to_jid);
+        }
+        message.payloads.push(reply_builder.build());
+    }
+    if let Some(origin_id) = archived.origin_id.as_deref() {
+        message.payloads.push(
+            Element::builder("origin-id", crate::mam::STANZA_ID_NS)
+                .attr("id", origin_id)
+                .build(),
+        );
+    }
+
+    message
 }
 
 fn isr_token_in_sasl_success_enabled() -> bool {
