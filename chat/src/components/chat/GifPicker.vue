@@ -47,7 +47,6 @@ watch(query, (q) => {
   debounceTimer = setTimeout(() => fetchGifs(q), 300);
 });
 
-// Load trending on mount
 fetchGifs("");
 
 function selectGif(gif: GiphyGif) {
@@ -56,41 +55,45 @@ function selectGif(gif: GiphyGif) {
 </script>
 
 <template>
-  <div class="absolute bottom-full left-0 right-0 mb-1 bg-background border border-foreground max-h-80 flex flex-col z-50">
+  <div class="absolute bottom-full left-0 right-0 mb-1 bg-popover border border-border rounded-md max-h-72 flex flex-col z-50 shadow-lg animate-fade-in overflow-hidden">
     <!-- Header -->
-    <div class="flex items-center gap-2 px-3 py-2 border-b border-foreground">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-border">
       <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
       <input
         v-model="query"
         placeholder="Search GIFs..."
-        class="flex-1 font-mono text-sm bg-transparent border-none focus:outline-none"
+        class="flex-1 text-[13px] bg-transparent border-none focus:outline-none placeholder:text-muted-foreground/50"
       />
       <button
-        class="text-muted-foreground hover:text-foreground flex-shrink-0"
+        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
         @click="emit('close')"
       >
         <X class="w-3.5 h-3.5" />
       </button>
     </div>
 
-    <!-- No API key warning -->
-    <div v-if="!apiKey" class="p-4 text-center text-sm font-mono text-muted-foreground">
-      GIPHY_API_KEY not configured. Add it to your environment variables.
+    <!-- No API key -->
+    <div v-if="!apiKey" class="p-5 text-center text-[13px] text-muted-foreground">
+      GIPHY_API_KEY not configured.
     </div>
 
-    <!-- Results grid -->
-    <div v-else class="flex-1 overflow-auto p-2">
-      <div v-if="isLoading" class="text-center py-4 text-sm font-mono text-muted-foreground">
-        Loading...
+    <!-- Results -->
+    <div v-else class="flex-1 overflow-auto p-1.5">
+      <div v-if="isLoading" class="text-center py-5 text-[13px] text-muted-foreground">
+        <div class="flex items-center justify-center gap-1.5">
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+        </div>
       </div>
-      <div v-else-if="results.length === 0" class="text-center py-4 text-sm font-mono text-muted-foreground">
+      <div v-else-if="results.length === 0" class="text-center py-5 text-[13px] text-muted-foreground">
         {{ query ? "No GIFs found" : "Loading trending GIFs..." }}
       </div>
       <div v-else class="grid grid-cols-3 gap-1">
         <button
           v-for="gif in results"
           :key="gif.id"
-          class="aspect-square overflow-hidden border border-foreground/20 hover:border-foreground transition-colors"
+          class="aspect-square overflow-hidden rounded border border-border hover:ring-1 hover:ring-primary transition-all"
           @click="selectGif(gif)"
         >
           <img
@@ -103,9 +106,9 @@ function selectGif(gif: GiphyGif) {
       </div>
     </div>
 
-    <!-- Giphy attribution -->
-    <div class="px-3 py-1 border-t border-foreground/30 text-right">
-      <span class="text-[10px] font-mono text-muted-foreground">Powered by GIPHY</span>
+    <!-- Attribution -->
+    <div class="px-3 py-1 border-t border-border text-right">
+      <span class="text-[10px] text-muted-foreground">Powered by GIPHY</span>
     </div>
   </div>
 </template>

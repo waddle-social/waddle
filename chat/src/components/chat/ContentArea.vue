@@ -95,26 +95,26 @@ watch(
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0">
-    <!-- Header -->
-    <div class="h-20 border-b border-foreground px-6 flex items-center justify-between bg-background flex-shrink-0">
-      <div class="flex items-center gap-4">
-        <div class="flex items-center gap-2">
-          <Hash class="w-4 h-4" />
-          <h1 class="text-xl font-mono font-bold">{{ channel?.name ?? "..." }}</h1>
+  <div class="flex-1 flex flex-col min-w-0 min-h-0 bg-background">
+    <!-- Header — thin, precise -->
+    <div class="h-12 border-b border-border px-5 flex items-center justify-between flex-shrink-0">
+      <div class="flex items-center gap-2.5">
+        <div class="flex items-center gap-1.5">
+          <Hash class="w-4 h-4 text-muted-foreground" />
+          <h1 class="text-[14px] font-semibold">{{ channel?.name ?? "..." }}</h1>
         </div>
         <div
           v-if="xmppStatus.state !== 'online'"
-          class="flex items-center gap-2 text-xs font-mono text-muted-foreground"
+          class="flex items-center gap-1.5 text-[11px] text-muted-foreground"
         >
           <span
-            class="w-2 h-2 inline-block"
-            :class="xmppStatus.state === 'error' ? 'bg-destructive' : 'bg-muted-foreground'"
+            class="w-1.5 h-1.5 rounded-full inline-block"
+            :class="xmppStatus.state === 'error' ? 'bg-destructive' : 'bg-warning animate-pulse'"
           />
           {{ xmppStatus.state }}
         </div>
       </div>
-      <div class="flex gap-1">
+      <div class="flex gap-0.5">
         <button
           v-if="channel && !mujiInCall"
           class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
@@ -159,8 +159,8 @@ watch(
         </button>
         <button
           v-if="channel"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
-          :class="showSearch ? 'bg-muted' : ''"
+          class="h-7 w-7 flex items-center justify-center rounded-md transition-colors"
+          :class="showSearch ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
           title="Search messages"
           @click="showSearch = !showSearch"
         >
@@ -168,7 +168,7 @@ watch(
         </button>
         <button
           v-if="canManageChannels && channel"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          class="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           title="Channel settings"
           @click="emit('editChannel')"
         >
@@ -225,18 +225,18 @@ watch(
       @end-call="emit('endCall')"
     />
 
-    <!-- XEP-0431: Search bar -->
-    <div v-if="showSearch" class="px-6 py-2 border-b border-foreground bg-background flex items-center gap-2 flex-shrink-0">
+    <!-- Search bar -->
+    <div v-if="showSearch" class="px-5 py-2 border-b border-border bg-surface flex items-center gap-2 flex-shrink-0 animate-fade-in">
       <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
       <input
         v-model="searchInput"
         placeholder="Search messages..."
-        class="flex-1 font-mono text-sm bg-transparent focus:outline-none"
+        class="flex-1 text-[13px] bg-transparent focus:outline-none placeholder:text-muted-foreground/50"
         @keydown.enter="doSearch"
       />
       <button
         v-if="searchInput"
-        class="text-muted-foreground hover:text-foreground"
+        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors"
         @click="closeSearch"
       >
         <X class="w-3.5 h-3.5" />
@@ -244,21 +244,21 @@ watch(
     </div>
 
     <!-- Search results -->
-    <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-foreground bg-muted/30 max-h-64 overflow-auto flex-shrink-0">
-      <div v-if="isSearching" class="px-6 py-4 text-sm font-mono text-muted-foreground">
+    <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-border bg-surface max-h-56 overflow-auto flex-shrink-0">
+      <div v-if="isSearching" class="px-5 py-3 text-[13px] text-muted-foreground">
         Searching...
       </div>
-      <div v-else class="divide-y divide-foreground/10">
+      <div v-else class="divide-y divide-border">
         <div
           v-for="result in searchResults"
           :key="result.id"
-          class="px-6 py-2 hover:bg-muted/50 transition-colors"
+          class="px-5 py-2.5 hover:bg-muted/50 transition-colors cursor-pointer"
         >
           <div class="flex items-baseline gap-2">
-            <span class="font-mono font-bold text-xs">{{ result.nick }}</span>
-            <span class="text-[10px] font-mono text-muted-foreground">{{ formatStamp(result.createdAt) }}</span>
+            <span class="font-medium text-[12px]">{{ result.nick }}</span>
+            <span class="text-[11px] font-mono text-muted-foreground">{{ formatStamp(result.createdAt) }}</span>
           </div>
-          <p class="text-xs font-mono text-muted-foreground truncate">{{ result.body }}</p>
+          <p class="text-[12px] text-muted-foreground truncate mt-0.5">{{ result.body }}</p>
         </div>
       </div>
     </div>
@@ -266,27 +266,39 @@ watch(
     <!-- Error banner -->
     <div
       v-if="actionError || mujiError"
-      class="px-6 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
+      class="px-5 py-2.5 bg-destructive/10 border-b border-destructive/20 text-[13px] text-destructive animate-fade-in"
     >
       <div v-if="actionError">{{ actionError }}</div>
       <div v-if="mujiError && mujiError !== actionError">{{ mujiError }}</div>
     </div>
 
     <!-- Messages -->
-    <div ref="messagesContainer" class="flex-1 overflow-auto px-6 py-6">
-      <div v-if="isLoadingMessages" class="text-center py-8 text-sm font-mono text-muted-foreground">
-        Loading messages...
+    <div ref="messagesContainer" class="flex-1 min-h-0 overflow-auto px-5 py-3">
+      <div v-if="isLoadingMessages" class="text-center py-12 text-[13px] text-muted-foreground">
+        <div class="flex items-center justify-center gap-1.5">
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+        </div>
+        <p class="mt-2">Loading messages...</p>
       </div>
 
-      <div v-else-if="!channel" class="text-center py-8 text-sm font-mono text-muted-foreground">
-        Select a channel to start chatting
+      <div v-else-if="!channel" class="flex flex-col items-center justify-center py-16">
+        <div class="w-10 h-10 rounded-lg bg-muted flex items-center justify-center mb-3">
+          <Hash class="w-5 h-5 text-muted-foreground" />
+        </div>
+        <p class="text-[13px] text-muted-foreground">Select a channel to start chatting</p>
       </div>
 
-      <div v-else-if="messages.length === 0" class="text-center py-8 text-sm font-mono text-muted-foreground">
-        No messages yet. Start the conversation!
+      <div v-else-if="messages.length === 0" class="flex flex-col items-center justify-center py-16">
+        <div class="w-10 h-10 rounded-lg bg-muted flex items-center justify-center mb-3">
+          <Hash class="w-5 h-5 text-muted-foreground" />
+        </div>
+        <p class="text-[14px] font-medium mb-1">Welcome to #{{ channel.name }}</p>
+        <p class="text-[13px] text-muted-foreground">This is the start of the conversation.</p>
       </div>
 
-      <div v-else class="space-y-4 max-w-4xl">
+      <div v-else class="max-w-none">
         <MessageCard
           v-for="msg in messages"
           :key="msg.id"
@@ -304,11 +316,16 @@ watch(
     <!-- Typing indicator -->
     <div
       v-if="typingUsers.length > 0"
-      class="px-6 py-1.5 text-xs font-mono text-muted-foreground flex-shrink-0"
+      class="px-5 py-1 text-[11px] text-muted-foreground flex items-center gap-1.5 flex-shrink-0"
     >
-      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing...</span>
-      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing...</span>
-      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing...</span>
+      <span class="flex gap-0.5">
+        <span class="typing-dot" />
+        <span class="typing-dot" />
+        <span class="typing-dot" />
+      </span>
+      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
+      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
+      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
     </div>
 
     <!-- Composer -->

@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig, fontProviders } from "astro/config";
+import { defineConfig } from "astro/config";
 import cloudflare from "@astrojs/cloudflare";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@astrojs/vue";
@@ -11,14 +11,6 @@ export default defineConfig({
   server: {
     port: 4321,
   },
-
-  fonts: [
-    {
-      provider: fontProviders.google(),
-      name: "Geist Mono",
-      cssVariable: "--font-geist-mono",
-    },
-  ],
 
   vite: {
     plugins: [tailwindcss()],

@@ -19,29 +19,29 @@ const emit = defineEmits<{
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="border-b border-foreground p-6 flex items-center justify-between">
-      <h2 class="text-xl font-mono font-bold uppercase tracking-wider">{{ title }}</h2>
-      <button class="p-1 hover:bg-muted transition-colors" @click="open = false">
-        <X class="w-5 h-5" />
+    <div class="border-b border-border px-5 py-4 flex items-center justify-between">
+      <h2 class="text-[15px] font-semibold">{{ title }}</h2>
+      <button class="p-1 rounded-md hover:bg-muted transition-colors" @click="open = false">
+        <X class="w-4 h-4 text-muted-foreground" />
       </button>
     </div>
 
-    <div class="p-6">
-      <p class="font-mono text-sm leading-relaxed">{{ message }}</p>
+    <div class="px-5 py-4">
+      <p class="text-[13px] leading-relaxed text-muted-foreground">{{ message }}</p>
     </div>
 
-    <div class="border-t border-foreground p-6 flex justify-end gap-3">
+    <div class="border-t border-border px-5 py-3 flex justify-end gap-2">
       <button
-        class="font-mono uppercase tracking-wider text-sm py-2 px-4 border border-foreground hover:bg-muted transition-colors"
+        class="text-[13px] font-medium py-1.5 px-3 rounded-md border border-border hover:bg-muted transition-colors"
         @click="open = false"
       >
         Cancel
       </button>
       <button
-        class="font-mono uppercase tracking-wider text-sm py-2 px-4 border transition-colors disabled:opacity-50"
+        class="text-[13px] font-medium py-1.5 px-3 rounded-md transition-all disabled:opacity-40"
         :class="destructive
-          ? 'bg-destructive text-destructive-foreground border-destructive hover:bg-destructive/90'
-          : 'bg-foreground text-background border-foreground hover:bg-foreground/90'"
+          ? 'bg-destructive text-destructive-foreground hover:opacity-90'
+          : 'bg-primary text-primary-foreground hover:opacity-90'"
         :disabled="loading"
         @click="emit('confirm')"
       >

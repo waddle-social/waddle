@@ -29,7 +29,6 @@ const emojiQuery = ref("");
 const selectedIndex = ref(0);
 const inputEl = ref<HTMLInputElement | null>(null);
 
-/** Strip diacritics for fuzzy matching (ø→o, ü→u, etc.) */
 function stripDiacritics(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
@@ -49,7 +48,6 @@ const mentionResults = computed(() => {
 
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
 
-// Unified autocomplete results for keyboard nav
 const activeResults = computed(() => {
   if (showMentions.value) return mentionResults.value;
   if (showEmoji.value) return emojiResults.value;
@@ -67,7 +65,6 @@ function checkAutocomplete(input: HTMLInputElement) {
   const pos = input.selectionStart ?? 0;
   const textBefore = input.value.slice(0, pos);
 
-  // Check for @mention — unicode-aware: match @ followed by any non-whitespace chars
   const mentionMatch = textBefore.match(/(?:^|\s)@(\S*)$/);
   if (mentionMatch) {
     mentionQuery.value = mentionMatch[1];
@@ -78,7 +75,6 @@ function checkAutocomplete(input: HTMLInputElement) {
   }
   showMentions.value = false;
 
-  // Check for :emoji shortcode
   const emojiMatch = textBefore.match(/(?:^|\s):([a-z0-9_+-]*)$/i);
   if (emojiMatch && emojiMatch[1].length >= 2) {
     emojiQuery.value = emojiMatch[1];
@@ -176,7 +172,7 @@ function onGifSelected(url: string) {
 </script>
 
 <template>
-  <div class="relative h-16 border-t border-foreground bg-background px-6 flex items-center gap-3 flex-shrink-0">
+  <div class="relative border-t border-border bg-background px-4 py-2.5 flex items-center gap-2 flex-shrink-0">
     <GifPicker
       v-if="showGifPicker"
       :api-key="tenorApiKey"
@@ -187,61 +183,66 @@ function onGifSelected(url: string) {
     <!-- @mention autocomplete -->
     <div
       v-if="showMentions && mentionResults.length > 0"
-      class="absolute bottom-full left-6 mb-1 bg-background border border-foreground max-h-48 overflow-auto z-50 min-w-48"
+      class="absolute bottom-full left-4 mb-1 bg-popover border border-border rounded-md max-h-48 overflow-auto z-50 min-w-44 shadow-lg animate-fade-in"
     >
-      <button
-        v-for="(name, i) in mentionResults"
-        :key="name"
-        class="w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-muted transition-colors flex items-center gap-2"
-        :class="i === selectedIndex ? 'bg-muted' : ''"
-        @mousedown.prevent="insertMention(name)"
-      >
-        <span class="text-muted-foreground">@</span>{{ name }}
-      </button>
+      <div class="py-0.5">
+        <button
+          v-for="(name, i) in mentionResults"
+          :key="name"
+          class="w-full px-3 py-1.5 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2"
+          :class="i === selectedIndex ? 'bg-muted' : ''"
+          @mousedown.prevent="insertMention(name)"
+        >
+          <span class="text-muted-foreground text-[11px]">@</span>
+          <span class="font-medium">{{ name }}</span>
+        </button>
+      </div>
     </div>
 
     <!-- :emoji autocomplete -->
     <div
       v-if="showEmoji && emojiResults.length > 0"
-      class="absolute bottom-full left-6 mb-1 bg-background border border-foreground max-h-48 overflow-auto z-50 min-w-48"
+      class="absolute bottom-full left-4 mb-1 bg-popover border border-border rounded-md max-h-48 overflow-auto z-50 min-w-44 shadow-lg animate-fade-in"
     >
-      <button
-        v-for="(entry, i) in emojiResults"
-        :key="entry.name"
-        class="w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-muted transition-colors flex items-center gap-2"
-        :class="i === selectedIndex ? 'bg-muted' : ''"
-        @mousedown.prevent="insertEmoji(entry.emoji)"
-      >
-        <span class="text-base">{{ entry.emoji }}</span>
-        <span class="text-muted-foreground">:{{ entry.name }}:</span>
-      </button>
+      <div class="py-0.5">
+        <button
+          v-for="(entry, i) in emojiResults"
+          :key="entry.name"
+          class="w-full px-3 py-1.5 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2"
+          :class="i === selectedIndex ? 'bg-muted' : ''"
+          @mousedown.prevent="insertEmoji(entry.emoji)"
+        >
+          <span>{{ entry.emoji }}</span>
+          <span class="text-muted-foreground text-[11px]">:{{ entry.name }}:</span>
+        </button>
+      </div>
     </div>
 
     <button
-      class="h-9 w-9 flex items-center justify-center hover:bg-muted transition-colors flex-shrink-0"
-      :class="showGifPicker ? 'bg-muted' : ''"
+      class="h-8 w-8 flex items-center justify-center rounded-md transition-colors flex-shrink-0"
+      :class="showGifPicker ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
       title="GIF"
       :disabled="disabled"
       @click="showGifPicker = !showGifPicker"
     >
-      <Image class="w-3.5 h-3.5" />
+      <Image class="w-4 h-4" />
     </button>
     <input
       ref="inputEl"
       :value="draft"
       :placeholder="slowModeCooldown > 0 ? `Slow mode — wait ${slowModeCooldown}s` : `Message #${channelName}`"
       :disabled="disabled || slowModeCooldown > 0"
-      class="flex-1 font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-3 bg-background text-sm h-9"
+      class="flex-1 border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring px-3 bg-surface text-[13px] h-9 placeholder:text-muted-foreground/50 transition-shadow"
       :class="slowModeCooldown > 0 ? 'opacity-50' : ''"
       @input="onInput"
       @keydown="onKeydown"
     />
     <button
-      class="h-9 w-9 flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors disabled:opacity-50 flex-shrink-0"
+      class="h-9 w-9 flex items-center justify-center bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-all disabled:opacity-30 flex-shrink-0"
       :disabled="isSending || disabled || !draft.trim() || slowModeCooldown > 0"
       @click="emit('send')"
     >
-      <span v-if="slowModeCooldown > 0" class="text-[10px] font-mono font-bold">{{ slowModeCooldown }}</span>
+      <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono">{{ slowModeCooldown }}</span>
       <Send v-else class="w-3.5 h-3.5" />
     </button>
   </div>
