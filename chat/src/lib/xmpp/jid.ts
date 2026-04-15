@@ -5,6 +5,10 @@ export function jidDomain(jid: string): string {
   return jid.split("@")[1] ?? "localhost";
 }
 
+export function barePeerJid(fullJid: string): string {
+  return fullJid.split("/")[0] ?? "";
+}
+
 export function roomBareJidFor(
   session: WaddleSession,
   waddleId: string,

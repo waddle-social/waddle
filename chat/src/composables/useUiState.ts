@@ -3,6 +3,7 @@ import type { AdminTab } from "@/lib/chat-ui";
 
 export function useUiState() {
   const adminTab = ref<AdminTab>("rooms");
+  const sidebarMode = ref<"channels" | "dms">("channels");
   const showMobileNav = ref(false);
   const showMobileDetails = ref(false);
   const showCreateWaddle = ref(false);
@@ -26,6 +27,7 @@ export function useUiState() {
 
   return {
     adminTab,
+    sidebarMode,
     showMobileNav,
     showMobileDetails,
     showCreateWaddle,

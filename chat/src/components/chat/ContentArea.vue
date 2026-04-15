@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Hash, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
+import { Hash, MessageCircle, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { MujiCallPhase, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
@@ -8,12 +8,15 @@ import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import CallOverlay from "@/components/chat/CallOverlay.vue";
+import UserPopover from "@/components/chat/UserPopover.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 
 const props = defineProps<{
   waddle: WaddleSummary | null;
   channel: ChannelSummary | null;
+  dmPeer?: { peerJid: string; peerUsername: string; presenceShow?: string } | null;
+  sidebarMode?: "channels" | "dms";
   messages: TimelineMessage[];
   xmppStatus: XmppStatusSnapshot;
   actionError: string;
@@ -23,6 +26,7 @@ const props = defineProps<{
   typingUsers: string[];
   currentUser?: string;
   avatarUrlByAuthor: Record<string, string | null>;
+  authorJidByNick?: Record<string, string>;
   tenorApiKey: string;
   memberNames: string[];
   roomHats: RoomHats;
@@ -66,12 +70,14 @@ const emit = defineEmits<{
   toggleMic: [];
   toggleCamera: [];
   joinCallFromMessage: [invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }];
+  openDm: [peerJid: string];
 }>();
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
+const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
 
 defineExpose({ messagesContainer });
 
@@ -83,6 +89,30 @@ function closeSearch() {
   showSearch.value = false;
   searchInput.value = "";
   emit("clearSearch");
+}
+
+function presenceText(show?: string): string {
+  if (show === "available") return "online";
+  if (show === "away") return "away";
+  if (show === "dnd") return "do not disturb";
+  if (show === "xa") return "extended away";
+  return "offline";
+}
+
+function onAvatarClick(author: string) {
+  const authorJid = props.authorJidByNick?.[author];
+  if (!authorJid || author === props.currentUser) return;
+  popoverAuthor.value = { username: author, jid: authorJid };
+}
+
+function closePopover() {
+  popoverAuthor.value = null;
+}
+
+function openPopoverDm() {
+  if (!popoverAuthor.value) return;
+  emit("openDm", popoverAuthor.value.jid);
+  popoverAuthor.value = null;
 }
 
 // XEP-0333: Send displayed marker for the latest non-self message
@@ -104,8 +134,11 @@ watch(
     <div class="h-14 border-b border-border px-6 flex items-center justify-between flex-shrink-0 glass-surface">
       <div class="flex items-center gap-3">
         <div class="flex items-center gap-2">
-          <Hash class="w-4 h-4 text-primary/70" />
-          <h1 class="text-[15px] font-display font-bold tracking-tight">{{ channel?.name ?? "..." }}</h1>
+          <component :is="dmPeer ? MessageCircle : Hash" class="w-4 h-4 text-primary/70" />
+          <h1 class="text-[15px] font-display font-bold tracking-tight">
+            {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "..." }}
+          </h1>
+          <span v-if="dmPeer" class="text-[11px] text-muted-foreground">· {{ presenceText(dmPeer.presenceShow) }}</span>
         </div>
         <div
           v-if="xmppStatus.state !== 'online'"
@@ -162,7 +195,7 @@ watch(
           <VideoOff v-else class="w-3.5 h-3.5" />
         </button>
         <button
-          v-if="channel"
+          v-if="channel || dmPeer"
           class="h-8 w-8 flex items-center justify-center rounded-lg transition-all duration-200"
           :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
           title="Search messages"
@@ -287,18 +320,22 @@ watch(
         <p class="mt-3 text-muted-foreground/60">Loading messages...</p>
       </div>
 
-      <div v-else-if="!channel" class="flex flex-col items-center justify-center py-20">
+      <div v-else-if="!channel && !dmPeer" class="flex flex-col items-center justify-center py-20">
         <div class="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mb-4">
-          <Hash class="w-5 h-5 text-primary/50" />
+          <component :is="sidebarMode === 'dms' ? MessageCircle : Hash" class="w-5 h-5 text-primary/50" />
         </div>
-        <p class="text-[14px] text-muted-foreground font-display">Select a channel to start chatting</p>
+        <p class="text-[14px] text-muted-foreground font-display">
+          {{ sidebarMode === "dms" ? "Select a conversation" : "Select a channel to start chatting" }}
+        </p>
       </div>
 
       <div v-else-if="messages.length === 0" class="flex flex-col items-center justify-center py-20">
         <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
-          <Hash class="w-5 h-5 text-primary" />
+          <component :is="dmPeer ? MessageCircle : Hash" class="w-5 h-5 text-primary" />
         </div>
-        <p class="text-[16px] font-display font-bold mb-1">Welcome to #{{ channel.name }}</p>
+        <p class="text-[16px] font-display font-bold mb-1">
+          {{ dmPeer ? `Conversation with @${dmPeer.peerUsername}` : `Welcome to #${channel?.name}` }}
+        </p>
         <p class="text-[13px] text-muted-foreground">This is the start of the conversation.</p>
       </div>
 
@@ -312,10 +349,12 @@ watch(
           :hats="roomHats[msg.author] ?? []"
           :presence="roomPresence[msg.author] ?? 'offline'"
           :last-seen="roomLastSeen[msg.author]"
+          :author-jid="authorJidByNick?.[msg.author]"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
           @join-call="(invite) => emit('joinCallFromMessage', invite)"
+          @avatar-click="onAvatarClick"
         />
       </div>
     </div>
@@ -337,17 +376,26 @@ watch(
 
     <!-- Composer -->
     <MessageComposer
-      v-if="channel"
+      v-if="channel || dmPeer"
       v-model:draft="draft"
-      :channel-name="channel.name"
+      :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
       :is-sending="isSending"
-      :disabled="!channel"
+      :disabled="!channel && !dmPeer"
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
       @send="emit('send')"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
+    />
+    <UserPopover
+      :open="!!popoverAuthor"
+      :username="popoverAuthor?.username ?? ''"
+      :avatar-url="popoverAuthor ? avatarUrlByAuthor[popoverAuthor.username] ?? null : null"
+      :presence-text="dmPeer?.peerUsername === popoverAuthor?.username ? presenceText(dmPeer.presenceShow) : undefined"
+      :can-message="!!popoverAuthor"
+      @close="closePopover"
+      @message="openPopoverDm"
     />
   </div>
 </template>

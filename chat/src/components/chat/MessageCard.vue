@@ -29,6 +29,7 @@ const props = defineProps<{
   avatarUrl?: string | null;
   presence?: OccupantPresence;
   lastSeen?: number;
+  authorJid?: string;
 }>();
 
 const emit = defineEmits<{
@@ -36,6 +37,7 @@ const emit = defineEmits<{
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
   joinCall: [invite: NonNullable<TimelineMessage["callInvite"]>];
+  avatarClick: [author: string];
 }>();
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
@@ -93,6 +95,12 @@ function onEditKeydown(e: KeyboardEvent) {
     cancelEdit();
   }
 }
+
+function emitAvatarClick() {
+  if (props.authorJid && !props.message.isSelf) {
+    emit("avatarClick", props.message.author);
+  }
+}
 </script>
 
 <template>
@@ -144,7 +152,13 @@ function onEditKeydown(e: KeyboardEvent) {
       isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
     ]"
   >
-    <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" class="mt-0.5" />
+    <button
+      class="mt-0.5 rounded-lg"
+      type="button"
+      @click.stop="emitAvatarClick"
+    >
+      <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
+    </button>
     <div class="flex-1 min-w-0">
       <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
         <span class="font-semibold text-[13px]">{{ message.author }}</span>

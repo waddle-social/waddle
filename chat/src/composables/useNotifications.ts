@@ -17,6 +17,13 @@ export interface MentionNotificationOptions {
   onNavigate?: (roomJid: string) => void;
 }
 
+export interface DmNotificationOptions {
+  senderUsername: string;
+  peerJid: string;
+  body: string;
+  onNavigate?: (peerJid: string) => void;
+}
+
 export function useNotifications() {
   const permissionState = ref<NotificationPermission>(
     hasNotificationApi ? Notification.permission : "denied",
@@ -61,6 +68,23 @@ export function useNotifications() {
       notification.close();
     };
 
+    setTimeout(() => notification.close(), 5000);
+  }
+
+  function showDmNotification(opts: DmNotificationOptions) {
+    if (!hasNotificationApi) return;
+    if (permissionState.value !== "granted" || !notificationsEnabled.value) return;
+    const body = opts.body.length > 100 ? `${opts.body.slice(0, 100)}…` : opts.body;
+    const notification = new Notification(`Message from @${opts.senderUsername}`, {
+      body,
+      tag: opts.peerJid,
+      icon: "/favicon.svg",
+    });
+    notification.onclick = () => {
+      window.focus();
+      opts.onNavigate?.(opts.peerJid);
+      notification.close();
+    };
     setTimeout(() => notification.close(), 5000);
   }
 
@@ -143,6 +167,7 @@ export function useNotifications() {
     notificationsEnabled,
     requestPermission,
     showMentionNotification,
+    showDmNotification,
     registerServiceWorker,
     subscribeToPush,
     syncPushSubscription,

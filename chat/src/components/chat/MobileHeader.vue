@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { Menu, Info, Hash } from "lucide-vue-next";
+import { Menu, Info, Hash, MessageCircle } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
 
 defineProps<{
   waddle: WaddleSummary | null;
   channel: ChannelSummary | null;
+  dmPeer?: { peerUsername: string } | null;
+  sidebarMode?: "channels" | "dms";
   session: WaddleSession | null;
 }>();
 
@@ -25,11 +27,15 @@ const emit = defineEmits<{
     </button>
     <div class="min-w-0 text-center">
       <div class="font-display font-bold text-[14px] truncate flex items-center justify-center gap-1.5">
-        <Hash v-if="channel" class="w-3 h-3 text-primary/60" />
-        {{ channel ? channel.name : waddle?.name ?? "Waddle" }}
+        <Hash v-if="channel && !dmPeer" class="w-3 h-3 text-primary/60" />
+        <MessageCircle v-else-if="dmPeer" class="w-3 h-3 text-primary/60" />
+        {{ dmPeer ? dmPeer.peerUsername : (channel ? channel.name : waddle?.name ?? "Waddle") }}
       </div>
-      <div v-if="channel && waddle" class="text-[11px] text-muted-foreground truncate">
+      <div v-if="channel && waddle && !dmPeer" class="text-[11px] text-muted-foreground truncate">
         {{ waddle.name }}
+      </div>
+      <div v-else-if="dmPeer" class="text-[11px] text-muted-foreground truncate">
+        Direct Message
       </div>
     </div>
     <button
