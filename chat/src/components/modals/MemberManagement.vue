@@ -4,6 +4,7 @@ import AppDialog from "@/components/ui/AppDialog.vue";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import type { MemberSummary, UserSearchResult } from "@/lib/waddle-api";
 import type { EditableRole } from "@/lib/chat-ui";
+import type { RoomPresence } from "@/lib/xmpp-client";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -14,6 +15,8 @@ defineProps<{
   searchResults: UserSearchResult[];
   isSearching: boolean;
   canManageMembers: boolean;
+  roomPresence?: RoomPresence;
+  roomLastSeen?: Record<string, number>;
 }>();
 
 const emit = defineEmits<{
@@ -94,7 +97,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         :key="member.user_id"
         class="flex items-center gap-2.5 p-2.5 rounded-xl hover:bg-muted/50 transition-all duration-200"
       >
-        <AppAvatar :name="member.username" :src="member.avatar_url" size="sm" />
+        <AppAvatar :name="member.username" :src="member.avatar_url" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />
         <div class="flex-1 min-w-0">
           <div class="text-[13px] font-medium truncate">{{ member.username }}</div>
           <div class="text-[11px] text-muted-foreground capitalize">

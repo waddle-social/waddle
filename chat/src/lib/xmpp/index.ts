@@ -15,7 +15,9 @@ export type {
   ReactionEvent,
   RemoteParticipant,
   RoomActivityEvent,
+  OccupantPresence,
   RoomHats,
+  RoomPresence,
   SharedFileInfo,
   XmppStatusSnapshot,
 } from "./types";

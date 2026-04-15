@@ -1,44 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:xmpp.org)",
-      "Bash(wc -l /Users/rawkode/Code/src/github.com/waddle-social/waddle/server/crates/waddle-xmpp/src/*.rs)",
-      "Bash(gh pr:*)",
-      "mcp__claude_ai_GitHub__issue_read",
-      "Bash(cargo check:*)",
-      "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(grep -r 'cuenv up' /Users/rawkode/Code/src/github.com/cuenv/cuenv --include=*.md --include=*.rs)",
-      "Bash(grep \"\\\\.cue$\")",
-      "Bash(npx astro:*)",
-      "Bash(bun run:*)",
-      "Bash(curl -s http://localhost:4321/@vite/client)",
-      "Bash(pkill -f \"astro dev\")",
-      "Bash(git stash:*)",
-      "Bash(grep -r \"devMatch\\\\|isDev\" /Users/rawkode/Code/src/github.com/waddle-social/waddle/chat/node_modules/astro/dist/core/app/*.d.ts)",
-      "Bash(bun install:*)",
-      "Bash(bun add:*)",
-      "Bash(bunx vite:*)",
-      "Bash(bunx vue-tsc:*)",
-      "Bash(wc -l /Users/rawkode/Code/src/github.com/waddle-social/waddle/chat/src/lib/*.ts)",
-      "Bash(grep:*)",
-      "mcp__plugin_context7_context7__resolve-library-id",
-      "mcp__plugin_context7_context7__query-docs",
-      "Bash(git show:*)",
-      "Bash(ls:*)",
-      "Bash(bunx astro:*)",
-      "Bash(bunx wrangler:*)",
-      "Bash(git checkout:*)",
-      "Bash(git fetch:*)",
-      "Bash(git rebase:*)",
-      "Bash(python3:*)",
-      "Bash(git:*)",
-      "WebFetch(domain:docs.astro.build)",
-      "Bash(jj log:*)",
-      "Bash(jj diff:*)",
-      "Bash(find:*)"
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(bun run:*)"
     ]
   }
 }

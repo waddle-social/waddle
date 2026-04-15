@@ -7,7 +7,8 @@ import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
-  LiveRoomMessage, MujiCallEvent, ReactionEvent, RoomActivityEvent, RoomHats, XmppStatusSnapshot,
+  LiveRoomMessage, MujiCallEvent, OccupantPresence, ReactionEvent, RoomActivityEvent,
+  RoomHats, RoomPresence, XmppStatusSnapshot,
 } from "./types";
 import { roomBareJidFor, sfuServiceJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
@@ -89,6 +90,16 @@ function keepOnlyOAuthBearer(xmpp: Agent) {
   }
 }
 
+function parsePresenceShow(show: string | undefined): OccupantPresence {
+  switch (show) {
+    case "away":
+    case "xa":    return "away";
+    case "dnd":   return "dnd";
+    case "chat":  return "online";
+    default:      return "online";
+  }
+}
+
 function parsePresenceHats(value: unknown): WaddleHat[] {
   const hats = Array.isArray(value) ? value : value ? [value] : [];
   return hats
@@ -111,6 +122,8 @@ export class BrowserXmppClient {
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private mujiCallHandler: ((event: MujiCallEvent) => void) | null = null;
+  private presenceHandler: ((presence: RoomPresence) => void) | null = null;
+  private lastSeenHandler: ((nick: string, timestamp: number) => void) | null = null;
   private xmpp: Agent | null = null;
   private connectPromise: Promise<void> | null = null;
   private connected = false;
@@ -119,6 +132,7 @@ export class BrowserXmppClient {
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
+  private roomPresence: RoomPresence = {};
   private readonly mujiSessions = new Map<string, MujiSession>();
 
   constructor(session: WaddleSession) { this.session = session; }
@@ -134,6 +148,8 @@ export class BrowserXmppClient {
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
   setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
   setMujiCallHandler(h: (event: MujiCallEvent) => void) { this.mujiCallHandler = h; }
+  setPresenceHandler(h: (presence: RoomPresence) => void) { this.presenceHandler = h; }
+  setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.lastSeenHandler = h; }
 
   // -- Connection lifecycle --
 
@@ -150,6 +166,8 @@ export class BrowserXmppClient {
     this.mujiSessions.clear();
     this.roomHats = {};
     this.hatsHandler?.({});
+    this.roomPresence = {};
+    this.presenceHandler?.({});
     const xmpp = createClient({
       jid: this.session.jid,
       // The session_id is a bearer token — use OAUTHBEARER (RFC 7628)
@@ -248,6 +266,8 @@ export class BrowserXmppClient {
     this.currentRoom = nextRoom;
     this.roomHats = {};
     this.hatsHandler?.({});
+    this.roomPresence = {};
+    this.presenceHandler?.({});
     const xmpp = this.xmpp;
     if (!xmpp) return;
 
@@ -267,6 +287,8 @@ export class BrowserXmppClient {
         this.stopSelfPing();
         this.roomHats = {};
         this.hatsHandler?.({});
+        this.roomPresence = {};
+        this.presenceHandler?.({});
       }
       throw error;
     }
@@ -613,6 +635,8 @@ export class BrowserXmppClient {
         this.mujiSessions.clear();
         this.roomHats = {};
         this.hatsHandler?.({});
+        this.roomPresence = {};
+        this.presenceHandler?.({});
         this.stopSelfPing();
       }
       const detail = err?.message ?? "Live room connection offline";
@@ -631,6 +655,8 @@ export class BrowserXmppClient {
         if (room === this.currentRoom && nick) {
           this.roomHats[nick] = parsePresenceHats(ext(pres).hats ?? ext(pres).hat);
           this.hatsHandler?.({ ...this.roomHats });
+          this.roomPresence[nick] = parsePresenceShow(pres.show);
+          this.presenceHandler?.({ ...this.roomPresence });
         }
         if (room && !nick && typeof pres.vcardAvatar === "string" && pres.vcardAvatar)
           this.roomAvatarHandler?.(room, pres.vcardAvatar);
@@ -645,6 +671,9 @@ export class BrowserXmppClient {
         if (room === this.currentRoom && nick) {
           delete this.roomHats[nick];
           this.hatsHandler?.({ ...this.roomHats });
+          this.roomPresence[nick] = "offline";
+          this.presenceHandler?.({ ...this.roomPresence });
+          this.lastSeenHandler?.(nick, Date.now());
         }
       } catch (error) {
         console.error("Failed to process MUC unavailable presence", error);

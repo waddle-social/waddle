@@ -89,6 +89,9 @@ export interface OccupantHat {
 
 export type RoomHats = Record<string, OccupantHat[]>;
 
+export type OccupantPresence = "online" | "away" | "dnd" | "offline";
+export type RoomPresence = Record<string, OccupantPresence>;
+
 export interface DisplayedEvent {
   roomJid: string;
   nick: string;

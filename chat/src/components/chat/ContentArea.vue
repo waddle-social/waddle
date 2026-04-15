@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { Hash, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
-import type { MujiCallPhase, XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-client";
+import type { MujiCallPhase, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -26,6 +26,8 @@ const props = defineProps<{
   tenorApiKey: string;
   memberNames: string[];
   roomHats: RoomHats;
+  roomPresence: RoomPresence;
+  roomLastSeen: Record<string, number>;
   slowModeCooldown: number;
   searchResults: { id: string; nick: string; body: string; createdAt: string }[];
   isSearching: boolean;
@@ -308,6 +310,8 @@ watch(
           :current-user="props.currentUser"
           :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
           :hats="roomHats[msg.author] ?? []"
+          :presence="roomPresence[msg.author] ?? 'offline'"
+          :last-seen="roomLastSeen[msg.author]"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"

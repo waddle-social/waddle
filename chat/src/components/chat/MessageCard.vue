@@ -3,7 +3,7 @@ import { ref, computed } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
-import type { OccupantHat } from "@/lib/xmpp-client";
+import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 
 const HAT_LABELS: Record<string, string> = {
@@ -27,6 +27,8 @@ const props = defineProps<{
   currentUser?: string;
   hats: OccupantHat[];
   avatarUrl?: string | null;
+  presence?: OccupantPresence;
+  lastSeen?: number;
 }>();
 
 const emit = defineEmits<{
@@ -99,7 +101,7 @@ function onEditKeydown(e: KeyboardEvent) {
     v-if="message.isRetracted"
     class="flex gap-3 px-3 py-2 opacity-30 animate-message-in"
   >
-    <AppAvatar :name="message.author" :src="avatarUrl" size="md" />
+    <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
     <div class="flex-1 min-w-0 pt-0.5">
       <div class="flex items-baseline gap-2 mb-0.5">
         <span class="font-medium text-[13px]">{{ message.author }}</span>
@@ -142,7 +144,7 @@ function onEditKeydown(e: KeyboardEvent) {
       isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
     ]"
   >
-    <AppAvatar :name="message.author" :src="avatarUrl" size="md" class="mt-0.5" />
+    <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" class="mt-0.5" />
     <div class="flex-1 min-w-0">
       <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
         <span class="font-semibold text-[13px]">{{ message.author }}</span>

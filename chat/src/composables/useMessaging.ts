@@ -11,6 +11,7 @@ import {
   type XmppStatusSnapshot,
   type ChatStateType,
   type RoomHats,
+  type RoomPresence,
 } from "@/lib/xmpp-client";
 import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
 
@@ -71,6 +72,8 @@ export function useMessaging(
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
   const typingUsers = ref<string[]>([]);
   const roomHats = ref<RoomHats>({});
+  const roomPresence = ref<RoomPresence>({});
+  const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
   const activeChannels = ref<Set<string>>(new Set());
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
@@ -167,6 +170,15 @@ export function useMessaging(
       });
       client.setHatsHandler((hats) => {
         roomHats.value = hats;
+      });
+      client.setPresenceHandler((presence) => {
+        if (Object.keys(presence).length === 0) {
+          roomLastSeen.value = {};
+        }
+        roomPresence.value = presence;
+      });
+      client.setLastSeenHandler((nick, timestamp) => {
+        roomLastSeen.value = { ...roomLastSeen.value, [nick]: timestamp };
       });
       client.setActivityHandler((event) => {
         activeChannels.value = new Set([...activeChannels.value, event.roomJid]);
@@ -635,6 +647,8 @@ export function useMessaging(
     currentRoomJid,
     typingUsers,
     roomHats,
+    roomPresence,
+    roomLastSeen,
     slowModeCooldown,
     loadMessages,
     selectChannel,
