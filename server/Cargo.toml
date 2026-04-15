@@ -99,9 +99,9 @@ base64 = "0.22"
 rand = "0.9"
 hex = "0.4"
 hickory-resolver = "0.25"
-lru = "0.12"
+lru = "0.16"
 regex = "1.10"
-jsonwebtoken = "9.3"
+jsonwebtoken = "10.3"
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"
