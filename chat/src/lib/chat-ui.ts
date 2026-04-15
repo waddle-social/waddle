@@ -96,6 +96,7 @@ import { Marked } from "marked";
  */
 
 const WB = /[\s.,;:!?'"()\[\]{}]/;
+const encoder = new TextEncoder();
 
 /** Convert XEP-0393 body text to GitHub-Flavored Markdown. */
 function xep0393ToGfm(input: string): string {
@@ -193,13 +194,19 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
+function byteLen(text: string): number {
+  return encoder.encode(text).byteLength;
+}
+
 /** Tailwind-styled marked instance for XEP-0393 rendering. */
 const md = new Marked({
   gfm: true,
   breaks: true,
   renderer: {
-    code({ text }: { text: string }) {
-      return `<pre class="bg-muted p-2 text-xs font-mono overflow-x-auto my-1"><code>${escapeHtml(text)}</code></pre>`;
+    code({ text, lang }: { text: string; lang?: string }) {
+      const normalizedLang = (lang ?? "").trim().toLowerCase();
+      const safeLang = normalizedLang ? escapeHtml(normalizedLang) : "text";
+      return `<pre data-code-block="true" data-language="${safeLang}" class="bg-muted p-2 text-xs font-mono overflow-x-auto my-1"><code>${escapeHtml(text)}</code></pre>`;
     },
     codespan({ text }: { text: string }) {
       return `<code class="px-1 bg-muted font-mono text-xs">${escapeHtml(text)}</code>`;
@@ -207,8 +214,8 @@ const md = new Marked({
     blockquote({ text }: { text: string }) {
       return `<blockquote class="border-l-2 border-muted-foreground pl-3 my-1 text-muted-foreground">${text}</blockquote>`;
     },
-    paragraph({ text }: { text: string }) {
-      return text;
+    paragraph(token) {
+      return this.parser.parseInline(token.tokens);
     },
     // Features not in XEP-0393 — de-style to plain text (preserve content, strip formatting)
     heading({ text }: { text: string }) { return text; },
@@ -230,93 +237,142 @@ const md = new Marked({
   },
 });
 
-/**
- * Render XEP-0394 markup spans into safe HTML using byte-offset annotations.
- * Falls back to XEP-0393 parsing when no markup is provided.
- */
-function renderViaXep0394(body: string, spans: MarkupSpan[]): string {
-  const encoder = new TextEncoder();
-  const bytes = encoder.encode(body);
-  const decoder = new TextDecoder();
-
-  // Build a list of open/close events at byte offsets
-  interface Event { offset: number; isOpen: boolean; span: MarkupSpan }
-  const events: Event[] = [];
-  for (const s of spans) {
-    events.push({ offset: s.start, isOpen: true, span: s });
-    events.push({ offset: s.end, isOpen: false, span: s });
-  }
-  // Sort: by offset, then closes before opens at the same offset
-  events.sort((a, b) => a.offset - b.offset || (a.isOpen ? 1 : -1) - (b.isOpen ? 1 : -1));
-
-  let html = "";
-  let pos = 0;
-
-  for (const ev of events) {
-    // Emit text between previous position and this event
-    if (ev.offset > pos) {
-      html += escapeHtml(decoder.decode(bytes.slice(pos, ev.offset)));
-    }
-    pos = ev.offset;
-
-    if (ev.isOpen) {
-      html += openTag(ev.span);
-    } else {
-      html += closeTag(ev.span);
-    }
-  }
-
-  // Remaining text after last event
-  if (pos < bytes.length) {
-    html += escapeHtml(decoder.decode(bytes.slice(pos)));
-  }
-
-  return html;
+function hasRichFormattingMarkers(body: string): boolean {
+  if (!body) return false;
+  // Body directives are authoritative when present because they preserve
+  // intended formatting without needing offset reinterpretation.
+  return /```|^>\s|[`*_~]/m.test(body);
 }
 
-function openTag(span: MarkupSpan): string {
+interface RenderNormalizationResult {
+  canonicalBody: string;
+  source: "body" | "markup-synthesized";
+}
+
+interface MarkerWrapper {
+  open: string;
+  close: string;
+}
+
+function isSafeLinkUri(uri: string): string | null {
+  try {
+    const url = new URL(uri);
+    if (!["http:", "https:", "mailto:"].includes(url.protocol)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function wrapperForSpan(span: MarkupSpan): MarkerWrapper | null {
   switch (span.type) {
-    case "b": return "<strong>";
-    case "i": return "<em>";
-    case "s": return "<del>";
-    case "code": return '<code class="px-1 bg-muted font-mono text-xs">';
-    case "code-block": return '<pre class="bg-muted p-2 text-xs font-mono overflow-x-auto my-1"><code>';
-    case "blockquote": return '<blockquote class="border-l-2 border-muted-foreground pl-3 my-1 text-muted-foreground">';
+    case "b":
+      return { open: "*", close: "*" };
+    case "i":
+      return { open: "_", close: "_" };
+    case "s":
+      return { open: "~", close: "~" };
+    case "code":
+      return { open: "`", close: "`" };
+    case "code-block":
+      return { open: "```\n", close: "\n```" };
+    case "blockquote":
+      return { open: "> ", close: "" };
     case "link": {
-      const href = span.uri ?? "";
-      try {
-        const url = new URL(href);
-        if (!["http:", "https:", "mailto:"].includes(url.protocol)) return "";
-      } catch {
-        return "";
-      }
-      return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" class="text-blue-500 underline hover:text-blue-400">`;
+      const safeUri = span.uri ? isSafeLinkUri(span.uri) : null;
+      if (!safeUri) return null;
+      return { open: "[", close: `](<${safeUri}>)` };
     }
   }
 }
 
-function closeTag(span: MarkupSpan): string {
-  switch (span.type) {
-    case "b": return "</strong>";
-    case "i": return "</em>";
-    case "s": return "</del>";
-    case "code": return "</code>";
-    case "code-block": return "</code></pre>";
-    case "blockquote": return "</blockquote>";
-    case "link": return span.uri ? "</a>" : "";
+function byteOffsetToCodeUnitIndex(input: string, targetOffset: number): number {
+  if (targetOffset <= 0) return 0;
+  let offset = 0;
+  let codeUnitIndex = 0;
+  for (const ch of input) {
+    if (offset >= targetOffset) break;
+    const next = offset + byteLen(ch);
+    if (next > targetOffset) {
+      return codeUnitIndex;
+    }
+    offset = next;
+    codeUnitIndex += ch.length;
   }
+  return codeUnitIndex;
 }
 
-/** Render XEP-0393 styled message body to safe HTML. Uses XEP-0394 when markup spans are present. */
-export function renderStyledBody(body: string, markup?: MarkupSpan[]): string {
-  let html: string;
+function synthesizeBodyFromMarkup(body: string, markup: MarkupSpan[]): string {
+  if (markup.length === 0) return body;
+  const totalBytes = byteLen(body);
 
-  if (markup && markup.length > 0) {
-    html = renderViaXep0394(body, markup);
-  } else {
-    const gfm = xep0393ToGfm(body);
-    html = (md.parse(gfm) as string).trim();
+  type MarkerEvent = {
+    index: number;
+    kind: "open" | "close";
+    text: string;
+    spanLen: number;
+  };
+
+  const events: MarkerEvent[] = [];
+  for (const span of markup) {
+    if (span.start < 0 || span.end <= span.start || span.end > totalBytes) continue;
+    const wrapper = wrapperForSpan(span);
+    if (!wrapper) continue;
+
+    const startIndex = byteOffsetToCodeUnitIndex(body, span.start);
+    const endIndex = byteOffsetToCodeUnitIndex(body, span.end);
+    if (endIndex <= startIndex) continue;
+
+    const spanLen = span.end - span.start;
+    events.push({ index: startIndex, kind: "open", text: wrapper.open, spanLen });
+    events.push({ index: endIndex, kind: "close", text: wrapper.close, spanLen });
   }
+
+  if (events.length === 0) return body;
+
+  events.sort((a, b) => {
+    if (a.index !== b.index) return a.index - b.index;
+    if (a.kind !== b.kind) return a.kind === "close" ? -1 : 1;
+    if (a.kind === "open") return b.spanLen - a.spanLen;
+    return a.spanLen - b.spanLen;
+  });
+
+  let out = "";
+  let cursor = 0;
+  let i = 0;
+
+  while (i < events.length) {
+    const idx = events[i].index;
+    out += body.slice(cursor, idx);
+    while (i < events.length && events[i].index === idx) {
+      out += events[i].text;
+      i++;
+    }
+    cursor = idx;
+  }
+
+  out += body.slice(cursor);
+  return out;
+}
+
+function normalizeRenderBody(body: string, markup?: MarkupSpan[]): RenderNormalizationResult {
+  if (!markup || markup.length === 0) {
+    return { canonicalBody: body, source: "body" };
+  }
+  if (hasRichFormattingMarkers(body)) {
+    return { canonicalBody: body, source: "body" };
+  }
+  return {
+    canonicalBody: synthesizeBodyFromMarkup(body, markup),
+    source: "markup-synthesized",
+  };
+}
+
+/** Render XEP-0393 styled message body to safe HTML through one canonical pipeline. */
+export function renderStyledBody(body: string, markup?: MarkupSpan[]): string {
+  const normalized = normalizeRenderBody(body, markup);
+  const gfm = xep0393ToGfm(normalized.canonicalBody);
+  const html = (md.parse(gfm) as string).trim();
 
   // Style @mentions — match @non-whitespace after rendered HTML
   return html.replace(

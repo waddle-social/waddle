@@ -118,7 +118,7 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body);
+          applyCorrection(msg.replacesId, msg.body, msg.markup);
           return;
         }
 
@@ -328,12 +328,19 @@ export function useMessaging(
     );
   }
 
-  function applyCorrection(replacesId: string, newBody: string) {
+  function applyCorrection(replacesId: string, newBody: string, markup?: MarkupSpan[]) {
     const idx = messages.value.findIndex((m) => m.id === replacesId);
     if (idx === -1) return;
-    messages.value = messages.value.map((m) =>
-      m.id === replacesId ? { ...m, body: newBody.trim(), isEdited: true } : m,
-    );
+    messages.value = messages.value.map((m) => {
+      if (m.id !== replacesId) return m;
+      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
+      if (markup && markup.length > 0) {
+        updated.markup = markup;
+      } else {
+        delete updated.markup;
+      }
+      return updated;
+    });
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {

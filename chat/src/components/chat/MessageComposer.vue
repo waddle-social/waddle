@@ -31,6 +31,9 @@ const mentionQuery = ref("");
 const emojiQuery = ref("");
 const selectedIndex = ref(0);
 const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
+const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
+  editorRef.value = instance;
+};
 
 /** Get the underlying TipTap Editor instance from the ChatEditor ref. */
 function getTiptapEditor() {
@@ -275,7 +278,7 @@ watch(
       <Image class="w-4 h-4" />
     </button>
     <ChatEditor
-      ref="editorRef"
+      :ref="setEditorRef"
       :placeholder="slowModeCooldown > 0 ? `Slow mode — wait ${slowModeCooldown}s` : `Message #${channelName}`"
       :disabled="disabled || slowModeCooldown > 0"
       @send="onSend"

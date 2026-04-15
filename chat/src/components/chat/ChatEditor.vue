@@ -33,6 +33,7 @@ const extensions = computed(() => {
     StarterKit.configure({
       heading: false,
       horizontalRule: false,
+      link: false,
     }),
     Link.configure({
       openOnClick: false,
@@ -67,6 +68,7 @@ function handleSend() {
 
 const editor = useEditor({
   extensions: extensions.value,
+  immediatelyRender: false,
   editable: !props.disabled,
   content: props.initialContent ?? "",
   editorProps: {
@@ -131,6 +133,7 @@ defineExpose({
       ]"
     >
       <EditorContent
+        v-if="editor"
         :editor="editor"
         class="flex items-center"
         :class="compact ? 'py-1.5' : 'py-2.5'"

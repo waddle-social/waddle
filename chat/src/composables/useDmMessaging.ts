@@ -21,6 +21,7 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
   };
   if (msg.mentions?.length) tm.mentions = msg.mentions;
+  if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.sharedFile) tm.sharedFile = msg.sharedFile;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.callInvite) tm.callInvite = msg.callInvite;
@@ -123,10 +124,17 @@ export function useDmMessaging(
     messages.value = messages.value.map((m) => (m.id === retractsId ? { ...m, body: "", isRetracted: true } : m));
   }
 
-  function applyCorrection(replacesId: string, newBody: string) {
-    messages.value = messages.value.map((m) => (
-      m.id === replacesId ? { ...m, body: newBody.trim(), isEdited: true } : m
-    ));
+  function applyCorrection(replacesId: string, newBody: string, markup?: LiveDmMessage["markup"]) {
+    messages.value = messages.value.map((m) => {
+      if (m.id !== replacesId) return m;
+      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
+      if (markup && markup.length > 0) {
+        updated.markup = markup;
+      } else {
+        delete updated.markup;
+      }
+      return updated;
+    });
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {
@@ -340,7 +348,7 @@ export function useDmMessaging(
       return;
     }
     if (msg.replacesId) {
-      applyCorrection(msg.replacesId, msg.body);
+      applyCorrection(msg.replacesId, msg.body, msg.markup);
       return;
     }
     mergeLiveMessage(fromLiveDmMessage(session.value, msg));

@@ -7,7 +7,7 @@ import type {
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
-  "body" | "mentions" | "broadcastMention" | "callInvite" | "sharedFile" | "isSticker" | "replacesId"
+  "body" | "mentions" | "broadcastMention" | "callInvite" | "sharedFile" | "isSticker" | "replacesId" | "markup"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -167,7 +167,7 @@ function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget)
 }
 
 /** XEP-0394: Extract Message Markup annotations. */
-function extractMarkup(msg: ReceivedMessage, base: LiveRoomMessage): void {
+function extractMarkup(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const markupData = ext(msg).markup as { spans?: Array<{ type: string; start: number; end: number; uri?: string }> } | undefined;
   if (!markupData?.spans || markupData.spans.length === 0) return;
 

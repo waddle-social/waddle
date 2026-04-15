@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, nextTick, watch } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
 import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
+import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 
@@ -48,11 +49,21 @@ const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 const isSystemEvent = computed(() => !!props.message.callInvite);
 
 const styledHtml = computed(() => renderStyledBody(props.message.body, props.message.markup));
+const styledBodyRef = ref<HTMLDivElement | null>(null);
+const setStyledBodyRef = (el: HTMLDivElement | null) => {
+  styledBodyRef.value = el;
+};
 const isGif = computed(() => isImageUrl(props.message.body));
 const isSharedImage = computed(() => {
   const f = props.message.sharedFile;
   return f && f.disposition === "inline" && f.mediaType?.startsWith("image/");
 });
+
+async function highlightMessageCodeBlocks() {
+  const el = styledBodyRef.value;
+  if (!el) return;
+  await applyShikiToCodeBlocks(el);
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -71,6 +82,9 @@ const isMentioned = computed(() => {
 const isEditing = ref(false);
 const editInitialContent = ref<Record<string, unknown> | undefined>(undefined);
 const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
+const setEditEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
+  editEditorRef.value = instance;
+};
 
 function startEdit() {
   editInitialContent.value = parseXep0393ToTiptap(props.message.body);
@@ -97,6 +111,14 @@ function emitAvatarClick() {
     emit("avatarClick", props.message.author);
   }
 }
+
+watch(
+  styledHtml,
+  () => {
+    void nextTick().then(highlightMessageCodeBlocks);
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -205,7 +227,7 @@ function emitAvatarClick() {
       <!-- Edit mode -->
       <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
         <ChatEditor
-          ref="editEditorRef"
+          :ref="setEditEditorRef"
           compact
           :initial-content="editInitialContent"
           placeholder="Edit message..."
@@ -275,7 +297,7 @@ function emitAvatarClick() {
       </div>
 
       <!-- Normal display -->
-      <div v-else class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
+      <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
 
       <!-- Reactions -->
       <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">
@@ -321,3 +343,21 @@ function emitAvatarClick() {
     </div>
   </div>
 </template>
+
+<style scoped>
+.styled-body :deep(pre.message-code-block) {
+  margin: 0.5rem 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+@media (prefers-color-scheme: dark) {
+  .styled-body :deep(pre.shiki),
+  .styled-body :deep(pre.shiki span) {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+}
+</style>

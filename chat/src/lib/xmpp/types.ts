@@ -47,6 +47,8 @@ export interface LiveDmMessage {
   replacesId?: string;
   retractsId?: string;
   mentions?: string[];
+  /** XEP-0394 */
+  markup?: import("@/lib/chat-ui").MarkupSpan[];
   sharedFile?: SharedFileInfo;
   isSticker?: boolean;
   callInvite?: CallInviteInfo;

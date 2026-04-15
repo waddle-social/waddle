@@ -75,6 +75,9 @@ const emit = defineEmits<{
 }>();
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
+const setMessagesContainer = (el: HTMLDivElement | null) => {
+  messagesContainer.value = el;
+};
 const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
@@ -313,7 +316,7 @@ watch(
     </div>
 
     <!-- Messages -->
-    <div ref="messagesContainer" class="flex-1 min-h-0 overflow-auto px-6 py-4">
+    <div :ref="setMessagesContainer" class="flex-1 min-h-0 overflow-auto px-6 py-4">
       <div v-if="isLoadingMessages" class="text-center py-16 text-[13px] text-muted-foreground">
         <div class="flex items-center justify-center gap-1.5">
           <span class="typing-dot" />
