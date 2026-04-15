@@ -484,8 +484,13 @@ pub async fn start_with_config(
     // Start XMPP server
     let xmpp_handle = if let Some(xmpp_app_state) = xmpp_app_state {
         let xmpp_tls_server_config = if xmpp_config.ephemeral_certs {
-            info!("Using ephemeral self-signed TLS certificate for domain '{}'", xmpp_config.domain);
-            Some(waddle_xmpp::generate_ephemeral_tls_config(&xmpp_config.domain)?)
+            info!(
+                "Using ephemeral self-signed TLS certificate for domain '{}'",
+                xmpp_config.domain
+            );
+            Some(waddle_xmpp::generate_ephemeral_tls_config(
+                &xmpp_config.domain,
+            )?)
         } else {
             acme_runtime
                 .as_ref()

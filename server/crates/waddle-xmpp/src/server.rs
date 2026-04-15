@@ -81,9 +81,7 @@ impl Default for XmppServerConfig {
 ///
 /// Uses `rcgen` to create a self-signed certificate in memory with SANs
 /// for the given domain and `localhost`. No files are read or written.
-pub fn generate_ephemeral_tls_config(
-    domain: &str,
-) -> Result<Arc<RustlsServerConfig>, XmppError> {
+pub fn generate_ephemeral_tls_config(domain: &str) -> Result<Arc<RustlsServerConfig>, XmppError> {
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use rustls_pemfile::{certs, pkcs8_private_keys};
     use std::io::{BufReader, Cursor};
@@ -94,10 +92,8 @@ pub fn generate_ephemeral_tls_config(
         subject_alt_names.push("localhost".to_string());
     }
 
-    let CertifiedKey { cert, key_pair } =
-        generate_simple_self_signed(subject_alt_names).map_err(|e| {
-            XmppError::config(format!("Failed to generate ephemeral certificate: {e}"))
-        })?;
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)
+        .map_err(|e| XmppError::config(format!("Failed to generate ephemeral certificate: {e}")))?;
 
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();

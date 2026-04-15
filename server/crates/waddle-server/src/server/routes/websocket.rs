@@ -715,10 +715,11 @@ fn handle_sasl_scram_response(
         }
     };
 
-    let server_final = match scram
-        .scram_server
-        .process_client_final(&client_final, &scram.stored_key, &scram.server_key)
-    {
+    let server_final = match scram.scram_server.process_client_final(
+        &client_final,
+        &scram.stored_key,
+        &scram.server_key,
+    ) {
         Ok(result) => result,
         Err(e) => {
             warn!(error = %e, username = %scram.username, "SCRAM-SHA-256 authentication failed");
