@@ -167,12 +167,12 @@ impl<S: AppState> XmppServer<S> {
 
         // Spawn the SFU UDP net loop as a background task
         let sfu_shutdown = shutdown_token.clone();
-        let sfu_registry_clone = Arc::clone(&sfu_registry);
+        let sfu_peer_store = Arc::clone(&sfu_registry.peer_store);
         let sfu_udp_addr_clone = sfu_udp_addr;
         tokio::spawn(async move {
             if let Err(e) = crate::sfu::net::spawn_sfu_net_loop(
                 sfu_udp_addr_clone,
-                sfu_registry_clone,
+                sfu_peer_store,
                 sfu_shutdown,
             )
             .await

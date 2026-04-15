@@ -27,6 +27,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
@@ -1787,7 +1788,18 @@ async fn list_waddle_members(
     offset: usize,
 ) -> Result<Vec<MemberResponse>, String> {
     let query = r#"
-        SELECT u.id, u.username, u.avatar_url, wm.role, wm.joined_at
+        SELECT u.id,
+               u.username,
+               u.avatar_url,
+               wm.role,
+               wm.joined_at,
+               (
+                   SELECT ai.raw_claims_json
+                   FROM auth_identities ai
+                   WHERE ai.user_id = u.id
+                   ORDER BY ai.last_login_at DESC
+                   LIMIT 1
+               ) AS raw_claims_json
         FROM waddle_members wm
         JOIN users u ON wm.user_id = u.id
         WHERE wm.waddle_id = ?
@@ -1842,6 +1854,18 @@ fn parse_member_row(row: &libsql::Row) -> Result<MemberResponse, String> {
     let joined_at: String = row
         .get(4)
         .map_err(|e| format!("Failed to get joined_at: {}", e))?;
+    let raw_claims_json: Option<String> = row
+        .get(5)
+        .map_err(|e| format!("Failed to get raw_claims_json: {}", e))?;
+    let avatar_url = if avatar_url.is_some() {
+        avatar_url
+    } else if let Some(raw_claims_json) = raw_claims_json {
+        let claims: Value = serde_json::from_str(&raw_claims_json)
+            .map_err(|e| format!("Failed to parse raw_claims_json: {}", e))?;
+        crate::auth::oidc::avatar_url_from_claims(&claims)
+    } else {
+        None
+    };
 
     Ok(MemberResponse {
         user_id,
@@ -1857,9 +1881,20 @@ async fn get_waddle_member(
     db: &Database,
     waddle_id: &str,
     user_id: &str,
-    ) -> Result<Option<MemberResponse>, String> {
-        let query = r#"
-        SELECT u.id, u.username, u.avatar_url, wm.role, wm.joined_at
+) -> Result<Option<MemberResponse>, String> {
+    let query = r#"
+        SELECT u.id,
+               u.username,
+               u.avatar_url,
+               wm.role,
+               wm.joined_at,
+               (
+                   SELECT ai.raw_claims_json
+                   FROM auth_identities ai
+                   WHERE ai.user_id = u.id
+                   ORDER BY ai.last_login_at DESC
+                   LIMIT 1
+               ) AS raw_claims_json
         FROM waddle_members wm
         JOIN users u ON wm.user_id = u.id
         WHERE wm.waddle_id = ? AND wm.user_id = ?

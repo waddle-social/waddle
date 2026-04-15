@@ -1,17 +1,22 @@
 //! SfuPeer — wraps a str0m Rtc instance for one participant.
 
+use super::RoomKey;
 use jid::FullJid;
 use std::net::SocketAddr;
 use std::time::Instant;
 use str0m::change::SdpOffer;
+use str0m::media::{MediaKind, Mid};
 use str0m::{Candidate, Input, Output, Rtc};
 
 /// Wraps a single str0m `Rtc` instance representing one SFU participant.
 pub struct SfuPeer {
     pub jid: Option<FullJid>,
     pub sid: String,
+    pub room_key: RoomKey,
     rtc: Rtc,
     local_addr: SocketAddr,
+    /// Negotiated media tracks — (mid, kind) pairs from MediaAdded events.
+    pub media_mids: Vec<(Mid, MediaKind)>,
 }
 
 impl SfuPeer {
@@ -22,6 +27,7 @@ impl SfuPeer {
     pub fn new_from_offer(
         offer_sdp: &str,
         local_addr: SocketAddr,
+        room_key: RoomKey,
     ) -> Result<(Self, String), String> {
         let mut rtc = Rtc::builder().set_ice_lite(true).build(Instant::now());
 
@@ -38,8 +44,10 @@ impl SfuPeer {
         let peer = Self {
             jid: None,
             sid: String::new(),
+            room_key,
             rtc,
             local_addr,
+            media_mids: Vec::new(),
         };
 
         Ok((peer, answer_sdp))
@@ -89,6 +97,14 @@ impl SfuPeer {
     pub fn rtc(&self) -> &Rtc {
         &self.rtc
     }
+
+    /// Find the first Mid matching a given media kind (audio/video).
+    pub fn mid_for_kind(&self, kind: MediaKind) -> Option<Mid> {
+        self.media_mids
+            .iter()
+            .find(|(_, k)| *k == kind)
+            .map(|(mid, _)| *mid)
+    }
 }
 
 #[cfg(test)]
@@ -104,8 +120,10 @@ mod tests {
         let peer = SfuPeer {
             jid: None,
             sid: "test-sid".to_string(),
+            room_key: RoomKey("test".to_string()),
             rtc,
             local_addr: "127.0.0.1:9000".parse().expect("valid addr"),
+            media_mids: Vec::new(),
         };
 
         assert!(peer.is_alive());
@@ -124,8 +142,10 @@ mod tests {
         let mut peer = SfuPeer {
             jid: None,
             sid: String::new(),
+            room_key: RoomKey("test".to_string()),
             rtc,
             local_addr: "127.0.0.1:9001".parse().expect("valid addr"),
+            media_mids: Vec::new(),
         };
 
         peer.disconnect();
@@ -138,8 +158,10 @@ mod tests {
         let mut peer = SfuPeer {
             jid: None,
             sid: String::new(),
+            room_key: RoomKey("test".to_string()),
             rtc,
             local_addr: "127.0.0.1:9002".parse().expect("valid addr"),
+            media_mids: Vec::new(),
         };
 
         // Just verify the accessors compile and return references

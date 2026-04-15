@@ -12,6 +12,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use tracing::{error, instrument, warn};
 
@@ -140,8 +141,19 @@ async fn search_users(
     xmpp_domain: &str,
 ) -> Result<Vec<SearchUserResponse>, String> {
     let sql = r#"
-        SELECT id, username, display_name, avatar_url, xmpp_localpart
-        FROM users
+        SELECT u.id,
+               u.username,
+               u.display_name,
+               u.avatar_url,
+               u.xmpp_localpart,
+               (
+                   SELECT ai.raw_claims_json
+                   FROM auth_identities ai
+                   WHERE ai.user_id = u.id
+                   ORDER BY ai.last_login_at DESC
+                   LIMIT 1
+               ) AS raw_claims_json
+        FROM users u
         WHERE lower(username) LIKE lower(?1) || '%'
            OR (display_name IS NOT NULL AND lower(display_name) LIKE lower(?1) || '%')
         ORDER BY
@@ -190,6 +202,18 @@ fn parse_user_row(row: &libsql::Row, xmpp_domain: &str) -> Result<SearchUserResp
     let xmpp_localpart: String = row
         .get(4)
         .map_err(|e| format!("Failed to get xmpp_localpart: {}", e))?;
+    let raw_claims_json: Option<String> = row
+        .get(5)
+        .map_err(|e| format!("Failed to get raw_claims_json: {}", e))?;
+    let avatar_url = if avatar_url.is_some() {
+        avatar_url
+    } else if let Some(raw_claims_json) = raw_claims_json {
+        let claims: Value = serde_json::from_str(&raw_claims_json)
+            .map_err(|e| format!("Failed to parse raw_claims_json: {}", e))?;
+        crate::auth::oidc::avatar_url_from_claims(&claims)
+    } else {
+        None
+    };
 
     Ok(SearchUserResponse {
         id,

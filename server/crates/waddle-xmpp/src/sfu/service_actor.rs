@@ -6,6 +6,7 @@
 use super::room_actor::{AddParticipant, RemoveParticipant, SfuRoomActor};
 use super::sdp;
 use super::{RoomKey, SfuRegistry};
+use crate::xep::xep0166::NS_JINGLE;
 use jid::FullJid;
 use kameo::Actor;
 use minidom::Element;
@@ -13,8 +14,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use xmpp_parsers::iq::{Iq, IqType};
-
-const JINGLE_NS: &str = "urn:xmpp:jingle:1";
 
 // ---------------------------------------------------------------------------
 // Actor
@@ -44,13 +43,13 @@ impl SfuServiceActor {
         jingle: &Element,
         sender_jid: FullJid,
     ) -> JingleIqResponse {
-        let sdp_offer = match sdp::extract_sdp_from_jingle(jingle) {
-            Some(sdp) => sdp,
-            None => {
-                warn!(sid = %sid, "No SDP found in session-initiate Jingle element");
+        let sdp_offer = match sdp::extract_sdp_offer_from_jingle(jingle) {
+            Ok(sdp) => sdp,
+            Err(e) => {
+                warn!(sid = %sid, error = %e, "Failed to extract SDP from session-initiate Jingle element");
                 return JingleIqResponse::Rejection {
                     id: iq_id,
-                    reason: "Missing SDP offer in session-initiate".to_string(),
+                    reason: format!("Failed to extract SDP offer: {e}"),
                 };
             }
         };
@@ -71,7 +70,11 @@ impl SfuServiceActor {
             Some(r) => r,
             None => {
                 info!(room = %room_key.0, "Creating new SFU room actor");
-                let actor_ref = kameo::spawn(SfuRoomActor::new(room_key.clone(), self.udp_addr));
+                let actor_ref = kameo::spawn(SfuRoomActor::new(
+                    room_key.clone(),
+                    self.udp_addr,
+                    Arc::clone(&self.registry.peer_store),
+                ));
                 self.registry.insert_room(room_key, actor_ref.clone()).await;
                 actor_ref
             }
@@ -97,10 +100,18 @@ impl SfuServiceActor {
         };
 
         debug!(sid = %sid, jid = %sender_jid, "Session initiated successfully");
-        let accept_element = sdp::build_jingle_session_accept(&sid, &answer_sdp);
-        JingleIqResponse::Accept {
-            id: iq_id,
-            jingle: accept_element,
+        match sdp::build_jingle_session_accept(&sid, &answer_sdp) {
+            Ok(accept_element) => JingleIqResponse::Accept {
+                id: iq_id,
+                jingle: accept_element,
+            },
+            Err(e) => {
+                warn!(sid = %sid, error = %e, "Failed to build session-accept from SDP answer");
+                JingleIqResponse::Rejection {
+                    id: iq_id,
+                    reason: format!("Failed to build session-accept: {e}"),
+                }
+            }
         }
     }
 
@@ -181,7 +192,7 @@ impl kameo::message::Message<HandleJingleIq> for SfuServiceActor {
 
         // Extract the Jingle element from the IQ payload.
         let jingle = match msg.iq.payload {
-            IqType::Set(ref el) if el.is("jingle", JINGLE_NS) => el,
+            IqType::Set(ref el) if el.is("jingle", NS_JINGLE) => el,
             _ => {
                 warn!(id = %iq_id, "Expected IQ set with Jingle payload");
                 return JingleIqResponse::Rejection {
@@ -250,7 +261,7 @@ mod tests {
         let _actor = kameo::spawn(SfuServiceActor::new(
             "sfu.waddle.social".to_string(),
             registry.clone(),
-            "127.0.0.1:10000".parse().unwrap(),
+            "127.0.0.1:10000".parse().expect("valid addr"),
         ));
         // Actor spawned successfully
         let key = RoomKey("test".to_string());

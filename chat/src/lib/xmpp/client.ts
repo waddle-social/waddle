@@ -399,17 +399,7 @@ export class BrowserXmppClient {
     if (!this.xmpp?.jingle) return null;
 
     const serviceJid = invite.jingleJid ?? sfuServiceJidFor(this.session);
-    const sid = invite.sid ?? `${w}_${c}_${crypto.randomUUID()}`;
-    const existing = sid ? this.mujiSessions.get(sid) : undefined;
-    if (existing && existing.state === "pending") {
-      for (const track of localStream.getTracks()) {
-        if (!existing.pc.getSenders().some((sender) => sender.track?.id === track.id)) {
-          await existing.addTrack(track, localStream);
-        }
-      }
-      await existing.accept();
-      return { sid: existing.sid, serviceJid };
-    }
+    const sid = `${w}_${c}_${crypto.randomUUID()}`;
 
     const session = requireMujiSessionShape(
       this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream),

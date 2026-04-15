@@ -10,7 +10,10 @@ pub mod room_actor;
 pub mod sdp;
 pub mod service_actor;
 
+use peer::SfuPeer;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Unique key for an SFU call room, derived from waddle + channel IDs.
@@ -30,10 +33,62 @@ impl RoomKey {
     }
 }
 
+/// Shared store of all active SFU peers, keyed by Jingle SID.
+#[derive(Default)]
+pub struct PeerStore {
+    peers: RwLock<HashMap<String, SfuPeer>>,
+}
+
+impl fmt::Debug for PeerStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerStore")
+            .field("peers", &"<RwLock<HashMap<String, SfuPeer>>>")
+            .finish()
+    }
+}
+
+impl PeerStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn insert(&self, sid: String, peer: SfuPeer) {
+        self.peers.write().await.insert(sid, peer);
+    }
+
+    pub async fn remove(&self, sid: &str) -> Option<SfuPeer> {
+        self.peers.write().await.remove(sid)
+    }
+
+    /// Mutable access to all peers -- used by the net loop.
+    pub fn peers(&self) -> &RwLock<HashMap<String, SfuPeer>> {
+        &self.peers
+    }
+
+    pub async fn peer_count_in_room(&self, room_key: &RoomKey) -> usize {
+        self.peers
+            .read()
+            .await
+            .values()
+            .filter(|peer| peer.room_key == *room_key)
+            .count()
+    }
+}
+
 /// Registry of active SFU call rooms.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SfuRegistry {
     rooms: RwLock<HashMap<RoomKey, kameo::actor::ActorRef<room_actor::SfuRoomActor>>>,
+    pub peer_store: Arc<PeerStore>,
+}
+
+impl Default for SfuRegistry {
+    fn default() -> Self {
+        Self {
+            rooms: RwLock::new(HashMap::new()),
+            peer_store: Arc::new(PeerStore::new()),
+        }
+    }
 }
 
 impl SfuRegistry {

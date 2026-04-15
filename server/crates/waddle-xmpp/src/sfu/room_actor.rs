@@ -1,41 +1,36 @@
 //! SfuRoomActor — Kameo actor managing one active call room.
 
 use super::peer::SfuPeer;
-use super::RoomKey;
+use super::{PeerStore, RoomKey};
 use jid::FullJid;
 use kameo::message::Context;
 use kameo::Actor;
-use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Actor
 // ---------------------------------------------------------------------------
 
-/// Actor that owns one [`SfuPeer`] per participant, keyed by Jingle session ID.
+/// Actor that manages participants in one SFU call room.
+///
+/// Peers are stored in the shared [`PeerStore`] (behind `Arc<RwLock>`) so the
+/// UDP net loop can access them directly without actor message-passing.
 #[derive(Actor)]
 pub struct SfuRoomActor {
     pub(crate) room_key: RoomKey,
-    pub(crate) peers: HashMap<String, SfuPeer>, // keyed by Jingle SID
+    pub(crate) peer_store: Arc<PeerStore>,
     pub(crate) local_addr: SocketAddr,
 }
 
 impl SfuRoomActor {
-    pub fn new(room_key: RoomKey, local_addr: SocketAddr) -> Self {
+    pub fn new(room_key: RoomKey, local_addr: SocketAddr, peer_store: Arc<PeerStore>) -> Self {
         Self {
             room_key,
-            peers: HashMap::new(),
+            peer_store,
             local_addr,
         }
-    }
-
-    pub fn participant_count(&self) -> usize {
-        self.peers.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
     }
 }
 
@@ -58,12 +53,13 @@ impl kameo::message::Message<AddParticipant> for SfuRoomActor {
         msg: AddParticipant,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let (mut peer, answer_sdp) = SfuPeer::new_from_offer(&msg.sdp_offer, self.local_addr)?;
+        let (mut peer, answer_sdp) =
+            SfuPeer::new_from_offer(&msg.sdp_offer, self.local_addr, self.room_key.clone())?;
 
         peer.jid = Some(msg.jid.clone());
         peer.sid = msg.sid.clone();
 
-        self.peers.insert(msg.sid.clone(), peer);
+        self.peer_store.insert(msg.sid.clone(), peer).await;
 
         info!(
             room = %self.room_key.0,
@@ -89,7 +85,7 @@ impl kameo::message::Message<RemoveParticipant> for SfuRoomActor {
         msg: RemoveParticipant,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match self.peers.remove(&msg.sid) {
+        match self.peer_store.remove(&msg.sid).await {
             Some(mut peer) => {
                 peer.disconnect();
                 info!(
@@ -97,7 +93,8 @@ impl kameo::message::Message<RemoveParticipant> for SfuRoomActor {
                     sid  = %msg.sid,
                     "Participant left SFU room"
                 );
-                Ok(self.is_empty())
+                let remaining = self.peer_store.peer_count_in_room(&self.room_key).await;
+                Ok(remaining == 0)
             }
             None => {
                 warn!(
@@ -122,7 +119,7 @@ impl kameo::message::Message<GetParticipantCount> for SfuRoomActor {
         _msg: GetParticipantCount,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.participant_count()
+        self.peer_store.peer_count_in_room(&self.room_key).await
     }
 }
 
@@ -136,21 +133,25 @@ mod tests {
 
     #[tokio::test]
     async fn creates_room_with_key() {
+        let peer_store = Arc::new(PeerStore::new());
         let room = SfuRoomActor::new(
             RoomKey("test_room".to_string()),
-            "127.0.0.1:10000".parse().unwrap(),
+            "127.0.0.1:10000".parse().expect("valid addr"),
+            peer_store,
         );
         assert_eq!(room.room_key.0, "test_room");
-        assert!(room.peers.is_empty());
     }
 
     #[tokio::test]
     async fn tracks_participant_count() {
+        let peer_store = Arc::new(PeerStore::new());
+        let room_key = RoomKey("test_room".to_string());
         let room = SfuRoomActor::new(
-            RoomKey("test_room".to_string()),
-            "127.0.0.1:10000".parse().unwrap(),
+            room_key.clone(),
+            "127.0.0.1:10000".parse().expect("valid addr"),
+            peer_store.clone(),
         );
-        assert_eq!(room.participant_count(), 0);
-        assert!(room.is_empty());
+        let count = room.peer_store.peer_count_in_room(&room_key).await;
+        assert_eq!(count, 0);
     }
 }

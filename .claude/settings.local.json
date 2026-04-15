@@ -35,7 +35,10 @@
       "Bash(git rebase:*)",
       "Bash(python3:*)",
       "Bash(git:*)",
-      "WebFetch(domain:docs.astro.build)"
+      "WebFetch(domain:docs.astro.build)",
+      "Bash(jj log:*)",
+      "Bash(jj diff:*)",
+      "Bash(find:*)"
     ]
   }
 }

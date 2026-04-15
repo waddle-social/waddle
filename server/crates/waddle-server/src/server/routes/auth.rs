@@ -503,7 +503,16 @@ async fn load_avatar_url(
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT avatar_url FROM users WHERE id = ? LIMIT 1",
+            "SELECT u.avatar_url,
+                    (
+                        SELECT ai.raw_claims_json
+                        FROM auth_identities ai
+                        WHERE ai.user_id = u.id
+                        ORDER BY ai.last_login_at DESC
+                        LIMIT 1
+                    )
+             FROM users u
+             WHERE u.id = ? LIMIT 1",
             libsql::params![user_id],
         )
         .await
@@ -514,9 +523,37 @@ async fn load_avatar_url(
         .map_err(|e| AuthError::DatabaseError(format!("Failed to read avatar_url row: {}", e)))?;
 
     match row {
-        Some(row) => row
-            .get(0)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e))),
+        Some(row) => {
+            let avatar_url: Option<String> = row
+                .get(0)
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e)))?;
+            if avatar_url.is_some() {
+                return Ok(avatar_url);
+            }
+
+            let raw_claims_json: Option<String> = row.get(1).map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to get raw_claims_json: {}", e))
+            })?;
+            let Some(raw_claims_json) = raw_claims_json else {
+                return Ok(None);
+            };
+
+            let claims = serde_json::from_str::<serde_json::Value>(&raw_claims_json).map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to parse raw_claims_json: {}", e))
+            })?;
+            let avatar_url = oidc::avatar_url_from_claims(&claims);
+            if let Some(ref avatar_url) = avatar_url {
+                conn.execute(
+                    "UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?",
+                    libsql::params![avatar_url.clone(), Utc::now().to_rfc3339(), user_id],
+                )
+                .await
+                .map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to backfill avatar_url: {}", e))
+                })?;
+            }
+            Ok(avatar_url)
+        }
         None => Ok(None),
     }
 }
@@ -994,6 +1031,61 @@ mod tests {
         assert_eq!(
             json["xmpp_websocket_url"].as_str(),
             Some("ws://localhost:3000/xmpp-websocket")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_response_falls_back_to_raw_claim_profile_avatar() {
+        let server_config = ServerConfig::test_homeserver();
+        let auth_state = create_test_auth_state(&server_config).await;
+        let session = Session::new("user-1", "alice", "alice");
+        auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+        auth_state
+            .db
+            .guard()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO auth_identities (id, user_id, provider_id, issuer, subject, email, email_verified, raw_claims_json, created_at, last_login_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                libsql::params![
+                    "identity-1",
+                    session.user_id.clone(),
+                    "colony",
+                    "https://colony.waddle.social",
+                    "subject-1",
+                    Option::<String>::None,
+                    Option::<i64>::None,
+                    r#"{"profile":"https://cdn.example.com/avatar.png"}"#,
+                    "2026-04-15T00:00:00Z",
+                    "2026-04-15T00:00:00Z"
+                ],
+            )
+            .await
+            .unwrap();
+
+        let app = router(auth_state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/session")
+                    .header(header::COOKIE, format!("waddle_session={}", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["avatar_url"].as_str(),
+            Some("https://cdn.example.com/avatar.png")
         );
     }
 

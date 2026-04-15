@@ -211,6 +211,12 @@ fn value_bool(value: Option<&Value>) -> Option<bool> {
     })
 }
 
+pub(crate) fn avatar_url_from_claims(claims: &Value) -> Option<String> {
+    value_string(claims.get("picture"))
+        .or_else(|| value_string(claims.get("avatar_url")))
+        .or_else(|| value_string(claims.get("profile")))
+}
+
 fn select_jwk<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
     if let Some(kid) = kid {
         if let Some(found) = jwks
@@ -316,8 +322,7 @@ pub async fn claims_from_token_response(
         name: value_string(merged.get("name")),
         email,
         email_verified: value_bool(merged.get("email_verified")),
-        avatar_url: value_string(merged.get("picture"))
-            .or_else(|| value_string(merged.get("avatar_url"))),
+        avatar_url: avatar_url_from_claims(&merged),
         raw_claims: merged,
     })
 }
@@ -331,4 +336,35 @@ pub async fn claims_from_oauth2_fallback(
 ) -> Result<IdentityClaims, AuthError> {
     let userinfo = fetch_userinfo(client, userinfo_endpoint, access_token).await?;
     claims_from_userinfo(provider, issuer, userinfo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::avatar_url_from_claims;
+    use serde_json::json;
+
+    #[test]
+    fn avatar_url_prefers_picture_claim() {
+        let claims = json!({
+            "picture": "https://cdn.example.com/picture.png",
+            "profile": "https://cdn.example.com/profile.png"
+        });
+
+        assert_eq!(
+            avatar_url_from_claims(&claims).as_deref(),
+            Some("https://cdn.example.com/picture.png")
+        );
+    }
+
+    #[test]
+    fn avatar_url_falls_back_to_profile_claim() {
+        let claims = json!({
+            "profile": "https://cdn.example.com/profile.png"
+        });
+
+        assert_eq!(
+            avatar_url_from_claims(&claims).as_deref(),
+            Some("https://cdn.example.com/profile.png")
+        );
+    }
 }
