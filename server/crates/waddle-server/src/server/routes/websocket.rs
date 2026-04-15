@@ -62,6 +62,8 @@ pub struct WebSocketState {
     pub mam_storage: Arc<LibSqlMamStorage>,
     /// GitHub link enricher for message embeds
     pub github_enricher: Arc<MessageEnricher>,
+    /// SFU actor used for Jingle call signaling.
+    pub sfu_service: kameo::actor::ActorRef<waddle_xmpp::sfu::service_actor::SfuServiceActor>,
 }
 
 /// Create the WebSocket router
@@ -258,10 +260,49 @@ fn parse_iq_frame(frame: &str) -> Option<xmpp_parsers::iq::Iq> {
     xmpp_parsers::iq::Iq::try_from(element).ok()
 }
 
-fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
-    let iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+fn build_iq_result_xml(
+    id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    payload: Option<xmpp_parsers::minidom::Element>,
+) -> String {
+    let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
         .attr("id", id)
-        .attr("type", "error")
+        .attr("type", "result");
+    if let Some(from) = from {
+        iq = iq.attr("from", from);
+    }
+    if let Some(to) = to {
+        iq = iq.attr("to", to);
+    }
+
+    let iq = if let Some(payload) = payload {
+        iq.append(payload).build()
+    } else {
+        iq.build()
+    };
+
+    element_to_xml(iq)
+}
+
+fn build_iq_error_xml_with_addresses(
+    id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    error_type: &str,
+    condition: &str,
+) -> String {
+    let mut iq = xmpp_parsers::minidom::Element::builder("iq", "jabber:client")
+        .attr("id", id)
+        .attr("type", "error");
+    if let Some(from) = from {
+        iq = iq.attr("from", from);
+    }
+    if let Some(to) = to {
+        iq = iq.attr("to", to);
+    }
+
+    let iq = iq
         .append(
             xmpp_parsers::minidom::Element::builder("error", "jabber:client")
                 .attr("type", error_type)
@@ -277,6 +318,10 @@ fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
         .build();
 
     element_to_xml(iq)
+}
+
+fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
+    build_iq_error_xml_with_addresses(id, None, None, error_type, condition)
 }
 
 fn build_stream_features_xml(authenticated: bool) -> String {
@@ -402,7 +447,15 @@ async fn handle_xmpp_frame(
 
     // Handle IQ stanzas
     if frame.starts_with("<iq") {
-        return handle_iq(frame, domain, &muc_domain, state, authenticated_session).await;
+        return handle_iq(
+            frame,
+            domain,
+            &muc_domain,
+            state,
+            authenticated_session,
+            session_jid,
+        )
+        .await;
     }
 
     // Handle message stanzas
@@ -787,6 +840,7 @@ async fn handle_iq(
     muc_domain: &str,
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
+    session_jid: &Option<FullJid>,
 ) -> Vec<String> {
     let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
@@ -804,25 +858,118 @@ async fn handle_iq(
         .as_ref()
         .and_then(|iq| iq.to.as_ref().map(|jid| jid.to_string()))
         .or_else(|| extract_attr(frame, "to"));
+    let from = parsed_iq
+        .as_ref()
+        .and_then(|iq| iq.from.as_ref().map(|jid| jid.to_string()))
+        .or_else(|| extract_attr(frame, "from"));
+    let response_from = to.as_deref();
+    let response_to = from.as_deref();
 
     // Ping
     if frame.contains("urn:xmpp:ping") {
-        return vec![format!(r#"<iq id="{}" type="result"/>"#, id)];
+        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
     }
 
     // Session establishment (legacy, but some clients need it)
     if frame.contains("urn:ietf:params:xml:ns:xmpp-session") {
         debug!("Session establishment requested");
-        return vec![format!(r#"<iq id="{}" type="result"/>"#, id)];
+        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
     }
 
     // Roster query
     if frame.contains("jabber:iq:roster") {
         debug!("Roster query");
-        return vec![format!(
-            r#"<iq id="{}" type="result"><query xmlns="jabber:iq:roster"/></iq>"#,
-            id
+        let query = xmpp_parsers::minidom::Element::builder("query", "jabber:iq:roster").build();
+        return vec![build_iq_result_xml(
+            &id,
+            response_from,
+            response_to,
+            Some(query),
         )];
+    }
+
+    // Jingle IQs addressed to the SFU service.
+    if let Some(request_iq) = parsed_iq.as_ref() {
+        let sfu_domain = format!("sfu.{domain}");
+        if to.as_deref() == Some(sfu_domain.as_str())
+            && matches!(
+                &request_iq.payload,
+                xmpp_parsers::iq::IqType::Set(elem) if elem.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
+            )
+        {
+            let Some(sender_jid) = session_jid.as_ref().cloned() else {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "auth",
+                    "not-authorized",
+                )];
+            };
+
+            let reply_from = request_iq.to.as_ref().map(ToString::to_string);
+            let reply_to = request_iq
+                .from
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| Some(sender_jid.to_string()));
+
+            let response = state
+                .sfu_service
+                .ask(waddle_xmpp::sfu::service_actor::HandleJingleIq {
+                    iq: request_iq.clone(),
+                    sender_jid,
+                })
+                .await;
+
+            return match response {
+                Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Accept { id, jingle }) => {
+                    let result_iq = xmpp_parsers::iq::Iq {
+                        from: reply_from
+                            .as_deref()
+                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
+                        to: reply_to
+                            .as_deref()
+                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
+                        id,
+                        payload: xmpp_parsers::iq::IqType::Result(Some(jingle)),
+                    };
+                    vec![iq_to_xml(result_iq)]
+                }
+                Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Ack { id }) => {
+                    let result_iq = xmpp_parsers::iq::Iq {
+                        from: reply_from
+                            .as_deref()
+                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
+                        to: reply_to
+                            .as_deref()
+                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
+                        id,
+                        payload: xmpp_parsers::iq::IqType::Result(None),
+                    };
+                    vec![iq_to_xml(result_iq)]
+                }
+                Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Rejection { id, .. }) => {
+                    vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        reply_from.as_deref(),
+                        reply_to.as_deref(),
+                        "modify",
+                        "bad-request",
+                    )]
+                }
+                Err(err) => {
+                    warn!(error = %err, "SFU actor call failed");
+                    vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        reply_from.as_deref(),
+                        reply_to.as_deref(),
+                        "wait",
+                        "internal-server-error",
+                    )]
+                }
+            };
+        }
     }
 
     // Disco info on MUC service
@@ -1132,46 +1279,64 @@ async fn handle_iq(
     // 2) submitting an empty owner form (`jabber:x:data` type='submit')
     if frame.contains("http://jabber.org/protocol/muc#owner") {
         let Some(target) = to.as_deref() else {
-            return vec![format!(
-                r#"<iq id="{}" type="error"><error type="modify"><bad-request xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
-                id
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "modify",
+                "bad-request",
             )];
         };
 
         let room_target = target.split('/').next().unwrap_or(target);
         let Ok(room_jid) = room_target.parse::<BareJid>() else {
-            return vec![format!(
-                r#"<iq id="{}" type="error"><error type="modify"><jid-malformed xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
-                id
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "modify",
+                "jid-malformed",
             )];
         };
 
         if !muc_registry.is_muc_jid(&room_jid) {
-            return vec![format!(
-                r#"<iq id="{}" type="error"><error type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
-                id
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "cancel",
+                "item-not-found",
             )];
         }
 
         if frame.contains("<destroy") {
             if muc_registry.destroy_room(&room_jid).is_some() {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
-                return vec![format!(
-                    r#"<iq id="{}" from="{}" type="result"/>"#,
-                    id, room_jid
+                let room_jid_string = room_jid.to_string();
+                return vec![build_iq_result_xml(
+                    &id,
+                    Some(room_jid_string.as_str()),
+                    response_to,
+                    None,
                 )];
             }
 
-            return vec![format!(
-                r#"<iq id="{}" type="error"><error type="cancel"><item-not-found xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
-                id
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "cancel",
+                "item-not-found",
             )];
         }
 
         // Treat all other owner IQ sets as successful config submit for instant rooms.
-        return vec![format!(
-            r#"<iq id="{}" from="{}" type="result"/>"#,
-            id, room_jid
+        let room_jid_string = room_jid.to_string();
+        return vec![build_iq_result_xml(
+            &id,
+            Some(room_jid_string.as_str()),
+            response_to,
+            None,
         )];
     }
 
@@ -1190,9 +1355,11 @@ async fn handle_iq(
             // Determine whether this is a personal archive query (to=self) or a
             // MUC room archive query.  Personal queries are allowed when the
             // target JID matches the authenticated user's bare JID.
-            let sender_bare: Option<BareJid> = authenticated_session
-                .as_ref()
-                .and_then(|session| format!("{}@{}", session.xmpp_localpart, domain).parse().ok());
+            let sender_bare: Option<BareJid> = authenticated_session.as_ref().and_then(|session| {
+                format!("{}@{}", session.xmpp_localpart, domain)
+                    .parse()
+                    .ok()
+            });
 
             let is_personal = sender_bare
                 .as_ref()
@@ -1254,14 +1421,17 @@ async fn handle_iq(
     // Carbons enable
     if frame.contains("urn:xmpp:carbons:") {
         debug!("Carbons request");
-        return vec![format!(r#"<iq id="{}" type="result"/>"#, id)];
+        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
     }
 
     // Unknown IQ - log it and return error
     warn!(id = %id, frame = %frame, "Unhandled IQ stanza");
-    vec![format!(
-        r#"<iq id="{}" type="error"><error type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#,
-        id
+    vec![build_iq_error_xml_with_addresses(
+        &id,
+        response_from,
+        response_to,
+        "cancel",
+        "feature-not-implemented",
     )]
 }
 
@@ -1855,6 +2025,12 @@ mod tests {
         let mam_conn = mam_db.connect().expect("mam conn");
         let mam_storage = Arc::new(LibSqlMamStorage::new(mam_conn));
         mam_storage.initialize().await.expect("mam init");
+        let sfu_registry = Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
+        let sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
+            "sfu.example.com".to_string(),
+            sfu_registry,
+            "127.0.0.1:9".parse().expect("valid dummy SFU address"),
+        ));
 
         Arc::new(WebSocketState {
             app_state,
@@ -1863,6 +2039,7 @@ mod tests {
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
             mam_storage,
             github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
+            sfu_service,
         })
     }
 
@@ -2157,6 +2334,121 @@ mod tests {
         assert_eq!(channel, "default");
     }
 
+    #[tokio::test]
+    async fn handle_iq_roster_query_returns_parseable_result() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="roster-1" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &None,
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+
+        let iq_xml = responses.first().expect("roster response");
+        let element = Element::from_str(iq_xml).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+
+        assert_eq!(iq.id, "roster-1");
+        match iq.payload {
+            xmpp_parsers::iq::IqType::Result(Some(payload)) => {
+                assert_eq!(payload.name(), "query");
+                assert_eq!(payload.ns(), "jabber:iq:roster");
+            }
+            other => panic!("expected roster IQ result payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_iq_carbons_enable_returns_parseable_result() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="carbons-1" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &None,
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+
+        let iq_xml = responses.first().expect("carbons response");
+        let element = Element::from_str(iq_xml).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+
+        assert_eq!(iq.id, "carbons-1");
+        match iq.payload {
+            xmpp_parsers::iq::IqType::Result(None) => {}
+            other => panic!("expected empty IQ result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_iq_unknown_includes_routing_addresses_in_error() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="unknown-1" type="get" from="alice@example.com/web" to="example.com"><foo xmlns="urn:waddle:test:0"/></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &None,
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+
+        let iq_xml = responses.first().expect("error response");
+        let element = Element::from_str(iq_xml).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+
+        assert_eq!(iq.id, "unknown-1");
+        assert_eq!(
+            iq.from.as_ref().map(ToString::to_string).as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            iq.to.as_ref().map(ToString::to_string).as_deref(),
+            Some("alice@example.com/web")
+        );
+        match iq.payload {
+            xmpp_parsers::iq::IqType::Error(_) => {}
+            other => panic!("expected IQ error payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_iq_jingle_to_sfu_routes_to_sfu_actor() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="jingle-1" type="set" to="sfu.example.com"><jingle xmlns="urn:xmpp:jingle:1"/></iq>"#;
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(sender_jid),
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+        let response = responses.first().expect("jingle response");
+        assert!(
+            response.contains("bad-request"),
+            "expected bad-request from SFU actor validation: {response}"
+        );
+        assert!(
+            !response.contains("feature-not-implemented"),
+            "Jingle IQ to SFU should no longer be treated as unhandled: {response}"
+        );
+    }
+
     async fn seed_waddle(
         state: &WebSocketState,
         owner_id: &str,
@@ -2224,6 +2516,7 @@ mod tests {
             muc_domain,
             state.as_ref(),
             &None,
+            &None,
         )
         .await;
         let server_response = server_responses.first().expect("server disco response");
@@ -2231,15 +2524,29 @@ mod tests {
         assert!(server_response.contains("urn:waddle:github:0"));
 
         let muc_query = r#"<iq xmlns="jabber:client" id="muc1" type="get" to="muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
-        let muc_responses =
-            handle_iq(muc_query, server_domain, muc_domain, state.as_ref(), &None).await;
+        let muc_responses = handle_iq(
+            muc_query,
+            server_domain,
+            muc_domain,
+            state.as_ref(),
+            &None,
+            &None,
+        )
+        .await;
         let muc_response = muc_responses.first().expect("muc disco response");
         assert!(muc_response.contains("urn:xmpp:reply:0"));
         assert!(muc_response.contains("urn:waddle:github:0"));
 
         let room_query = r#"<iq xmlns="jabber:client" id="room1" type="get" to="room@muc.example.com"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#;
-        let room_responses =
-            handle_iq(room_query, server_domain, muc_domain, state.as_ref(), &None).await;
+        let room_responses = handle_iq(
+            room_query,
+            server_domain,
+            muc_domain,
+            state.as_ref(),
+            &None,
+            &None,
+        )
+        .await;
         let room_response = room_responses.first().expect("room disco response");
         assert!(room_response.contains("urn:xmpp:mam:2"));
         assert!(room_response.contains("urn:xmpp:reply:0"));
@@ -2256,6 +2563,7 @@ mod tests {
             "example.com",
             "muc.example.com",
             state.as_ref(),
+            &None,
             &None,
         )
         .await;
@@ -2292,6 +2600,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &authenticated_session,
+            &None,
         )
         .await;
         let response = responses.first().expect("spaces disco items response");
@@ -2342,6 +2651,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &authenticated_session,
+            &None,
         )
         .await;
         let response = responses.first().expect("spaces node disco items response");
@@ -2377,6 +2687,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(viewer),
+            &None,
         )
         .await;
         let response = responses.first().expect("spaces node disco info response");
@@ -2416,6 +2727,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(viewer),
+            &None,
         )
         .await;
         let response = responses
@@ -2530,7 +2842,7 @@ mod tests {
             message_xml.as_str(),
             "muc.example.com",
             state.as_ref(),
-            &Some(sender_jid),
+            &Some(sender_jid.clone()),
             &Some(session.clone()),
         )
         .await;
@@ -2556,6 +2868,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &Some(session),
+            &Some(sender_jid),
         )
         .await;
 

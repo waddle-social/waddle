@@ -55,6 +55,8 @@ struct AcmeRuntime {
     http01_challenge_service: TowerHttp01ChallengeService,
 }
 
+type SfuServiceRef = kameo::actor::ActorRef<waddle_xmpp::sfu::service_actor::SfuServiceActor>;
+
 /// Server application state
 pub struct AppState {
     /// Database pool for global and per-waddle databases
@@ -442,12 +444,14 @@ pub async fn start_with_config(
         create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
+    let shared_sfu_service = spawn_shared_sfu_service(&xmpp_config.domain, stop_token.clone())?;
 
     // Start HTTP server
     let http_state = state.clone();
     let http_mam_storage = websocket_mam_storage.clone();
     let http_server_config = server_config.clone();
     let http_stop = stop_token.clone();
+    let http_sfu_service = shared_sfu_service.clone();
     let acme_http01_challenge_service = acme_runtime
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
@@ -457,6 +461,7 @@ pub async fn start_with_config(
             http_server_config,
             xmpp_native_auth_enabled,
             http_mam_storage,
+            http_sfu_service,
             acme_http01_challenge_service,
             http_listener,
             http_stop,
@@ -471,6 +476,7 @@ pub async fn start_with_config(
             .map(|runtime| runtime.tls_server_config.clone());
         let xmpp_server_config = xmpp_config.to_xmpp_server_config(xmpp_tls_server_config);
         let xmpp_stop = stop_token.clone();
+        let xmpp_sfu_service = shared_sfu_service.clone();
         let c2s = c2s_listener.expect("XMPP enabled but no C2S listener");
 
         Some(tokio::spawn(async move {
@@ -480,6 +486,7 @@ pub async fn start_with_config(
                 c2s,
                 s2s_listener,
                 xmpp_stop,
+                xmpp_sfu_service,
             )
             .await
         }))
@@ -546,16 +553,18 @@ async fn start_http_server(
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
     mam_storage: Arc<LibSqlMamStorage>,
+    sfu_service: SfuServiceRef,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     info!(media_backend = %state.media_backend.kind(), "Configured media backend");
-    let app = create_router(
+    let app = create_router_with_sfu(
         state,
         server_config,
         xmpp_native_auth_enabled,
         mam_storage,
+        sfu_service,
         acme_http01_challenge_service,
     );
 
@@ -579,15 +588,23 @@ async fn start_xmpp_server(
     c2s_listener: tokio::net::TcpListener,
     s2s_listener: Option<tokio::net::TcpListener>,
     stop_token: tokio_util::sync::CancellationToken,
+    sfu_service: SfuServiceRef,
 ) -> Result<()> {
     info!(
         domain = %config.domain,
         "Starting XMPP server"
     );
 
-    let server = waddle_xmpp::start(config, app_state, c2s_listener, s2s_listener, stop_token)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
+    let server = waddle_xmpp::start_with_sfu(
+        config,
+        app_state,
+        c2s_listener,
+        s2s_listener,
+        stop_token,
+        sfu_service,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
 
     server
         .run()
@@ -613,6 +630,42 @@ async fn create_websocket_mam_storage(
         .map_err(|err| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {}", err))?;
     info!(db_path = %db_path, "WebSocket MAM storage initialized");
     Ok(storage)
+}
+
+fn spawn_shared_sfu_service(
+    xmpp_domain: &str,
+    stop_token: tokio_util::sync::CancellationToken,
+) -> Result<SfuServiceRef> {
+    let sfu_domain = format!("sfu.{xmpp_domain}");
+    let sfu_udp_addr: SocketAddr = std::env::var("WADDLE_SFU_UDP_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:10000".to_string())
+        .parse()
+        .map_err(|err| anyhow::anyhow!("Invalid WADDLE_SFU_UDP_ADDR: {err}"))?;
+
+    let sfu_registry = Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
+    let sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
+        sfu_domain.clone(),
+        Arc::clone(&sfu_registry),
+        sfu_udp_addr,
+    ));
+
+    let sfu_peer_store = Arc::clone(&sfu_registry.peer_store);
+    tokio::spawn(async move {
+        if let Err(err) =
+            waddle_xmpp::sfu::net::spawn_sfu_net_loop(sfu_udp_addr, sfu_peer_store, stop_token)
+                .await
+        {
+            warn!(error = %err, addr = %sfu_udp_addr, "Shared SFU net loop failed");
+        }
+    });
+
+    info!(
+        domain = %sfu_domain,
+        udp_addr = %sfu_udp_addr,
+        "Shared SFU service initialized"
+    );
+
+    Ok(sfu_service)
 }
 
 /// State for the server-info endpoint
@@ -676,6 +729,32 @@ fn create_router(
     mam_storage: Arc<LibSqlMamStorage>,
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
 ) -> Router {
+    let test_registry = Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
+    let test_sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
+        "sfu.localhost".to_string(),
+        test_registry,
+        "127.0.0.1:9".parse().expect("valid dummy SFU address"),
+    ));
+
+    create_router_with_sfu(
+        state,
+        server_config,
+        xmpp_native_auth_enabled,
+        mam_storage,
+        test_sfu_service,
+        acme_http01_challenge_service,
+    )
+}
+
+/// Create the Axum router with all routes and middleware.
+fn create_router_with_sfu(
+    state: Arc<AppState>,
+    server_config: ServerConfig,
+    xmpp_native_auth_enabled: bool,
+    mam_storage: Arc<LibSqlMamStorage>,
+    sfu_service: SfuServiceRef,
+    acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
+) -> Router {
     // Create auth broker state
     let encryption_key = server_config.session_key.clone();
 
@@ -704,6 +783,7 @@ fn create_router(
         muc_registry,
         mam_storage,
         github_enricher,
+        sfu_service,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 

@@ -46,6 +46,51 @@ function nickFromJid(jid: string): string {
   return value;
 }
 
+const CALL_SETUP_UNAVAILABLE_CONDITIONS = new Set([
+  "item-not-found",
+  "feature-not-implemented",
+  "service-unavailable",
+  "remote-server-timeout",
+]);
+
+function xmppErrorCondition(value: unknown): string | null {
+  if (value && typeof value === "object") {
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.condition === "string" && candidate.condition.length > 0) {
+      return candidate.condition;
+    }
+    if (candidate.error && typeof candidate.error === "object") {
+      const nested = candidate.error as Record<string, unknown>;
+      if (typeof nested.condition === "string" && nested.condition.length > 0) {
+        return nested.condition;
+      }
+    }
+  }
+
+  if (value instanceof Error) {
+    const message = value.message.toLowerCase();
+    if (message.includes("object can not be found here") || message.includes("item-not-found")) {
+      return "item-not-found";
+    }
+    if (message.includes("feature requested is not implemented")) {
+      return "feature-not-implemented";
+    }
+  }
+
+  return null;
+}
+
+function normalizeCallError(
+  value: unknown,
+  normalizeError: (value: unknown) => string,
+): string {
+  const condition = xmppErrorCondition(value);
+  if (condition && CALL_SETUP_UNAVAILABLE_CONDITIONS.has(condition)) {
+    return "Calling is unavailable on this server right now.";
+  }
+  return normalizeError(value);
+}
+
 export function useMujiRuntime(
   session: Ref<WaddleSession | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -117,7 +162,7 @@ export function useMujiRuntime(
         serviceJid.value = event.peerJid;
         void xmppClient.value?.acceptMujiCall(event.sid, localStream.value).catch((err) => {
           phase.value = "error";
-          error.value = normalizeError(err);
+          error.value = normalizeCallError(err, normalizeError);
         });
         return;
       }
@@ -290,7 +335,7 @@ export function useMujiRuntime(
       phase.value = "dialing";
     } catch (err) {
       phase.value = "error";
-      error.value = normalizeError(err);
+      error.value = normalizeCallError(err, normalizeError);
       stopStream(localStream.value);
       localStream.value = null;
     }
@@ -319,7 +364,7 @@ export function useMujiRuntime(
       phase.value = "dialing";
     } catch (err) {
       phase.value = "error";
-      error.value = normalizeError(err);
+      error.value = normalizeCallError(err, normalizeError);
       stopStream(localStream.value);
       localStream.value = null;
     }
@@ -404,7 +449,7 @@ export function useMujiRuntime(
         phase.value = "dialing";
       } catch (err) {
         phase.value = "error";
-        error.value = normalizeError(err);
+        error.value = normalizeCallError(err, normalizeError);
       }
     })();
 

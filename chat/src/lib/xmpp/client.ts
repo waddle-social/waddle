@@ -112,6 +112,33 @@ function parsePresenceHats(value: unknown): WaddleHat[] {
     .filter((hat) => hat.title && hat.uri);
 }
 
+const OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS = new Set([
+  "feature-not-implemented",
+  "service-unavailable",
+  "item-not-found",
+  "remote-server-timeout",
+]);
+
+function xmppErrorCondition(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as Record<string, unknown>;
+  const direct = candidate.condition;
+  if (typeof direct === "string" && direct.length > 0) return direct;
+
+  const nested = candidate.error;
+  if (nested && typeof nested === "object") {
+    const nestedCondition = (nested as Record<string, unknown>).condition;
+    if (typeof nestedCondition === "string" && nestedCondition.length > 0) return nestedCondition;
+  }
+
+  return null;
+}
+
+function isOptionalXmppFeatureError(error: unknown): boolean {
+  const condition = xmppErrorCondition(error);
+  return !!condition && OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS.has(condition);
+}
+
 function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   if ((pres.type ?? "available") === "unavailable") return "offline";
   switch (pres.show ?? "available") {
@@ -708,7 +735,9 @@ export class BrowserXmppClient {
       try {
         await xmpp.enableCarbons();
       } catch (error) {
-        console.warn("Failed to enable message carbons", error);
+        if (!isOptionalXmppFeatureError(error)) {
+          console.warn("Failed to enable message carbons", error);
+        }
       }
       try {
         const roster = await xmpp.getRoster();
@@ -716,7 +745,9 @@ export class BrowserXmppClient {
           if (item.jid) xmpp.subscribe(item.jid);
         }
       } catch (error) {
-        console.warn("Failed to refresh roster presence subscriptions", error);
+        if (!isOptionalXmppFeatureError(error)) {
+          console.warn("Failed to refresh roster presence subscriptions", error);
+        }
       }
     });
     xmpp.on("disconnected", (err) => {
