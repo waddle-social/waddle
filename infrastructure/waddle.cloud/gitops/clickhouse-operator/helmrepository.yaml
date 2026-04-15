@@ -6,4 +6,4 @@ metadata:
 spec:
   type: oci
   interval: 12h
-  url: oci://ghcr.io/clickhouse/clickhouse-operator-helm
+  url: oci://ghcr.io/clickhouse
