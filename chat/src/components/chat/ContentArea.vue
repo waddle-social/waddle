@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Hash, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage } from "@/lib/chat-ui";
@@ -69,6 +69,7 @@ const emit = defineEmits<{
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const showSearch = ref(false);
 const searchInput = ref("");
+const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 
 defineExpose({ messagesContainer });
 
@@ -305,7 +306,7 @@ watch(
           :key="msg.id"
           :message="msg"
           :current-user="props.currentUser"
-          :avatar-url="props.avatarUrlByAuthor[msg.author] ?? null"
+          :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
           :hats="roomHats[msg.author] ?? []"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
