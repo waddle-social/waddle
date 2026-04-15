@@ -1,8 +1,9 @@
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
-  name: altinity
+  name: clickhouse-operator
   namespace: clickhouse-system
 spec:
+  type: oci
   interval: 12h
-  url: https://helm.altinity.com
+  url: oci://ghcr.io/clickhouse/clickhouse-operator-helm

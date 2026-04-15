@@ -7,19 +7,18 @@ spec:
   interval: 30m
   chart:
     spec:
-      chart: altinity-clickhouse-operator
-      version: 0.26.2
+      chart: .
+      version: 0.0.3
       sourceRef:
         kind: HelmRepository
-        name: altinity
+        name: clickhouse-operator
         namespace: clickhouse-system
       interval: 12h
   values:
     metrics:
-      enabled: true
-    serviceMonitor:
-      enabled: false
-    dashboards:
-      enabled: false
-    rbac:
-      namespaceScoped: false
+      enable: true
+    prometheus:
+      service_monitor: false
+    certManager:
+      enable: true
+      install: false

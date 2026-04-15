@@ -5,6 +5,7 @@ metadata:
   namespace: flux-system
 spec:
   dependsOn:
+    - name: infra-clickhouse-operator
     - name: openebs-postinstall
     - name: infra-external-secrets
     - name: infra-onepassword-connect
@@ -18,11 +19,7 @@ spec:
     kind: OCIRepository
     name: bootstrap
   healthChecks:
-    - apiVersion: helm.toolkit.fluxcd.io/v2
-      kind: HelmRelease
-      name: clickhouse-operator
-      namespace: clickhouse-system
-    - apiVersion: helm.toolkit.fluxcd.io/v2
-      kind: HelmRelease
+    - apiVersion: clickhouse.com/v1alpha1
+      kind: ClickHouseCluster
       name: clickhouse
       namespace: clickhouse
