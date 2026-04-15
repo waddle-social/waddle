@@ -7,6 +7,7 @@ import type { MujiCallPhase, XmppStatusSnapshot, RoomHats } from "@/lib/xmpp-cli
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
+import CallOverlay from "@/components/chat/CallOverlay.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 
@@ -212,15 +213,17 @@ watch(
       </div>
     </div>
 
-    <div
-      v-if="channel && mujiInCall"
-      class="px-6 py-2 border-b border-foreground bg-muted/20 text-xs font-mono text-muted-foreground"
-    >
-      <span class="font-bold text-foreground">Call:</span>
-      {{ mujiPhase }}
-      <span v-if="mujiServiceJid"> · {{ mujiServiceJid }}</span>
-      <span v-if="mujiHasRemoteTracks"> · remote media connected</span>
-    </div>
+    <CallOverlay
+      v-if="mujiInCall"
+      :local-stream="mujiLocalStream"
+      :remote-participants="mujiRemoteParticipants"
+      :mic-enabled="mujiMicEnabled"
+      :camera-enabled="mujiCameraEnabled"
+      :phase="mujiPhase"
+      @toggle-mic="emit('toggleMic')"
+      @toggle-camera="emit('toggleCamera')"
+      @end-call="emit('endCall')"
+    />
 
     <!-- XEP-0431: Search bar -->
     <div v-if="showSearch" class="px-6 py-2 border-b border-foreground bg-background flex items-center gap-2 flex-shrink-0">
