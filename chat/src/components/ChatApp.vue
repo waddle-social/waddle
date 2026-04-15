@@ -377,7 +377,9 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
   if (route.dmUsername) {
     const username = route.dmUsername.replace(/^@/, "").trim();
     if (username) {
-      await handleOpenDm(`${username}@${session.value?.jid.split("@")[1] ?? "waddle.social"}`);
+      const domain = session.value?.jid.split("@")[1];
+      if (!domain) return;
+      await handleOpenDm(`${username}@${domain}`);
     }
     return;
   }

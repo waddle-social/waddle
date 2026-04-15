@@ -49,6 +49,8 @@ export interface LiveDmMessage {
   isSticker?: boolean;
   callInvite?: CallInviteInfo;
   isCarbon?: boolean;
+  _reactionTarget?: string;
+  _reactionEmojis?: string[];
 }
 
 export interface SharedFileInfo {

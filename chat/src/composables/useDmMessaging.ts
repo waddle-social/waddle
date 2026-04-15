@@ -35,6 +35,7 @@ export function useDmMessaging(
   actionError: Ref<string>,
   clearActionError: () => void,
 ) {
+  const peerNameFromJid = (jid: string) => barePeerJid(jid).split("@")[0] ?? "unknown";
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
   const isLoadingMessages = ref(false);
@@ -155,12 +156,11 @@ export function useDmMessaging(
       const regular: LiveDmMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
       for (const msg of mamResults) {
-        const reactionMsg = msg as LiveDmMessage & { _reactionTarget?: string; _reactionEmojis?: string[] };
-        if (reactionMsg._reactionTarget && reactionMsg._reactionEmojis) {
+        if (msg._reactionTarget && msg._reactionEmojis) {
           reactionUpdates.push({
-            targetId: reactionMsg._reactionTarget,
+            targetId: msg._reactionTarget,
             nick: msg.nick,
-            emojis: reactionMsg._reactionEmojis,
+            emojis: msg._reactionEmojis,
           });
         } else if (msg.body || msg.callInvite || msg.sharedFile) {
           regular.push(msg);
@@ -198,22 +198,22 @@ export function useDmMessaging(
     try {
       const msgId = await client.sendDirectMessage(peerJid, bodyText);
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
-      if (msgId && isStillActive) {
-        messages.value = [
-          ...messages.value,
-          {
-            id: msgId,
-            author: session.value.username,
-            body: bodyText.trim(),
-            createdAt: new Date().toISOString(),
-            isSelf: true,
-            deliveryStatus: "sending",
-          },
-        ];
-        void scrollToBottom();
-      }
-      if (!explicitBody && isStillActive) draft.value = "";
       if (isStillActive) {
+        if (msgId) {
+          messages.value = [
+            ...messages.value,
+            {
+              id: msgId,
+              author: session.value.username,
+              body: bodyText.trim(),
+              createdAt: new Date().toISOString(),
+              isSelf: true,
+              deliveryStatus: "sending",
+            },
+          ];
+          void scrollToBottom();
+        }
+        if (!explicitBody) draft.value = "";
         if (composingTimeout) {
           clearTimeout(composingTimeout);
           composingTimeout = null;
@@ -351,18 +351,19 @@ export function useDmMessaging(
 
   function onChatState(event: DmChatStateEvent) {
     if (!activePeerJid.value || event.peerJid !== activePeerJid.value) return;
-    if (event.state === "composing") addTypingUser(event.peerJid.split("@")[0] ?? "unknown");
-    else removeTypingUser(event.peerJid.split("@")[0] ?? "unknown");
+    const peerName = peerNameFromJid(event.peerJid);
+    if (event.state === "composing") addTypingUser(peerName);
+    else removeTypingUser(peerName);
   }
 
   function onDisplayed(event: DmDisplayedEvent) {
     if (!activePeerJid.value || event.peerJid !== activePeerJid.value) return;
-    applyDisplayed(event.messageId, event.peerJid.split("@")[0] ?? "unknown");
+    applyDisplayed(event.messageId, peerNameFromJid(event.peerJid));
   }
 
   function onReaction(event: DmReactionEvent) {
     if (!activePeerJid.value || event.peerJid !== activePeerJid.value) return;
-    applyReaction(event.messageId, event.peerJid.split("@")[0] ?? "unknown", event.emojis);
+    applyReaction(event.messageId, peerNameFromJid(event.peerJid), event.emojis);
   }
 
   return {

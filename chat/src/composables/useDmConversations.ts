@@ -24,6 +24,7 @@ export function useDmConversations(
   const presenceByJid = ref<Record<string, DmConversation["presenceShow"]>>({});
 
   const hasUnread = computed(() => conversations.value.some((c) => c.unreadCount > 0));
+  const selfBareJid = computed(() => barePeerJid(session.value?.jid ?? ""));
 
   function storageKey() {
     const bare = session.value ? barePeerJid(session.value.jid) : "";
@@ -109,7 +110,7 @@ export function useDmConversations(
   function receiveIncomingDm(msg: LiveDmMessage) {
     const bare = barePeerJid(msg.peerJid);
     const existing = ensureConversation(bare);
-    const shouldIncrementUnread = msg.fromJid !== barePeerJid(session.value?.jid ?? "")
+    const shouldIncrementUnread = barePeerJid(msg.fromJid) !== selfBareJid.value
       && activePeerJid.value !== bare;
     conversations.value = sortByRecent(conversations.value.map((c) => (
       c.peerJid === bare

@@ -95,6 +95,12 @@ function onEditKeydown(e: KeyboardEvent) {
     cancelEdit();
   }
 }
+
+function emitAvatarClick() {
+  if (props.authorJid && !props.message.isSelf) {
+    emit("avatarClick", props.message.author);
+  }
+}
 </script>
 
 <template>

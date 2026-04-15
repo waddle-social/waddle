@@ -112,6 +112,20 @@ function parsePresenceHats(value: unknown): WaddleHat[] {
     .filter((hat) => hat.title && hat.uri);
 }
 
+function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
+  if ((pres.type ?? "available") === "unavailable") return "offline";
+  switch (pres.show ?? "available") {
+    case "away":
+      return "away";
+    case "xa":
+      return "xa";
+    case "dnd":
+      return "dnd";
+    default:
+      return "available";
+  }
+}
+
 export class BrowserXmppClient {
   private readonly session: WaddleSession;
   private readonly resource = createXmppResource();
@@ -690,7 +704,7 @@ export class BrowserXmppClient {
     xmpp.on("session:started", async () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
-      this.statusHandler?.({ state: "online", detail: "Live room connection ready" });
+      this.statusHandler?.({ state: "online", detail: "Connection ready" });
       try {
         await xmpp.enableCarbons();
       } catch (error) {
@@ -808,20 +822,9 @@ export class BrowserXmppClient {
       const from = barePeerJid(pres.from ?? "");
       if (!from) return;
       if (from.includes("@muc.") || from.includes("@conference.")) return;
-      const type = pres.type ?? "available";
-      const show =
-        type === "unavailable"
-          ? "offline"
-          : (pres.show ?? "available") === "away"
-            ? "away"
-            : (pres.show ?? "available") === "xa"
-              ? "xa"
-              : (pres.show ?? "available") === "dnd"
-                ? "dnd"
-                : "available";
       this.presenceUpdateHandler?.({
         bareJid: from,
-        show,
+        show: mapPresenceShow(pres),
         status: pres.status,
       });
     });

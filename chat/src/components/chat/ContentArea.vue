@@ -95,7 +95,7 @@ function presenceText(show?: string): string {
   if (show === "available") return "online";
   if (show === "away") return "away";
   if (show === "dnd") return "do not disturb";
-  if (show === "xa") return "offline";
+  if (show === "xa") return "extended away";
   return "offline";
 }
 

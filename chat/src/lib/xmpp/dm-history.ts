@@ -55,9 +55,8 @@ export async function queryPersonalMam(
     const reactions = ext(innerMsg).reactions as { id?: string; items?: string[] } | undefined;
     if (reactions?.id) {
       msg.body = "";
-      (msg as LiveDmMessage & { _reactionTarget?: string })._reactionTarget = reactions.id;
-      (msg as LiveDmMessage & { _reactionEmojis?: string[] })._reactionEmojis =
-        (reactions.items ?? []).filter((t) => t.length > 0);
+      msg._reactionTarget = reactions.id;
+      msg._reactionEmojis = (reactions.items ?? []).filter((t) => t.length > 0);
     }
 
     extractMessageExtensions(innerMsg as ReceivedMessage, msg);
