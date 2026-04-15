@@ -95,21 +95,21 @@ watch(
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0">
-    <!-- Header -->
-    <div class="h-20 border-b border-foreground px-6 flex items-center justify-between bg-background flex-shrink-0">
-      <div class="flex items-center gap-4">
+  <div class="flex-1 flex flex-col min-w-0 min-h-0 bg-background">
+    <!-- Header — sleek, floating feel -->
+    <div class="h-14 border-b border-border px-6 flex items-center justify-between flex-shrink-0 glass-surface">
+      <div class="flex items-center gap-3">
         <div class="flex items-center gap-2">
-          <Hash class="w-4 h-4" />
-          <h1 class="text-xl font-mono font-bold">{{ channel?.name ?? "..." }}</h1>
+          <Hash class="w-4 h-4 text-primary/70" />
+          <h1 class="text-[15px] font-display font-bold tracking-tight">{{ channel?.name ?? "..." }}</h1>
         </div>
         <div
           v-if="xmppStatus.state !== 'online'"
-          class="flex items-center gap-2 text-xs font-mono text-muted-foreground"
+          class="flex items-center gap-1.5 text-[11px] text-muted-foreground"
         >
           <span
-            class="w-2 h-2 inline-block"
-            :class="xmppStatus.state === 'error' ? 'bg-destructive' : 'bg-muted-foreground'"
+            class="w-1.5 h-1.5 rounded-full inline-block"
+            :class="xmppStatus.state === 'error' ? 'bg-destructive' : 'bg-warning animate-pulse'"
           />
           {{ xmppStatus.state }}
         </div>
@@ -117,7 +117,7 @@ watch(
       <div class="flex gap-1">
         <button
           v-if="channel && !mujiInCall"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-all duration-200 hover:text-primary"
           title="Start audio call"
           @click="emit('startAudioCall')"
         >
@@ -125,7 +125,7 @@ watch(
         </button>
         <button
           v-if="channel && !mujiInCall"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-all duration-200 hover:text-primary"
           title="Start video call"
           @click="emit('startVideoCall')"
         >
@@ -133,7 +133,7 @@ watch(
         </button>
         <button
           v-if="channel && mujiInCall"
-          class="h-7 w-7 flex items-center justify-center text-destructive hover:bg-destructive/10 transition-colors"
+          class="h-8 w-8 flex items-center justify-center rounded-lg text-destructive hover:bg-destructive/10 transition-all duration-200"
           title="End call"
           @click="emit('endCall')"
         >
@@ -141,7 +141,7 @@ watch(
         </button>
         <button
           v-if="channel && mujiInCall"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-all duration-200"
           :title="mujiMicEnabled ? 'Mute microphone' : 'Unmute microphone'"
           @click="emit('toggleMic')"
         >
@@ -150,7 +150,7 @@ watch(
         </button>
         <button
           v-if="channel && mujiInCall"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-all duration-200"
           :title="mujiCameraEnabled ? 'Disable camera' : 'Enable camera'"
           @click="emit('toggleCamera')"
         >
@@ -159,8 +159,8 @@ watch(
         </button>
         <button
           v-if="channel"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
-          :class="showSearch ? 'bg-muted' : ''"
+          class="h-8 w-8 flex items-center justify-center rounded-lg transition-all duration-200"
+          :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
           title="Search messages"
           @click="showSearch = !showSearch"
         >
@@ -168,7 +168,7 @@ watch(
         </button>
         <button
           v-if="canManageChannels && channel"
-          class="h-7 w-7 flex items-center justify-center hover:bg-muted transition-colors"
+          class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-200"
           title="Channel settings"
           @click="emit('editChannel')"
         >
@@ -179,32 +179,32 @@ watch(
 
     <div
       v-if="mujiPendingInvite"
-      class="px-6 py-3 border-b border-foreground bg-muted/30 flex items-center justify-between gap-4"
+      class="px-6 py-3 border-b border-primary/20 bg-primary/5 glass-surface flex items-center justify-between gap-4"
     >
       <div class="min-w-0">
-        <div class="text-sm font-mono font-bold">
+        <div class="text-sm font-display font-bold">
           {{ mujiPendingInvite.fromNick }} invited you to a call
           <span v-if="mujiInCall"> while you're already in a call</span>
         </div>
-        <div class="text-xs font-mono text-muted-foreground truncate">
+        <div class="text-xs text-muted-foreground truncate">
           {{ mujiPendingInvite.invite.meetingDesc ?? mujiPendingInvite.invite.jingleJid ?? "Muji call invite" }}
         </div>
       </div>
       <div class="flex items-center gap-2">
         <button
-          class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
+          class="px-4 py-1.5 text-xs font-semibold uppercase tracking-wider rounded-lg bg-primary text-primary-foreground hover:shadow-[0_0_16px_var(--glow-strong)] transition-all duration-200"
           @click="mujiInCall ? emit('switchCallInvite', true) : emit('joinCallInvite', true)"
         >
           {{ mujiInCall ? "Switch" : "Join" }}
         </button>
         <button
-          class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground/60 text-muted-foreground hover:text-foreground transition-colors"
+          class="px-4 py-1.5 text-xs font-semibold uppercase tracking-wider rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-all duration-200"
           @click="emit('declineCallInvite')"
         >
           Decline
         </button>
         <button
-          class="text-muted-foreground hover:text-foreground"
+          class="text-muted-foreground hover:text-foreground transition-colors"
           title="Dismiss invite"
           @click="emit('dismissCallInvite')"
         >
@@ -225,18 +225,18 @@ watch(
       @end-call="emit('endCall')"
     />
 
-    <!-- XEP-0431: Search bar -->
-    <div v-if="showSearch" class="px-6 py-2 border-b border-foreground bg-background flex items-center gap-2 flex-shrink-0">
+    <!-- Search bar -->
+    <div v-if="showSearch" class="px-6 py-2.5 border-b border-border glass-surface flex items-center gap-2.5 flex-shrink-0 animate-fade-in">
       <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
       <input
         v-model="searchInput"
         placeholder="Search messages..."
-        class="flex-1 font-mono text-sm bg-transparent focus:outline-none"
+        class="flex-1 text-[13px] bg-transparent focus:outline-none placeholder:text-muted-foreground/40"
         @keydown.enter="doSearch"
       />
       <button
         v-if="searchInput"
-        class="text-muted-foreground hover:text-foreground"
+        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors"
         @click="closeSearch"
       >
         <X class="w-3.5 h-3.5" />
@@ -244,21 +244,21 @@ watch(
     </div>
 
     <!-- Search results -->
-    <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-foreground bg-muted/30 max-h-64 overflow-auto flex-shrink-0">
-      <div v-if="isSearching" class="px-6 py-4 text-sm font-mono text-muted-foreground">
+    <div v-if="showSearch && (searchResults.length > 0 || isSearching)" class="border-b border-border glass-surface max-h-56 overflow-auto flex-shrink-0">
+      <div v-if="isSearching" class="px-6 py-3 text-[13px] text-muted-foreground">
         Searching...
       </div>
-      <div v-else class="divide-y divide-foreground/10">
+      <div v-else class="divide-y divide-border">
         <div
           v-for="result in searchResults"
           :key="result.id"
-          class="px-6 py-2 hover:bg-muted/50 transition-colors"
+          class="px-6 py-3 hover:bg-muted/50 transition-colors cursor-pointer"
         >
           <div class="flex items-baseline gap-2">
-            <span class="font-mono font-bold text-xs">{{ result.nick }}</span>
-            <span class="text-[10px] font-mono text-muted-foreground">{{ formatStamp(result.createdAt) }}</span>
+            <span class="font-medium text-[12px]">{{ result.nick }}</span>
+            <span class="text-[11px] font-mono text-muted-foreground tabular-nums">{{ formatStamp(result.createdAt) }}</span>
           </div>
-          <p class="text-xs font-mono text-muted-foreground truncate">{{ result.body }}</p>
+          <p class="text-[12px] text-muted-foreground truncate mt-0.5">{{ result.body }}</p>
         </div>
       </div>
     </div>
@@ -266,27 +266,39 @@ watch(
     <!-- Error banner -->
     <div
       v-if="actionError || mujiError"
-      class="px-6 py-3 bg-destructive/10 border-b border-destructive/20 text-sm font-mono text-destructive"
+      class="px-6 py-2.5 bg-destructive/10 border-b border-destructive/20 text-[13px] text-destructive animate-fade-in"
     >
       <div v-if="actionError">{{ actionError }}</div>
       <div v-if="mujiError && mujiError !== actionError">{{ mujiError }}</div>
     </div>
 
     <!-- Messages -->
-    <div ref="messagesContainer" class="flex-1 overflow-auto px-6 py-6">
-      <div v-if="isLoadingMessages" class="text-center py-8 text-sm font-mono text-muted-foreground">
-        Loading messages...
+    <div ref="messagesContainer" class="flex-1 min-h-0 overflow-auto px-6 py-4">
+      <div v-if="isLoadingMessages" class="text-center py-16 text-[13px] text-muted-foreground">
+        <div class="flex items-center justify-center gap-1.5">
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+        </div>
+        <p class="mt-3 text-muted-foreground/60">Loading messages...</p>
       </div>
 
-      <div v-else-if="!channel" class="text-center py-8 text-sm font-mono text-muted-foreground">
-        Select a channel to start chatting
+      <div v-else-if="!channel" class="flex flex-col items-center justify-center py-20">
+        <div class="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mb-4">
+          <Hash class="w-5 h-5 text-primary/50" />
+        </div>
+        <p class="text-[14px] text-muted-foreground font-display">Select a channel to start chatting</p>
       </div>
 
-      <div v-else-if="messages.length === 0" class="text-center py-8 text-sm font-mono text-muted-foreground">
-        No messages yet. Start the conversation!
+      <div v-else-if="messages.length === 0" class="flex flex-col items-center justify-center py-20">
+        <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+          <Hash class="w-5 h-5 text-primary" />
+        </div>
+        <p class="text-[16px] font-display font-bold mb-1">Welcome to #{{ channel.name }}</p>
+        <p class="text-[13px] text-muted-foreground">This is the start of the conversation.</p>
       </div>
 
-      <div v-else class="space-y-4 max-w-4xl">
+      <div v-else class="max-w-none">
         <MessageCard
           v-for="msg in messages"
           :key="msg.id"
@@ -304,11 +316,16 @@ watch(
     <!-- Typing indicator -->
     <div
       v-if="typingUsers.length > 0"
-      class="px-6 py-1.5 text-xs font-mono text-muted-foreground flex-shrink-0"
+      class="px-6 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2 flex-shrink-0"
     >
-      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing...</span>
-      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing...</span>
-      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing...</span>
+      <span class="flex gap-0.5">
+        <span class="typing-dot" />
+        <span class="typing-dot" />
+        <span class="typing-dot" />
+      </span>
+      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
+      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
+      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
     </div>
 
     <!-- Composer -->

@@ -19,29 +19,29 @@ const emit = defineEmits<{
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="border-b border-foreground p-6 flex items-center justify-between">
-      <h2 class="text-xl font-mono font-bold uppercase tracking-wider">{{ title }}</h2>
-      <button class="p-1 hover:bg-muted transition-colors" @click="open = false">
-        <X class="w-5 h-5" />
+    <div class="border-b border-border px-6 py-4 flex items-center justify-between">
+      <h2 class="text-[16px] font-display font-bold">{{ title }}</h2>
+      <button class="p-1.5 rounded-lg hover:bg-muted transition-all duration-200" @click="open = false">
+        <X class="w-4 h-4 text-muted-foreground" />
       </button>
     </div>
 
-    <div class="p-6">
-      <p class="font-mono text-sm leading-relaxed">{{ message }}</p>
+    <div class="px-6 py-5">
+      <p class="text-[13px] leading-relaxed text-muted-foreground">{{ message }}</p>
     </div>
 
-    <div class="border-t border-foreground p-6 flex justify-end gap-3">
+    <div class="border-t border-border px-6 py-3.5 flex justify-end gap-2">
       <button
-        class="font-mono uppercase tracking-wider text-sm py-2 px-4 border border-foreground hover:bg-muted transition-colors"
+        class="text-[13px] font-medium py-2 px-4 rounded-xl border border-border hover:bg-muted transition-all duration-200"
         @click="open = false"
       >
         Cancel
       </button>
       <button
-        class="font-mono uppercase tracking-wider text-sm py-2 px-4 border transition-colors disabled:opacity-50"
+        class="text-[13px] font-semibold py-2 px-4 rounded-xl transition-all duration-200 disabled:opacity-30"
         :class="destructive
-          ? 'bg-destructive text-destructive-foreground border-destructive hover:bg-destructive/90'
-          : 'bg-foreground text-background border-foreground hover:bg-foreground/90'"
+          ? 'bg-destructive text-destructive-foreground hover:shadow-[0_0_12px_rgba(239,68,68,0.3)]'
+          : 'bg-primary text-primary-foreground hover:shadow-[0_0_12px_var(--glow)]'"
         :disabled="loading"
         @click="emit('confirm')"
       >

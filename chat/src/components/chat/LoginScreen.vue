@@ -92,110 +92,116 @@ function handleLogin(providerId?: string) {
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center p-6">
-    <div class="w-full max-w-md border-2 border-foreground bg-background">
-      <div class="p-6 border-b border-foreground">
-        <h1 class="text-2xl font-mono font-bold uppercase tracking-wider">
-          Waddle
-        </h1>
-        <p class="text-sm font-mono text-muted-foreground mt-2 leading-relaxed">
-          Rooms, membership, and live chat in one compact client.
-        </p>
-      </div>
-
-      <!-- Server selection -->
-      <div class="p-6 border-b border-foreground space-y-4">
-        <div class="flex items-center justify-between">
-          <label class="text-xs font-mono uppercase tracking-widest text-muted-foreground">
-            Homeserver
-          </label>
-          <button
-            class="text-xs font-mono text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
-            @click="showCustomServer = !showCustomServer"
-          >
-            {{ showCustomServer ? "Hide" : "Edit" }}
-            <component :is="showCustomServer ? ChevronUp : ChevronDown" class="w-3 h-3" />
-          </button>
+  <div class="min-h-screen flex items-center justify-center p-6 bg-background">
+    <div class="w-full max-w-sm animate-slide-up">
+      <div class="glass-panel rounded-2xl border border-border shadow-2xl overflow-hidden">
+        <!-- Header -->
+        <div class="px-7 pt-8 pb-6">
+          <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-5 shadow-[0_0_20px_var(--glow)]">
+            <span class="text-2xl">🐧</span>
+          </div>
+          <h1 class="text-[22px] font-display font-bold tracking-tight">
+            Sign in to Waddle
+          </h1>
+          <p class="text-[13px] text-muted-foreground mt-1.5">
+            Rooms, membership, and live chat.
+          </p>
         </div>
 
-        <div v-if="!showCustomServer" class="font-mono text-sm font-bold">
-          {{ activeServerDisplay }}
-        </div>
+        <!-- Server selection -->
+        <div class="px-7 pb-6 space-y-3">
+          <div class="flex items-center justify-between">
+            <label class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Homeserver
+            </label>
+            <button
+              class="text-[11px] text-muted-foreground hover:text-primary transition-colors duration-200 flex items-center gap-0.5"
+              @click="showCustomServer = !showCustomServer"
+            >
+              {{ showCustomServer ? "Hide" : "Edit" }}
+              <component :is="showCustomServer ? ChevronUp : ChevronDown" class="w-3 h-3" />
+            </button>
+          </div>
 
-        <div v-else class="space-y-3">
-          <label
-            class="flex items-center gap-3 p-3 border cursor-pointer transition-colors"
-            :class="!useCustom ? 'border-foreground bg-foreground text-background' : 'border-foreground hover:bg-muted'"
-          >
-            <input
-              type="radio"
-              name="server"
-              :checked="!useCustom"
-              class="sr-only"
-              @change="selectDefault"
-            />
-            <span class="text-sm font-mono">{{ displayDefault }}</span>
-            <span class="text-xs font-mono opacity-60 ml-auto">default</span>
-          </label>
+          <div v-if="!showCustomServer" class="text-[13px] font-medium flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-success shadow-[0_0_6px_var(--success)]" />
+            {{ activeServerDisplay }}
+          </div>
 
-          <label
-            class="flex flex-col gap-2 p-3 border cursor-pointer transition-colors"
-            :class="useCustom ? 'border-foreground bg-foreground text-background' : 'border-foreground hover:bg-muted'"
-          >
-            <div class="flex items-center gap-3">
+          <div v-else class="space-y-2">
+            <label
+              class="flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all duration-200"
+              :class="!useCustom ? 'bg-primary/5 border border-primary/20' : 'border border-border hover:bg-muted'"
+            >
               <input
                 type="radio"
                 name="server"
-                :checked="useCustom"
+                :checked="!useCustom"
                 class="sr-only"
-                @change="selectCustom"
+                @change="selectDefault"
               />
-              <span class="text-sm font-mono">Other server</span>
-            </div>
-            <input
-              v-if="useCustom"
-              v-model="customUrl"
-              type="url"
-              placeholder="https://server.example.com"
-              class="w-full font-mono text-sm px-3 py-2 border border-current bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-background"
-              @focus="selectCustom"
-            />
-          </label>
+              <span class="text-[13px] font-medium">{{ displayDefault }}</span>
+              <span class="text-[11px] text-muted-foreground ml-auto">default</span>
+            </label>
+
+            <label
+              class="flex flex-col gap-2 p-3 rounded-xl cursor-pointer transition-all duration-200"
+              :class="useCustom ? 'bg-primary/5 border border-primary/20' : 'border border-border hover:bg-muted'"
+            >
+              <div class="flex items-center gap-3">
+                <input
+                  type="radio"
+                  name="server"
+                  :checked="useCustom"
+                  class="sr-only"
+                  @change="selectCustom"
+                />
+                <span class="text-[13px] font-medium">Other server</span>
+              </div>
+              <input
+                v-if="useCustom"
+                v-model="customUrl"
+                type="url"
+                placeholder="https://server.example.com"
+                class="w-full text-[13px] px-3 py-2 rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all duration-200"
+                @focus="selectCustom"
+              />
+            </label>
+          </div>
         </div>
-      </div>
 
-      <!-- Providers / Login -->
-      <div class="p-6 space-y-3">
-        <p
-          v-if="errorMessage"
-          class="border border-destructive px-3 py-2 text-sm font-mono text-destructive"
-        >
-          {{ errorMessage }}
-        </p>
-
-        <template v-if="providers.length > 1">
-          <label class="text-xs font-mono uppercase tracking-widest text-muted-foreground">
-            Sign in with
-          </label>
-          <button
-            v-for="provider in providers"
-            :key="provider.id"
-            class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
-            @click="handleLogin(provider.id)"
+        <!-- Providers / Login -->
+        <div class="px-7 pb-7 space-y-2.5">
+          <p
+            v-if="errorMessage"
+            class="rounded-xl bg-destructive/10 px-4 py-2.5 text-[13px] text-destructive"
           >
-            {{ provider.display_name || provider.id }}
-          </button>
-        </template>
+            {{ errorMessage }}
+          </p>
 
-        <button
-          v-else
-          class="w-full py-2 px-4 font-mono text-sm uppercase tracking-wider border border-foreground bg-foreground text-background hover:bg-foreground/90 transition-colors"
-          :disabled="providers.length === 0"
-          :class="providers.length === 0 ? 'opacity-50 cursor-not-allowed' : ''"
-          @click="handleLogin(providers[0]?.id)"
-        >
-          {{ providers.length === 0 ? "No sign-in methods found" : `Sign in with ${singleProviderLabel}` }}
-        </button>
+          <template v-if="providers.length > 1">
+            <label class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Sign in with
+            </label>
+            <button
+              v-for="provider in providers"
+              :key="provider.id"
+              class="w-full py-2.5 px-4 text-[13px] font-semibold rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300"
+              @click="handleLogin(provider.id)"
+            >
+              {{ provider.display_name || provider.id }}
+            </button>
+          </template>
+
+          <button
+            v-else
+            class="w-full py-2.5 px-4 text-[13px] font-semibold rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-30"
+            :disabled="providers.length === 0"
+            @click="handleLogin(providers[0]?.id)"
+          >
+            {{ providers.length === 0 ? "No sign-in methods found" : `Sign in with ${singleProviderLabel}` }}
+          </button>
+        </div>
       </div>
     </div>
   </div>

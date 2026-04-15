@@ -14,6 +14,14 @@ const HAT_LABELS: Record<string, string> = {
   "urn:xmpp:hats:verified": "VERIFIED",
 };
 
+const HAT_COLORS: Record<string, string> = {
+  "urn:xmpp:hats:owner": "bg-warning/10 text-warning",
+  "urn:xmpp:hats:admin": "bg-primary/10 text-primary",
+  "urn:xmpp:hats:moderator": "bg-primary/10 text-primary",
+  "urn:xmpp:hats:bot": "bg-success/10 text-success",
+  "urn:xmpp:hats:verified": "bg-primary/10 text-primary",
+};
+
 const props = defineProps<{
   message: TimelineMessage;
   currentUser?: string;
@@ -29,6 +37,8 @@ const emit = defineEmits<{
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
+const isSystemEvent = computed(() => !!props.message.callInvite);
+
 const styledHtml = computed(() => renderStyledBody(props.message.body));
 const isGif = computed(() => isImageUrl(props.message.body));
 const isSharedImage = computed(() => {
@@ -43,7 +53,6 @@ function formatFileSize(bytes: number): string {
 }
 
 const isMentioned = computed(() => {
-  // XEP-0513: Broadcast mentions highlight for everyone
   if (props.message.broadcastMention) return true;
   if (!props.currentUser || !props.message.mentions) return false;
   return props.message.mentions.some(
@@ -87,67 +96,91 @@ function onEditKeydown(e: KeyboardEvent) {
   <!-- Retracted tombstone -->
   <div
     v-if="message.isRetracted"
-    class="flex gap-4 border border-foreground/30 p-4 opacity-50"
+    class="flex gap-3 px-3 py-2 opacity-30 animate-message-in"
   >
     <AppAvatar :name="message.author" size="md" />
-    <div class="flex-1 min-w-0">
-      <div class="flex items-baseline gap-3 mb-1">
-        <span class="font-mono font-bold text-sm">{{ message.author }}</span>
-        <span class="text-xs font-mono text-muted-foreground">
+    <div class="flex-1 min-w-0 pt-0.5">
+      <div class="flex items-baseline gap-2 mb-0.5">
+        <span class="font-medium text-[13px]">{{ message.author }}</span>
+        <span class="text-[11px] font-mono text-muted-foreground tabular-nums">
           {{ formatStamp(message.createdAt) }}
         </span>
       </div>
-      <p class="text-sm italic text-muted-foreground">This message was deleted.</p>
+      <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
     </div>
+  </div>
+
+  <!-- System event (call invites, etc.) -->
+  <div
+    v-else-if="isSystemEvent"
+    class="flex items-center justify-center gap-3 py-3 animate-message-in"
+  >
+    <div class="h-px flex-1 bg-border" />
+    <div class="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-muted/40 text-[12px] text-muted-foreground">
+      <Phone v-if="message.callInvite && !message.callInvite.jingleSid && !message.callInvite.externalUri" class="w-3 h-3 text-primary/60" />
+      <Video v-else class="w-3.5 h-3.5 text-primary/60" />
+      <span>
+        <span class="font-medium text-foreground/70">{{ message.author }}</span>
+        · {{ message.callInvite?.meetingDesc ?? message.body }}
+      </span>
+      <span class="text-[10px] font-mono text-muted-foreground/50 tabular-nums">{{ formatStamp(message.createdAt) }}</span>
+      <button
+        v-if="message.callInvite"
+        class="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-all duration-200"
+        @click="emit('joinCall', message.callInvite!)"
+      >Join</button>
+    </div>
+    <div class="h-px flex-1 bg-border" />
   </div>
 
   <!-- Normal message -->
   <div
     v-else
-    class="group flex gap-4 border p-4 transition-colors"
+    class="group flex gap-3 px-3 py-2 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
-      message.isSelf ? 'bg-muted/30 border-foreground' : 'border-foreground',
-      isMentioned ? 'border-l-4 border-l-yellow-500 bg-yellow-500/5' : '',
+      isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
     ]"
   >
-    <AppAvatar :name="message.author" size="md" />
+    <AppAvatar :name="message.author" size="md" class="mt-0.5" />
     <div class="flex-1 min-w-0">
-      <div class="flex items-baseline gap-3 mb-1">
-        <span class="font-mono font-bold text-sm">{{ message.author }}</span>
+      <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
+        <span class="font-semibold text-[13px]">{{ message.author }}</span>
         <span
           v-for="hat in hats"
           :key="hat.uri"
-          class="inline-block px-1 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider border border-foreground/40 text-muted-foreground leading-none"
+          class="inline-block px-1.5 py-px text-[9px] font-bold uppercase tracking-wider rounded-md leading-none"
+          :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
           :title="hat.title"
         >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
-        <span class="text-xs font-mono text-muted-foreground">
+        <span class="text-[11px] font-mono text-muted-foreground/60 tabular-nums">
           {{ formatStamp(message.createdAt) }}
         </span>
-        <span v-if="message.isEdited" class="text-xs font-mono text-muted-foreground">(edited)</span>
+        <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
         <span
           v-if="message.isSelf && message.deliveryStatus"
-          class="text-xs font-mono text-muted-foreground flex items-center gap-1"
+          class="text-[11px] text-muted-foreground flex items-center gap-0.5"
         >
           <Check v-if="message.deliveryStatus === 'sending'" class="w-3 h-3" />
-          <CheckCheck v-else-if="message.deliveryStatus === 'delivered'" class="w-3 h-3" />
+          <CheckCheck v-else-if="message.deliveryStatus === 'delivered'" class="w-3 h-3 text-primary" />
         </span>
         <span
           v-if="message.isSelf && message.readBy && message.readBy.length > 0"
-          class="text-xs font-mono text-muted-foreground"
+          class="text-[11px] text-muted-foreground/50"
           :title="message.readBy.join(', ')"
         >
           Read by {{ message.readBy.length }}
         </span>
-        <span v-if="message.isSelf && !isEditing" class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+        <!-- Action toolbar -->
+        <span v-if="message.isSelf && !isEditing" class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 ml-auto">
           <button
-            class="text-muted-foreground hover:text-foreground"
+            class="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-all duration-200"
             title="Edit message"
             @click="startEdit"
           >
             <Pencil class="w-3 h-3" />
           </button>
           <button
-            class="text-muted-foreground hover:text-destructive"
+            class="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-all duration-200"
             title="Delete message"
             @click="emit('retract', message.id)"
           >
@@ -157,82 +190,60 @@ function onEditKeydown(e: KeyboardEvent) {
       </div>
 
       <!-- Edit mode -->
-      <div v-if="isEditing" class="flex gap-2">
+      <div v-if="isEditing" class="flex gap-2 mt-1">
         <input
           v-model="editDraft"
-          class="flex-1 font-mono border border-foreground focus:outline-none focus:ring-2 focus:ring-foreground px-2 bg-background text-sm h-8"
+          class="flex-1 rounded-xl focus:outline-none px-4 bg-muted text-[13px] h-9 focus:ring-2 focus:ring-primary/30 transition-all duration-200"
           @keydown="onEditKeydown"
         />
         <button
-          class="text-xs font-mono px-2 h-8 border border-foreground hover:bg-foreground hover:text-background transition-colors"
+          class="text-[12px] font-semibold px-3 h-9 rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200"
           @click="submitEdit"
         >Save</button>
         <button
-          class="text-xs font-mono px-2 h-8 text-muted-foreground hover:text-foreground transition-colors"
+          class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
           @click="cancelEdit"
         >Cancel</button>
       </div>
 
-      <!-- XEP-0482/0483: Call invite card -->
-      <div v-else-if="message.callInvite" class="mt-1">
-        <div class="inline-flex items-center gap-3 border border-foreground p-3">
-          <div class="flex items-center justify-center w-8 h-8 bg-foreground text-background">
-            <Video v-if="message.callInvite.muji || message.callInvite.jingleSid || message.callInvite.externalUri" class="w-4 h-4" />
-            <Phone v-else class="w-4 h-4" />
-          </div>
-          <div class="flex-1 min-w-0">
-            <div class="font-mono text-sm font-bold">
-              {{ message.callInvite.meetingDesc ?? "Call Invite" }}
-            </div>
-            <div v-if="message.callInvite.externalUri" class="text-xs font-mono text-muted-foreground truncate">
-              {{ message.callInvite.externalUri }}
-            </div>
-          </div>
-          <button
-            class="px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border border-foreground hover:bg-foreground hover:text-background transition-colors"
-            @click="emit('joinCall', message.callInvite!)"
-          >Join</button>
-        </div>
-      </div>
-
-      <!-- XEP-0449: Sticker (large image, no metadata) -->
+      <!-- Sticker -->
       <div v-else-if="message.isSticker && message.sharedFile" class="mt-1">
         <img
           :src="message.sharedFile.url"
           :alt="message.sharedFile.desc ?? message.body ?? 'Sticker'"
-          class="max-w-32 max-h-32 object-contain"
+          class="max-w-28 max-h-28 object-contain"
           loading="lazy"
         />
       </div>
 
-      <!-- XEP-0447: Shared file (image inline) -->
-      <div v-else-if="isSharedImage && message.sharedFile" class="mt-1">
+      <!-- Shared file (image inline) -->
+      <div v-else-if="isSharedImage && message.sharedFile" class="mt-2">
         <a :href="message.sharedFile.url" target="_blank" rel="noopener noreferrer">
           <img
             :src="message.sharedFile.url"
             :alt="message.sharedFile.name ?? 'Shared image'"
-            class="max-w-xs max-h-64 border border-foreground/20 object-contain"
+            class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
             loading="lazy"
           />
         </a>
-        <div v-if="message.sharedFile.name" class="text-xs font-mono text-muted-foreground mt-0.5">
+        <div v-if="message.sharedFile.name" class="text-[11px] text-muted-foreground/60 mt-1">
           {{ message.sharedFile.name }}
           <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
         </div>
       </div>
 
-      <!-- XEP-0447: Shared file (non-image download card) -->
-      <div v-else-if="message.sharedFile" class="mt-1">
+      <!-- Shared file (non-image) -->
+      <div v-else-if="message.sharedFile" class="mt-2">
         <a
           :href="message.sharedFile.url"
           target="_blank"
           rel="noopener noreferrer"
-          class="inline-flex items-center gap-3 border border-foreground p-3 hover:bg-muted transition-colors"
+          class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200"
         >
-          <FileDown class="w-5 h-5 flex-shrink-0" />
+          <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
           <div class="flex-1 min-w-0">
-            <div class="font-mono text-sm font-bold truncate">{{ message.sharedFile.name ?? "File" }}</div>
-            <div class="text-xs font-mono text-muted-foreground">
+            <div class="text-[13px] font-medium truncate">{{ message.sharedFile.name ?? "File" }}</div>
+            <div class="text-[11px] text-muted-foreground">
               {{ message.sharedFile.mediaType ?? "file" }}
               <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
             </div>
@@ -240,43 +251,43 @@ function onEditKeydown(e: KeyboardEvent) {
         </a>
       </div>
 
-      <!-- Inline image/GIF -->
-      <div v-else-if="isGif" class="mt-1">
+      <!-- Inline GIF -->
+      <div v-else-if="isGif" class="mt-2">
         <img
           :src="message.body.trim()"
           alt="GIF"
-          class="max-w-xs max-h-64 border border-foreground/20 object-contain"
+          class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
           loading="lazy"
         />
       </div>
 
-      <!-- Normal display (XEP-0393 styled) -->
-      <div v-else class="text-sm leading-relaxed break-words styled-body" v-html="styledHtml" />
+      <!-- Normal display -->
+      <div v-else class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
 
-      <!-- Reactions display -->
+      <!-- Reactions -->
       <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">
         <button
           v-for="(nicks, emoji) in message.reactions"
           :key="emoji"
-          class="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs border border-foreground/30 hover:border-foreground transition-colors font-mono"
+          class="inline-flex items-center gap-1 px-2 py-0.5 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
           :title="nicks.join(', ')"
           @click="emit('react', message.id, emoji)"
         >
           <span>{{ emoji }}</span>
-          <span class="text-muted-foreground">{{ nicks.length }}</span>
+          <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
         </button>
         <button
-          class="opacity-0 group-hover:opacity-100 inline-flex items-center px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground border border-transparent hover:border-foreground/30 transition-all"
+          class="opacity-0 group-hover:opacity-100 inline-flex items-center px-2 py-0.5 text-[12px] text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-all duration-200"
           title="Add reaction"
           @click.stop
         >
           <span class="relative">
-            <SmilePlus class="w-3.5 h-3.5" />
+            <SmilePlus class="w-3 h-3" />
             <span class="absolute left-full top-1/2 -translate-y-1/2 ml-1 flex gap-0.5 whitespace-nowrap">
               <button
                 v-for="e in quickEmojis"
                 :key="e"
-                class="hover:scale-125 transition-transform"
+                class="hover:scale-125 transition-transform duration-150"
                 @click="emit('react', message.id, e)"
               >{{ e }}</button>
             </span>
@@ -284,12 +295,12 @@ function onEditKeydown(e: KeyboardEvent) {
         </button>
       </div>
 
-      <!-- Quick react (when no reactions yet) -->
-      <div v-else class="opacity-0 group-hover:opacity-100 flex gap-1 mt-1 transition-opacity">
+      <!-- Quick react (no reactions yet) -->
+      <div v-else class="opacity-0 group-hover:opacity-100 flex gap-0.5 mt-1.5 transition-opacity">
         <button
           v-for="e in quickEmojis"
           :key="e"
-          class="text-sm hover:scale-125 transition-transform"
+          class="text-[13px] hover:scale-125 transition-transform duration-150 p-0.5"
           :title="`React with ${e}`"
           @click="emit('react', message.id, e)"
         >{{ e }}</button>

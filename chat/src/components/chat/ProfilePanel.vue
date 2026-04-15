@@ -8,6 +8,7 @@ const props = defineProps<{
   session: WaddleSession;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
+  compact?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -34,14 +35,13 @@ function handleBellClick() {
 </script>
 
 <template>
-  <div class="h-16 border-t border-foreground px-6 flex items-center gap-3 flex-shrink-0">
-    <AppAvatar :name="session.username" size="sm" />
-    <span class="flex-1 min-w-0 text-sm font-mono font-bold truncate">{{ session.username }}</span>
+  <!-- Compact mode for icon rail -->
+  <div v-if="compact" class="flex flex-col items-center gap-1.5 pt-3 border-t border-border mt-2">
     <button
-      class="h-7 w-7 flex items-center justify-center transition-colors flex-shrink-0"
+      class="w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200"
       :class="notificationPermission === 'denied'
-        ? 'opacity-30 cursor-not-allowed'
-        : 'hover:bg-foreground/10'"
+        ? 'opacity-30 cursor-not-allowed text-rail-foreground'
+        : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
       :title="bellTitle"
       :aria-label="bellTitle"
       :disabled="notificationPermission === 'denied'"
@@ -51,7 +51,33 @@ function handleBellClick() {
       <Bell v-else class="w-3.5 h-3.5" />
     </button>
     <button
-      class="h-7 w-7 flex items-center justify-center hover:bg-destructive hover:text-destructive-foreground transition-colors flex-shrink-0"
+      class="w-10 h-10 flex items-center justify-center rounded-xl text-rail-foreground hover:bg-rail-hover hover:text-rail-active transition-all duration-200"
+      :title="`${session.username} — Log out`"
+      @click="emit('logout')"
+    >
+      <AppAvatar :name="session.username" size="xs" />
+    </button>
+  </div>
+
+  <!-- Full mode for sidebar -->
+  <div v-else class="px-3 py-2.5 flex items-center gap-2.5 flex-shrink-0 border-t border-border">
+    <AppAvatar :name="session.username" size="sm" />
+    <span class="flex-1 min-w-0 text-[13px] font-medium truncate text-sidebar-foreground">{{ session.username }}</span>
+    <button
+      class="h-7 w-7 flex items-center justify-center rounded-lg transition-all duration-200 flex-shrink-0"
+      :class="notificationPermission === 'denied'
+        ? 'opacity-30 cursor-not-allowed'
+        : 'hover:bg-sidebar-accent text-sidebar-muted hover:text-primary'"
+      :title="bellTitle"
+      :aria-label="bellTitle"
+      :disabled="notificationPermission === 'denied'"
+      @click="handleBellClick"
+    >
+      <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="w-3.5 h-3.5" />
+      <Bell v-else class="w-3.5 h-3.5" />
+    </button>
+    <button
+      class="h-7 w-7 flex items-center justify-center rounded-lg text-sidebar-muted hover:bg-sidebar-accent hover:text-destructive transition-all duration-200 flex-shrink-0"
       title="Log out"
       @click="emit('logout')"
     >

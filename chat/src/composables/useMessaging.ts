@@ -260,10 +260,11 @@ export function useMessaging(
 
   async function scrollToBottom() {
     await nextTick();
-    timelineEl.value?.scrollTo({
-      top: timelineEl.value.scrollHeight,
-      behavior: "auto",
-    });
+    // Double nextTick ensures the DOM has fully rendered after reactive updates
+    await nextTick();
+    if (timelineEl.value) {
+      timelineEl.value.scrollTop = timelineEl.value.scrollHeight;
+    }
   }
 
   function applyDisplayed(messageId: string, nick: string) {
@@ -399,13 +400,13 @@ export function useMessaging(
       }
 
       messages.value = timeline;
+      if (requestId === messageRequestId) {
+        isLoadingMessages.value = false;
+      }
       await scrollToBottom();
     } catch (e) {
       if (requestId === messageRequestId) {
         actionError.value = normalizeError(e);
-      }
-    } finally {
-      if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
       }
     }

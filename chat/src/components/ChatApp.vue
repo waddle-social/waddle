@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { type ComponentPublicInstance, onMounted, onUnmounted, ref, shallowRef, watch, watchEffect } from "vue";
-import { useAuth } from "@/composables/useAuth";
+import { type ComponentPublicInstance, computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
 import { useMessaging } from "@/composables/useMessaging";
@@ -8,7 +7,7 @@ import { useMujiRuntime } from "@/composables/useMujiRuntime";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
-import { BrowserXmppClient } from "@/lib/xmpp-client";
+import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
@@ -26,24 +25,29 @@ import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/waddle-api";
 
-const props = defineProps<{ serverBaseUrl: string; tenorApiKey: string }>();
+const props = defineProps<{
+  tenorApiKey?: string;
+}>();
+
+const tenorApiKey = props.tenorApiKey ?? "";
 
 const ui = useUiState();
-const auth = useAuth(props.serverBaseUrl);
 
-const xmppClient = shallowRef<BrowserXmppClient | null>(null);
+const xmppClient = computed(() => connectionStore.client);
+const session = computed(() => connectionStore.session);
+const api = computed(() => connectionStore.api);
 
 const waddles = useWaddles(
-  auth.api,
+  api,
   xmppClient,
-  auth.session,
+  session,
   ui.normalizeError,
   ui.actionError,
   ui.clearActionError,
 );
 
 const members = useMembers(
-  auth.api,
+  api,
   waddles.activeWaddleId,
   waddles.activeChannelId,
   waddles.members,
@@ -55,8 +59,8 @@ const members = useMembers(
 );
 
 const messaging = useMessaging(
-  auth.session,
-  auth.api,
+  session,
+  api,
   xmppClient,
   waddles.activeWaddleId,
   waddles.activeChannelId,
@@ -66,7 +70,7 @@ const messaging = useMessaging(
 );
 
 const muji = useMujiRuntime(
-  auth.session,
+  session,
   xmppClient,
   messaging.xmppStatus,
   waddles.activeWaddleId,
@@ -98,7 +102,7 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
   const channelName = resolveChannelNameFromJid(event.roomJid) ?? "unknown";
   const isBroadcast = !!event.broadcastMention;
   const isPersonalMention = event.mentions?.some(
-    (m) => m === auth.session.value?.username || m.split("@")[0] === auth.session.value?.username,
+    (m) => m === connectionStore.session?.username || m.split("@")[0] === connectionStore.session?.username,
   );
 
   if (isBroadcast || isPersonalMention) {
@@ -127,8 +131,8 @@ const isApplyingRoute = ref(false);
 let routeRequestId = 0;
 
 async function setupPushSubscription() {
-  if (!xmppClient.value || !auth.session.value) return;
-  await notifications.syncPushSubscription(xmppClient.value, auth.session.value.jid);
+  if (!xmppClient.value || !connectionStore.session) return;
+  await notifications.syncPushSubscription(xmppClient.value, connectionStore.session.jid);
 }
 
 async function handleRequestNotifications() {
@@ -142,8 +146,8 @@ async function handleToggleNotifications() {
   notifications.notificationsEnabled.value = !notifications.notificationsEnabled.value;
   if (notifications.notificationsEnabled.value) {
     await setupPushSubscription();
-  } else if (xmppClient.value && auth.session.value) {
-    await notifications.disablePushSubscription(xmppClient.value, auth.session.value.jid);
+  } else if (xmppClient.value && connectionStore.session) {
+    await notifications.disablePushSubscription(xmppClient.value, connectionStore.session.jid);
   }
 }
 
@@ -226,35 +230,30 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
   }
 }
 
-// --- Bootstrap ---
+// --- Bootstrap (watches connection store) ---
 
-async function bootstrap() {
-  await auth.bootstrap();
-  if (auth.appState.value === "ready" && auth.session.value) {
-    xmppClient.value = new BrowserXmppClient(auth.session.value);
+async function onConnectionReady() {
+  const route = parseRoute(window.location.pathname);
+  const requestId = ++routeRequestId;
+  isApplyingRoute.value = true;
 
-    const route = parseRoute(window.location.pathname);
-    const requestId = ++routeRequestId;
-    isApplyingRoute.value = true;
-
-    try {
-      await waddles.loadWaddles(undefined, { loadStructure: !route.waddleSlug });
-      if (requestId === routeRequestId) {
-        await applyRouteTarget(route, requestId);
-      }
-    } finally {
-      if (requestId === routeRequestId) {
-        isApplyingRoute.value = false;
-        updateUrl();
-      }
+  try {
+    await waddles.loadWaddles(undefined, { loadStructure: !route.waddleSlug });
+    if (requestId === routeRequestId) {
+      await applyRouteTarget(route, requestId);
     }
-
-    // Register service worker and sync push subscription (best-effort, non-blocking)
-    void (async () => {
-      await notifications.registerServiceWorker();
-      await setupPushSubscription();
-    })();
+  } finally {
+    if (requestId === routeRequestId) {
+      isApplyingRoute.value = false;
+      updateUrl();
+    }
   }
+
+  // Register service worker and sync push subscription (best-effort, non-blocking)
+  void (async () => {
+    await notifications.registerServiceWorker();
+    await setupPushSubscription();
+  })();
 }
 
 // --- Actions ---
@@ -262,12 +261,10 @@ async function bootstrap() {
 async function handleLogout() {
   muji.endCall();
   messaging.disconnect();
-  await xmppClient.value?.disconnect().catch(() => undefined);
-  xmppClient.value = null;
-  await auth.logout();
   waddles.clearData();
   messaging.clearMessages();
   pushRoute(null, null);
+  await connectionStore.logout();
 }
 
 async function selectWaddle(waddleId: string, preferredChannelId?: string | null) {
@@ -284,8 +281,9 @@ async function selectChannel(channelId: string) {
   waddles.activeChannelId.value = channelId;
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
-  if (waddles.activeWaddleId.value && auth.session.value) {
-    const roomJid = `${channelId}@conference.${auth.session.value.xmpp_domain}`;
+  if (waddles.activeWaddleId.value && connectionStore.session) {
+    const domain = connectionStore.session.jid.split("@")[1] ?? "";
+    const roomJid = `${channelId}@conference.${domain}`;
     messaging.clearChannelActivity(roomJid);
   }
   if (waddles.activeWaddleId.value) {
@@ -397,44 +395,55 @@ function openChannelEdit() {
   }
 }
 
+// Watch for connection becoming ready (XmppProvider handles auth bootstrap)
+let hasBootstrapped = false;
+watch(
+  () => connectionStore.appState,
+  (state) => {
+    if (state === "ready" && !hasBootstrapped) {
+      hasBootstrapped = true;
+      void onConnectionReady();
+    }
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   window.addEventListener("popstate", onPopState);
-  void bootstrap();
 });
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
   muji.endCall();
   messaging.disconnect();
-  void xmppClient.value?.disconnect().catch(() => undefined);
 });
 </script>
 
 <template>
   <!-- Loading -->
   <LandingState
-    v-if="auth.appState.value === 'loading'"
+    v-if="connectionStore.appState === 'loading'"
     title="Checking session."
   />
 
   <!-- Signed out -->
   <LoginScreen
-    v-else-if="auth.appState.value === 'signed-out'"
-    :default-server-url="props.serverBaseUrl"
-    :active-server-url="auth.activeServerUrl.value"
-    :providers="auth.providers.value"
-    :error-message="auth.appError.value"
-    @login="(url, pid) => auth.login(url, pid)"
-    @fetch-providers="auth.fetchProviders"
+    v-else-if="connectionStore.appState === 'signed-out'"
+    :default-server-url="connectionStore.activeServerUrl"
+    :active-server-url="connectionStore.activeServerUrl"
+    :providers="connectionStore.providers"
+    :error-message="connectionStore.appError"
+    @login="(url, pid) => connectionStore.login(url, pid)"
+    @fetch-providers="connectionStore.fetchProviders"
   />
 
   <!-- Error -->
   <LandingState
-    v-else-if="auth.appState.value === 'error'"
+    v-else-if="connectionStore.appState === 'error'"
     title="Server unavailable."
-    :copy="auth.appError.value"
+    :copy="connectionStore.appError"
     action-label="Try again"
-    @action="bootstrap"
+    @action="connectionStore.bootstrap"
   />
 
   <!-- Ready -->
@@ -443,7 +452,7 @@ onUnmounted(() => {
     <MobileHeader
       :waddle="waddles.currentWaddle.value"
       :channel="waddles.currentChannel.value"
-      :session="auth.session.value"
+      :session="connectionStore.session"
       @open-nav="ui.showMobileNav.value = true"
       @open-details="ui.showMobileDetails.value = true"
     />
@@ -451,10 +460,10 @@ onUnmounted(() => {
     <!-- Mobile nav drawer -->
     <AppDrawer v-model:open="ui.showMobileNav.value" side="left">
       <template #title>
-        <span class="font-mono font-bold uppercase tracking-wider">Navigation</span>
+        <span class="text-[13px] font-semibold">Navigation</span>
       </template>
       <div class="flex flex-col h-full">
-        <div class="border-b border-foreground">
+        <div class="border-b border-border">
           <WaddlesSidebar
             :waddles="waddles.sortedWaddles.value"
             :active-waddle-id="waddles.activeWaddleId.value"
@@ -481,8 +490,8 @@ onUnmounted(() => {
           @open-members="ui.showMembers.value = true"
         />
         <ProfilePanel
-          v-if="auth.session.value"
-          :session="auth.session.value"
+          v-if="connectionStore.session"
+          :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
           @logout="handleLogout"
@@ -495,26 +504,26 @@ onUnmounted(() => {
     <!-- Mobile details drawer -->
     <AppDrawer v-model:open="ui.showMobileDetails.value" side="right">
       <template #title>
-        <span class="font-mono font-bold uppercase tracking-wider">Details</span>
+        <span class="text-[13px] font-semibold">Details</span>
       </template>
-      <div class="p-4 space-y-4">
-        <div v-if="waddles.currentWaddle.value" class="space-y-2">
-          <h3 class="font-mono font-bold uppercase tracking-wider">{{ waddles.currentWaddle.value.name }}</h3>
-          <p v-if="waddles.currentWaddle.value.description" class="text-sm font-mono text-muted-foreground">
+      <div class="p-4 space-y-3">
+        <div v-if="waddles.currentWaddle.value" class="space-y-1.5">
+          <h3 class="text-[14px] font-semibold">{{ waddles.currentWaddle.value.name }}</h3>
+          <p v-if="waddles.currentWaddle.value.description" class="text-[13px] text-muted-foreground">
             {{ waddles.currentWaddle.value.description }}
           </p>
         </div>
 
-        <div class="space-y-2">
+        <div class="space-y-1.5">
           <button
             v-if="waddles.currentChannel.value && waddles.canManageChannels.value"
-            class="w-full font-mono uppercase tracking-wider text-sm py-2 px-4 border border-foreground hover:bg-foreground hover:text-background transition-colors"
+            class="w-full text-[13px] font-medium py-2 px-3 rounded-md border border-border hover:bg-muted transition-colors"
             @click="openChannelEdit(); ui.showMobileDetails.value = false"
           >
             Edit Channel
           </button>
           <button
-            class="w-full font-mono uppercase tracking-wider text-sm py-2 px-4 border border-foreground hover:bg-foreground hover:text-background transition-colors"
+            class="w-full text-[13px] font-medium py-2 px-3 rounded-md border border-border hover:bg-muted transition-colors"
             @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
           >
             Members ({{ waddles.members.value.length }})
@@ -525,24 +534,24 @@ onUnmounted(() => {
 
     <!-- Desktop layout -->
     <div class="flex-1 flex overflow-hidden">
-      <!-- Left sidebar: waddles + profile -->
+      <!-- Icon rail: waddle switcher -->
       <div class="hidden lg:flex">
-          <WaddlesSidebar
-            :waddles="waddles.sortedWaddles.value"
-            :active-waddle-id="waddles.activeWaddleId.value"
-            :session="auth.session.value"
-            :notification-permission="notifications.permissionState.value"
-            :notifications-enabled="notifications.notificationsEnabled.value"
-            @select-waddle="selectWaddle($event)"
-            @browse-public-waddles="openBrowsePublicWaddles"
-            @create-waddle="ui.showCreateWaddle.value = true"
-            @logout="handleLogout"
-            @request-notifications="handleRequestNotifications"
-            @toggle-notifications="handleToggleNotifications"
-          />
-        </div>
+        <WaddlesSidebar
+          :waddles="waddles.sortedWaddles.value"
+          :active-waddle-id="waddles.activeWaddleId.value"
+          :session="connectionStore.session"
+          :notification-permission="notifications.permissionState.value"
+          :notifications-enabled="notifications.notificationsEnabled.value"
+          @select-waddle="selectWaddle($event)"
+          @browse-public-waddles="openBrowsePublicWaddles"
+          @create-waddle="ui.showCreateWaddle.value = true"
+          @logout="handleLogout"
+          @request-notifications="handleRequestNotifications"
+          @toggle-notifications="handleToggleNotifications"
+        />
+      </div>
 
-      <!-- Topics panel -->
+      <!-- Channel sidebar -->
       <div class="hidden lg:flex">
         <TopicsPanel
           :waddle="waddles.currentWaddle.value"
@@ -573,8 +582,8 @@ onUnmounted(() => {
         :is-sending="messaging.isSending.value"
         :can-manage-channels="waddles.canManageChannels.value"
         :typing-users="messaging.typingUsers.value"
-        :current-user="auth.session.value?.username"
-        :tenor-api-key="props.tenorApiKey"
+        :current-user="connectionStore.session?.username"
+        :tenor-api-key="tenorApiKey"
         :member-names="waddles.members.value.map((m) => m.username)"
         :room-hats="messaging.roomHats.value"
         :slow-mode-cooldown="messaging.slowModeCooldown.value"
@@ -630,8 +639,8 @@ onUnmounted(() => {
       :joined-waddle-ids="waddles.waddles.value.map((w) => w.id)"
       :is-loading="waddles.isLoadingPublicWaddles.value"
       :joining-waddle-id="waddles.joiningPublicWaddleId.value"
-      :query="publicBrowseQuery.value"
-      @update:query="publicBrowseQuery.value = $event"
+      :query="publicBrowseQuery"
+      @update:query="publicBrowseQuery = $event"
       @refresh="refreshPublicWaddles"
       @join="handleJoinPublicWaddle"
     />
