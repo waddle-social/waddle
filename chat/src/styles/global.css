@@ -3,9 +3,8 @@
 @import "@fontsource-variable/jetbrains-mono";
 @import "tailwindcss";
 
-@custom-variant dark (&:is(.dark *));
-
 :root {
+  color-scheme: light;
   /* Aether light — crisp, luminous, spatial */
   --background: #f4f5f7;
   --foreground: #0f1115;
@@ -46,49 +45,49 @@
   --ambient-1: rgba(0, 180, 160, 0.03);
   --ambient-2: rgba(120, 80, 255, 0.02);
   --ambient-3: rgba(0, 120, 255, 0.02);
-}
-
-.dark {
-  /* Aether dark — deep obsidian, luminous accents */
-  --background: #0c0d12;
-  --foreground: #e4e6ed;
-  --card: rgba(22, 24, 32, 0.72);
-  --card-foreground: #e4e6ed;
-  --popover: rgba(26, 28, 38, 0.92);
-  --popover-foreground: #e4e6ed;
-  --primary: #00ddc0;
-  --primary-foreground: #0c0d12;
-  --secondary: #1a1c24;
-  --secondary-foreground: #e4e6ed;
-  --muted: rgba(255, 255, 255, 0.06);
-  --muted-foreground: #6b7080;
-  --accent: #00ddc0;
-  --accent-foreground: #0c0d12;
-  --destructive: #ef4444;
-  --destructive-foreground: #ffffff;
-  --border: rgba(255, 255, 255, 0.06);
-  --input: rgba(255, 255, 255, 0.08);
-  --ring: #00ddc0;
-  --sidebar: rgba(14, 16, 22, 0.72);
-  --sidebar-foreground: #e4e6ed;
-  --sidebar-primary: #00ddc0;
-  --sidebar-primary-foreground: #0c0d12;
-  --sidebar-accent: rgba(0, 221, 192, 0.08);
-  --sidebar-accent-foreground: #e4e6ed;
-  --sidebar-border: rgba(255, 255, 255, 0.04);
-  --sidebar-muted: #4a4f5e;
-  --surface: rgba(22, 24, 32, 0.56);
-  --glow: rgba(0, 221, 192, 0.1);
-  --glow-strong: rgba(0, 221, 192, 0.2);
-  --rail: rgba(10, 11, 16, 0.8);
-  --rail-foreground: #4a4f5e;
-  --rail-active: #e4e6ed;
-  --rail-hover: rgba(255, 255, 255, 0.06);
-  --success: #10b981;
-  --warning: #f59e0b;
-  --ambient-1: rgba(0, 221, 192, 0.04);
-  --ambient-2: rgba(120, 80, 255, 0.03);
-  --ambient-3: rgba(0, 120, 255, 0.03);
+  @media (prefers-color-scheme: dark) {
+    color-scheme: dark;
+    /* Aether dark — deep obsidian, luminous accents */
+    --background: #0c0d12;
+    --foreground: #e4e6ed;
+    --card: rgba(22, 24, 32, 0.72);
+    --card-foreground: #e4e6ed;
+    --popover: rgba(26, 28, 38, 0.92);
+    --popover-foreground: #e4e6ed;
+    --primary: #00ddc0;
+    --primary-foreground: #0c0d12;
+    --secondary: #1a1c24;
+    --secondary-foreground: #e4e6ed;
+    --muted: rgba(255, 255, 255, 0.06);
+    --muted-foreground: #6b7080;
+    --accent: #00ddc0;
+    --accent-foreground: #0c0d12;
+    --destructive: #ef4444;
+    --destructive-foreground: #ffffff;
+    --border: rgba(255, 255, 255, 0.06);
+    --input: rgba(255, 255, 255, 0.08);
+    --ring: #00ddc0;
+    --sidebar: rgba(14, 16, 22, 0.72);
+    --sidebar-foreground: #e4e6ed;
+    --sidebar-primary: #00ddc0;
+    --sidebar-primary-foreground: #0c0d12;
+    --sidebar-accent: rgba(0, 221, 192, 0.08);
+    --sidebar-accent-foreground: #e4e6ed;
+    --sidebar-border: rgba(255, 255, 255, 0.04);
+    --sidebar-muted: #4a4f5e;
+    --surface: rgba(22, 24, 32, 0.56);
+    --glow: rgba(0, 221, 192, 0.1);
+    --glow-strong: rgba(0, 221, 192, 0.2);
+    --rail: rgba(10, 11, 16, 0.8);
+    --rail-foreground: #4a4f5e;
+    --rail-active: #e4e6ed;
+    --rail-hover: rgba(255, 255, 255, 0.06);
+    --success: #10b981;
+    --warning: #f59e0b;
+    --ambient-1: rgba(0, 221, 192, 0.04);
+    --ambient-2: rgba(120, 80, 255, 0.03);
+    --ambient-3: rgba(0, 120, 255, 0.03);
+  }
 }
 
 @theme inline {
