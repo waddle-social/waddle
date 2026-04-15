@@ -41,10 +41,8 @@ impl TestServer {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
 
         // Temp file where the server writes its bound HTTP port
-        let port_file = std::env::temp_dir().join(format!(
-            "waddle-test-port-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let port_file =
+            std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
 
         let child = Command::new(bin)
             .env("WADDLE_CERTS_EPHEMERAL", "true")
@@ -85,9 +83,7 @@ impl TestServer {
             std::thread::sleep(Duration::from_millis(50));
         }
         if !listening {
-            panic!(
-                "Server failed to accept connections on 127.0.0.1:{http_port} within 5s"
-            );
+            panic!("Server failed to accept connections on 127.0.0.1:{http_port} within 5s");
         }
 
         Self {
@@ -171,10 +167,7 @@ impl WsXmppClient {
             .await
             .map_err(|e| format!("WebSocket connect failed: {e}"))?;
 
-        Ok(Self {
-            ws,
-            full_jid: None,
-        })
+        Ok(Self { ws, full_jid: None })
     }
 
     async fn authenticate(
@@ -321,7 +314,10 @@ impl WsXmppClient {
     }
 
     /// Receive the first frame matching a predicate, discarding others.
-    pub async fn recv_matching<F: Fn(&str) -> bool>(&mut self, predicate: F) -> Result<String, String> {
+    pub async fn recv_matching<F: Fn(&str) -> bool>(
+        &mut self,
+        predicate: F,
+    ) -> Result<String, String> {
         loop {
             let frame = self.recv().await?;
             if predicate(&frame) {
@@ -350,8 +346,7 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }

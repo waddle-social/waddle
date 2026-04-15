@@ -23,11 +23,7 @@ async fn setup() -> (TestServer, WsXmppClient) {
 
 fn mam_query_xml(id: &str, archive_jid: &str, max: Option<u32>) -> String {
     let rsm = max
-        .map(|m| {
-            format!(
-                r#"<set xmlns="http://jabber.org/protocol/rsm"><max>{m}</max></set>"#
-            )
-        })
+        .map(|m| format!(r#"<set xmlns="http://jabber.org/protocol/rsm"><max>{m}</max></set>"#))
         .unwrap_or_default();
     format!(
         r#"<iq type="set" id="{id}" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2">{rsm}</query></iq>"#
