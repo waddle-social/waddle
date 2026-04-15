@@ -55,7 +55,14 @@ export function sendCorrection(xmpp: Agent, roomJid: string, body: string, repla
   const text = body.trim();
   if (!text) return null;
   const msgId = crypto.randomUUID();
-  const msgData: Record<string, unknown> = { id: msgId, to: roomJid, type: "groupchat", body: text, replace: replacesId };
+  const msgData: Record<string, unknown> = {
+    id: msgId,
+    to: roomJid,
+    type: "groupchat",
+    body: text,
+    replace: replacesId,
+    processingHints: { store: true },
+  };
   if (markup && markup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(markup) };
   }
@@ -89,6 +96,7 @@ export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, mar
     id: msgId, to: roomJid, type: "groupchat", body: text,
     receipt: { type: "request" },
     marker: { type: "markable" },
+    processingHints: { store: true },
   };
   if (references.length > 0) msgData.references = references;
   if (explicitMentionItems.length > 0) msgData.explicitMentions = { items: explicitMentionItems };
