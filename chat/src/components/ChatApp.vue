@@ -2,16 +2,19 @@
 import { type ComponentPublicInstance, computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useWaddles } from "@/composables/useWaddles";
 import { useMembers } from "@/composables/useMembers";
+import { useDmConversations } from "@/composables/useDmConversations";
+import { useDmMessaging } from "@/composables/useDmMessaging";
 import { useMessaging } from "@/composables/useMessaging";
 import { useMujiRuntime } from "@/composables/useMujiRuntime";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
-import { parseRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
+import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
+import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
 import MobileHeader from "@/components/chat/MobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
@@ -69,6 +72,20 @@ const messaging = useMessaging(
   ui.clearActionError,
 );
 
+const dmConversations = useDmConversations(
+  session,
+  xmppClient,
+);
+
+const dmMessaging = useDmMessaging(
+  session,
+  xmppClient,
+  dmConversations.activePeerJid,
+  ui.normalizeError,
+  ui.actionError,
+  ui.clearActionError,
+);
+
 const muji = useMujiRuntime(
   session,
   xmppClient,
@@ -82,7 +99,53 @@ const muji = useMujiRuntime(
 const contentAreaRef = ref<ComponentPublicInstance & { messagesContainer: HTMLDivElement | null } | null>(null);
 
 watchEffect(() => {
-  messaging.timelineEl.value = contentAreaRef.value?.messagesContainer ?? null;
+  const timeline = contentAreaRef.value?.messagesContainer ?? null;
+  if (ui.sidebarMode.value === "dms") {
+    dmMessaging.timelineEl.value = timeline;
+    messaging.timelineEl.value = null;
+  } else {
+    messaging.timelineEl.value = timeline;
+    dmMessaging.timelineEl.value = null;
+  }
+});
+
+const activeMessages = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.messages.value : messaging.messages.value,
+);
+const activeDraft = computed({
+  get: () => (ui.sidebarMode.value === "dms" ? dmMessaging.draft.value : messaging.draft.value),
+  set: (value: string) => {
+    if (ui.sidebarMode.value === "dms") dmMessaging.draft.value = value;
+    else messaging.draft.value = value;
+  },
+});
+const activeTypingUsers = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.typingUsers.value : messaging.typingUsers.value,
+);
+const activeIsLoadingMessages = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.isLoadingMessages.value : messaging.isLoadingMessages.value,
+);
+const activeIsSending = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.isSending.value : messaging.isSending.value,
+);
+const activeSearchResults = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.searchResults.value : messaging.searchResults.value,
+);
+const activeIsSearching = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.isSearching.value : messaging.isSearching.value,
+);
+
+const memberJidByNick = ref<Record<string, string>>({});
+const activeDmPeer = computed(() => {
+  const active = dmConversations.activePeerJid.value;
+  if (!active) return null;
+  const conversation = dmConversations.conversations.value.find((c) => c.peerJid === active);
+  if (!conversation) return null;
+  return {
+    peerJid: conversation.peerJid,
+    peerUsername: conversation.peerUsername,
+    presenceShow: conversation.presenceShow,
+  };
 });
 
 const notifications = useNotifications();
@@ -141,6 +204,37 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
   messaging.lastMentionActivity.value = null;
 });
 
+watch(xmppClient, (client) => {
+  if (!client || !session.value) return;
+  client.setDirectMessageHandler((msg) => {
+    dmMessaging.onIncomingMessage(msg);
+    dmConversations.receiveIncomingDm(msg);
+    const isTabHidden = typeof document !== "undefined"
+      && (!document.hasFocus() || document.visibilityState === "hidden");
+    if (
+      isTabHidden &&
+      msg.fromJid !== session.value?.jid &&
+      ui.sidebarMode.value !== "dms"
+    ) {
+      notifications.showDmNotification({
+        senderUsername: msg.nick,
+        peerJid: msg.peerJid,
+        body: msg.body,
+        onNavigate: (peerJid) => {
+          void handleOpenDm(peerJid);
+        },
+      });
+    }
+  });
+  client.setDmChatStateHandler(dmMessaging.onChatState);
+  client.setDmDisplayedHandler(dmMessaging.onDisplayed);
+  client.setDmReactionHandler(dmMessaging.onReaction);
+  client.setPresenceUpdateHandler(dmConversations.updatePresence);
+  client.setMemberJidHandler((nick, bareJid) => {
+    memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
+  });
+});
+
 const publicBrowseQuery = ref("");
 const isApplyingRoute = ref(false);
 let routeRequestId = 0;
@@ -167,7 +261,75 @@ async function handleToggleNotifications() {
 }
 
 async function sendGif(url: string) {
-  await messaging.sendMessage(url);
+  if (ui.sidebarMode.value === "dms") {
+    await dmMessaging.sendMessage(url);
+  } else {
+    await messaging.sendMessage(url);
+  }
+}
+
+async function sendActiveMessage() {
+  if (ui.sidebarMode.value === "dms") {
+    await dmMessaging.sendMessage();
+  } else {
+    await messaging.sendMessage();
+  }
+}
+
+function notifyActiveComposing() {
+  if (ui.sidebarMode.value === "dms") {
+    dmMessaging.notifyComposing();
+  } else {
+    messaging.notifyComposing();
+  }
+}
+
+function editActiveMessage(messageId: string, newBody: string) {
+  if (ui.sidebarMode.value === "dms") {
+    void dmMessaging.editMessage(messageId, newBody);
+  } else {
+    void messaging.editMessage(messageId, newBody);
+  }
+}
+
+function retractActiveMessage(messageId: string) {
+  if (ui.sidebarMode.value === "dms") {
+    void dmMessaging.retractMessage(messageId);
+  } else {
+    void messaging.retractMessage(messageId);
+  }
+}
+
+function reactActiveMessage(messageId: string, emoji: string) {
+  if (ui.sidebarMode.value === "dms") {
+    void dmMessaging.toggleReaction(messageId, emoji);
+  } else {
+    void messaging.toggleReaction(messageId, emoji);
+  }
+}
+
+function markActiveDisplayed(messageId: string) {
+  if (ui.sidebarMode.value === "dms") {
+    dmMessaging.markDisplayed(messageId);
+  } else {
+    messaging.markDisplayed(messageId);
+  }
+}
+
+function searchActiveMessages(query: string) {
+  if (ui.sidebarMode.value === "dms") {
+    void dmMessaging.searchMessages(query);
+  } else {
+    void messaging.searchMessages(query);
+  }
+}
+
+function clearActiveSearch() {
+  if (ui.sidebarMode.value === "dms") {
+    dmMessaging.clearSearch();
+  } else {
+    messaging.clearSearch();
+  }
 }
 
 function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }) {
@@ -189,14 +351,18 @@ function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSi
 
 function updateUrl() {
   if (isApplyingRoute.value) return;
-  pushRoute(waddles.currentWaddle.value, waddles.currentChannel.value);
+  if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
+    pushDmRoute(activeDmPeer.value.peerUsername);
+  } else {
+    pushRoute(waddles.currentWaddle.value, waddles.currentChannel.value);
+  }
 }
 
-watch([waddles.activeWaddleId, waddles.activeChannelId], updateUrl);
+watch([waddles.activeWaddleId, waddles.activeChannelId, ui.sidebarMode, () => dmConversations.activePeerJid.value], updateUrl);
 
 function onPopState() {
   const route = parseRoute(window.location.pathname);
-  if (!route.waddleSlug) return;
+  if (!route.waddleSlug && !route.dmUsername) return;
 
   const requestId = ++routeRequestId;
   isApplyingRoute.value = true;
@@ -208,6 +374,14 @@ function onPopState() {
 }
 
 async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId: number) {
+  if (route.dmUsername) {
+    const username = route.dmUsername.replace(/^@/, "").trim();
+    if (username) {
+      await handleOpenDm(`${username}@${session.value?.jid.split("@")[1] ?? "waddle.social"}`);
+    }
+    return;
+  }
+
   let matchedRouteWaddle = false;
   if (route.waddleSlug) {
     const w = resolveWaddle(route.waddleSlug, waddles.waddles.value);
@@ -276,13 +450,17 @@ async function onConnectionReady() {
 async function handleLogout() {
   muji.endCall();
   messaging.disconnect();
+  dmMessaging.disconnect();
   waddles.clearData();
   messaging.clearMessages();
+  dmMessaging.clearMessages();
   pushRoute(null, null);
   await connectionStore.logout();
 }
 
 async function selectWaddle(waddleId: string, preferredChannelId?: string | null) {
+  ui.sidebarMode.value = "channels";
+  dmConversations.closeDm();
   waddles.activeWaddleId.value = waddleId;
   const channelId = await waddles.loadStructure(waddleId, preferredChannelId);
   if (channelId) {
@@ -293,6 +471,9 @@ async function selectWaddle(waddleId: string, preferredChannelId?: string | null
 }
 
 async function selectChannel(channelId: string) {
+  ui.sidebarMode.value = "channels";
+  dmConversations.closeDm();
+  memberJidByNick.value = {};
   waddles.activeChannelId.value = channelId;
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
@@ -305,6 +486,20 @@ async function selectChannel(channelId: string) {
     await messaging.loadMessages(waddles.activeWaddleId.value, channelId);
   }
   ui.showMobileNav.value = false;
+}
+
+async function handleOpenDm(peerJid: string) {
+  ui.sidebarMode.value = "dms";
+  await dmConversations.openDm(peerJid);
+  dmMessaging.clearMessages();
+  if (dmConversations.activePeerJid.value) {
+    await dmMessaging.loadMessages(dmConversations.activePeerJid.value);
+  }
+  ui.showMobileNav.value = false;
+}
+
+async function selectDm(peerJid: string) {
+  await handleOpenDm(peerJid);
 }
 
 async function handleCreateWaddle() {
@@ -431,6 +626,7 @@ onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
   muji.endCall();
   messaging.disconnect();
+  dmMessaging.disconnect();
 });
 </script>
 
@@ -467,6 +663,8 @@ onUnmounted(() => {
     <MobileHeader
       :waddle="waddles.currentWaddle.value"
       :channel="waddles.currentChannel.value"
+      :dm-peer="activeDmPeer"
+      :sidebar-mode="ui.sidebarMode.value"
       :session="connectionStore.session"
       @open-nav="ui.showMobileNav.value = true"
       @open-details="ui.showMobileDetails.value = true"
@@ -482,14 +680,18 @@ onUnmounted(() => {
           <WaddlesSidebar
             :waddles="waddles.sortedWaddles.value"
             :active-waddle-id="waddles.activeWaddleId.value"
+            :active-sidebar-mode="ui.sidebarMode.value"
+            :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
             class="!w-full !border-r-0"
             @select-waddle="selectWaddle($event)"
+            @toggle-dms="ui.sidebarMode.value = 'dms'"
             @browse-public-waddles="openBrowsePublicWaddles"
             @create-waddle="ui.showCreateWaddle.value = true"
           />
         </div>
         <TopicsPanel
+          v-if="ui.sidebarMode.value === 'channels'"
           :waddle="waddles.currentWaddle.value"
           :channels="waddles.sortedChannels.value"
           :active-channel-id="waddles.activeChannelId.value"
@@ -503,6 +705,13 @@ onUnmounted(() => {
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"
+        />
+        <DmPanel
+          v-else
+          :conversations="dmConversations.conversations.value"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          class="!w-full !border-r-0 !flex-1"
+          @select-dm="selectDm"
         />
         <ProfilePanel
           v-if="connectionStore.session"
@@ -554,10 +763,13 @@ onUnmounted(() => {
         <WaddlesSidebar
           :waddles="waddles.sortedWaddles.value"
           :active-waddle-id="waddles.activeWaddleId.value"
+          :active-sidebar-mode="ui.sidebarMode.value"
+          :has-unread-dms="dmConversations.hasUnread.value"
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
           @select-waddle="selectWaddle($event)"
+          @toggle-dms="ui.sidebarMode.value = 'dms'"
           @browse-public-waddles="openBrowsePublicWaddles"
           @create-waddle="ui.showCreateWaddle.value = true"
           @logout="handleLogout"
@@ -569,6 +781,7 @@ onUnmounted(() => {
       <!-- Channel sidebar -->
       <div class="hidden lg:flex">
         <TopicsPanel
+          v-if="ui.sidebarMode.value === 'channels'"
           :waddle="waddles.currentWaddle.value"
           :channels="waddles.sortedChannels.value"
           :active-channel-id="waddles.activeChannelId.value"
@@ -582,31 +795,40 @@ onUnmounted(() => {
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"
         />
+        <DmPanel
+          v-else
+          :conversations="dmConversations.conversations.value"
+          :active-peer-jid="dmConversations.activePeerJid.value"
+          @select-dm="selectDm"
+        />
       </div>
 
       <!-- Main content -->
       <ContentArea
         ref="contentAreaRef"
-        v-model:draft="messaging.draft.value"
+        v-model:draft="activeDraft"
         :waddle="waddles.currentWaddle.value"
-        :channel="waddles.currentChannel.value"
-        :messages="messaging.messages.value"
+        :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
+        :dm-peer="activeDmPeer"
+        :sidebar-mode="ui.sidebarMode.value"
+        :messages="activeMessages"
         :xmpp-status="messaging.xmppStatus.value"
         :action-error="ui.actionError.value"
-        :is-loading-messages="messaging.isLoadingMessages.value"
-        :is-sending="messaging.isSending.value"
+        :is-loading-messages="activeIsLoadingMessages"
+        :is-sending="activeIsSending"
         :can-manage-channels="waddles.canManageChannels.value"
-        :typing-users="messaging.typingUsers.value"
+        :typing-users="activeTypingUsers"
         :current-user="connectionStore.session?.username"
         :avatar-url-by-author="avatarUrlByAuthor"
+        :author-jid-by-nick="memberJidByNick"
         :tenor-api-key="tenorApiKey"
         :member-names="waddles.members.value.map((m) => m.username)"
         :room-hats="messaging.roomHats.value"
         :room-presence="messaging.roomPresence.value"
         :room-last-seen="messaging.roomLastSeen.value"
         :slow-mode-cooldown="messaging.slowModeCooldown.value"
-        :search-results="messaging.searchResults.value"
-        :is-searching="messaging.isSearching.value"
+        :search-results="activeSearchResults"
+        :is-searching="activeIsSearching"
         :muji-phase="muji.phase.value"
         :muji-pending-invite="muji.pendingInvite.value"
         :muji-in-call="muji.inCall.value"
@@ -619,15 +841,15 @@ onUnmounted(() => {
         :muji-error="muji.error.value"
         :muji-local-stream="muji.localStream.value"
         :muji-remote-participants="muji.remoteParticipants.value"
-        @send="messaging.sendMessage"
-        @typing="messaging.notifyComposing"
+        @send="sendActiveMessage"
+        @typing="notifyActiveComposing"
         @select-gif="sendGif"
-        @edit-message="messaging.editMessage"
-        @retract-message="messaging.retractMessage"
-        @react-message="messaging.toggleReaction"
-        @displayed="messaging.markDisplayed"
-        @search="messaging.searchMessages"
-        @clear-search="messaging.clearSearch"
+        @edit-message="editActiveMessage"
+        @retract-message="retractActiveMessage"
+        @react-message="reactActiveMessage"
+        @displayed="markActiveDisplayed"
+        @search="searchActiveMessages"
+        @clear-search="clearActiveSearch"
         @edit-channel="openChannelEdit"
         @start-audio-call="muji.startAudioCall"
         @start-video-call="muji.startVideoCall"
@@ -639,6 +861,7 @@ onUnmounted(() => {
         @toggle-mic="muji.toggleMicrophone"
         @toggle-camera="muji.toggleCamera"
         @join-call-from-message="joinCallFromMessage"
+        @open-dm="handleOpenDm"
       />
     </div>
 

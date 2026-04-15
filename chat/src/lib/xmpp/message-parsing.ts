@@ -2,8 +2,13 @@
 import type { ReceivedMessage } from "stanza/protocol";
 import type {
   CallInviteInfo, ChatStateEvent, ChatStateType, DisplayedEvent,
-  LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
+  LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
 } from "./types";
+
+type MessageExtensionsTarget = Pick<
+  LiveRoomMessage,
+  "body" | "mentions" | "broadcastMention" | "callInvite" | "sharedFile" | "isSticker" | "replacesId"
+>;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
 export function ext(msg: unknown): Record<string, unknown> {
@@ -13,7 +18,7 @@ export function ext(msg: unknown): Record<string, unknown> {
 /** Populate a LiveRoomMessage with data from XEP extensions on the stanza. */
 export function extractMessageExtensions(
   msg: ReceivedMessage,
-  base: LiveRoomMessage,
+  base: LiveRoomMessage | LiveDmMessage,
 ): void {
   if (msg.replace) {
     base.replacesId = msg.replace;
@@ -29,7 +34,7 @@ export function extractMessageExtensions(
   }
 }
 
-function extractReferences(msg: ReceivedMessage, base: LiveRoomMessage): void {
+function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const refs = ext(msg).references as Array<{ type?: string; uri?: string }> | undefined;
   if (!refs?.length) return;
 
@@ -41,7 +46,7 @@ function extractReferences(msg: ReceivedMessage, base: LiveRoomMessage): void {
   }
 }
 
-function extractExplicitMentions(msg: ReceivedMessage, base: LiveRoomMessage): void {
+function extractExplicitMentions(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const em = ext(msg).explicitMentions as { items?: Array<{ type?: string }> } | undefined;
   if (!em?.items) return;
 
@@ -51,7 +56,7 @@ function extractExplicitMentions(msg: ReceivedMessage, base: LiveRoomMessage): v
   }
 }
 
-function extractCallInvite(msg: ReceivedMessage, base: LiveRoomMessage): void {
+function extractCallInvite(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const inviteElement = ext(msg).callInvite as
     | { id?: string; muji?: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string }
     | undefined;
@@ -141,7 +146,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
   h.onMessage?.(liveMsg);
 }
 
-function extractFileSharing(msg: ReceivedMessage, base: LiveRoomMessage): void {
+function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const fs = ext(msg).fileSharing as
     | { disposition?: string; name?: string; mediaType?: string; size?: string; width?: string; height?: string; desc?: string; url?: string }
     | undefined;

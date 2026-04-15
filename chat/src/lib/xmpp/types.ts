@@ -33,6 +33,24 @@ export interface LiveRoomMessage {
   callInvite?: CallInviteInfo;
 }
 
+/** A direct message received/sent via type:"chat" stanzas */
+export interface LiveDmMessage {
+  id: string;
+  peerJid: string;
+  fromJid: string;
+  nick: string;
+  body: string;
+  createdAt: string;
+  type: "message";
+  replacesId?: string;
+  retractsId?: string;
+  mentions?: string[];
+  sharedFile?: SharedFileInfo;
+  isSticker?: boolean;
+  callInvite?: CallInviteInfo;
+  isCarbon?: boolean;
+}
+
 export interface SharedFileInfo {
   name?: string;
   mediaType?: string;
@@ -105,10 +123,42 @@ export interface ReactionEvent {
   emojis: string[];
 }
 
+export interface DmConversation {
+  peerJid: string;
+  peerUsername: string;
+  peerAvatarUrl?: string | null;
+  lastMessageBody?: string;
+  lastMessageAt?: string;
+  unreadCount: number;
+  presenceShow?: "available" | "away" | "xa" | "dnd" | "offline";
+}
+
 export interface ChatStateEvent {
   roomJid: string;
   nick: string;
   state: ChatStateType;
+}
+
+export interface DmChatStateEvent {
+  peerJid: string;
+  state: ChatStateType;
+}
+
+export interface DmDisplayedEvent {
+  peerJid: string;
+  messageId: string;
+}
+
+export interface DmReactionEvent {
+  peerJid: string;
+  messageId: string;
+  emojis: string[];
+}
+
+export interface PresenceUpdateEvent {
+  bareJid: string;
+  show: "available" | "away" | "xa" | "dnd" | "offline";
+  status?: string;
 }
 
 export interface DiscoveredWaddle {

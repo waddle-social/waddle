@@ -1,20 +1,24 @@
 /** BrowserXmppClient — thin orchestrator that delegates to functional modules. */
 import { createClient } from "stanza";
 import type { Agent } from "stanza";
-import type { ReceivedMUCPresence } from "stanza/protocol";
+import type { ReceivedMUCPresence, ReceivedMessage, ReceivedPresence } from "stanza/protocol";
 import type MediaSession from "stanza/jingle/MediaSession";
 import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
-  LiveRoomMessage, MujiCallEvent, OccupantPresence, ReactionEvent, RoomActivityEvent,
+  DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, LiveDmMessage, LiveRoomMessage,
+  MujiCallEvent, OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, XmppStatusSnapshot,
 } from "./types";
-import { roomBareJidFor, sfuServiceJidFor } from "./jid";
+import { barePeerJid, roomBareJidFor, sfuServiceJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
 import { dispatchGroupchat, ext } from "./message-parsing";
+import { dispatchChat } from "./dm-parsing";
 import * as messaging from "./messaging";
 import * as history from "./history";
+import * as dmMessaging from "./dm-messaging";
+import * as dmHistory from "./dm-history";
 import * as discovery from "./discovery";
 
 type StanzaSaslMechanism = { name: string };
@@ -112,10 +116,16 @@ export class BrowserXmppClient {
   private readonly session: WaddleSession;
   private readonly resource = createXmppResource();
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
+  private directMessageHandler: ((message: LiveDmMessage) => void) | null = null;
   private statusHandler: ((status: XmppStatusSnapshot) => void) | null = null;
   private reactionHandler: ((event: ReactionEvent) => void) | null = null;
   private displayedHandler: ((event: DisplayedEvent) => void) | null = null;
   private chatStateHandler: ((event: ChatStateEvent) => void) | null = null;
+  private dmChatStateHandler: ((event: DmChatStateEvent) => void) | null = null;
+  private dmReactionHandler: ((event: DmReactionEvent) => void) | null = null;
+  private dmDisplayedHandler: ((event: DmDisplayedEvent) => void) | null = null;
+  private presenceUpdateHandler: ((event: PresenceUpdateEvent) => void) | null = null;
+  private memberJidHandler: ((nick: string, bareJid: string) => void) | null = null;
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private slowModeHandler: ((seconds: number) => void) | null = null;
   private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
@@ -138,10 +148,16 @@ export class BrowserXmppClient {
   constructor(session: WaddleSession) { this.session = session; }
 
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
+  setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.directMessageHandler = h; }
   setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
   setChatStateHandler(h: (event: ChatStateEvent) => void) { this.chatStateHandler = h; }
+  setDmChatStateHandler(h: (event: DmChatStateEvent) => void) { this.dmChatStateHandler = h; }
   setReactionHandler(h: (event: ReactionEvent) => void) { this.reactionHandler = h; }
+  setDmReactionHandler(h: (event: DmReactionEvent) => void) { this.dmReactionHandler = h; }
   setDisplayedHandler(h: (event: DisplayedEvent) => void) { this.displayedHandler = h; }
+  setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.dmDisplayedHandler = h; }
+  setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.presenceUpdateHandler = h; }
+  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.memberJidHandler = h; }
   setHatsHandler(h: (hats: RoomHats) => void) { this.hatsHandler = h; }
   setSlowModeHandler(h: (seconds: number) => void) { this.slowModeHandler = h; }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
@@ -374,6 +390,44 @@ export class BrowserXmppClient {
     if (this.xmpp) messaging.sendCallLeft(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
   }
 
+  async sendDirectMessage(peerJid: string, body: string): Promise<string | null> {
+    await this.connect();
+    return this.xmpp ? dmMessaging.sendDirectMessage(this.xmpp, barePeerJid(peerJid), body) : null;
+  }
+
+  async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> {
+    await this.connect();
+    if (this.xmpp) dmMessaging.sendDmChatState(this.xmpp, barePeerJid(peerJid), state);
+  }
+
+  async sendDmDisplayed(peerJid: string, messageId: string): Promise<void> {
+    await this.connect();
+    if (this.xmpp) dmMessaging.sendDmDisplayed(this.xmpp, barePeerJid(peerJid), messageId);
+  }
+
+  async sendDmRetraction(peerJid: string, messageId: string): Promise<void> {
+    await this.connect();
+    if (this.xmpp) dmMessaging.sendDmRetraction(this.xmpp, barePeerJid(peerJid), messageId);
+  }
+
+  async sendDmCorrection(peerJid: string, body: string, replacesId: string): Promise<string | null> {
+    await this.connect();
+    return this.xmpp ? dmMessaging.sendDmCorrection(this.xmpp, barePeerJid(peerJid), body, replacesId) : null;
+  }
+
+  async sendDmReaction(peerJid: string, messageId: string, emojis: string[]): Promise<void> {
+    await this.connect();
+    if (this.xmpp) dmMessaging.sendDmReaction(this.xmpp, barePeerJid(peerJid), messageId, emojis);
+  }
+
+  async sendDmCallInvite(
+    peerJid: string,
+    opts: { sid?: string; jingleJid?: string; externalUri?: string; video: boolean; muji?: boolean },
+  ): Promise<string | null> {
+    await this.connect();
+    return this.xmpp ? dmMessaging.sendDmCallInvite(this.xmpp, barePeerJid(peerJid), opts) : null;
+  }
+
   async startMujiCall(
     w: string,
     c: string,
@@ -518,6 +572,20 @@ export class BrowserXmppClient {
     await this.connect();
     return this.xmpp ? history.searchMessages(this.xmpp, roomBareJidFor(this.session, w, c), query, max) : [];
   }
+  async queryPersonalMam(peerJid: string, max = 100): Promise<LiveDmMessage[]> {
+    await this.connect();
+    const selfBare = barePeerJid(this.session.jid);
+    return this.xmpp ? dmHistory.queryPersonalMam(this.xmpp, selfBare, barePeerJid(peerJid), max) : [];
+  }
+  async searchDmMessages(peerJid: string, query: string, max = 20) {
+    await this.connect();
+    const selfBare = barePeerJid(this.session.jid);
+    return this.xmpp ? dmHistory.searchDmMessages(this.xmpp, selfBare, barePeerJid(peerJid), query, max) : [];
+  }
+  async subscribeToPeerPresence(peerJid: string): Promise<void> {
+    await this.connect();
+    this.xmpp?.subscribe(barePeerJid(peerJid));
+  }
   async discoverWaddles(): Promise<DiscoveredWaddle[]> {
     await this.connect();
     return this.xmpp
@@ -619,10 +687,23 @@ export class BrowserXmppClient {
 
   private wireEvents(xmpp: Agent) {
     this.wireMujiEvents(xmpp);
-    xmpp.on("session:started", () => {
+    xmpp.on("session:started", async () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.statusHandler?.({ state: "online", detail: "Live room connection ready" });
+      try {
+        await xmpp.enableCarbons();
+      } catch (error) {
+        console.warn("Failed to enable message carbons", error);
+      }
+      try {
+        const roster = await xmpp.getRoster();
+        for (const item of roster.items ?? []) {
+          if (item.jid) xmpp.subscribe(item.jid);
+        }
+      } catch (error) {
+        console.warn("Failed to refresh roster presence subscriptions", error);
+      }
     });
     xmpp.on("disconnected", (err) => {
       if (this.xmpp === xmpp) {
@@ -657,6 +738,10 @@ export class BrowserXmppClient {
           this.hatsHandler?.({ ...this.roomHats });
           this.roomPresence[nick] = parsePresenceShow(pres.show);
           this.presenceHandler?.({ ...this.roomPresence });
+          const item = (ext(pres).muc as { item?: { jid?: string } } | undefined)?.item;
+          if (item?.jid) {
+            this.memberJidHandler?.(nick, barePeerJid(item.jid));
+          }
         }
         if (room && !nick && typeof pres.vcardAvatar === "string" && pres.vcardAvatar)
           this.roomAvatarHandler?.(room, pres.vcardAvatar);
@@ -696,5 +781,49 @@ export class BrowserXmppClient {
       onReaction: this.reactionHandler,
       onActivity: this.activityHandler,
     }));
+
+    xmpp.on("chat", (msg) => dispatchChat(msg, {
+      selfBareJid: barePeerJid(this.session.jid),
+      onMessage: this.directMessageHandler,
+      onChatState: this.dmChatStateHandler,
+      onDisplayed: this.dmDisplayedHandler,
+      onReaction: this.dmReactionHandler,
+    }));
+
+    xmpp.on("carbon:sent", (msg) => {
+      const forwarded = msg.carbon?.forward?.message;
+      if (!forwarded) return;
+      if (!forwarded.from || !forwarded.to) return;
+      (forwarded as ReceivedMessage & { carbon?: unknown }).carbon = msg.carbon;
+      dispatchChat(forwarded as ReceivedMessage, {
+        selfBareJid: barePeerJid(this.session.jid),
+        onMessage: this.directMessageHandler,
+        onChatState: this.dmChatStateHandler,
+        onDisplayed: this.dmDisplayedHandler,
+        onReaction: this.dmReactionHandler,
+      });
+    });
+
+    xmpp.on("presence", (pres: ReceivedPresence) => {
+      const from = barePeerJid(pres.from ?? "");
+      if (!from) return;
+      if (from.includes("@muc.") || from.includes("@conference.")) return;
+      const type = pres.type ?? "available";
+      const show =
+        type === "unavailable"
+          ? "offline"
+          : (pres.show ?? "available") === "away"
+            ? "away"
+            : (pres.show ?? "available") === "xa"
+              ? "xa"
+              : (pres.show ?? "available") === "dnd"
+                ? "dnd"
+                : "available";
+      this.presenceUpdateHandler?.({
+        bareJid: from,
+        show,
+        status: pres.status,
+      });
+    });
   }
 }

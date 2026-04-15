@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Plus, Lock, Compass } from "lucide-vue-next";
+import { Plus, Lock, Compass, MessageCircle } from "lucide-vue-next";
 import type { WaddleSummary } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
@@ -8,6 +8,8 @@ import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 const props = defineProps<{
   waddles: WaddleSummary[];
   activeWaddleId: string | null;
+  activeSidebarMode?: "channels" | "dms";
+  hasUnreadDms?: boolean;
   session: WaddleSession | null;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
@@ -17,6 +19,7 @@ const emit = defineEmits<{
   selectWaddle: [id: string];
   createWaddle: [];
   browsePublicWaddles: [];
+  toggleDms: [];
   logout: [];
   "request-notifications": [];
   "toggle-notifications": [];
@@ -114,6 +117,20 @@ function waddleColor(waddle: WaddleSummary): string {
 
     <!-- Bottom actions -->
     <div class="flex flex-col items-center gap-1.5 mt-2">
+      <button
+        class="relative w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200 hover:scale-105"
+        :class="activeSidebarMode === 'dms'
+          ? 'bg-rail-hover text-primary'
+          : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
+        title="Direct messages"
+        @click="emit('toggleDms')"
+      >
+        <MessageCircle class="w-4 h-4" />
+        <span
+          v-if="hasUnreadDms"
+          class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-primary shadow-[0_0_6px_var(--glow-strong)]"
+        />
+      </button>
       <button
         class="w-10 h-10 flex items-center justify-center rounded-xl text-rail-foreground hover:bg-rail-hover hover:text-primary transition-all duration-200 hover:scale-105"
         title="Browse public spaces"
