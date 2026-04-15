@@ -2,6 +2,7 @@
 
 ## Rust
 
+- **Always run `cargo fmt` before every commit.** CI checks formatting and will reject unformatted code.
 - Never allow unwrap
 - Never add clippy allows in general, fix the code
 - If something can be a trait, use a trait and plan for extension

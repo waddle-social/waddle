@@ -267,8 +267,40 @@ fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
 }
 
 fn parse_iq_frame(frame: &str) -> Option<xmpp_parsers::iq::Iq> {
-    let element = xmpp_parsers::minidom::Element::from_str(frame).ok()?;
+    // WebSocket clients may omit xmlns="jabber:client" on stanzas (they
+    // rely on stream-level namespace inheritance from <open>).  Inject it
+    // when missing so xmpp_parsers can parse the IQ.
+    let patched = inject_default_ns_if_missing(frame, "jabber:client");
+    let element = xmpp_parsers::minidom::Element::from_str(&patched).ok()?;
     xmpp_parsers::iq::Iq::try_from(element).ok()
+}
+
+/// Inject `xmlns` into the opening tag of an `<iq>`, `<message>`, or
+/// `<presence>` stanza when the attribute is absent.
+fn inject_default_ns_if_missing(xml: &str, ns: &str) -> String {
+    let trimmed = xml.trim();
+    if !(trimmed.starts_with("<iq")
+        || trimmed.starts_with("<message")
+        || trimmed.starts_with("<presence"))
+    {
+        return trimmed.to_string();
+    }
+    let Some(open_end) = trimmed.find('>') else {
+        return trimmed.to_string();
+    };
+    let open_tag = &trimmed[..open_end];
+    if open_tag.contains("xmlns=") {
+        return trimmed.to_string();
+    }
+    // Insert xmlns right after the tag name, before any `/>`or attributes
+    let insert_pos = trimmed
+        .find(|c: char| c.is_whitespace() || c == '/')
+        .unwrap_or(open_end);
+    format!(
+        "{} xmlns=\"{ns}\"{}",
+        &trimmed[..insert_pos],
+        &trimmed[insert_pos..]
+    )
 }
 
 fn build_iq_result_xml(

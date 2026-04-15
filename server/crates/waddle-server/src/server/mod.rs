@@ -376,9 +376,16 @@ pub async fn start_with_config(
         (http, c2s, s2s)
     } else {
         // Cold start path: bind all listeners fresh
-        let http_addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+        let http_addr: SocketAddr = std::env::var("WADDLE_HTTP_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+            .parse()
+            .unwrap_or_else(|_| "0.0.0.0:3000".parse().expect("Valid fallback HTTP address"));
         let http = tokio::net::TcpListener::bind(http_addr).await?;
-        info!(addr = %http_addr, "Bound HTTP listener");
+        if let Ok(addr) = http.local_addr() {
+            info!(addr = %addr, "Bound HTTP listener");
+        } else {
+            info!(addr = %http_addr, "Bound HTTP listener");
+        }
 
         let c2s = if xmpp_config.enabled {
             let listener = tokio::net::TcpListener::bind(xmpp_config.c2s_addr).await?;
@@ -592,6 +599,14 @@ async fn start_http_server(
 
     let addr = listener.local_addr()?;
     info!("Starting Axum HTTP server on {}", addr);
+
+    // When WADDLE_HTTP_PORT_FILE is set, write the bound port so test
+    // harnesses can discover it after binding to port 0.
+    if let Ok(path) = std::env::var("WADDLE_HTTP_PORT_FILE") {
+        if let Err(e) = std::fs::write(&path, addr.port().to_string()) {
+            warn!(path = %path, error = %e, "Failed to write HTTP port file");
+        }
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

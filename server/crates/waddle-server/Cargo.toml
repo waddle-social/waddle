@@ -94,6 +94,8 @@ jsonwebtoken = { workspace = true }
 tokio-test = "0.4"
 wiremock = "0.6"
 http-body-util = "0.1"
+tokio-tungstenite = "0.24"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
 
 [[bin]]
 name = "waddle-server"
