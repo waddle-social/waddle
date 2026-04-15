@@ -262,6 +262,10 @@ fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String {
     String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
 }
 
+fn archived_stanza_xml(message: &xmpp_parsers::message::Message) -> String {
+    stanza_to_xml(&Stanza::Message(message.clone()))
+}
+
 fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
     stanza_to_xml(&Stanza::Iq(iq))
 }
@@ -1893,6 +1897,7 @@ async fn archive_groupchat_message(
         reply_to_jid,
         origin_id,
         message_type: mam_message_type(&message.type_),
+        stanza_xml: Some(archived_stanza_xml(message)),
     };
 
     let archive_jid = room_jid.to_string();
@@ -1943,6 +1948,7 @@ async fn archive_direct_message(
         reply_to_jid,
         origin_id,
         message_type: mam_message_type(&message.type_),
+        stanza_xml: Some(archived_stanza_xml(message)),
     };
 
     // Store in sender's personal archive
