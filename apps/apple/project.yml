@@ -1,0 +1,50 @@
+name: Waddle
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    GENERATE_INFOPLIST_FILE: YES
+    ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+targets:
+  Waddle-iOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Waddle
+    settings:
+      base:
+        PRODUCT_NAME: Waddle
+        PRODUCT_BUNDLE_IDENTIFIER: social.waddle.ios
+        INFOPLIST_KEY_CFBundleDisplayName: Waddle
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+  Waddle-macOS:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Waddle
+    settings:
+      base:
+        PRODUCT_NAME: Waddle
+        PRODUCT_BUNDLE_IDENTIFIER: social.waddle.macos
+        INFOPLIST_KEY_CFBundleDisplayName: Waddle
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
+schemes:
+  Waddle:
+    build:
+      targets:
+        Waddle-iOS: all
+        Waddle-macOS: all
+  Waddle-iOS:
+    build:
+      targets:
+        Waddle-iOS: all
+  Waddle-macOS:
+    build:
+      targets:
+        Waddle-macOS: all

@@ -1,0 +1,443 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1AD217140D76B9EA2F9293BC /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1D7F0578FED187C1011D0F /* AppConfig.swift */; };
+		406DC4AC6FF7302FACDF1AF2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA49C7EBB1F4B7819123A37B /* ContentView.swift */; };
+		4230F4641D894E48468B1D19 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
+		56D9D4EA89E6E42D38741A6D /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B926355CB1B32289C011C9C4 /* APIModels.swift */; };
+		6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
+		952A36D97F57B0631BDEEF1D /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
+		95CE93BC36F8321BEBCF160F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
+		A9217F14ABF56184314B9FC2 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B926355CB1B32289C011C9C4 /* APIModels.swift */; };
+		AD2508D306961CE0B0556E6F /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1D7F0578FED187C1011D0F /* AppConfig.swift */; };
+		B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
+		B60E8C9E29FA9849CE370118 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
+		BB7C898C97CF2C3B2940D9E6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA49C7EBB1F4B7819123A37B /* ContentView.swift */; };
+		FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
+		FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		3F58BCC39D30A86E52EFE92E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		6C1D7F0578FED187C1011D0F /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		B926355CB1B32289C011C9C4 /* APIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModels.swift; sourceTree = "<group>"; };
+		BB8C551551F6E346F2CF6447 /* WaddleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleApp.swift; sourceTree = "<group>"; };
+		C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleAPIClient.swift; sourceTree = "<group>"; };
+		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA49C7EBB1F4B7819123A37B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		3652C6085313F6318FE4E995 = {
+			isa = PBXGroup;
+			children = (
+				93D0F97B0F84D4D2BD82FEAB /* Waddle */,
+				4FAB2C42DF256B6DC1D6F0F2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4DDC350C0234224B5EECE505 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				6C1D7F0578FED187C1011D0F /* AppConfig.swift */,
+				B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */,
+				FA49C7EBB1F4B7819123A37B /* ContentView.swift */,
+				BB8C551551F6E346F2CF6447 /* WaddleApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		4FAB2C42DF256B6DC1D6F0F2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */,
+				C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		5280D8F4821B4B5C061850EB /* Network */ = {
+			isa = PBXGroup;
+			children = (
+				C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */,
+			);
+			path = Network;
+			sourceTree = "<group>";
+		};
+		93D0F97B0F84D4D2BD82FEAB /* Waddle */ = {
+			isa = PBXGroup;
+			children = (
+				3F58BCC39D30A86E52EFE92E /* Assets.xcassets */,
+				4DDC350C0234224B5EECE505 /* App */,
+				F1261F1BCDDD7AF6F28B5C41 /* Models */,
+				5280D8F4821B4B5C061850EB /* Network */,
+			);
+			path = Waddle;
+			sourceTree = "<group>";
+		};
+		F1261F1BCDDD7AF6F28B5C41 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B926355CB1B32289C011C9C4 /* APIModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		559E3F574767EB98D57EF138 /* Waddle-iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FA4FC46919E0829CDB1E767D /* Build configuration list for PBXNativeTarget "Waddle-iOS" */;
+			buildPhases = (
+				9AF59CA4CF6BA99174694D89 /* Sources */,
+				25A9234B89B3CCD884B2EAC8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Waddle-iOS";
+			packageProductDependencies = (
+			);
+			productName = "Waddle-iOS";
+			productReference = CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D1537FCAB55E21CDA0F3F836 /* Waddle-macOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 82F47DA9FAAD26A5799A5098 /* Build configuration list for PBXNativeTarget "Waddle-macOS" */;
+			buildPhases = (
+				04A8892B08B96635392E79A3 /* Sources */,
+				4D3E3A857D5ACBA42EB96FA8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Waddle-macOS";
+			packageProductDependencies = (
+			);
+			productName = "Waddle-macOS";
+			productReference = C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		FE980CAE39C06CFDF0A4F81F /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = 73CE5296D52B52FD3964813C /* Build configuration list for PBXProject "Waddle" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 3652C6085313F6318FE4E995;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4FAB2C42DF256B6DC1D6F0F2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				559E3F574767EB98D57EF138 /* Waddle-iOS */,
+				D1537FCAB55E21CDA0F3F836 /* Waddle-macOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		25A9234B89B3CCD884B2EAC8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4230F4641D894E48468B1D19 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4D3E3A857D5ACBA42EB96FA8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				95CE93BC36F8321BEBCF160F /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		04A8892B08B96635392E79A3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A9217F14ABF56184314B9FC2 /* APIModels.swift in Sources */,
+				AD2508D306961CE0B0556E6F /* AppConfig.swift in Sources */,
+				FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */,
+				BB7C898C97CF2C3B2940D9E6 /* ContentView.swift in Sources */,
+				952A36D97F57B0631BDEEF1D /* WaddleAPIClient.swift in Sources */,
+				B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9AF59CA4CF6BA99174694D89 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				56D9D4EA89E6E42D38741A6D /* APIModels.swift in Sources */,
+				1AD217140D76B9EA2F9293BC /* AppConfig.swift in Sources */,
+				B60E8C9E29FA9849CE370118 /* AppModel.swift in Sources */,
+				406DC4AC6FF7302FACDF1AF2 /* ContentView.swift in Sources */,
+				FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */,
+				6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		04A956434388CD9EEBF37097 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		341A1DA1BDAD631FA9685222 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = social.waddle.ios;
+				PRODUCT_NAME = Waddle;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		6BD91B7FA75EF62ACB621C16 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = social.waddle.macos;
+				PRODUCT_NAME = Waddle;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		AF44AE3691299CA064C3CC11 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = social.waddle.ios;
+				PRODUCT_NAME = Waddle;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C65C04DD64EAC1EBCEA719F7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = social.waddle.macos;
+				PRODUCT_NAME = Waddle;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		FC023194AB5B87862909A40D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		73CE5296D52B52FD3964813C /* Build configuration list for PBXProject "Waddle" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				04A956434388CD9EEBF37097 /* Debug */,
+				FC023194AB5B87862909A40D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		82F47DA9FAAD26A5799A5098 /* Build configuration list for PBXNativeTarget "Waddle-macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6BD91B7FA75EF62ACB621C16 /* Debug */,
+				C65C04DD64EAC1EBCEA719F7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FA4FC46919E0829CDB1E767D /* Build configuration list for PBXNativeTarget "Waddle-iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AF44AE3691299CA064C3CC11 /* Debug */,
+				341A1DA1BDAD631FA9685222 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = FE980CAE39C06CFDF0A4F81F /* Project object */;
+}
