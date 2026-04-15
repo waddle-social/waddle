@@ -2,7 +2,10 @@
 import { ref, computed } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
+import ChatEditor from "@/components/chat/ChatEditor.vue";
+import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
+import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 
@@ -33,7 +36,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  edit: [messageId: string, newBody: string];
+  edit: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
   joinCall: [invite: NonNullable<TimelineMessage["callInvite"]>];
@@ -44,7 +47,7 @@ const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
 const isSystemEvent = computed(() => !!props.message.callInvite);
 
-const styledHtml = computed(() => renderStyledBody(props.message.body));
+const styledHtml = computed(() => renderStyledBody(props.message.body, props.message.markup));
 const isGif = computed(() => isImageUrl(props.message.body));
 const isSharedImage = computed(() => {
   const f = props.message.sharedFile;
@@ -66,34 +69,27 @@ const isMentioned = computed(() => {
 });
 
 const isEditing = ref(false);
-const editDraft = ref("");
+const editInitialContent = ref<Record<string, unknown> | undefined>(undefined);
+const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 
 function startEdit() {
-  editDraft.value = props.message.body;
+  editInitialContent.value = parseXep0393ToTiptap(props.message.body);
   isEditing.value = true;
 }
 
 function cancelEdit() {
   isEditing.value = false;
-  editDraft.value = "";
+  editInitialContent.value = undefined;
 }
 
-function submitEdit() {
-  const trimmed = editDraft.value.trim();
+function submitEditFromEditor(doc: Record<string, unknown>) {
+  const { body, markup } = serializeTiptapToXep0393(doc);
+  const trimmed = body.trim();
   if (trimmed && trimmed !== props.message.body) {
-    emit("edit", props.message.id, trimmed);
+    emit("edit", props.message.id, trimmed, markup);
   }
   isEditing.value = false;
-  editDraft.value = "";
-}
-
-function onEditKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    submitEdit();
-  } else if (e.key === "Escape") {
-    cancelEdit();
-  }
+  editInitialContent.value = undefined;
 }
 
 function emitAvatarClick() {
@@ -207,18 +203,18 @@ function emitAvatarClick() {
       </div>
 
       <!-- Edit mode -->
-      <div v-if="isEditing" class="flex gap-2 mt-1">
-        <input
-          v-model="editDraft"
-          class="flex-1 rounded-xl focus:outline-none px-4 bg-muted text-[13px] h-9 focus:ring-2 focus:ring-primary/30 transition-all duration-200"
-          @keydown="onEditKeydown"
+      <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
+        <ChatEditor
+          ref="editEditorRef"
+          compact
+          :initial-content="editInitialContent"
+          placeholder="Edit message..."
+          @send="submitEditFromEditor"
+          @cancel="cancelEdit"
+          class="flex-1"
         />
         <button
-          class="text-[12px] font-semibold px-3 h-9 rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200"
-          @click="submitEdit"
-        >Save</button>
-        <button
-          class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
+          class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200 shrink-0"
           @click="cancelEdit"
         >Cancel</button>
       </div>

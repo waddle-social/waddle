@@ -5,6 +5,13 @@ export type EditableRole = "member" | "moderator" | "admin";
 /** Delivery status for messages sent by the current user. */
 export type DeliveryStatus = "sending" | "delivered";
 
+export interface MarkupSpan {
+  type: "b" | "i" | "s" | "code" | "code-block" | "blockquote" | "link";
+  start: number;
+  end: number;
+  uri?: string;
+}
+
 export interface TimelineMessage {
   id: string;
   author: string;
@@ -33,6 +40,8 @@ export interface TimelineMessage {
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483: Call invite info. */
   callInvite?: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string };
+  /** XEP-0394: Message Markup offset-based annotations. */
+  markup?: MarkupSpan[];
 }
 
 export interface CommunityFormData {
@@ -221,10 +230,94 @@ const md = new Marked({
   },
 });
 
-/** Render XEP-0393 styled message body to safe HTML. */
-export function renderStyledBody(body: string): string {
-  const gfm = xep0393ToGfm(body);
-  const html = (md.parse(gfm) as string).trim();
+/**
+ * Render XEP-0394 markup spans into safe HTML using byte-offset annotations.
+ * Falls back to XEP-0393 parsing when no markup is provided.
+ */
+function renderViaXep0394(body: string, spans: MarkupSpan[]): string {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(body);
+  const decoder = new TextDecoder();
+
+  // Build a list of open/close events at byte offsets
+  interface Event { offset: number; isOpen: boolean; span: MarkupSpan }
+  const events: Event[] = [];
+  for (const s of spans) {
+    events.push({ offset: s.start, isOpen: true, span: s });
+    events.push({ offset: s.end, isOpen: false, span: s });
+  }
+  // Sort: by offset, then closes before opens at the same offset
+  events.sort((a, b) => a.offset - b.offset || (a.isOpen ? 1 : -1) - (b.isOpen ? 1 : -1));
+
+  let html = "";
+  let pos = 0;
+
+  for (const ev of events) {
+    // Emit text between previous position and this event
+    if (ev.offset > pos) {
+      html += escapeHtml(decoder.decode(bytes.slice(pos, ev.offset)));
+    }
+    pos = ev.offset;
+
+    if (ev.isOpen) {
+      html += openTag(ev.span);
+    } else {
+      html += closeTag(ev.span);
+    }
+  }
+
+  // Remaining text after last event
+  if (pos < bytes.length) {
+    html += escapeHtml(decoder.decode(bytes.slice(pos)));
+  }
+
+  return html;
+}
+
+function openTag(span: MarkupSpan): string {
+  switch (span.type) {
+    case "b": return "<strong>";
+    case "i": return "<em>";
+    case "s": return "<del>";
+    case "code": return '<code class="px-1 bg-muted font-mono text-xs">';
+    case "code-block": return '<pre class="bg-muted p-2 text-xs font-mono overflow-x-auto my-1"><code>';
+    case "blockquote": return '<blockquote class="border-l-2 border-muted-foreground pl-3 my-1 text-muted-foreground">';
+    case "link": {
+      const href = span.uri ?? "";
+      try {
+        const url = new URL(href);
+        if (!["http:", "https:", "mailto:"].includes(url.protocol)) return "";
+      } catch {
+        return "";
+      }
+      return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" class="text-blue-500 underline hover:text-blue-400">`;
+    }
+  }
+}
+
+function closeTag(span: MarkupSpan): string {
+  switch (span.type) {
+    case "b": return "</strong>";
+    case "i": return "</em>";
+    case "s": return "</del>";
+    case "code": return "</code>";
+    case "code-block": return "</code></pre>";
+    case "blockquote": return "</blockquote>";
+    case "link": return span.uri ? "</a>" : "";
+  }
+}
+
+/** Render XEP-0393 styled message body to safe HTML. Uses XEP-0394 when markup spans are present. */
+export function renderStyledBody(body: string, markup?: MarkupSpan[]): string {
+  let html: string;
+
+  if (markup && markup.length > 0) {
+    html = renderViaXep0394(body, markup);
+  } else {
+    const gfm = xep0393ToGfm(body);
+    html = (md.parse(gfm) as string).trim();
+  }
+
   // Style @mentions — match @non-whitespace after rendered HTML
   return html.replace(
     /(?:^|(?<=\s|>))@(\S+?)(?=[\s<.,;:!?'")\]}&]|$)/g,

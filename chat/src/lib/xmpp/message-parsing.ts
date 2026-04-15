@@ -28,6 +28,7 @@ export function extractMessageExtensions(
   extractExplicitMentions(msg, base);
   extractCallInvite(msg, base);
   extractFileSharing(msg, base);
+  extractMarkup(msg, base);
 
   if (ext(msg).sticker) {
     base.isSticker = true;
@@ -163,4 +164,17 @@ function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget)
   if (fs.height) info.height = parseInt(fs.height, 10);
   if (fs.desc) info.desc = fs.desc;
   base.sharedFile = info;
+}
+
+/** XEP-0394: Extract Message Markup annotations. */
+function extractMarkup(msg: ReceivedMessage, base: LiveRoomMessage): void {
+  const markupData = ext(msg).markup as { spans?: Array<{ type: string; start: number; end: number; uri?: string }> } | undefined;
+  if (!markupData?.spans || markupData.spans.length === 0) return;
+
+  base.markup = markupData.spans.map(s => ({
+    type: s.type as import("@/lib/chat-ui").MarkupSpan["type"],
+    start: s.start,
+    end: s.end,
+    ...(s.uri ? { uri: s.uri } : {}),
+  }));
 }

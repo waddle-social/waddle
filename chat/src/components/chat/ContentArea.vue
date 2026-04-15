@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { Hash, MessageCircle, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
-import type { TimelineMessage } from "@/lib/chat-ui";
+import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { MujiCallPhase, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -51,10 +51,10 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [];
+  send: [body: string, markup: MarkupSpan[]];
   typing: [];
   selectGif: [url: string];
-  editMessage: [messageId: string, newBody: string];
+  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
@@ -353,7 +353,7 @@ watch(
           :presence="roomPresence[msg.author] ?? 'offline'"
           :last-seen="roomLastSeen[msg.author]"
           :author-jid="authorJidByNick?.[msg.author]"
-          @edit="(id, body) => emit('editMessage', id, body)"
+          @edit="(id, body, m) => emit('editMessage', id, body, m)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
           @join-call="(invite) => emit('joinCallFromMessage', invite)"
@@ -387,7 +387,7 @@ watch(
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
-      @send="emit('send')"
+      @send="(body, markup) => emit('send', body, markup)"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
     />

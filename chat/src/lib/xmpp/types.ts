@@ -23,6 +23,8 @@ export interface LiveRoomMessage {
   retractsId?: string;
   /** XEP-0372 */
   mentions?: string[];
+  /** XEP-0394 */
+  markup?: import("@/lib/chat-ui").MarkupSpan[];
   /** XEP-0446/0447 */
   sharedFile?: SharedFileInfo;
   /** XEP-0449 */
