@@ -292,9 +292,9 @@ fn inject_default_ns_if_missing(xml: &str, ns: &str) -> String {
     if open_tag.contains("xmlns=") {
         return trimmed.to_string();
     }
-    // Insert xmlns right after the tag name
+    // Insert xmlns right after the tag name, before any `/>`or attributes
     let insert_pos = trimmed
-        .find(char::is_whitespace)
+        .find(|c: char| c.is_whitespace() || c == '/')
         .unwrap_or(open_end);
     format!(
         "{} xmlns=\"{ns}\"{}",

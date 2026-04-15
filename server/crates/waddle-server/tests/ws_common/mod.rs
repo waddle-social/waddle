@@ -8,7 +8,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use futures::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -57,7 +56,7 @@ impl TestServer {
             .env("WADDLE_SFU_UDP_ADDR", "127.0.0.1:0")
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {bin}: {e}"));
 
@@ -77,11 +76,18 @@ impl TestServer {
 
         // Wait for the port to actually accept connections
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut listening = false;
         while Instant::now() < deadline {
             if TcpStream::connect(format!("127.0.0.1:{http_port}")).is_ok() {
+                listening = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+        if !listening {
+            panic!(
+                "Server failed to accept connections on 127.0.0.1:{http_port} within 5s"
+            );
         }
 
         Self {

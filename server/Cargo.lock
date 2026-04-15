@@ -5777,7 +5777,6 @@ dependencies = [
  "kameo",
  "libsql",
  "lru",
- "minidom",
  "object_store",
  "opentelemetry",
  "opentelemetry-otlp",

@@ -1,26 +1,24 @@
 //! XEP-0313 MAM integration tests over WebSocket.
 //!
-//! A single waddle-server instance is shared across all tests. Each test
-//! uses unique room names to avoid interference.
+//! Each test starts its own isolated waddle-server on dynamic ports.
 
 mod ws_common;
 
-use std::sync::LazyLock;
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 const PASSWORD: &str = "admin";
 
-/// One server per XEP test file. Each test uses unique room names and
-/// message bodies to avoid interference.
-static SERVER: LazyLock<TestServer> = LazyLock::new(TestServer::start);
-
-async fn connect() -> WsXmppClient {
+/// Start an isolated server and connect an authenticated client.
+async fn setup() -> (TestServer, WsXmppClient) {
+    let server = TestServer::start();
     let resource = format!("test-{}", uuid::Uuid::new_v4());
-    WsXmppClient::connect_and_auth(&SERVER.ws_url(), DOMAIN, USERNAME, PASSWORD, &resource)
-        .await
-        .expect("Failed to connect and authenticate")
+    let client =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, PASSWORD, &resource)
+            .await
+            .expect("Failed to connect and authenticate");
+    (server, client)
 }
 
 fn mam_query_xml(id: &str, archive_jid: &str, max: Option<u32>) -> String {
@@ -67,7 +65,7 @@ fn extract_fin_last(frame: &str) -> Option<String> {
 
 #[tokio::test]
 async fn muc_message_archived_and_queryable() {
-    let mut client = connect().await;
+    let (_server, mut client) = setup().await;
     let room = format!("mam-test-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     // Join
@@ -134,7 +132,7 @@ async fn muc_message_archived_and_queryable() {
 
 #[tokio::test]
 async fn muc_mam_pagination() {
-    let mut client = connect().await;
+    let (_server, mut client) = setup().await;
     let room = format!("mam-page-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     // Join
@@ -227,7 +225,7 @@ async fn muc_mam_pagination() {
 
 #[tokio::test]
 async fn dm_archived_in_sender_personal_archive() {
-    let mut client = connect().await;
+    let (_server, mut client) = setup().await;
     let bare_jid = format!("{USERNAME}@{DOMAIN}");
 
     // Self-DM so it archives in personal archive
@@ -254,9 +252,14 @@ async fn dm_archived_in_sender_personal_archive() {
         frames.last().expect("no fin").contains("<fin"),
         "Last frame should be <fin>"
     );
+    // Verify the body appears in a MAM result frame (not just any echo)
     assert!(
-        frames.iter().any(|f| f.contains(&unique_body)),
-        "DM body not found in personal archive"
+        frames.iter().any(|f| {
+            f.contains(r#"<result xmlns="urn:xmpp:mam:2""#)
+                || f.contains(r#"<result xmlns='urn:xmpp:mam:2'"#)
+        } && f.contains("<forwarded")
+            && f.contains(&unique_body)),
+        "DM body not found in MAM result frames"
     );
 
     client.close().await;

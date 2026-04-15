@@ -381,7 +381,11 @@ pub async fn start_with_config(
             .parse()
             .unwrap_or_else(|_| "0.0.0.0:3000".parse().expect("Valid fallback HTTP address"));
         let http = tokio::net::TcpListener::bind(http_addr).await?;
-        info!(addr = %http.local_addr()?, "Bound HTTP listener");
+        if let Ok(addr) = http.local_addr() {
+            info!(addr = %addr, "Bound HTTP listener");
+        } else {
+            info!(addr = %http_addr, "Bound HTTP listener");
+        }
 
         let c2s = if xmpp_config.enabled {
             let listener = tokio::net::TcpListener::bind(xmpp_config.c2s_addr).await?;
