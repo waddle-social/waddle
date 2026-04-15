@@ -8,6 +8,8 @@ resources:
   - kustomization-infra-cert-manager.yaml
   - kustomization-infra-external-dns.yaml
   - kustomization-infra-cloudnative-pg.yaml
+  - kustomization-infra-clickhouse.yaml
+  - kustomization-infra-rustfs.yaml
   - kustomization-infra-spicedb-operator-source.yaml
   - kustomization-infra-spicedb-operator.yaml
   - kustomization-infra-cert-manager-issuer.yaml
