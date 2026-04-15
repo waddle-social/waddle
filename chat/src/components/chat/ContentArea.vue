@@ -392,7 +392,7 @@ watch(
       :open="!!popoverAuthor"
       :username="popoverAuthor?.username ?? ''"
       :avatar-url="popoverAuthor ? avatarUrlByAuthor[popoverAuthor.username] ?? null : null"
-      :presence-text="dmPeer?.peerUsername === popoverAuthor?.username ? presenceText(dmPeer.presenceShow) : undefined"
+      :presence-text="dmPeer?.peerUsername === popoverAuthor?.username ? presenceText(dmPeer?.presenceShow) : undefined"
       :can-message="!!popoverAuthor"
       @close="closePopover"
       @message="openPopoverDm"
