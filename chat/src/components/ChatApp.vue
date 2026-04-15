@@ -598,7 +598,7 @@ onUnmounted(() => {
         :can-manage-channels="waddles.canManageChannels.value"
         :typing-users="messaging.typingUsers.value"
         :current-user="connectionStore.session?.username"
-        :avatar-url-by-author="avatarUrlByAuthor.value"
+        :avatar-url-by-author="avatarUrlByAuthor"
         :tenor-api-key="tenorApiKey"
         :member-names="waddles.members.value.map((m) => m.username)"
         :room-hats="messaging.roomHats.value"
