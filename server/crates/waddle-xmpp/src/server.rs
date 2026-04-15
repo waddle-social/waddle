@@ -95,6 +95,10 @@ pub struct XmppServer<S: AppState> {
     push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
     push_sender: Arc<dyn WebPushSender + Send + Sync>,
+    /// SFU service actor for Jingle-based media calls
+    sfu_service: kameo::actor::ActorRef<crate::sfu::service_actor::SfuServiceActor>,
+    /// SFU room registry (shared with service actor)
+    sfu_registry: Arc<crate::sfu::SfuRegistry>,
     /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
     c2s_listener: TcpListener,
     /// S2S listener — passed in if S2S federation is enabled.
@@ -148,6 +152,23 @@ impl<S: AppState> XmppServer<S> {
         let push_sender: Arc<dyn WebPushSender + Send + Sync> = Arc::new(HttpWebPushSender::new());
         info!("Push notification store initialized");
 
+        // Create the SFU service actor and registry
+        let sfu_domain = format!("sfu.{}", config.domain);
+        let sfu_registry = Arc::new(crate::sfu::SfuRegistry::new());
+        let sfu_udp_addr: SocketAddr = "0.0.0.0:10000"
+            .parse()
+            .map_err(|e| {
+                XmppError::internal_server_error(Some(format!("Invalid SFU UDP addr: {e}")))
+            })?;
+        let sfu_service = kameo::spawn(
+            crate::sfu::service_actor::SfuServiceActor::new(
+                sfu_domain,
+                Arc::clone(&sfu_registry),
+                sfu_udp_addr,
+            ),
+        );
+        info!("SFU service actor initialized");
+
         // Create the GitHub link enricher from environment
         let github_enricher = {
             let enricher = waddle_xmpp_xep_github::MessageEnricher::from_env();
@@ -173,6 +194,8 @@ impl<S: AppState> XmppServer<S> {
             github_enricher,
             push_store,
             push_sender,
+            sfu_service,
+            sfu_registry,
             c2s_listener,
             s2s_listener,
             shutdown_token,
@@ -347,6 +370,7 @@ impl<S: AppState> XmppServer<S> {
             let registration_enabled = self.config.registration_enabled;
             let single_tenant = self.config.single_tenant;
             let github_enricher = self.github_enricher;
+            let sfu_service = self.sfu_service;
 
             tokio::spawn(async move {
                 loop {
@@ -378,6 +402,7 @@ impl<S: AppState> XmppServer<S> {
                     let push_store = Arc::clone(&push_store);
                     let push_sender = Arc::clone(&push_sender);
                     let github_enricher = github_enricher.clone();
+                    let sfu_service = sfu_service.clone();
 
                     tokio::spawn(
                         async move {
@@ -398,6 +423,7 @@ impl<S: AppState> XmppServer<S> {
                                 single_tenant,
                                 push_store,
                                 push_sender,
+                                sfu_service,
                             )
                             .await
                             {

@@ -175,13 +175,15 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
     push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
+    /// SFU service actor for Jingle-based media calls
+    sfu_service: Option<kameo::actor::ActorRef<crate::sfu::service_actor::SfuServiceActor>>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender, sfu_service),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -202,6 +204,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         single_tenant: bool,
         push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
         push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
+        sfu_service: kameo::actor::ActorRef<crate::sfu::service_actor::SfuServiceActor>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -233,6 +236,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             single_tenant,            // XEP-0503: single-tenant mode for spaces
             push_store,               // XEP-0357: push subscription store
             push_sender,              // XEP-0357: push notification sender
+            sfu_service: Some(sfu_service), // SFU service actor for Jingle media calls
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -3742,6 +3746,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
+        // Route Jingle IQs addressed to sfu.{domain} to the SFU service
+        if let Some(to_jid) = &iq.to {
+            let sfu_domain = format!("sfu.{}", self.domain);
+            if to_jid.domain().as_str() == sfu_domain
+                && crate::xep::xep0166::is_jingle_iq(&iq)
+            {
+                return self.handle_sfu_jingle_iq(iq).await;
+            }
+        }
+
         // IQ result/error stanzas addressed to the server are terminal and should
         // not trigger additional error responses.
         if matches!(&iq.payload, IqType::Result(_) | IqType::Error(_)) {
@@ -3943,6 +3957,56 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ///
     /// Returns identity and supported features for:
     /// - Server domain: Server identity + server features
+    /// Handle a Jingle IQ addressed to the SFU component (`sfu.{domain}`).
+    ///
+    /// Forwards the IQ to the SfuServiceActor and sends the response back to
+    /// the client.
+    async fn handle_sfu_jingle_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sfu = self.sfu_service.as_ref().ok_or_else(|| {
+            XmppError::service_unavailable(Some("SFU service not available".to_string()))
+        })?;
+
+        let sender_jid = self
+            .jid
+            .as_ref()
+            .ok_or_else(|| XmppError::not_authorized(Some("Not authenticated".to_string())))?
+            .clone();
+
+        let response = sfu
+            .ask(crate::sfu::service_actor::HandleJingleIq {
+                iq: iq.clone(),
+                sender_jid,
+            })
+            .await
+            .map_err(|e| {
+                XmppError::internal_server_error(Some(format!("SFU actor error: {e}")))
+            })?;
+
+        match response {
+            crate::sfu::service_actor::JingleIqResponse::Accept { id, jingle } => {
+                let result_iq = xmpp_parsers::iq::Iq {
+                    from: iq.to.clone(),
+                    to: iq.from.clone(),
+                    id,
+                    payload: IqType::Result(Some(jingle)),
+                };
+                self.stream.write_stanza(&Stanza::Iq(result_iq)).await
+            }
+            crate::sfu::service_actor::JingleIqResponse::Ack { id } => {
+                let result_iq = xmpp_parsers::iq::Iq {
+                    from: iq.to.clone(),
+                    to: iq.from.clone(),
+                    id,
+                    payload: IqType::Result(None),
+                };
+                self.stream.write_stanza(&Stanza::Iq(result_iq)).await
+            }
+            crate::sfu::service_actor::JingleIqResponse::Rejection { id: _, reason } => {
+                Err(XmppError::bad_request(Some(reason)))
+            }
+        }
+    }
+
     /// - MUC domain: Conference service identity + MUC features
     /// - MUC room: Conference room identity + room features
     /// - Upload domain: Upload service identity + upload features
