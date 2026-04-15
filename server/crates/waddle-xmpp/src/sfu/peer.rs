@@ -19,18 +19,19 @@ impl SfuPeer {
     ///
     /// Builds an ICE-lite `Rtc`, adds a host candidate at `local_addr`,
     /// accepts the SDP offer, and returns `(peer, answer_sdp_string)`.
-    pub fn new_from_offer(offer_sdp: &str, local_addr: SocketAddr) -> Result<(Self, String), String> {
-        let mut rtc = Rtc::builder()
-            .set_ice_lite(true)
-            .build(Instant::now());
+    pub fn new_from_offer(
+        offer_sdp: &str,
+        local_addr: SocketAddr,
+    ) -> Result<(Self, String), String> {
+        let mut rtc = Rtc::builder().set_ice_lite(true).build(Instant::now());
 
-        let candidate = Candidate::host(local_addr, "udp")
-            .map_err(|e| format!("{:?}", e))?;
+        let candidate = Candidate::host(local_addr, "udp").map_err(|e| format!("{:?}", e))?;
         rtc.add_local_candidate(candidate);
 
-        let offer = SdpOffer::from_sdp_string(offer_sdp)
-            .map_err(|e| format!("{:?}", e))?;
-        let answer = rtc.sdp_api().accept_offer(offer)
+        let offer = SdpOffer::from_sdp_string(offer_sdp).map_err(|e| format!("{:?}", e))?;
+        let answer = rtc
+            .sdp_api()
+            .accept_offer(offer)
             .map_err(|e| format!("{:?}", e))?;
         let answer_sdp = answer.to_sdp_string();
 
@@ -109,7 +110,10 @@ mod tests {
 
         assert!(peer.is_alive());
         assert!(!peer.is_connected());
-        assert_eq!(peer.local_addr(), "127.0.0.1:9000".parse::<SocketAddr>().expect("valid addr"));
+        assert_eq!(
+            peer.local_addr(),
+            "127.0.0.1:9000".parse::<SocketAddr>().expect("valid addr")
+        );
         assert!(peer.jid.is_none());
         assert_eq!(peer.sid, "test-sid");
     }

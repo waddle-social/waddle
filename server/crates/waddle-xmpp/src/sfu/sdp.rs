@@ -11,10 +11,7 @@ const PARTICIPANT_MAP_NS: &str = "urn:waddle:sfu:participant-map:0";
 /// Walks `<content>` → `<transport>` → `<sdp>` children to find raw SDP text.
 pub fn extract_sdp_from_jingle(jingle: &Element) -> Option<String> {
     for content in jingle.children().filter(|c| c.is("content", JINGLE_NS)) {
-        for transport in content
-            .children()
-            .filter(|c| c.is("transport", ICE_UDP_NS))
-        {
+        for transport in content.children().filter(|c| c.is("transport", ICE_UDP_NS)) {
             for sdp_el in transport.children().filter(|c| c.is("sdp", OOB_SDP_NS)) {
                 let text = sdp_el.text();
                 if !text.is_empty() {

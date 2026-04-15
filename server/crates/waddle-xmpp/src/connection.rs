@@ -3750,9 +3750,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Route Jingle IQs addressed to sfu.{domain} to the SFU service
         if let Some(to_jid) = &iq.to {
             let sfu_domain = format!("sfu.{}", self.domain);
-            if to_jid.domain().as_str() == sfu_domain
-                && crate::xep::xep0166::is_jingle_iq(&iq)
-            {
+            if to_jid.domain().as_str() == sfu_domain && crate::xep::xep0166::is_jingle_iq(&iq) {
                 return self.handle_sfu_jingle_iq(iq).await;
             }
         }
@@ -3979,9 +3977,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 sender_jid,
             })
             .await
-            .map_err(|e| {
-                XmppError::internal_server_error(Some(format!("SFU actor error: {e}")))
-            })?;
+            .map_err(|e| XmppError::internal_server_error(Some(format!("SFU actor error: {e}"))))?;
 
         match response {
             crate::sfu::service_actor::JingleIqResponse::Accept { id, jingle } => {

@@ -155,18 +155,14 @@ impl<S: AppState> XmppServer<S> {
         // Create the SFU service actor and registry
         let sfu_domain = format!("sfu.{}", config.domain);
         let sfu_registry = Arc::new(crate::sfu::SfuRegistry::new());
-        let sfu_udp_addr: SocketAddr = "0.0.0.0:10000"
-            .parse()
-            .map_err(|e| {
-                XmppError::internal_server_error(Some(format!("Invalid SFU UDP addr: {e}")))
-            })?;
-        let sfu_service = kameo::spawn(
-            crate::sfu::service_actor::SfuServiceActor::new(
-                sfu_domain,
-                Arc::clone(&sfu_registry),
-                sfu_udp_addr,
-            ),
-        );
+        let sfu_udp_addr: SocketAddr = "0.0.0.0:10000".parse().map_err(|e| {
+            XmppError::internal_server_error(Some(format!("Invalid SFU UDP addr: {e}")))
+        })?;
+        let sfu_service = kameo::spawn(crate::sfu::service_actor::SfuServiceActor::new(
+            sfu_domain,
+            Arc::clone(&sfu_registry),
+            sfu_udp_addr,
+        ));
         info!("SFU service actor initialized");
 
         // Spawn the SFU UDP net loop as a background task
@@ -178,7 +174,9 @@ impl<S: AppState> XmppServer<S> {
                 sfu_udp_addr_clone,
                 sfu_registry_clone,
                 sfu_shutdown,
-            ).await {
+            )
+            .await
+            {
                 tracing::error!(error = %e, "SFU net loop failed to start");
             }
         });

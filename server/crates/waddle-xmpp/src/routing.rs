@@ -1144,8 +1144,17 @@ mod tests {
         let config = RouterConfig::new("waddle.social".to_string());
         let registry = Arc::new(ConnectionRegistry::new());
         let router = StanzaRouter::new(config, registry, None);
-        assert_eq!(router.get_destination_for_domain("waddle.social"), RoutingDestination::Local);
-        assert_eq!(router.get_destination_for_domain("muc.waddle.social"), RoutingDestination::LocalMuc);
-        assert_eq!(router.get_destination_for_domain("sfu.waddle.social"), RoutingDestination::LocalSfu);
+        assert_eq!(
+            router.get_destination_for_domain("waddle.social"),
+            RoutingDestination::Local
+        );
+        assert_eq!(
+            router.get_destination_for_domain("muc.waddle.social"),
+            RoutingDestination::LocalMuc
+        );
+        assert_eq!(
+            router.get_destination_for_domain("sfu.waddle.social"),
+            RoutingDestination::LocalSfu
+        );
     }
 }

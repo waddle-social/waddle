@@ -58,8 +58,7 @@ impl kameo::message::Message<AddParticipant> for SfuRoomActor {
         msg: AddParticipant,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let (mut peer, answer_sdp) =
-            SfuPeer::new_from_offer(&msg.sdp_offer, self.local_addr)?;
+        let (mut peer, answer_sdp) = SfuPeer::new_from_offer(&msg.sdp_offer, self.local_addr)?;
 
         peer.jid = Some(msg.jid.clone());
         peer.sid = msg.sid.clone();

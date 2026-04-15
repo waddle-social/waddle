@@ -1,0 +1,1 @@
+- [No co-author in commits](feedback_no_coauthor.md) — User does not want Co-Authored-By lines in commit messages

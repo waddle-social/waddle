@@ -627,13 +627,11 @@ async fn run_test_server<S: AppState>(
     // Create SFU service actor for tests
     let sfu_domain = format!("sfu.{}", domain);
     let sfu_registry = std::sync::Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
-    let sfu_service = kameo::spawn(
-        waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
-            sfu_domain,
-            sfu_registry,
-            "127.0.0.1:0".parse().unwrap(),
-        ),
-    );
+    let sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
+        sfu_domain,
+        sfu_registry,
+        "127.0.0.1:0".parse().unwrap(),
+    ));
 
     loop {
         tokio::select! {
