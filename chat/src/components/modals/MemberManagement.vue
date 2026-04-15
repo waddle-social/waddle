@@ -68,7 +68,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
           class="w-full flex items-center gap-2.5 p-2.5 rounded-xl bg-surface hover:bg-muted transition-all duration-200 text-left border border-border"
           @click="emit('addMember', user.id)"
         >
-          <AppAvatar :name="user.display_name || user.username" size="sm" />
+          <AppAvatar :name="user.display_name || user.username" :src="user.avatar_url" size="sm" />
           <div class="flex-1 min-w-0">
             <div class="text-[13px] font-medium truncate">{{ user.display_name || user.username }}</div>
             <div class="text-[11px] text-muted-foreground">@{{ user.username }}</div>
@@ -94,7 +94,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         :key="member.user_id"
         class="flex items-center gap-2.5 p-2.5 rounded-xl hover:bg-muted/50 transition-all duration-200"
       >
-        <AppAvatar :name="member.username" size="sm" />
+        <AppAvatar :name="member.username" :src="member.avatar_url" size="sm" />
         <div class="flex-1 min-w-0">
           <div class="text-[13px] font-medium truncate">{{ member.username }}</div>
           <div class="text-[11px] text-muted-foreground capitalize">

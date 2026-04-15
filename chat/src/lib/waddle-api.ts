@@ -25,6 +25,7 @@ export interface ChannelSummary {
 export interface MemberSummary {
   user_id: string;
   username: string;
+  avatar_url: string | null;
   role: "owner" | "admin" | "moderator" | "member";
   joined_at: string;
 }

@@ -86,6 +86,21 @@ watchEffect(() => {
 });
 
 const notifications = useNotifications();
+const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
+  const avatars: Record<string, string | null> = {};
+
+  if (session.value) {
+    avatars[session.value.username] = session.value.avatar_url;
+  }
+
+  for (const member of waddles.members.value) {
+    if (!(member.username in avatars) || member.avatar_url) {
+      avatars[member.username] = member.avatar_url;
+    }
+  }
+
+  return avatars;
+});
 
 function resolveChannelNameFromJid(roomJid: string): string | null {
   const localpart = roomJid.split("@")[0] ?? "";
@@ -583,6 +598,7 @@ onUnmounted(() => {
         :can-manage-channels="waddles.canManageChannels.value"
         :typing-users="messaging.typingUsers.value"
         :current-user="connectionStore.session?.username"
+        :avatar-url-by-author="avatarUrlByAuthor.value"
         :tenor-api-key="tenorApiKey"
         :member-names="waddles.members.value.map((m) => m.username)"
         :room-hats="messaging.roomHats.value"

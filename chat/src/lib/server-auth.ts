@@ -2,6 +2,7 @@ export interface WaddleSession {
   session_id: string;
   user_id: string;
   username: string;
+  avatar_url: string | null;
   xmpp_localpart: string;
   jid: string;
   xmpp_websocket_url: string;

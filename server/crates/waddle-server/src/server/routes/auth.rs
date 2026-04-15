@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 /// Shared auth state.
 pub struct AuthState {
+    pub db: Arc<crate::db::Database>,
     pub session_manager: SessionManager,
     pub identity_service: IdentityService,
     pub providers: ProviderRegistry,
@@ -63,6 +64,7 @@ impl AuthState {
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
         Self {
+            db,
             session_manager,
             identity_service,
             providers,
@@ -437,6 +439,7 @@ pub struct SessionResponse {
     pub session_id: String,
     pub user_id: String,
     pub username: String,
+    pub avatar_url: Option<String>,
     pub xmpp_localpart: String,
     pub jid: String,
     pub xmpp_websocket_url: String,
@@ -488,6 +491,34 @@ fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorResponse>) {
     };
 
     (status, Json(ErrorResponse::new(code, &err.to_string())))
+}
+
+async fn load_avatar_url(
+    db: &crate::db::Database,
+    user_id: &str,
+) -> Result<Option<String>, AuthError> {
+    let conn = db
+        .guard()
+        .await
+        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT avatar_url FROM users WHERE id = ? LIMIT 1",
+            libsql::params![user_id],
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to query avatar_url: {}", e)))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to read avatar_url row: {}", e)))?;
+
+    match row {
+        Some(row) => row
+            .get(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e))),
+        None => Ok(None),
+    }
 }
 
 #[instrument(skip(state))]
@@ -840,12 +871,17 @@ pub async fn session_handler(
             let expires_at = session.expires_at.map(|v| v.to_rfc3339());
             let jid = localpart_to_jid(&session.xmpp_localpart, &state.xmpp_domain)
                 .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, state.xmpp_domain));
+            let avatar_url = match load_avatar_url(&state.db, &session.user_id).await {
+                Ok(avatar_url) => avatar_url,
+                Err(err) => return auth_error_to_response(err).into_response(),
+            };
             (
                 StatusCode::OK,
                 Json(SessionResponse {
                     session_id: session.id,
                     user_id: session.user_id,
                     username: session.username,
+                    avatar_url,
                     xmpp_localpart: session.xmpp_localpart,
                     jid,
                     xmpp_websocket_url: state.websocket_url(),
@@ -920,6 +956,17 @@ mod tests {
             .create_session(&session)
             .await
             .unwrap();
+        auth_state
+            .db
+            .guard()
+            .await
+            .unwrap()
+            .execute(
+                "UPDATE users SET avatar_url = ? WHERE id = ?",
+                libsql::params!["https://avatars.example.com/alice.png", session.user_id.clone()],
+            )
+            .await
+            .unwrap();
 
         let app = router(auth_state.clone());
         let response = app
@@ -939,6 +986,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let expected_jid = format!("alice@{}", auth_state.xmpp_domain);
         assert_eq!(json["username"], "alice");
+        assert_eq!(
+            json["avatar_url"].as_str(),
+            Some("https://avatars.example.com/alice.png")
+        );
         assert_eq!(json["jid"].as_str(), Some(expected_jid.as_str()));
         assert_eq!(
             json["xmpp_websocket_url"].as_str(),

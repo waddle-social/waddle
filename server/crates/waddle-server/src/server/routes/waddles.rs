@@ -203,6 +203,8 @@ pub struct MemberResponse {
     pub user_id: String,
     /// User's immutable username
     pub username: String,
+    /// Avatar URL sourced from the linked identity profile
+    pub avatar_url: Option<String>,
     /// User's role in the waddle (owner, admin, moderator, member)
     pub role: String,
     /// When the user joined the waddle
@@ -1040,6 +1042,7 @@ pub async fn add_member_handler(
         Json(MemberResponse {
             user_id: request.user_id,
             username,
+            avatar_url: None,
             role: request.role,
             joined_at: now,
         }),
@@ -1784,7 +1787,7 @@ async fn list_waddle_members(
     offset: usize,
 ) -> Result<Vec<MemberResponse>, String> {
     let query = r#"
-        SELECT u.id, u.username, wm.role, wm.joined_at
+        SELECT u.id, u.username, u.avatar_url, wm.role, wm.joined_at
         FROM waddle_members wm
         JOIN users u ON wm.user_id = u.id
         WHERE wm.waddle_id = ?
@@ -1830,16 +1833,20 @@ fn parse_member_row(row: &libsql::Row) -> Result<MemberResponse, String> {
     let username: String = row
         .get(1)
         .map_err(|e| format!("Failed to get username: {}", e))?;
-    let role: String = row
+    let avatar_url: Option<String> = row
         .get(2)
+        .map_err(|e| format!("Failed to get avatar_url: {}", e))?;
+    let role: String = row
+        .get(3)
         .map_err(|e| format!("Failed to get role: {}", e))?;
     let joined_at: String = row
-        .get(3)
+        .get(4)
         .map_err(|e| format!("Failed to get joined_at: {}", e))?;
 
     Ok(MemberResponse {
         user_id,
         username,
+        avatar_url,
         role,
         joined_at,
     })
@@ -1850,9 +1857,9 @@ async fn get_waddle_member(
     db: &Database,
     waddle_id: &str,
     user_id: &str,
-) -> Result<Option<MemberResponse>, String> {
-    let query = r#"
-        SELECT u.id, u.username, wm.role, wm.joined_at
+    ) -> Result<Option<MemberResponse>, String> {
+        let query = r#"
+        SELECT u.id, u.username, u.avatar_url, wm.role, wm.joined_at
         FROM waddle_members wm
         JOIN users u ON wm.user_id = u.id
         WHERE wm.waddle_id = ? AND wm.user_id = ?
@@ -2424,6 +2431,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(add_member_response.status(), StatusCode::CREATED);
+        waddle_state
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .unwrap()
+            .execute(
+                "UPDATE users SET avatar_url = ? WHERE id = ?",
+                libsql::params![
+                    "https://avatars.example.com/member.png",
+                    member_session.user_id.clone()
+                ],
+            )
+            .await
+            .unwrap();
 
         let update_response = app
             .clone()
@@ -2478,6 +2501,10 @@ mod tests {
             .iter()
             .find(|member| member["user_id"] == member_session.user_id)
             .unwrap();
+        assert_eq!(
+            updated["avatar_url"].as_str(),
+            Some("https://avatars.example.com/member.png")
+        );
         assert_eq!(updated["role"], "admin");
     }
 

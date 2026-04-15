@@ -44,15 +44,21 @@ export const auth = betterAuth({
           return {};
         }
 
+        const picture = typeof user.image === "string" ? user.image.trim() : "";
         const githubUsername =
           typeof user.githubUsername === "string"
             ? user.githubUsername.trim()
             : "";
-        if (!githubUsername) {
-          return {};
+        const claims: Record<string, string> = {};
+
+        if (githubUsername) {
+          claims.preferred_username = githubUsername;
+        }
+        if (picture) {
+          claims.picture = picture;
         }
 
-        return { preferred_username: githubUsername };
+        return claims;
       },
       useJWTPlugin: true,
     }),

@@ -55,13 +55,13 @@ function handleBellClick() {
       :title="`${session.username} — Log out`"
       @click="emit('logout')"
     >
-      <AppAvatar :name="session.username" size="xs" />
+      <AppAvatar :name="session.username" :src="session.avatar_url" size="xs" />
     </button>
   </div>
 
   <!-- Full mode for sidebar -->
   <div v-else class="px-3 py-2.5 flex items-center gap-2.5 flex-shrink-0 border-t border-border">
-    <AppAvatar :name="session.username" size="sm" />
+    <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
     <span class="flex-1 min-w-0 text-[13px] font-medium truncate text-sidebar-foreground">{{ session.username }}</span>
     <button
       class="h-7 w-7 flex items-center justify-center rounded-lg transition-all duration-200 flex-shrink-0"

@@ -22,6 +22,7 @@ const props = defineProps<{
   canManageChannels: boolean;
   typingUsers: string[];
   currentUser?: string;
+  avatarUrlByAuthor: Record<string, string | null>;
   tenorApiKey: string;
   memberNames: string[];
   roomHats: RoomHats;
@@ -304,6 +305,7 @@ watch(
           :key="msg.id"
           :message="msg"
           :current-user="props.currentUser"
+          :avatar-url="props.avatarUrlByAuthor[msg.author] ?? null"
           :hats="roomHats[msg.author] ?? []"
           @edit="(id, body) => emit('editMessage', id, body)"
           @retract="(id) => emit('retractMessage', id)"
