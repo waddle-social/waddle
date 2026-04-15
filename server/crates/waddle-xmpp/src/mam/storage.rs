@@ -383,9 +383,13 @@ impl MamStorage for LibSqlMamStorage {
         }
 
         // Pagination filters (before_id/after_id)
-        if let Some(ref before_id) = query.before_id {
+        if let Some(before_id) = query
+            .before_id
+            .as_deref()
+            .filter(|before_id| !before_id.is_empty())
+        {
             conditions.push(format!("id < ?{}", param_index));
-            params.push(before_id.clone());
+            params.push(before_id.to_string());
             param_index += 1;
         }
 
@@ -515,7 +519,7 @@ impl MamStorage for LibSqlMamStorage {
             messages.pop();
         }
 
-        // Reverse if we were paginating backwards
+        // Reverse if we were paginating backwards so callers always receive chronological order.
         if query.before_id.is_some() {
             messages.reverse();
         }
@@ -782,6 +786,43 @@ mod tests {
         let result = storage.query_messages(room, &query).await.unwrap();
         assert_eq!(result.messages.len(), 5);
         assert!(!result.complete); // There are more messages
+    }
+
+    #[tokio::test]
+    async fn test_query_last_page_with_empty_before_returns_latest_messages() {
+        let storage = create_test_storage().await;
+
+        let room = "room@conference.example.com";
+
+        for i in 0..10 {
+            let msg = ArchivedMessage {
+                id: String::new(),
+                timestamp: Utc::now(),
+                from: "user@example.com/nick".to_string(),
+                to: room.to_string(),
+                body: format!("Message {}", i),
+                stanza_id: None,
+                ..Default::default()
+            };
+            storage.store_message(room, &msg).await.unwrap();
+        }
+
+        let query = MamQuery {
+            max: Some(3),
+            before_id: Some(String::new()),
+            ..Default::default()
+        };
+        let result = storage.query_messages(room, &query).await.unwrap();
+
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Message 7", "Message 8", "Message 9"]
+        );
     }
 
     #[tokio::test]

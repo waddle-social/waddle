@@ -20,7 +20,7 @@ export async function queryMam(
   roomJid: string,
   max: number,
 ): Promise<LiveRoomMessage[]> {
-  const result = await xmpp.searchHistory(roomJid, { paging: { max } });
+  const result = await xmpp.searchHistory(roomJid, { paging: { max, before: "" } });
   const collected: LiveRoomMessage[] = [];
 
   if (result.results) {

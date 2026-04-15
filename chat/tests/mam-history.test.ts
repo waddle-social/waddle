@@ -15,6 +15,17 @@ function makeMamAgent(results: unknown[]) {
 }
 
 describe("MAM history parsing", () => {
+  test("requests the latest room history page", async () => {
+    const xmpp = makeMamAgent([]);
+
+    await queryMam(xmpp, "room@muc.example.com", 20);
+
+    expect(xmpp.searchHistory).toHaveBeenCalledWith(
+      "room@muc.example.com",
+      { paging: { max: 20, before: "" } },
+    );
+  });
+
   test("parses archived room reactions, corrections, and retractions with original stanza IDs", async () => {
     const xmpp = makeMamAgent([
       {
@@ -149,6 +160,19 @@ describe("MAM history parsing", () => {
     expect(results[1]._reactionEmojis).toEqual(["🔥"]);
     expect(results[2].replacesId).toBe("msg-1");
     expect(results[3].retractsId).toBe("msg-1");
+  });
+
+  test("requests the latest DM history page", async () => {
+    const xmpp = makeMamAgent([]);
+
+    await queryPersonalMam(xmpp, "alice@example.com", "bob@example.com", 20);
+
+    expect(xmpp.searchHistory).toHaveBeenCalledWith(
+      "alice@example.com",
+      expect.objectContaining({
+        paging: { max: 20, before: "" },
+      }),
+    );
   });
 });
 

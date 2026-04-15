@@ -39,7 +39,7 @@ export async function queryPersonalMam(
   let result;
   try {
     result = await xmpp.searchHistory(selfBareJid, {
-      paging: { max },
+      paging: { max, before: "" },
       form: {
         type: "submit",
         fields: [
