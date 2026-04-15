@@ -123,14 +123,6 @@ export class BrowserXmppClient {
 
   constructor(session: WaddleSession) { this.session = session; }
 
-  private fullJid() {
-    return `${this.session.jid}/${this.resource}`;
-  }
-
-  private nextCallSid() {
-    return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
-  }
-
   setMessageHandler(h: (message: LiveRoomMessage) => void) { this.messageHandler = h; }
   setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.statusHandler = h; }
   setChatStateHandler(h: (event: ChatStateEvent) => void) { this.chatStateHandler = h; }
@@ -171,6 +163,11 @@ export class BrowserXmppClient {
     // Only keep OAUTHBEARER; session tokens aren't SCRAM/PLAIN passwords
     keepOnlyOAuthBearer(xmpp);
     registerWaddleExtensions(xmpp);
+    if (xmpp.jingle) {
+      xmpp.jingle.config.iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+      ];
+    }
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
 
@@ -358,16 +355,28 @@ export class BrowserXmppClient {
   async startMujiCall(
     w: string,
     c: string,
-    _localStream: MediaStream,
+    localStream: MediaStream,
     opts: { video: boolean; sid?: string; serviceJid?: string } = { video: true },
   ): Promise<{ sid: string; serviceJid: string } | null> {
     await this.connect();
     await this.switchRoom(w, c);
     if (!this.xmpp?.jingle) return null;
 
-    const sid = opts.sid ?? this.nextCallSid();
-    const serviceJid = opts.serviceJid ?? this.fullJid();
+    const serviceJid = opts.serviceJid ?? sfuServiceJidFor(this.session);
+    const sid = opts.sid ?? `${w}_${c}_${crypto.randomUUID()}`;
 
+    // Create real Jingle session to the SFU
+    const session = requireMujiSessionShape(
+      this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream),
+    );
+    this.mujiSessions.set(session.sid, session);
+
+    await session.start({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: opts.video,
+    });
+
+    // Broadcast invite to room
     await this.sendCallInvite(w, c, {
       muji: true,
       sid,
@@ -390,7 +399,7 @@ export class BrowserXmppClient {
     if (!this.xmpp?.jingle) return null;
 
     const serviceJid = invite.jingleJid ?? sfuServiceJidFor(this.session);
-    const sid = invite.sid;
+    const sid = invite.sid ?? `${w}_${c}_${crypto.randomUUID()}`;
     const existing = sid ? this.mujiSessions.get(sid) : undefined;
     if (existing && existing.state === "pending") {
       for (const track of localStream.getTracks()) {
