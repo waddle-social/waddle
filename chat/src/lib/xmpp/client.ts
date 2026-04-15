@@ -378,12 +378,12 @@ export class BrowserXmppClient {
   async sendModeration(w: string, c: string, targetId: string, reason?: string) {
     if (this.xmpp) messaging.sendModeration(this.xmpp, roomBareJidFor(this.session, w, c), targetId, reason);
   }
-  async sendCorrection(w: string, c: string, body: string, replacesId: string): Promise<string | null> {
-    return this.xmpp ? messaging.sendCorrection(this.xmpp, roomBareJidFor(this.session, w, c), body, replacesId) : null;
+  async sendCorrection(w: string, c: string, body: string, replacesId: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
+    return this.xmpp ? messaging.sendCorrection(this.xmpp, roomBareJidFor(this.session, w, c), body, replacesId, markup) : null;
   }
-  async sendGroupMessage(w: string, c: string, body: string): Promise<string | null> {
+  async sendGroupMessage(w: string, c: string, body: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
     await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body) : null;
+    return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body, markup) : null;
   }
   async sendCallInvite(
     w: string,

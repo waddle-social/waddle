@@ -29,6 +29,7 @@ import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/waddle-api";
+import type { MarkupSpan } from "@/lib/chat-ui";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -99,6 +100,11 @@ const muji = useMujiRuntime(
 );
 
 const contentAreaRef = ref<ComponentPublicInstance & { messagesContainer: HTMLDivElement | null } | null>(null);
+const setContentAreaRef = (
+  instance: (ComponentPublicInstance & { messagesContainer: HTMLDivElement | null }) | null,
+) => {
+  contentAreaRef.value = instance;
+};
 
 watchEffect(() => {
   const timeline = contentAreaRef.value?.messagesContainer ?? null;
@@ -268,16 +274,24 @@ async function sendGif(url: string) {
   await activeTarget.value.sendMessage(url);
 }
 
-async function sendActiveMessage() {
-  await activeTarget.value.sendMessage();
+async function sendActiveMessage(body?: string, markup?: MarkupSpan[]) {
+  if (ui.sidebarMode.value === "dms") {
+    await dmMessaging.sendMessage();
+    return;
+  }
+  await messaging.sendMessage(body, markup);
 }
 
 function notifyActiveComposing() {
   activeTarget.value.notifyComposing();
 }
 
-function editActiveMessage(messageId: string, newBody: string) {
-  void activeTarget.value.editMessage(messageId, newBody);
+function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[]) {
+  if (ui.sidebarMode.value === "dms") {
+    void dmMessaging.editMessage(messageId, newBody);
+    return;
+  }
+  void messaging.editMessage(messageId, newBody, markup);
 }
 
 function retractActiveMessage(messageId: string) {
@@ -782,7 +796,7 @@ onUnmounted(() => {
 
       <!-- Main content -->
       <ContentArea
-        ref="contentAreaRef"
+        :ref="setContentAreaRef"
         v-model:draft="activeDraft"
         :waddle="waddles.currentWaddle.value"
         :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"

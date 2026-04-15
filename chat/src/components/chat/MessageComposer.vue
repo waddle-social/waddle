@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { Send, Image } from "lucide-vue-next";
 import GifPicker from "@/components/chat/GifPicker.vue";
+import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { searchEmoji } from "@/lib/emoji";
+import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import type { MarkupSpan } from "@/lib/chat-ui";
 
 const draft = defineModel<string>("draft", { required: true });
 
@@ -16,7 +19,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [];
+  send: [body: string, markup: MarkupSpan[]];
   typing: [];
   selectGif: [url: string];
 }>();
@@ -27,7 +30,19 @@ const showEmoji = ref(false);
 const mentionQuery = ref("");
 const emojiQuery = ref("");
 const selectedIndex = ref(0);
-const inputEl = ref<HTMLInputElement | null>(null);
+const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
+const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
+  editorRef.value = instance;
+};
+
+/** Get the underlying TipTap Editor instance from the ChatEditor ref. */
+function getTiptapEditor() {
+  const e = editorRef.value as any;
+  return e?.editor?.value ?? e?.editor ?? null;
+}
+
+// Track the ProseMirror position range for the active autocomplete trigger
+const triggerRange = ref<{ from: number; to: number } | null>(null);
 
 function stripDiacritics(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -54,16 +69,30 @@ const activeResults = computed(() => {
   return [];
 });
 
-function onInput(e: Event) {
-  const input = e.target as HTMLInputElement;
-  draft.value = input.value;
+/** Whether the editor content is empty (for send button disabled state). */
+const isEmpty = computed(() => !draft.value.trim());
+
+function onEditorUpdate(doc: Record<string, unknown>) {
+  // Keep draft in sync as a plain text representation
+  const serialized = serializeTiptapToXep0393(doc as any);
+  draft.value = serialized.body;
   emit("typing");
-  checkAutocomplete(input);
+  checkAutocompleteFromEditor();
 }
 
-function checkAutocomplete(input: HTMLInputElement) {
-  const pos = input.selectionStart ?? 0;
-  const textBefore = input.value.slice(0, pos);
+function checkAutocompleteFromEditor() {
+  const editor = editorRef.value;
+  if (!editor) return;
+  const json = editor.getJSON?.();
+  if (!json) return;
+
+  // Access the underlying TipTap editor to get ProseMirror state
+  const tiptapEditor = getTiptapEditor();
+  if (!tiptapEditor?.state) return;
+
+  const { selection, doc } = tiptapEditor.state;
+  const pos = selection.from;
+  const textBefore = doc.textBetween(0, pos, "\n", "\uFFFC");
 
   const mentionMatch = textBefore.match(/(?:^|\s)@(\S*)$/);
   if (mentionMatch) {
@@ -71,6 +100,14 @@ function checkAutocomplete(input: HTMLInputElement) {
     selectedIndex.value = 0;
     showMentions.value = true;
     showEmoji.value = false;
+    // Calculate PM range for the trigger
+    const triggerLen = mentionMatch[0].length;
+    const triggerStart = textBefore.length - triggerLen;
+    // Map text offset back to PM position: find the PM pos for the trigger start
+    triggerRange.value = {
+      from: pos - mentionMatch[0].trimStart().length,
+      to: pos,
+    };
     return;
   }
   showMentions.value = false;
@@ -80,70 +117,84 @@ function checkAutocomplete(input: HTMLInputElement) {
     emojiQuery.value = emojiMatch[1];
     selectedIndex.value = 0;
     showEmoji.value = true;
+    triggerRange.value = {
+      from: pos - emojiMatch[0].trimStart().length,
+      to: pos,
+    };
     return;
   }
   showEmoji.value = false;
 }
 
 function insertMention(username: string) {
-  const input = inputEl.value;
-  if (!input) return;
+  const tiptapEditor = getTiptapEditor();
+  if (!tiptapEditor || !triggerRange.value) return;
 
-  const pos = input.selectionStart ?? 0;
-  const textBefore = draft.value.slice(0, pos);
-  const textAfter = draft.value.slice(pos);
+  const replacement = `@${username} `;
+  tiptapEditor.chain()
+    .focus()
+    .insertContentAt(triggerRange.value, replacement)
+    .run();
 
-  const replaced = textBefore.replace(/(?:^|\s)@\S*$/, (m) => {
-    const prefix = m.match(/^\s/) ? m[0] : "";
-    return `${prefix}@${username} `;
-  });
-  draft.value = replaced + textAfter;
   showMentions.value = false;
-
-  const newPos = replaced.length;
-  requestAnimationFrame(() => {
-    input.focus();
-    input.setSelectionRange(newPos, newPos);
-  });
+  triggerRange.value = null;
 }
 
 function insertEmoji(emoji: string) {
-  const input = inputEl.value;
-  if (!input) return;
+  const tiptapEditor = getTiptapEditor();
+  if (!tiptapEditor || !triggerRange.value) return;
 
-  const pos = input.selectionStart ?? 0;
-  const textBefore = draft.value.slice(0, pos);
-  const textAfter = draft.value.slice(pos);
+  const replacement = `${emoji} `;
+  tiptapEditor.chain()
+    .focus()
+    .insertContentAt(triggerRange.value, replacement)
+    .run();
 
-  const replaced = textBefore.replace(/(?:^|\s):[a-z0-9_+-]*$/i, (m) => {
-    const prefix = m.match(/^\s/) ? m[0] : "";
-    return `${prefix}${emoji} `;
-  });
-  draft.value = replaced + textAfter;
   showEmoji.value = false;
+  triggerRange.value = null;
+}
 
-  const newPos = replaced.length;
-  requestAnimationFrame(() => {
-    input.focus();
-    input.setSelectionRange(newPos, newPos);
-  });
+function onSend(doc: Record<string, unknown>) {
+  if (showMentions.value || showEmoji.value) {
+    // If autocomplete is open, Enter selects instead of sending
+    if (showMentions.value && mentionResults.value.length > 0) {
+      insertMention(mentionResults.value[selectedIndex.value]);
+    } else if (showEmoji.value && emojiResults.value.length > 0) {
+      insertEmoji(emojiResults.value[selectedIndex.value].emoji);
+    }
+    return;
+  }
+
+  const serialized = serializeTiptapToXep0393(doc as any);
+  if (!serialized.body.trim()) return;
+  emit("send", serialized.body, serialized.markup);
+}
+
+function onEditorCancel() {
+  if (showMentions.value || showEmoji.value) {
+    showMentions.value = false;
+    showEmoji.value = false;
+  }
 }
 
 function onKeydown(e: KeyboardEvent) {
   if (activeResults.value.length > 0 && (showMentions.value || showEmoji.value)) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      e.stopPropagation();
       selectedIndex.value = (selectedIndex.value + 1) % activeResults.value.length;
       return;
     }
     if (e.key === "ArrowUp") {
       e.preventDefault();
+      e.stopPropagation();
       selectedIndex.value =
         (selectedIndex.value - 1 + activeResults.value.length) % activeResults.value.length;
       return;
     }
-    if (e.key === "Tab" || e.key === "Enter") {
+    if (e.key === "Tab") {
       e.preventDefault();
+      e.stopPropagation();
       if (showMentions.value) {
         insertMention(mentionResults.value[selectedIndex.value]);
       } else if (showEmoji.value) {
@@ -151,17 +202,6 @@ function onKeydown(e: KeyboardEvent) {
       }
       return;
     }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      showMentions.value = false;
-      showEmoji.value = false;
-      return;
-    }
-  }
-
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    emit("send");
   }
 }
 
@@ -169,10 +209,20 @@ function onGifSelected(url: string) {
   showGifPicker.value = false;
   emit("selectGif", url);
 }
+
+// Clear editor content when draft is reset externally (e.g. after successful send)
+watch(
+  () => draft.value,
+  (newVal) => {
+    if (newVal === "" && editorRef.value && !editorRef.value.isEmpty()) {
+      editorRef.value.clear();
+    }
+  },
+);
 </script>
 
 <template>
-  <div class="relative px-4 py-3 flex items-center gap-2.5 flex-shrink-0">
+  <div class="relative px-4 py-3 flex items-center gap-2.5 flex-shrink-0" @keydown="onKeydown">
     <GifPicker
       v-if="showGifPicker"
       :api-key="tenorApiKey"
@@ -227,20 +277,18 @@ function onGifSelected(url: string) {
     >
       <Image class="w-4 h-4" />
     </button>
-    <input
-      ref="inputEl"
-      :value="draft"
+    <ChatEditor
+      :ref="setEditorRef"
       :placeholder="slowModeCooldown > 0 ? `Slow mode — wait ${slowModeCooldown}s` : `Message #${channelName}`"
       :disabled="disabled || slowModeCooldown > 0"
-      class="flex-1 rounded-xl focus:outline-none px-4 bg-muted text-[13px] h-10 placeholder:text-muted-foreground/40 transition-all duration-300 focus:ring-2 focus:ring-primary/20 focus:shadow-[0_0_16px_var(--glow)]"
-      :class="slowModeCooldown > 0 ? 'opacity-40' : ''"
-      @input="onInput"
-      @keydown="onKeydown"
+      @send="onSend"
+      @update="onEditorUpdate"
+      @cancel="onEditorCancel"
     />
     <button
       class="h-10 w-10 flex items-center justify-center bg-primary text-primary-foreground rounded-xl hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 flex-shrink-0"
-      :disabled="isSending || disabled || !draft.trim() || slowModeCooldown > 0"
-      @click="emit('send')"
+      :disabled="isSending || disabled || isEmpty || slowModeCooldown > 0"
+      @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
     >
       <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
       <Send v-else class="w-4 h-4" />

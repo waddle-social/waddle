@@ -13,7 +13,7 @@ import {
   type RoomHats,
   type RoomPresence,
 } from "@/lib/xmpp-client";
-import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
+import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
 
 function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -37,6 +37,9 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   }
   if (msg.callInvite) {
     tm.callInvite = msg.callInvite;
+  }
+  if (msg.markup && msg.markup.length > 0) {
+    tm.markup = msg.markup;
   }
   return tm;
 }
@@ -115,7 +118,7 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body);
+          applyCorrection(msg.replacesId, msg.body, msg.markup);
           return;
         }
 
@@ -325,12 +328,19 @@ export function useMessaging(
     );
   }
 
-  function applyCorrection(replacesId: string, newBody: string) {
+  function applyCorrection(replacesId: string, newBody: string, markup?: MarkupSpan[]) {
     const idx = messages.value.findIndex((m) => m.id === replacesId);
     if (idx === -1) return;
-    messages.value = messages.value.map((m) =>
-      m.id === replacesId ? { ...m, body: newBody.trim(), isEdited: true } : m,
-    );
+    messages.value = messages.value.map((m) => {
+      if (m.id !== replacesId) return m;
+      const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
+      if (markup && markup.length > 0) {
+        updated.markup = markup;
+      } else {
+        delete updated.markup;
+      }
+      return updated;
+    });
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {
@@ -431,8 +441,11 @@ export function useMessaging(
     await loadMessages(activeWaddleId.value, channelId);
   }
 
-  async function sendMessage(explicitBody?: string) {
-    const bodyText = explicitBody ?? draft.value;
+  async function sendMessage(body?: string, markup?: MarkupSpan[]) {
+    const bodyText = body ?? draft.value;
+    // markup !== undefined means this came from the rich editor (composer send)
+    // undefined means it came from a programmatic send (GIF, etc.)
+    const fromComposer = markup !== undefined;
     const client = xmppClient.value;
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
@@ -448,7 +461,7 @@ export function useMessaging(
     clearActionError();
 
     try {
-      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText);
+      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, markup);
       const isStillCurrentChannel =
         xmppClient.value === client &&
         activeWaddleId.value === waddleId &&
@@ -463,13 +476,14 @@ export function useMessaging(
           createdAt: new Date().toISOString(),
           isSelf: true,
           deliveryStatus: "sending",
+          markup,
         };
         messages.value = [...messages.value, optimistic];
         void scrollToBottom();
       }
 
-      // Only clear draft when sending from the composer (not explicit body)
-      if (!explicitBody && isStillCurrentChannel) {
+      // Clear draft on successful send (triggers ChatEditor clear via watcher)
+      if (fromComposer && isStillCurrentChannel) {
         draft.value = "";
       }
       // Send "active" state after sending a message (stops composing indicator)
@@ -555,7 +569,7 @@ export function useMessaging(
     }
   }
 
-  async function editMessage(messageId: string, newBody: string) {
+  async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[]) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !newBody.trim())
       return;
 
@@ -567,6 +581,7 @@ export function useMessaging(
         activeChannelId.value,
         newBody,
         messageId,
+        markup,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

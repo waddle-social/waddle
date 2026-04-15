@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, nextTick, watch } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import { renderStyledBody, isImageUrl, type TimelineMessage } from "@/lib/chat-ui";
+import ChatEditor from "@/components/chat/ChatEditor.vue";
+import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
+import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
+import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 
@@ -33,7 +37,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  edit: [messageId: string, newBody: string];
+  edit: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
   joinCall: [invite: NonNullable<TimelineMessage["callInvite"]>];
@@ -44,12 +48,22 @@ const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
 const isSystemEvent = computed(() => !!props.message.callInvite);
 
-const styledHtml = computed(() => renderStyledBody(props.message.body));
+const styledHtml = computed(() => renderStyledBody(props.message.body, props.message.markup));
+const styledBodyRef = ref<HTMLDivElement | null>(null);
+const setStyledBodyRef = (el: HTMLDivElement | null) => {
+  styledBodyRef.value = el;
+};
 const isGif = computed(() => isImageUrl(props.message.body));
 const isSharedImage = computed(() => {
   const f = props.message.sharedFile;
   return f && f.disposition === "inline" && f.mediaType?.startsWith("image/");
 });
+
+async function highlightMessageCodeBlocks() {
+  const el = styledBodyRef.value;
+  if (!el) return;
+  await applyShikiToCodeBlocks(el);
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -66,34 +80,30 @@ const isMentioned = computed(() => {
 });
 
 const isEditing = ref(false);
-const editDraft = ref("");
+const editInitialContent = ref<Record<string, unknown> | undefined>(undefined);
+const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
+const setEditEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
+  editEditorRef.value = instance;
+};
 
 function startEdit() {
-  editDraft.value = props.message.body;
+  editInitialContent.value = parseXep0393ToTiptap(props.message.body);
   isEditing.value = true;
 }
 
 function cancelEdit() {
   isEditing.value = false;
-  editDraft.value = "";
+  editInitialContent.value = undefined;
 }
 
-function submitEdit() {
-  const trimmed = editDraft.value.trim();
+function submitEditFromEditor(doc: Record<string, unknown>) {
+  const { body, markup } = serializeTiptapToXep0393(doc);
+  const trimmed = body.trim();
   if (trimmed && trimmed !== props.message.body) {
-    emit("edit", props.message.id, trimmed);
+    emit("edit", props.message.id, trimmed, markup);
   }
   isEditing.value = false;
-  editDraft.value = "";
-}
-
-function onEditKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    submitEdit();
-  } else if (e.key === "Escape") {
-    cancelEdit();
-  }
+  editInitialContent.value = undefined;
 }
 
 function emitAvatarClick() {
@@ -101,6 +111,14 @@ function emitAvatarClick() {
     emit("avatarClick", props.message.author);
   }
 }
+
+watch(
+  styledHtml,
+  () => {
+    void nextTick().then(highlightMessageCodeBlocks);
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -207,18 +225,18 @@ function emitAvatarClick() {
       </div>
 
       <!-- Edit mode -->
-      <div v-if="isEditing" class="flex gap-2 mt-1">
-        <input
-          v-model="editDraft"
-          class="flex-1 rounded-xl focus:outline-none px-4 bg-muted text-[13px] h-9 focus:ring-2 focus:ring-primary/30 transition-all duration-200"
-          @keydown="onEditKeydown"
+      <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
+        <ChatEditor
+          :ref="setEditEditorRef"
+          compact
+          :initial-content="editInitialContent"
+          placeholder="Edit message..."
+          @send="submitEditFromEditor"
+          @cancel="cancelEdit"
+          class="flex-1"
         />
         <button
-          class="text-[12px] font-semibold px-3 h-9 rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200"
-          @click="submitEdit"
-        >Save</button>
-        <button
-          class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
+          class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200 shrink-0"
           @click="cancelEdit"
         >Cancel</button>
       </div>
@@ -279,7 +297,7 @@ function emitAvatarClick() {
       </div>
 
       <!-- Normal display -->
-      <div v-else class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
+      <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
 
       <!-- Reactions -->
       <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">
@@ -325,3 +343,21 @@ function emitAvatarClick() {
     </div>
   </div>
 </template>
+
+<style scoped>
+.styled-body :deep(pre.message-code-block) {
+  margin: 0.5rem 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+@media (prefers-color-scheme: dark) {
+  .styled-body :deep(pre.shiki),
+  .styled-body :deep(pre.shiki span) {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+}
+</style>

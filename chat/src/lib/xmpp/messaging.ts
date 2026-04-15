@@ -1,5 +1,7 @@
 /** Outbound message operations — all send* functions as standalone. */
 import type { Agent } from "stanza";
+import type { MarkupSpan } from "@/lib/chat-ui";
+import type { WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
 
 export function sendChatState(xmpp: Agent, roomJid: string, state: ChatStateType): void {
@@ -45,15 +47,23 @@ export function sendModeration(xmpp: Agent, roomJid: string, targetId: string, r
   } as Record<string, unknown>);
 }
 
-export function sendCorrection(xmpp: Agent, roomJid: string, body: string, replacesId: string): string | null {
+function toStanzaSpans(spans: MarkupSpan[]): WaddleMarkupSpan[] {
+  return spans.map(s => ({ type: s.type, start: s.start, end: s.end, ...(s.uri ? { uri: s.uri } : {}) }));
+}
+
+export function sendCorrection(xmpp: Agent, roomJid: string, body: string, replacesId: string, markup?: MarkupSpan[]): string | null {
   const text = body.trim();
   if (!text) return null;
   const msgId = crypto.randomUUID();
-  xmpp.sendMessage({ id: msgId, to: roomJid, type: "groupchat", body: text, replace: replacesId });
+  const msgData: Record<string, unknown> = { id: msgId, to: roomJid, type: "groupchat", body: text, replace: replacesId };
+  if (markup && markup.length > 0) {
+    msgData.markup = { spans: toStanzaSpans(markup) };
+  }
+  xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
 }
 
-export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string): string | null {
+export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, markup?: MarkupSpan[]): string | null {
   const text = body.trim();
   if (!text) return null;
 
@@ -82,6 +92,9 @@ export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string): st
   };
   if (references.length > 0) msgData.references = references;
   if (explicitMentionItems.length > 0) msgData.explicitMentions = { items: explicitMentionItems };
+  if (markup && markup.length > 0) {
+    msgData.markup = { spans: toStanzaSpans(markup) };
+  }
 
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
