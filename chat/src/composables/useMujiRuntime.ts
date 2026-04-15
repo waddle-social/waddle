@@ -6,6 +6,7 @@ import type {
   IncomingCallInviteEvent,
   MujiCallEvent,
   MujiCallPhase,
+  RemoteParticipant,
   XmppStatusSnapshot,
 } from "@/lib/xmpp-client";
 
@@ -59,7 +60,7 @@ export function useMujiRuntime(
   const serviceJid = ref<string | null>(null);
   const error = ref("");
   const localStream = ref<MediaStream | null>(null);
-  const remoteStream = ref<MediaStream | null>(null);
+  const remoteParticipants = ref<Map<string, RemoteParticipant>>(new Map());
   const pendingInvite = ref<PendingInvite | null>(null);
   const micEnabled = ref(true);
   const cameraEnabled = ref(true);
@@ -75,8 +76,7 @@ export function useMujiRuntime(
     sid.value = null;
     serviceJid.value = null;
     hasRemoteTracks.value = false;
-    stopStream(remoteStream.value);
-    remoteStream.value = null;
+    remoteParticipants.value = new Map();
   }
 
   function resetCallState() {
@@ -157,18 +157,38 @@ export function useMujiRuntime(
     if (event.type === "peer-track-added") {
       sid.value = event.sid;
       phase.value = "active";
-      if (!remoteStream.value) remoteStream.value = new MediaStream();
-      if (!remoteStream.value.getTracks().some((t) => t.id === event.track.id)) {
-        remoteStream.value.addTrack(event.track);
+
+      const streamId = event.stream?.id ?? "unknown";
+      const existing = remoteParticipants.value.get(streamId);
+      if (existing) {
+        if (!existing.stream.getTracks().some((t) => t.id === event.track.id)) {
+          existing.stream.addTrack(event.track);
+        }
+      } else {
+        const stream = new MediaStream([event.track]);
+        remoteParticipants.value.set(streamId, {
+          jid: streamId,
+          stream,
+        });
       }
-      hasRemoteTracks.value = remoteStream.value.getTracks().length > 0;
+      remoteParticipants.value = new Map(remoteParticipants.value);
+      hasRemoteTracks.value = remoteParticipants.value.size > 0;
       return;
     }
     if (event.type === "peer-track-removed") {
-      if (!remoteStream.value) return;
-      const existing = remoteStream.value.getTracks().find((t) => t.id === event.track.id);
-      if (existing) remoteStream.value.removeTrack(existing);
-      hasRemoteTracks.value = remoteStream.value.getTracks().length > 0;
+      for (const [key, participant] of remoteParticipants.value) {
+        const tracks = participant.stream.getTracks();
+        const trackIdx = tracks.findIndex((t) => t.id === event.track.id);
+        if (trackIdx >= 0) {
+          participant.stream.removeTrack(tracks[trackIdx]!);
+          if (participant.stream.getTracks().length === 0) {
+            remoteParticipants.value.delete(key);
+          }
+          break;
+        }
+      }
+      remoteParticipants.value = new Map(remoteParticipants.value);
+      hasRemoteTracks.value = remoteParticipants.value.size > 0;
       return;
     }
     if (event.type === "terminated") {
@@ -438,7 +458,7 @@ export function useMujiRuntime(
     inCall,
     isSwitching,
     localStream,
-    remoteStream,
+    remoteParticipants,
     pendingInvite,
     hasRemoteTracks,
     micEnabled,

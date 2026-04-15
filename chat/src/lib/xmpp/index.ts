@@ -13,6 +13,7 @@ export type {
   MujiCallPhase,
   OccupantHat,
   ReactionEvent,
+  RemoteParticipant,
   RoomActivityEvent,
   RoomHats,
   SharedFileInfo,

@@ -37,6 +37,8 @@ const props = defineProps<{
   mujiCameraEnabled: boolean;
   mujiServiceJid: string | null;
   mujiError: string;
+  mujiLocalStream: MediaStream | null;
+  mujiRemoteParticipants: Map<string, { jid: string; stream: MediaStream }>;
 }>();
 
 const emit = defineEmits<{

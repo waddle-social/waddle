@@ -1,5 +1,10 @@
 /** Shared types for the XMPP client layer. */
 
+export interface RemoteParticipant {
+  jid: string;
+  stream: MediaStream;
+}
+
 export interface XmppStatusSnapshot {
   state: string;
   detail: string;
