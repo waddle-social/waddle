@@ -27,8 +27,8 @@ const bgColor = computed(() => consistentColor(props.name, 55, 45));
 
 <template>
   <div
-    :class="[sizeClass, 'flex items-center justify-center font-medium flex-shrink-0 text-white rounded-md']"
-    :style="{ backgroundColor: bgColor }"
+    :class="[sizeClass, 'flex items-center justify-center font-semibold flex-shrink-0 text-white rounded-lg']"
+    :style="{ backgroundColor: bgColor, boxShadow: `0 2px 8px ${bgColor}30` }"
   >
     {{ initials }}
   </div>

@@ -32,60 +32,67 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="w-[240px] border-r border-border bg-sidebar flex flex-col flex-shrink-0">
+  <div class="w-[248px] border-r border-border glass-panel flex flex-col flex-shrink-0">
     <!-- Waddle header -->
-    <div class="h-12 px-4 flex items-center justify-between flex-shrink-0 border-b border-sidebar-border">
-      <button class="flex items-center gap-1.5 min-w-0 hover:text-sidebar-foreground transition-colors group">
-        <span class="text-[13px] font-semibold truncate text-sidebar-foreground">{{ waddle?.name ?? "..." }}</span>
-        <ChevronDown class="w-3 h-3 text-sidebar-muted flex-shrink-0" />
+    <div class="h-14 px-4 flex items-center justify-between flex-shrink-0 border-b border-border">
+      <button class="flex items-center gap-1.5 min-w-0 hover:text-primary transition-colors duration-200 group">
+        <span class="text-[14px] font-display font-bold tracking-tight truncate text-sidebar-foreground">{{ waddle?.name ?? "..." }}</span>
+        <ChevronDown class="w-3 h-3 text-sidebar-muted flex-shrink-0 group-hover:text-primary transition-colors" />
       </button>
       <div class="flex gap-0.5 flex-shrink-0">
         <button
           v-if="canManageCommunity"
-          class="h-6 w-6 flex items-center justify-center rounded-md hover:bg-sidebar-accent transition-colors"
+          class="h-7 w-7 flex items-center justify-center rounded-lg hover:bg-sidebar-accent transition-all duration-200"
           title="Settings"
           @click="emit('openSettings')"
         >
-          <Settings class="w-3.5 h-3.5 text-sidebar-muted" />
+          <Settings class="w-3.5 h-3.5 text-sidebar-muted hover:text-primary" />
         </button>
         <button
           v-if="canManageChannels"
-          class="h-6 w-6 flex items-center justify-center rounded-md hover:bg-sidebar-accent transition-colors"
+          class="h-7 w-7 flex items-center justify-center rounded-lg hover:bg-sidebar-accent transition-all duration-200"
           title="Add channel"
           @click="emit('createChannel')"
         >
-          <Plus class="w-3.5 h-3.5 text-sidebar-muted" />
+          <Plus class="w-3.5 h-3.5 text-sidebar-muted hover:text-primary" />
         </button>
       </div>
     </div>
 
     <!-- Channel list -->
-    <div class="flex-1 overflow-auto py-2 px-2">
-      <div class="px-2 mb-1.5">
-        <span class="text-[11px] font-medium uppercase tracking-wider text-sidebar-muted">
+    <div class="flex-1 overflow-auto py-3 px-2">
+      <div class="px-2.5 mb-2">
+        <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-muted">
           Channels
         </span>
       </div>
 
-      <div v-if="isLoading" class="text-center py-6 text-[13px] text-sidebar-muted">
-        Loading...
+      <div v-if="isLoading" class="text-center py-8 text-[13px] text-sidebar-muted">
+        <div class="flex items-center justify-center gap-1">
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+          <span class="typing-dot" />
+        </div>
       </div>
 
-      <div v-else-if="channels.length === 0" class="text-center py-6 text-[13px] text-sidebar-muted">
+      <div v-else-if="channels.length === 0" class="text-center py-8 text-[13px] text-sidebar-muted">
         No channels yet
       </div>
 
-      <div v-else class="space-y-px">
+      <div v-else class="space-y-0.5">
         <button
           v-for="channel in channels"
           :key="channel.id"
-          class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors text-left"
+          class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-200 text-left group"
           :class="activeChannelId === channel.id
             ? 'bg-sidebar-accent text-sidebar-foreground'
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
           @click="emit('selectChannel', channel.id)"
         >
-          <Hash class="w-3.5 h-3.5 flex-shrink-0 opacity-60" />
+          <Hash
+            class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
+            :class="activeChannelId === channel.id ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
+          />
           <span
             class="text-[13px] truncate flex-1"
             :class="[
@@ -95,21 +102,21 @@ const emit = defineEmits<{
           >{{ channel.name }}</span>
           <span
             v-if="hasActivity(channel.id) && activeChannelId !== channel.id"
-            class="w-1.5 h-1.5 bg-primary rounded-full flex-shrink-0"
+            class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
           />
         </button>
       </div>
     </div>
 
     <!-- Members footer -->
-    <div v-if="waddle" class="flex-shrink-0 px-2 py-2 border-t border-sidebar-border">
+    <div v-if="waddle" class="flex-shrink-0 px-2 py-2 border-t border-border">
       <button
-        class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors text-left"
+        class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-all duration-200 text-left group"
         @click="emit('openMembers')"
       >
-        <Users class="w-3.5 h-3.5 flex-shrink-0 opacity-60" />
+        <Users class="w-3.5 h-3.5 flex-shrink-0 opacity-40 group-hover:opacity-70 transition-opacity" />
         <span class="text-[13px] flex-1">Members</span>
-        <span class="text-[11px] text-sidebar-muted font-mono">{{ memberCount }}</span>
+        <span class="text-[11px] text-sidebar-muted font-mono tabular-nums">{{ memberCount }}</span>
       </button>
     </div>
   </div>

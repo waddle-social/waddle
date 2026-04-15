@@ -7,5 +7,5 @@ const tenorApiKey = (env as unknown as Record<string, string>).GIPHY_API_KEY ?? 
 ---
 
 <AppLayout>
-  <ChatApp client:load tenorApiKey={tenorApiKey} />
+  <ChatApp client:only="vue" tenorApiKey={tenorApiKey} />
 </AppLayout>

@@ -21,55 +21,55 @@ const emit = defineEmits<{
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="border-b border-border px-5 py-4 flex items-center justify-between">
-      <h2 class="text-[15px] font-semibold">
+    <div class="border-b border-border px-6 py-4 flex items-center justify-between">
+      <h2 class="text-[16px] font-display font-bold">
         Edit #{{ channel?.name }}
       </h2>
-      <button class="p-1 rounded-md hover:bg-muted transition-colors" @click="open = false">
+      <button class="p-1 rounded-xl hover:bg-muted transition-all duration-200" @click="open = false">
         <X class="w-4 h-4 text-muted-foreground" />
       </button>
     </div>
 
-    <div class="px-5 py-4 space-y-4">
+    <div class="px-6 py-4 space-y-4">
       <div>
-        <label class="block text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">
+        <label class="block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">
           Name
         </label>
         <input
           :value="form.name"
-          class="w-full border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring px-3 py-2 bg-surface text-[13px] transition-shadow"
+          class="w-full rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 px-3 py-2 text-[13px] transition-all duration-200"
           @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
         />
       </div>
 
       <div>
-        <label class="block text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">
+        <label class="block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">
           Description
         </label>
         <textarea
           :value="form.description"
-          class="w-full border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring px-3 py-2 bg-surface text-[13px] min-h-16 resize-y transition-shadow"
+          class="w-full rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 px-3 py-2 text-[13px] min-h-16 resize-y transition-all duration-200"
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
       </div>
     </div>
 
-    <div class="border-t border-border px-5 py-3 flex items-center justify-between">
+    <div class="border-t border-border px-6 py-3 flex items-center justify-between">
       <button
-        class="text-[13px] font-medium py-1.5 px-3 rounded-md text-destructive hover:bg-destructive/10 transition-colors"
+        class="text-[13px] font-medium py-1.5 px-3 rounded-xl text-destructive hover:bg-destructive/10 transition-all duration-200"
         @click="emit('delete')"
       >
         Delete Channel
       </button>
       <div class="flex gap-2">
         <button
-          class="text-[13px] font-medium py-1.5 px-3 rounded-md border border-border hover:bg-muted transition-colors"
+          class="text-[13px] font-medium py-1.5 px-3 rounded-xl border border-border hover:bg-muted transition-all duration-200"
           @click="open = false"
         >
           Cancel
         </button>
         <button
-          class="text-[13px] font-medium py-1.5 px-3 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-all disabled:opacity-40"
+          class="text-[13px] font-medium py-1.5 px-3 rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200 disabled:opacity-40"
           :disabled="isSubmitting || !form.name.trim()"
           @click="emit('save')"
         >

@@ -55,17 +55,17 @@ function selectGif(gif: GiphyGif) {
 </script>
 
 <template>
-  <div class="absolute bottom-full left-0 right-0 mb-1 bg-popover border border-border rounded-md max-h-72 flex flex-col z-50 shadow-lg animate-fade-in overflow-hidden">
+  <div class="absolute bottom-full left-0 right-0 mb-2 glass-panel border border-border rounded-xl max-h-72 flex flex-col z-50 shadow-2xl animate-fade-in overflow-hidden">
     <!-- Header -->
-    <div class="flex items-center gap-2 px-3 py-2 border-b border-border">
+    <div class="flex items-center gap-2.5 px-4 py-2.5 border-b border-border">
       <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
       <input
         v-model="query"
         placeholder="Search GIFs..."
-        class="flex-1 text-[13px] bg-transparent border-none focus:outline-none placeholder:text-muted-foreground/50"
+        class="flex-1 text-[13px] bg-transparent border-none focus:outline-none placeholder:text-muted-foreground/40"
       />
       <button
-        class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+        class="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-all duration-200 flex-shrink-0"
         @click="emit('close')"
       >
         <X class="w-3.5 h-3.5" />
@@ -78,7 +78,7 @@ function selectGif(gif: GiphyGif) {
     </div>
 
     <!-- Results -->
-    <div v-else class="flex-1 overflow-auto p-1.5">
+    <div v-else class="flex-1 overflow-auto p-2">
       <div v-if="isLoading" class="text-center py-5 text-[13px] text-muted-foreground">
         <div class="flex items-center justify-center gap-1.5">
           <span class="typing-dot" />
@@ -89,11 +89,11 @@ function selectGif(gif: GiphyGif) {
       <div v-else-if="results.length === 0" class="text-center py-5 text-[13px] text-muted-foreground">
         {{ query ? "No GIFs found" : "Loading trending GIFs..." }}
       </div>
-      <div v-else class="grid grid-cols-3 gap-1">
+      <div v-else class="grid grid-cols-3 gap-1.5">
         <button
           v-for="gif in results"
           :key="gif.id"
-          class="aspect-square overflow-hidden rounded border border-border hover:ring-1 hover:ring-primary transition-all"
+          class="aspect-square overflow-hidden rounded-lg hover:ring-2 hover:ring-primary/40 hover:shadow-[0_0_8px_var(--glow)] transition-all duration-200"
           @click="selectGif(gif)"
         >
           <img
@@ -107,8 +107,8 @@ function selectGif(gif: GiphyGif) {
     </div>
 
     <!-- Attribution -->
-    <div class="px-3 py-1 border-t border-border text-right">
-      <span class="text-[10px] text-muted-foreground">Powered by GIPHY</span>
+    <div class="px-4 py-1.5 border-t border-border text-right">
+      <span class="text-[10px] text-muted-foreground/50">Powered by GIPHY</span>
     </div>
   </div>
 </template>

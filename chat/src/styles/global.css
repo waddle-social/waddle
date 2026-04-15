@@ -1,89 +1,99 @@
-@import "@fontsource-variable/inter";
+@import "@fontsource-variable/syne";
+@import "@fontsource-variable/outfit";
 @import "@fontsource-variable/jetbrains-mono";
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  /* Linear-inspired light theme — cool, precise, professional */
-  --background: #ffffff;
-  --foreground: #1b1b1f;
-  --card: #ffffff;
-  --card-foreground: #1b1b1f;
-  --popover: #ffffff;
-  --popover-foreground: #1b1b1f;
-  --primary: #5e6ad2;
+  /* Aether light — crisp, luminous, spatial */
+  --background: #f4f5f7;
+  --foreground: #0f1115;
+  --card: rgba(255, 255, 255, 0.72);
+  --card-foreground: #0f1115;
+  --popover: rgba(255, 255, 255, 0.88);
+  --popover-foreground: #0f1115;
+  --primary: #00b4a0;
   --primary-foreground: #ffffff;
-  --secondary: #f2f3f5;
-  --secondary-foreground: #1b1b1f;
-  --muted: #f2f3f5;
-  --muted-foreground: #8a8f98;
-  --accent: #5e6ad2;
+  --secondary: #eef0f3;
+  --secondary-foreground: #0f1115;
+  --muted: #e8eaef;
+  --muted-foreground: #6b7080;
+  --accent: #00b4a0;
   --accent-foreground: #ffffff;
-  --destructive: #e5484d;
+  --destructive: #ef4444;
   --destructive-foreground: #ffffff;
-  --border: #e6e6eb;
-  --input: #e6e6eb;
-  --ring: #5e6ad2;
-  --sidebar: #f7f8fa;
-  --sidebar-foreground: #1b1b1f;
-  --sidebar-primary: #5e6ad2;
+  --border: rgba(0, 0, 0, 0.06);
+  --input: rgba(0, 0, 0, 0.06);
+  --ring: #00b4a0;
+  --sidebar: rgba(255, 255, 255, 0.56);
+  --sidebar-foreground: #0f1115;
+  --sidebar-primary: #00b4a0;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #edeef1;
-  --sidebar-accent-foreground: #1b1b1f;
-  --sidebar-border: #e6e6eb;
-  --sidebar-muted: #8a8f98;
-  --surface: #f7f8fa;
-  --glow: rgba(94, 106, 210, 0.12);
-  --rail: #2b2d33;
-  --rail-foreground: #9ba1ab;
-  --rail-active: #ffffff;
-  --rail-hover: #3d3f47;
-  --success: #30a46c;
-  --warning: #f5a623;
+  --sidebar-accent: rgba(0, 180, 160, 0.08);
+  --sidebar-accent-foreground: #0f1115;
+  --sidebar-border: rgba(0, 0, 0, 0.04);
+  --sidebar-muted: #8b90a0;
+  --surface: rgba(255, 255, 255, 0.48);
+  --glow: rgba(0, 180, 160, 0.12);
+  --glow-strong: rgba(0, 180, 160, 0.25);
+  --rail: rgba(15, 17, 21, 0.04);
+  --rail-foreground: #6b7080;
+  --rail-active: #0f1115;
+  --rail-hover: rgba(0, 0, 0, 0.04);
+  --success: #10b981;
+  --warning: #f59e0b;
+  --ambient-1: rgba(0, 180, 160, 0.03);
+  --ambient-2: rgba(120, 80, 255, 0.02);
+  --ambient-3: rgba(0, 120, 255, 0.02);
 }
 
 .dark {
-  /* Linear dark — the signature look */
-  --background: #1b1d24;
-  --foreground: #edeef0;
-  --card: #22242b;
-  --card-foreground: #edeef0;
-  --popover: #22242b;
-  --popover-foreground: #edeef0;
-  --primary: #5e6ad2;
-  --primary-foreground: #ffffff;
-  --secondary: #2c2e36;
-  --secondary-foreground: #edeef0;
-  --muted: #2c2e36;
-  --muted-foreground: #787c85;
-  --accent: #5e6ad2;
-  --accent-foreground: #ffffff;
-  --destructive: #e5484d;
+  /* Aether dark — deep obsidian, luminous accents */
+  --background: #0c0d12;
+  --foreground: #e4e6ed;
+  --card: rgba(22, 24, 32, 0.72);
+  --card-foreground: #e4e6ed;
+  --popover: rgba(26, 28, 38, 0.92);
+  --popover-foreground: #e4e6ed;
+  --primary: #00ddc0;
+  --primary-foreground: #0c0d12;
+  --secondary: #1a1c24;
+  --secondary-foreground: #e4e6ed;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: #6b7080;
+  --accent: #00ddc0;
+  --accent-foreground: #0c0d12;
+  --destructive: #ef4444;
   --destructive-foreground: #ffffff;
-  --border: #2c2e36;
-  --input: #2c2e36;
-  --ring: #5e6ad2;
-  --sidebar: #1e2028;
-  --sidebar-foreground: #edeef0;
-  --sidebar-primary: #5e6ad2;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #2c2e36;
-  --sidebar-accent-foreground: #edeef0;
-  --sidebar-border: #2c2e36;
-  --sidebar-muted: #5c6069;
-  --surface: #22242b;
-  --glow: rgba(94, 106, 210, 0.15);
-  --rail: #16171d;
-  --rail-foreground: #5c6069;
-  --rail-active: #edeef0;
-  --rail-hover: #22242b;
-  --success: #30a46c;
-  --warning: #f5a623;
+  --border: rgba(255, 255, 255, 0.06);
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: #00ddc0;
+  --sidebar: rgba(14, 16, 22, 0.72);
+  --sidebar-foreground: #e4e6ed;
+  --sidebar-primary: #00ddc0;
+  --sidebar-primary-foreground: #0c0d12;
+  --sidebar-accent: rgba(0, 221, 192, 0.08);
+  --sidebar-accent-foreground: #e4e6ed;
+  --sidebar-border: rgba(255, 255, 255, 0.04);
+  --sidebar-muted: #4a4f5e;
+  --surface: rgba(22, 24, 32, 0.56);
+  --glow: rgba(0, 221, 192, 0.1);
+  --glow-strong: rgba(0, 221, 192, 0.2);
+  --rail: rgba(10, 11, 16, 0.8);
+  --rail-foreground: #4a4f5e;
+  --rail-active: #e4e6ed;
+  --rail-hover: rgba(255, 255, 255, 0.06);
+  --success: #10b981;
+  --warning: #f59e0b;
+  --ambient-1: rgba(0, 221, 192, 0.04);
+  --ambient-2: rgba(120, 80, 255, 0.03);
+  --ambient-3: rgba(0, 120, 255, 0.03);
 }
 
 @theme inline {
-  --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-sans: "Outfit Variable", system-ui, sans-serif;
+  --font-display: "Syne Variable", "Outfit Variable", system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -113,6 +123,7 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-surface: var(--surface);
   --color-glow: var(--glow);
+  --color-glow-strong: var(--glow-strong);
   --color-rail: var(--rail);
   --color-rail-foreground: var(--rail-foreground);
   --color-rail-active: var(--rail-active);
@@ -128,9 +139,9 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     margin: 0;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    letter-spacing: 0.01em;
   }
   h1, h2, h3, p {
     margin: 0;
@@ -143,62 +154,84 @@
   }
 }
 
-/* Scrollbar — thin, minimal, Linear-style */
+/* Ambient gradient mesh background */
+@layer base {
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(ellipse 80% 60% at 10% 20%, var(--ambient-1), transparent),
+      radial-gradient(ellipse 60% 80% at 90% 80%, var(--ambient-2), transparent),
+      radial-gradient(ellipse 70% 50% at 50% 50%, var(--ambient-3), transparent);
+    animation: ambient-drift 30s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes ambient-drift {
+  0% { opacity: 1; }
+  50% { opacity: 0.7; }
+  100% { opacity: 1; }
+}
+
+/* Scrollbar — ghost-thin, luminous */
 @layer base {
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
     background: var(--muted-foreground);
-    border-radius: 3px;
-    opacity: 0.3;
+    border-radius: 99px;
+    opacity: 0.2;
   }
   ::-webkit-scrollbar-thumb:hover {
-    opacity: 0.5;
+    background: var(--primary);
+    opacity: 0.4;
   }
 }
 
-/* Message entrance — subtle, fast */
+/* Message entrance — fluid, spatial */
 @keyframes message-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(6px) scale(0.995);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
 .animate-message-in {
-  animation: message-in 0.15s ease-out both;
+  animation: message-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* Typing dots */
+/* Typing dots — luminous pulse */
 @keyframes typing-dot {
-  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-2px); }
+  0%, 60%, 100% { opacity: 0.2; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
 }
 
 .typing-dot {
   display: inline-block;
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: var(--muted-foreground);
+  background: var(--primary);
   animation: typing-dot 1.4s infinite;
 }
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
-/* Activity pulse — subtle */
+/* Activity pulse — soft glow */
 @keyframes pulse-glow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--glow); }
+  50% { opacity: 0.7; box-shadow: 0 0 8px 2px var(--glow-strong); }
 }
 
 .animate-pulse-glow {
@@ -212,50 +245,68 @@
 }
 
 .animate-fade-in {
-  animation: fade-in 0.15s ease-out both;
+  animation: fade-in 0.2s ease-out both;
 }
 
-/* Slide up */
+/* Slide up — spatial entrance */
 @keyframes slide-up {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .animate-slide-up {
-  animation: slide-up 0.2s ease-out both;
+  animation: slide-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* Styled message body — clean, precise */
+/* Glow ring for focus states */
+@keyframes focus-glow {
+  0%, 100% { box-shadow: 0 0 0 2px var(--glow), 0 0 12px 0 var(--glow); }
+  50% { box-shadow: 0 0 0 2px var(--glow-strong), 0 0 20px 4px var(--glow); }
+}
+
+/* Glass panel utility */
+.glass-panel {
+  background: var(--card);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+}
+
+.glass-surface {
+  background: var(--surface);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+}
+
+/* Styled message body — clean, luminous */
 .styled-body strong { font-weight: 600; }
 .styled-body em { font-style: italic; }
-.styled-body del { text-decoration: line-through; opacity: 0.5; }
+.styled-body del { text-decoration: line-through; opacity: 0.4; }
 .styled-body code {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 0.8em;
-  padding: 0.1em 0.35em;
+  padding: 0.15em 0.4em;
   background: var(--muted);
-  border-radius: 3px;
-  border: 1px solid var(--border);
+  border-radius: 5px;
 }
 .styled-body pre {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 0.8em;
-  padding: 0.75em 1em;
+  padding: 0.85em 1.1em;
   background: var(--muted);
-  border-radius: 6px;
-  border: 1px solid var(--border);
+  border-radius: 8px;
   overflow-x: auto;
   margin: 0.5em 0;
 }
 .styled-body blockquote {
   border-left: 2px solid var(--primary);
-  padding-left: 0.75em;
+  padding-left: 0.85em;
   margin: 0.5em 0;
-  opacity: 0.8;
+  opacity: 0.75;
 }
 .styled-body a {
   color: var(--primary);
   text-decoration: none;
+  text-underline-offset: 2px;
 }
 .styled-body a:hover {
   text-decoration: underline;

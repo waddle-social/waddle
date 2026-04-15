@@ -94,28 +94,28 @@ function handleLogin(providerId?: string) {
 <template>
   <div class="min-h-screen flex items-center justify-center p-6 bg-background">
     <div class="w-full max-w-sm animate-slide-up">
-      <div class="bg-card rounded-lg border border-border shadow-sm overflow-hidden">
+      <div class="glass-panel rounded-2xl border border-border shadow-2xl overflow-hidden">
         <!-- Header -->
-        <div class="px-6 pt-6 pb-5">
-          <div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-4">
-            <span class="text-xl">🐧</span>
+        <div class="px-7 pt-8 pb-6">
+          <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-5 shadow-[0_0_20px_var(--glow)]">
+            <span class="text-2xl">🐧</span>
           </div>
-          <h1 class="text-[18px] font-semibold tracking-tight">
+          <h1 class="text-[22px] font-display font-bold tracking-tight">
             Sign in to Waddle
           </h1>
-          <p class="text-[13px] text-muted-foreground mt-1">
+          <p class="text-[13px] text-muted-foreground mt-1.5">
             Rooms, membership, and live chat.
           </p>
         </div>
 
         <!-- Server selection -->
-        <div class="px-6 pb-5 space-y-3">
+        <div class="px-7 pb-6 space-y-3">
           <div class="flex items-center justify-between">
-            <label class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            <label class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
               Homeserver
             </label>
             <button
-              class="text-[11px] text-muted-foreground hover:text-foreground transition-colors flex items-center gap-0.5"
+              class="text-[11px] text-muted-foreground hover:text-primary transition-colors duration-200 flex items-center gap-0.5"
               @click="showCustomServer = !showCustomServer"
             >
               {{ showCustomServer ? "Hide" : "Edit" }}
@@ -123,15 +123,15 @@ function handleLogin(providerId?: string) {
             </button>
           </div>
 
-          <div v-if="!showCustomServer" class="text-[13px] font-medium flex items-center gap-1.5">
-            <span class="w-1.5 h-1.5 rounded-full bg-success" />
+          <div v-if="!showCustomServer" class="text-[13px] font-medium flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-success shadow-[0_0_6px_var(--success)]" />
             {{ activeServerDisplay }}
           </div>
 
-          <div v-else class="space-y-1.5">
+          <div v-else class="space-y-2">
             <label
-              class="flex items-center gap-2.5 p-2.5 rounded-md cursor-pointer transition-all border"
-              :class="!useCustom ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'"
+              class="flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all duration-200"
+              :class="!useCustom ? 'bg-primary/5 border border-primary/20' : 'border border-border hover:bg-muted'"
             >
               <input
                 type="radio"
@@ -145,10 +145,10 @@ function handleLogin(providerId?: string) {
             </label>
 
             <label
-              class="flex flex-col gap-2 p-2.5 rounded-md cursor-pointer transition-all border"
-              :class="useCustom ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'"
+              class="flex flex-col gap-2 p-3 rounded-xl cursor-pointer transition-all duration-200"
+              :class="useCustom ? 'bg-primary/5 border border-primary/20' : 'border border-border hover:bg-muted'"
             >
-              <div class="flex items-center gap-2.5">
+              <div class="flex items-center gap-3">
                 <input
                   type="radio"
                   name="server"
@@ -163,7 +163,7 @@ function handleLogin(providerId?: string) {
                 v-model="customUrl"
                 type="url"
                 placeholder="https://server.example.com"
-                class="w-full text-[13px] px-2.5 py-1.5 rounded-md bg-background border border-border focus:outline-none focus:ring-1 focus:ring-ring"
+                class="w-full text-[13px] px-3 py-2 rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all duration-200"
                 @focus="selectCustom"
               />
             </label>
@@ -171,22 +171,22 @@ function handleLogin(providerId?: string) {
         </div>
 
         <!-- Providers / Login -->
-        <div class="px-6 pb-6 space-y-2">
+        <div class="px-7 pb-7 space-y-2.5">
           <p
             v-if="errorMessage"
-            class="rounded-md bg-destructive/10 border border-destructive/20 px-3 py-2 text-[13px] text-destructive"
+            class="rounded-xl bg-destructive/10 px-4 py-2.5 text-[13px] text-destructive"
           >
             {{ errorMessage }}
           </p>
 
           <template v-if="providers.length > 1">
-            <label class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            <label class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
               Sign in with
             </label>
             <button
               v-for="provider in providers"
               :key="provider.id"
-              class="w-full py-2 px-3 text-[13px] font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-all"
+              class="w-full py-2.5 px-4 text-[13px] font-semibold rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300"
               @click="handleLogin(provider.id)"
             >
               {{ provider.display_name || provider.id }}
@@ -195,7 +195,7 @@ function handleLogin(providerId?: string) {
 
           <button
             v-else
-            class="w-full py-2 px-3 text-[13px] font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-all disabled:opacity-40"
+            class="w-full py-2.5 px-4 text-[13px] font-semibold rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-30"
             :disabled="providers.length === 0"
             @click="handleLogin(providers[0]?.id)"
           >

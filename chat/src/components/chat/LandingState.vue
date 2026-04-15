@@ -13,19 +13,19 @@ defineEmits<{
 <template>
   <div class="min-h-screen flex items-center justify-center p-6 bg-background">
     <div class="w-full max-w-sm animate-slide-up">
-      <div class="bg-card rounded-lg border border-border p-6 shadow-sm">
-        <div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-4">
-          <span class="text-xl">🐧</span>
+      <div class="glass-panel rounded-2xl border border-border p-7 shadow-2xl">
+        <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-5 shadow-[0_0_20px_var(--glow)]">
+          <span class="text-2xl">🐧</span>
         </div>
-        <h1 class="text-[18px] font-semibold tracking-tight mb-1.5">
+        <h1 class="text-[20px] font-display font-bold tracking-tight mb-2">
           {{ title }}
         </h1>
-        <p v-if="copy" class="text-[13px] text-muted-foreground leading-relaxed mb-4">
+        <p v-if="copy" class="text-[13px] text-muted-foreground leading-relaxed mb-5">
           {{ copy }}
         </p>
         <button
           v-if="actionLabel"
-          class="w-full py-2 px-3 text-[13px] font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-all"
+          class="w-full py-2.5 px-4 text-[13px] font-semibold rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300"
           @click="$emit('action')"
         >
           {{ actionLabel }}
