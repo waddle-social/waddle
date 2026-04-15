@@ -13,11 +13,6 @@ function localpart(jid: string): string {
   return barePeerJid(jid).split("@")[0] ?? "unknown";
 }
 
-function isMucAddress(jid: string): boolean {
-  const bare = barePeerJid(jid).toLowerCase();
-  return bare.includes("@muc.") || bare.includes("@conference.");
-}
-
 export interface DmHandlers {
   selfBareJid: string;
   onMessage: ((msg: LiveDmMessage) => void) | null;
@@ -32,7 +27,11 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
   const fromBare = barePeerJid(msg.from ?? "");
   const toBare = barePeerJid(msg.to ?? "");
   if (!fromBare || !toBare) return;
-  if (isMucAddress(fromBare) || isMucAddress(toBare)) return;
+
+  // Derive the MUC service domain from the user's own JID domain.
+  const selfDomain = h.selfBareJid.split("@")[1] ?? "";
+  const mucSuffix = selfDomain ? `@muc.${selfDomain}` : null;
+  if (mucSuffix && (fromBare.endsWith(mucSuffix) || toBare.endsWith(mucSuffix))) return;
 
   const isSelf = fromBare === h.selfBareJid;
   const peerJid = isSelf ? toBare : fromBare;
@@ -53,7 +52,6 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
       createdAt: new Date().toISOString(),
       type: "message",
       retractsId: retract.id,
-      isCarbon: !!ext(msg).carbon,
     });
     return;
   }
@@ -79,7 +77,6 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
     body: msg.body ?? msg.subject ?? "",
     createdAt: new Date().toISOString(),
     type: "message",
-    isCarbon: !!ext(msg).carbon,
   };
   if (msg.replace) {
     liveMsg.replacesId = msg.replace;

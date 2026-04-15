@@ -821,7 +821,17 @@ export class BrowserXmppClient {
     xmpp.on("presence", (pres: ReceivedPresence) => {
       const from = barePeerJid(pres.from ?? "");
       if (!from) return;
-      if (from.includes("@muc.") || from.includes("@conference.")) return;
+      const selfDomain = barePeerJid(this.session.jid).split("@")[1] ?? "";
+      if (selfDomain && from.endsWith(`@muc.${selfDomain}`)) return;
+
+      if (pres.type === "subscribe") {
+        if (from !== barePeerJid(this.session.jid)) {
+          xmpp.acceptSubscription(from);
+          xmpp.subscribe(from);
+        }
+        return;
+      }
+
       this.presenceUpdateHandler?.({
         bareJid: from,
         show: mapPresenceShow(pres),

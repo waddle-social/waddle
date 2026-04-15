@@ -9,6 +9,7 @@ import { useMujiRuntime } from "@/composables/useMujiRuntime";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
+import { barePeerJid } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
@@ -209,13 +210,10 @@ watch(xmppClient, (client) => {
   client.setDirectMessageHandler((msg) => {
     dmMessaging.onIncomingMessage(msg);
     dmConversations.receiveIncomingDm(msg);
-    const isTabHidden = typeof document !== "undefined"
-      && (!document.hasFocus() || document.visibilityState === "hidden");
-    if (
-      isTabHidden &&
-      msg.fromJid !== session.value?.jid &&
-      ui.sidebarMode.value !== "dms"
-    ) {
+    const isSelf = barePeerJid(msg.fromJid) === barePeerJid(session.value?.jid ?? "");
+    const isViewingThisDm = ui.sidebarMode.value === "dms"
+      && dmConversations.activePeerJid.value === msg.peerJid;
+    if (!isSelf && !isViewingThisDm) {
       notifications.showDmNotification({
         senderUsername: msg.nick,
         peerJid: msg.peerJid,
@@ -260,76 +258,44 @@ async function handleToggleNotifications() {
   }
 }
 
+const activeTarget = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging : messaging,
+);
+
 async function sendGif(url: string) {
-  if (ui.sidebarMode.value === "dms") {
-    await dmMessaging.sendMessage(url);
-  } else {
-    await messaging.sendMessage(url);
-  }
+  await activeTarget.value.sendMessage(url);
 }
 
 async function sendActiveMessage() {
-  if (ui.sidebarMode.value === "dms") {
-    await dmMessaging.sendMessage();
-  } else {
-    await messaging.sendMessage();
-  }
+  await activeTarget.value.sendMessage();
 }
 
 function notifyActiveComposing() {
-  if (ui.sidebarMode.value === "dms") {
-    dmMessaging.notifyComposing();
-  } else {
-    messaging.notifyComposing();
-  }
+  activeTarget.value.notifyComposing();
 }
 
 function editActiveMessage(messageId: string, newBody: string) {
-  if (ui.sidebarMode.value === "dms") {
-    void dmMessaging.editMessage(messageId, newBody);
-  } else {
-    void messaging.editMessage(messageId, newBody);
-  }
+  void activeTarget.value.editMessage(messageId, newBody);
 }
 
 function retractActiveMessage(messageId: string) {
-  if (ui.sidebarMode.value === "dms") {
-    void dmMessaging.retractMessage(messageId);
-  } else {
-    void messaging.retractMessage(messageId);
-  }
+  void activeTarget.value.retractMessage(messageId);
 }
 
 function reactActiveMessage(messageId: string, emoji: string) {
-  if (ui.sidebarMode.value === "dms") {
-    void dmMessaging.toggleReaction(messageId, emoji);
-  } else {
-    void messaging.toggleReaction(messageId, emoji);
-  }
+  void activeTarget.value.toggleReaction(messageId, emoji);
 }
 
 function markActiveDisplayed(messageId: string) {
-  if (ui.sidebarMode.value === "dms") {
-    dmMessaging.markDisplayed(messageId);
-  } else {
-    messaging.markDisplayed(messageId);
-  }
+  activeTarget.value.markDisplayed(messageId);
 }
 
 function searchActiveMessages(query: string) {
-  if (ui.sidebarMode.value === "dms") {
-    void dmMessaging.searchMessages(query);
-  } else {
-    void messaging.searchMessages(query);
-  }
+  void activeTarget.value.searchMessages(query);
 }
 
 function clearActiveSearch() {
-  if (ui.sidebarMode.value === "dms") {
-    dmMessaging.clearSearch();
-  } else {
-    messaging.clearSearch();
-  }
+  activeTarget.value.clearSearch();
 }
 
 function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }) {

@@ -48,7 +48,6 @@ export interface LiveDmMessage {
   sharedFile?: SharedFileInfo;
   isSticker?: boolean;
   callInvite?: CallInviteInfo;
-  isCarbon?: boolean;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }
