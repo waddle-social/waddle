@@ -169,6 +169,20 @@ impl<S: AppState> XmppServer<S> {
         );
         info!("SFU service actor initialized");
 
+        // Spawn the SFU UDP net loop as a background task
+        let sfu_shutdown = shutdown_token.clone();
+        let sfu_registry_clone = Arc::clone(&sfu_registry);
+        let sfu_udp_addr_clone = sfu_udp_addr;
+        tokio::spawn(async move {
+            if let Err(e) = crate::sfu::net::spawn_sfu_net_loop(
+                sfu_udp_addr_clone,
+                sfu_registry_clone,
+                sfu_shutdown,
+            ).await {
+                tracing::error!(error = %e, "SFU net loop failed to start");
+            }
+        });
+
         // Create the GitHub link enricher from environment
         let github_enricher = {
             let enricher = waddle_xmpp_xep_github::MessageEnricher::from_env();
