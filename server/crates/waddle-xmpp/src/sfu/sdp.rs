@@ -547,10 +547,8 @@ mod tests {
         let transport = IceUdpTransport {
             ufrag: Some("abc".to_owned()),
             pwd: Some("xyz123".to_owned()),
-            fingerprints: vec![
-                DtlsFingerprint::new("sha-256", "AA:BB:CC:DD")
-                    .with_setup(FingerprintSetup::Actpass),
-            ],
+            fingerprints: vec![DtlsFingerprint::new("sha-256", "AA:BB:CC:DD")
+                .with_setup(FingerprintSetup::Actpass)],
             candidates: vec![candidate],
         };
 
@@ -583,8 +581,7 @@ mod tests {
             ufrag: Some("def".to_owned()),
             pwd: Some("pwd456".to_owned()),
             fingerprints: vec![
-                DtlsFingerprint::new("sha-256", "EE:FF:00:11")
-                    .with_setup(FingerprintSetup::Active),
+                DtlsFingerprint::new("sha-256", "EE:FF:00:11").with_setup(FingerprintSetup::Active)
             ],
             candidates: vec![],
         };
@@ -604,14 +601,23 @@ mod tests {
         let sdp = jingle_contents_to_sdp(&[content]).expect("should produce SDP");
 
         assert!(sdp.contains("v=0\r\n"), "missing v= line");
-        assert!(sdp.contains("o=- 0 0 IN IP4 0.0.0.0\r\n"), "missing o= line");
+        assert!(
+            sdp.contains("o=- 0 0 IN IP4 0.0.0.0\r\n"),
+            "missing o= line"
+        );
         assert!(sdp.contains("s=-\r\n"), "missing s= line");
         assert!(sdp.contains("t=0 0\r\n"), "missing t= line");
         assert!(sdp.contains("a=group:BUNDLE audio\r\n"), "missing BUNDLE");
-        assert!(sdp.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"), "missing m= line");
+        assert!(
+            sdp.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"),
+            "missing m= line"
+        );
         assert!(sdp.contains("a=mid:audio\r\n"), "missing mid");
         assert!(sdp.contains("a=sendrecv\r\n"), "missing direction");
-        assert!(sdp.contains("a=rtpmap:111 opus/48000/2\r\n"), "missing rtpmap");
+        assert!(
+            sdp.contains("a=rtpmap:111 opus/48000/2\r\n"),
+            "missing rtpmap"
+        );
         assert!(sdp.contains("a=fmtp:111 minptime=10\r\n"), "missing fmtp");
         assert!(sdp.contains("a=rtcp-mux\r\n"), "missing rtcp-mux");
         assert!(sdp.contains("a=ice-ufrag:abc\r\n"), "missing ice-ufrag");
@@ -675,10 +681,7 @@ mod tests {
         assert!(audio_desc.rtcp_mux, "audio rtcp_mux");
         assert_eq!(audio_desc.payload_types.len(), 1);
         assert_eq!(audio_desc.payload_types[0].id, 111);
-        assert_eq!(
-            audio_desc.payload_types[0].name.as_deref(),
-            Some("opus")
-        );
+        assert_eq!(audio_desc.payload_types[0].name.as_deref(), Some("opus"));
         assert_eq!(audio_desc.payload_types[0].clockrate, Some(48000));
         assert_eq!(audio_desc.payload_types[0].channels, Some(2));
 
@@ -711,8 +714,7 @@ mod tests {
     #[test]
     fn parses_sdp_candidate_line() {
         let line = "1 1 udp 2130706431 192.0.2.1 3478 typ host generation 0";
-        let candidate =
-            parse_sdp_candidate_line(line).expect("should parse candidate");
+        let candidate = parse_sdp_candidate_line(line).expect("should parse candidate");
 
         assert_eq!(candidate.foundation, "1");
         assert_eq!(candidate.component, 1);
@@ -757,9 +759,15 @@ mod tests {
 
         assert!(sdp.contains("v=0\r\n"), "SDP should start with v=0");
         assert!(sdp.contains("m=audio 9"), "SDP should have audio m= line");
-        assert!(sdp.contains("a=rtpmap:111 opus/48000/2"), "SDP should have rtpmap");
+        assert!(
+            sdp.contains("a=rtpmap:111 opus/48000/2"),
+            "SDP should have rtpmap"
+        );
         assert!(sdp.contains("a=ice-ufrag:u1"), "SDP should have ice-ufrag");
-        assert!(sdp.contains("a=fingerprint:sha-256 AB:CD:EF"), "SDP should have fingerprint");
+        assert!(
+            sdp.contains("a=fingerprint:sha-256 AB:CD:EF"),
+            "SDP should have fingerprint"
+        );
         assert!(
             sdp.contains("a=candidate:1 1 udp 2130706431 192.0.2.1 3478 typ host"),
             "SDP should have candidate"

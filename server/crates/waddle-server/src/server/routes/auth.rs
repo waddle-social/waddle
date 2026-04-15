@@ -524,9 +524,9 @@ async fn load_avatar_url(
 
     match row {
         Some(row) => {
-            let avatar_url: Option<String> = row
-                .get(0)
-                .map_err(|e| AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e)))?;
+            let avatar_url: Option<String> = row.get(0).map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to get avatar_url: {}", e))
+            })?;
             if avatar_url.is_some() {
                 return Ok(avatar_url);
             }
@@ -538,9 +538,10 @@ async fn load_avatar_url(
                 return Ok(None);
             };
 
-            let claims = serde_json::from_str::<serde_json::Value>(&raw_claims_json).map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to parse raw_claims_json: {}", e))
-            })?;
+            let claims =
+                serde_json::from_str::<serde_json::Value>(&raw_claims_json).map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to parse raw_claims_json: {}", e))
+                })?;
             let avatar_url = oidc::avatar_url_from_claims(&claims);
             if let Some(ref avatar_url) = avatar_url {
                 conn.execute(
@@ -1000,7 +1001,10 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE users SET avatar_url = ? WHERE id = ?",
-                libsql::params!["https://avatars.example.com/alice.png", session.user_id.clone()],
+                libsql::params![
+                    "https://avatars.example.com/alice.png",
+                    session.user_id.clone()
+                ],
             )
             .await
             .unwrap();
