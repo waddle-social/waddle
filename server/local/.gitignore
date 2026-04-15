@@ -1,7 +1,0 @@
-waddle.env
-
-data/*
-!data/.gitkeep
-
-uploads/*
-!uploads/.gitkeep

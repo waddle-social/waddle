@@ -10,6 +10,9 @@ node_modules
 # Codex
 .codex
 
+# Cuenv
+.cuenv
+
 # Editor state
 .vscode/
 
@@ -33,7 +36,6 @@ cue.mod/pkg/
 
 # TLS certificates (generated locally, never committed)
 server/certs/
-server/local/certs/
 
 # Gateway generated schemas
 gateway/schemas/

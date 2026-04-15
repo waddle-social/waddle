@@ -41,12 +41,13 @@ use xmpp_parsers::minidom::Element;
 use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
-use crate::auth::{localpart_to_jid, Session};
+use crate::auth::{localpart_to_jid, NativeUserStore, Session};
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
 };
 use crate::server::AppState;
+use waddle_xmpp::auth::ScramServer;
 
 /// WebSocket state containing all necessary registries for message routing
 pub struct WebSocketState {
@@ -64,6 +65,14 @@ pub struct WebSocketState {
     pub github_enricher: Arc<MessageEnricher>,
     /// SFU actor used for Jingle call signaling.
     pub sfu_service: kameo::actor::ActorRef<waddle_xmpp::sfu::service_actor::SfuServiceActor>,
+}
+
+/// In-progress SCRAM-SHA-256 authentication state between challenge and response.
+struct PendingScramAuth {
+    scram_server: ScramServer,
+    stored_key: Vec<u8>,
+    server_key: Vec<u8>,
+    username: String,
 }
 
 /// Create the WebSocket router
@@ -106,6 +115,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let mut authenticated_session: Option<Session> = None;
     let mut registered = false;
     let mut resource_bound = false;
+    let mut pending_scram: Option<PendingScramAuth> = None;
 
     loop {
         tokio::select! {
@@ -124,6 +134,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             &mut session_jid,
                             &mut authenticated_session,
                             &mut resource_bound,
+                            &mut pending_scram,
                         ).await;
 
                         // Register connection after successful authentication AND resource binding
@@ -331,6 +342,11 @@ fn build_stream_features_xml(authenticated: bool) -> String {
         Element::builder("mechanisms", waddle_xmpp::ns::SASL)
             .append(
                 Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                    .append("SCRAM-SHA-256")
+                    .build(),
+            )
+            .append(
+                Element::builder("mechanism", waddle_xmpp::ns::SASL)
                     .append("OAUTHBEARER")
                     .build(),
             )
@@ -380,6 +396,7 @@ async fn handle_xmpp_frame(
     session_jid: &mut Option<FullJid>,
     authenticated_session: &mut Option<Session>,
     resource_bound: &mut bool,
+    pending_scram: &mut Option<PendingScramAuth>,
 ) -> Vec<String> {
     let frame = frame.trim();
     let muc_domain = format!("muc.{}", domain);
@@ -414,6 +431,9 @@ async fn handle_xmpp_frame(
         };
 
         return match mechanism.as_str() {
+            "SCRAM-SHA-256" => {
+                handle_sasl_scram_client_first(&data, domain, state, pending_scram).await
+            }
             "OAUTHBEARER" => {
                 handle_sasl_oauthbearer(
                     &data,
@@ -429,6 +449,22 @@ async fn handle_xmpp_frame(
                 vec![sasl_failure_xml("invalid-mechanism")]
             }
         };
+    }
+
+    // Handle SASL <response> (SCRAM client-final-message)
+    if frame.starts_with("<response") {
+        if let Some(scram) = pending_scram.take() {
+            return handle_sasl_scram_response(
+                frame,
+                domain,
+                scram,
+                authenticated,
+                session_jid,
+                authenticated_session,
+            );
+        }
+        warn!("SASL response received without pending SCRAM state");
+        return vec![sasl_failure_xml("not-authorized")];
     }
 
     // Handle resource binding
@@ -549,6 +585,182 @@ async fn handle_sasl_oauthbearer(
             vec![sasl_failure_xml("not-authorized")]
         }
     }
+}
+
+/// Handle SASL SCRAM-SHA-256 client-first-message.
+///
+/// Parses the client-first to extract the username, looks up stored SCRAM
+/// credentials, creates a ScramServer with the user's salt/iterations, and
+/// returns a `<challenge>` frame.
+async fn handle_sasl_scram_client_first(
+    b64_data: &str,
+    domain: &str,
+    state: &WebSocketState,
+    pending_scram: &mut Option<PendingScramAuth>,
+) -> Vec<String> {
+    debug!("SASL SCRAM-SHA-256 auth attempt");
+
+    let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: failed to decode base64 client-first");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let client_first = match String::from_utf8(decoded) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: invalid UTF-8 in client-first");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    // Parse username from client-first-message: "n,,n=<username>,r=<nonce>"
+    // Use a temporary ScramServer to extract it.
+    let username = {
+        let mut tmp = ScramServer::new();
+        match tmp.process_client_first(&client_first) {
+            Ok(result) => result.username,
+            Err(e) => {
+                warn!(error = %e, "SCRAM: failed to parse client-first");
+                return vec![sasl_failure_xml("not-authorized")];
+            }
+        }
+    };
+
+    // Look up SCRAM credentials for the user
+    let native_user_store =
+        NativeUserStore::new(Arc::new(state.app_state.db_pool.global().clone()));
+
+    let creds = match native_user_store
+        .get_scram_credentials(&username, domain)
+        .await
+    {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
+            warn!(username = %username, "SCRAM: user not found");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+        Err(e) => {
+            warn!(error = %e, username = %username, "SCRAM: credential lookup failed");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    // Create ScramServer with the user's stored salt and iterations, then
+    // process the client-first again to produce a challenge with the correct params.
+    let mut scram_server = ScramServer::with_salt_b64(creds.salt_b64, creds.iterations);
+    let server_first = match scram_server.process_client_first(&client_first) {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: failed to process client-first with stored params");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let challenge_b64 = BASE64_STANDARD.encode(server_first.message.as_bytes());
+    debug!(username = %username, "SCRAM-SHA-256 challenge generated");
+
+    *pending_scram = Some(PendingScramAuth {
+        scram_server,
+        stored_key: creds.stored_key,
+        server_key: creds.server_key,
+        username,
+    });
+
+    vec![element_to_xml(
+        Element::builder("challenge", waddle_xmpp::ns::SASL)
+            .append(challenge_b64)
+            .build(),
+    )]
+}
+
+/// Handle SASL SCRAM-SHA-256 response (client-final-message).
+///
+/// Verifies the client proof against stored keys and returns `<success>` or
+/// `<failure>`.
+fn handle_sasl_scram_response(
+    frame: &str,
+    domain: &str,
+    mut scram: PendingScramAuth,
+    authenticated: &mut bool,
+    session_jid: &mut Option<FullJid>,
+    authenticated_session: &mut Option<Session>,
+) -> Vec<String> {
+    // Parse <response> element to extract base64 data
+    let element = match Element::from_str(frame) {
+        Ok(el) => el,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: invalid response XML");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let b64_data = element.text();
+
+    let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: failed to decode base64 client-final");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let client_final = match String::from_utf8(decoded) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: invalid UTF-8 in client-final");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let server_final = match scram
+        .scram_server
+        .process_client_final(&client_final, &scram.stored_key, &scram.server_key)
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, username = %scram.username, "SCRAM-SHA-256 authentication failed");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    // Authentication successful - create session
+    let bare_jid_str = format!("{}@{}", scram.username, domain);
+    let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
+        Ok(jid) => jid,
+        Err(e) => {
+            warn!(error = %e, jid = %bare_jid_str, "SCRAM: JID construction failed");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    let bare_jid: BareJid = match bare_jid_str.parse() {
+        Ok(jid) => jid,
+        Err(e) => {
+            warn!(error = %e, "SCRAM: bare JID parse failed");
+            return vec![sasl_failure_xml("not-authorized")];
+        }
+    };
+
+    info!(
+        jid = %bare_jid_str,
+        "SASL SCRAM-SHA-256 authentication successful",
+    );
+
+    let session = Session::new(&bare_jid.to_string(), &scram.username, &scram.username);
+
+    *authenticated = true;
+    *authenticated_session = Some(session);
+    *session_jid = Some(full_jid);
+
+    let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
+    vec![element_to_xml(
+        Element::builder("success", waddle_xmpp::ns::SASL)
+            .append(success_b64)
+            .build(),
+    )]
 }
 
 fn build_bind_result_xml(id: &str, full_jid: &FullJid) -> String {
@@ -2066,6 +2278,7 @@ mod tests {
         let mut authenticated_session = None;
         let mut resource_bound = false;
 
+        let mut pending_scram = None;
         let responses = handle_xmpp_frame(
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
             "example.com",
@@ -2074,6 +2287,7 @@ mod tests {
             &mut session_jid,
             &mut authenticated_session,
             &mut resource_bound,
+            &mut pending_scram,
         )
         .await;
 
@@ -2082,6 +2296,10 @@ mod tests {
         assert!(
             features.contains("<mechanism>OAUTHBEARER</mechanism>"),
             "expected OAUTHBEARER in WebSocket SASL mechanisms: {features}"
+        );
+        assert!(
+            features.contains("<mechanism>SCRAM-SHA-256</mechanism>"),
+            "expected SCRAM-SHA-256 in WebSocket SASL mechanisms: {features}"
         );
         assert!(
             !features.contains("<mechanism>PLAIN</mechanism>"),
@@ -2102,6 +2320,7 @@ mod tests {
         let mut session_jid = None;
         let mut authenticated_session = None;
         let mut resource_bound = false;
+        let mut pending_scram = None;
 
         let responses = handle_xmpp_frame(
             &frame,
@@ -2111,6 +2330,7 @@ mod tests {
             &mut session_jid,
             &mut authenticated_session,
             &mut resource_bound,
+            &mut pending_scram,
         )
         .await;
 
@@ -2136,6 +2356,7 @@ mod tests {
         let mut session_jid = None;
         let mut authenticated_session = None;
         let mut resource_bound = false;
+        let mut pending_scram = None;
 
         let responses = handle_xmpp_frame(
             &frame,
@@ -2145,6 +2366,7 @@ mod tests {
             &mut session_jid,
             &mut authenticated_session,
             &mut resource_bound,
+            &mut pending_scram,
         )
         .await;
 
@@ -2194,6 +2416,7 @@ mod tests {
         let mut session_jid = None;
         let mut authenticated_session = None;
         let mut resource_bound = false;
+        let mut pending_scram = None;
 
         let auth_responses = handle_xmpp_frame(
             &auth_frame,
@@ -2203,6 +2426,7 @@ mod tests {
             &mut session_jid,
             &mut authenticated_session,
             &mut resource_bound,
+            &mut pending_scram,
         )
         .await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
@@ -2215,6 +2439,7 @@ mod tests {
             &mut session_jid,
             &mut authenticated_session,
             &mut resource_bound,
+            &mut pending_scram,
         )
         .await;
 

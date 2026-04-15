@@ -52,16 +52,11 @@ cargo run --bin waddle
 cargo test
 ```
 
-### Local Chat + Colony Flow
-
-To run the Rust server locally with the same Colony-backed auth flow used by `chat`:
+### Local Development
 
 ```bash
-cp local/waddle.env.example local/waddle.env
 cuenv task dev
 ```
-
-Before the first login, copy [local/waddle.env.example](/Users/icepuma/development/waddle/server/local/waddle.env.example) to `local/waddle.env` and replace the `replace-me` secret inside `WADDLE_AUTH_PROVIDERS_JSON`. The checked-in local certs live in [local/certs](/Users/icepuma/development/waddle/server/local/certs), runtime data stays under `server/local/`, and the app serves on `http://localhost:3000`.
 
 ### Runtime Configuration
 
@@ -82,6 +77,12 @@ Before the first login, copy [local/waddle.env.example](/Users/icepuma/developme
 - `WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS`: Hard cap on total embedded SFU sessions (default `1024`).
 - `WADDLE_SFU_UDP_ADDR`: UDP bind address for XMPP-native SFU media (default `0.0.0.0:10000`).
 - `WADDLE_SFU_CANDIDATE_ADDR`: Optional advertised ICE host candidate address (`ip:port`) used by SFU Jingle answers. Set this in production when binding SFU on `0.0.0.0`.
+- `WADDLE_CERTS_EPHEMERAL`: Generate ephemeral self-signed TLS certificates in memory at startup (also available as `--ephemeral-certs` CLI flag).
+- `WADDLE_TEST_FIXED_ACCOUNT_ENABLED`: Enable boot-time provisioning of a deterministic native XMPP account for integration tests.
+- `WADDLE_TEST_FIXED_ACCOUNT_USERNAME`: Native account username (default `admin`).
+- `WADDLE_TEST_FIXED_ACCOUNT_PASSWORD`: Native account password (default `admin`).
+- `WADDLE_TEST_FIXED_ACCOUNT_DOMAIN`: Optional domain override (defaults to `WADDLE_XMPP_DOMAIN`).
+- `WADDLE_TEST_FIXED_ACCOUNT_EMAIL`: Optional email for the fixed account.
 
 ### Container Image
 

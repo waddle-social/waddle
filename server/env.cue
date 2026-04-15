@@ -1,41 +1,56 @@
 package cuenv
 
-let _t = tasks
+import (
+	"github.com/cuenv/cuenv/schema"
+	c "github.com/cuenv/cuenv/contrib/contributors"
+)
 
-tasks: {
-  build: {
-    command: "cargo"
-    args: ["build", "--bin", "waddle-server"]
-    inputs: [
-      "Cargo.toml",
-      "Cargo.lock",
-      "crates/**",
-    ]
-  }
-  dev: {
-    command: "bash"
-    args: [
-      "-lc",
-      """
-      set -euo pipefail
+schema.#Project & {
+	name: "waddle-server"
 
-      if [ ! -f local/waddle.env ]; then
-        echo "Missing server/local/waddle.env"
-        exit 1
-      fi
+	ci: providers: ["github"]
+	ci: contributors: [
+		c.#CuenvRelease,
+		c.#OnePassword,
+	]
 
-      set -a
-      . ./local/waddle.env
-      set +a
+	tasks: {
+		build: {
+			command: "cargo"
+			args: ["build", "--bin", "waddle-server"]
+			inputs: [
+				"Cargo.toml",
+				"Cargo.lock",
+				"crates/**",
+			]
+		}
 
-      if printf '%s\n' "${WADDLE_AUTH_PROVIDERS_JSON:-}" | grep -q 'replace-me'; then
-        echo "Set the real Colony client secret in server/local/waddle.env before running local auth."
-        exit 1
-      fi
+		dev: {
+			command: "cargo"
+			args: [
+				"run",
+				"--bin",
+				"waddle-server",
+			]
+			dependsOn: [build]
+		}
+	}
 
-      cargo run --bin waddle-server
-      """,
-    ]
-    dependsOn: [_t.build]
-  }
+	env: environment: test: {
+		WADDLE_CERTS_EPHEMERAL:            "true"
+		WADDLE_TEST_FIXED_ACCOUNT_ENABLED: "true"
+	}
+
+	services: {
+		server: {
+			description: "Waddle XMPP server"
+			command:     "cargo"
+			args: ["run", "--bin", "waddle-server"]
+			readiness: {
+				kind: "port"
+				port: 5222
+			}
+			logs: color: "magenta"
+		}
+	}
 }

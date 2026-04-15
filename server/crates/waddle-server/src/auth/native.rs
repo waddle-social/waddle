@@ -274,7 +274,6 @@ impl NativeUserStore {
     }
 
     /// Delete a native user.
-    #[cfg(test)]
     pub async fn delete_user(&self, username: &str, domain: &str) -> Result<bool, AuthError> {
         let conn = self.get_connection().await?;
 

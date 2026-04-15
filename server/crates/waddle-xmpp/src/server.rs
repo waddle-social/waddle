@@ -77,6 +77,52 @@ impl Default for XmppServerConfig {
     }
 }
 
+/// Generate an ephemeral self-signed TLS configuration for the given domain.
+///
+/// Uses `rcgen` to create a self-signed certificate in memory with SANs
+/// for the given domain and `localhost`. No files are read or written.
+pub fn generate_ephemeral_tls_config(
+    domain: &str,
+) -> Result<Arc<RustlsServerConfig>, XmppError> {
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
+    use rustls_pemfile::{certs, pkcs8_private_keys};
+    use std::io::{BufReader, Cursor};
+    use tokio_rustls::rustls::pki_types::PrivateKeyDer;
+
+    let mut subject_alt_names = vec![domain.to_string()];
+    if domain != "localhost" {
+        subject_alt_names.push("localhost".to_string());
+    }
+
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(subject_alt_names).map_err(|e| {
+            XmppError::config(format!("Failed to generate ephemeral certificate: {e}"))
+        })?;
+
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    let certs: Vec<_> = certs(&mut BufReader::new(Cursor::new(cert_pem.as_bytes())))
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let keys: Vec<_> = pkcs8_private_keys(&mut BufReader::new(Cursor::new(key_pem.as_bytes())))
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let key = keys
+        .into_iter()
+        .next()
+        .ok_or_else(|| XmppError::config("No private key in generated ephemeral cert"))?;
+
+    let server_config = RustlsServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, PrivateKeyDer::Pkcs8(key))
+        .map_err(|e| XmppError::config(format!("Ephemeral TLS config error: {e}")))?;
+
+    Ok(Arc::new(server_config))
+}
+
 /// XMPP server instance.
 pub struct XmppServer<S: AppState> {
     config: XmppServerConfig,

@@ -3,7 +3,19 @@
     "allow": [
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(bun run:*)"
+      "Bash(bun run:*)",
+      "Bash(gh pr:*)",
+      "Read(//tmp/**)",
+      "Bash(git fetch:*)",
+      "Bash(cargo check:*)",
+      "Bash(printf '<?xml version=\"1.0\"?><stream:stream xmlns=\"jabber:client\" xmlns:stream=\"http://etherx.jabber.org/streams\" to=\"localhost\" version=\"1.0\">')",
+      "Bash(timeout 2 openssl s_client -connect localhost:5222 -starttls xmpp -quiet)",
+      "Bash(printf '<stream:stream xmlns=\"jabber:client\" xmlns:stream=\"http://etherx.jabber.org/streams\" to=\"localhost\" version=\"1.0\">')",
+      "Bash(nc -w 2 localhost 5222)",
+      "Bash(cargo test:*)",
+      "Bash(python3 -c \"import websockets; print\\('ok'\\)\")",
+      "Bash(python3 -c \"import websocket; print\\('ok'\\)\")",
+      "Bash(python3:*)"
     ]
   }
 }

@@ -1,3 +1,4 @@
+use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::{ServerConfig, ServerInfo};
 use crate::db::{DatabasePool, PoolHealth};
 use crate::media::{build_media_backend, MediaBackend, MediaConfig};
@@ -113,6 +114,9 @@ pub struct XmppConfig {
     pub single_tenant: bool,
     /// ACME configuration for managed TLS certificates.
     pub acme: XmppAcmeConfig,
+    /// Whether to generate ephemeral self-signed TLS certificates in memory.
+    /// Enabled via `WADDLE_CERTS_EPHEMERAL=true` or `--ephemeral-certs`.
+    pub ephemeral_certs: bool,
 }
 
 impl Default for XmppConfig {
@@ -135,6 +139,7 @@ impl Default for XmppConfig {
                 cache_dir: PathBuf::from("certs/acme-cache"),
                 production: false,
             },
+            ephemeral_certs: false,
         }
     }
 }
@@ -206,6 +211,11 @@ impl XmppConfig {
             .parse()
             .unwrap_or_else(|_| "0.0.0.0:5269".parse().expect("Valid fallback S2S address"));
 
+        let ephemeral_certs = std::env::var("WADDLE_CERTS_EPHEMERAL")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+            || std::env::args().any(|a| a == "--ephemeral-certs");
+
         Self {
             enabled,
             domain,
@@ -224,6 +234,7 @@ impl XmppConfig {
                 cache_dir: acme_cache_dir,
                 production: acme_production,
             },
+            ephemeral_certs,
         }
     }
 
@@ -404,6 +415,7 @@ pub async fn start_with_config(
 
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
+    ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
 
     // Create XMPP app state
     let xmpp_app_state = if xmpp_config.enabled {
@@ -471,9 +483,14 @@ pub async fn start_with_config(
 
     // Start XMPP server
     let xmpp_handle = if let Some(xmpp_app_state) = xmpp_app_state {
-        let xmpp_tls_server_config = acme_runtime
-            .as_ref()
-            .map(|runtime| runtime.tls_server_config.clone());
+        let xmpp_tls_server_config = if xmpp_config.ephemeral_certs {
+            info!("Using ephemeral self-signed TLS certificate for domain '{}'", xmpp_config.domain);
+            Some(waddle_xmpp::generate_ephemeral_tls_config(&xmpp_config.domain)?)
+        } else {
+            acme_runtime
+                .as_ref()
+                .map(|runtime| runtime.tls_server_config.clone())
+        };
         let xmpp_server_config = xmpp_config.to_xmpp_server_config(xmpp_tls_server_config);
         let xmpp_stop = stop_token.clone();
         let xmpp_sfu_service = shared_sfu_service.clone();
@@ -630,6 +647,104 @@ async fn create_websocket_mam_storage(
         .map_err(|err| anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {}", err))?;
     info!(db_path = %db_path, "WebSocket MAM storage initialized");
     Ok(storage)
+}
+
+#[derive(Debug, Clone)]
+struct FixedTestAccountConfig {
+    username: String,
+    password: String,
+    domain: String,
+    email: Option<String>,
+}
+
+async fn ensure_fixed_test_account(
+    db_pool: &Arc<DatabasePool>,
+    xmpp_config: &XmppConfig,
+) -> Result<()> {
+    let enabled = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_ENABLED")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(());
+    }
+
+    if !xmpp_config.enabled {
+        anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true requires WADDLE_XMPP_ENABLED=true");
+    }
+    if !xmpp_config.native_auth_enabled {
+        anyhow::bail!(
+            "WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true requires WADDLE_NATIVE_AUTH_ENABLED=true"
+        );
+    }
+
+    let username = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_USERNAME")
+        .unwrap_or_else(|_| "admin".to_string())
+        .trim()
+        .to_string();
+    if username.is_empty() {
+        anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_USERNAME cannot be empty");
+    }
+
+    let password =
+        std::env::var("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD").unwrap_or_else(|_| "admin".to_string());
+    if password.is_empty() {
+        anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD cannot be empty");
+    }
+
+    let domain = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_DOMAIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| xmpp_config.domain.clone());
+    let email = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_EMAIL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    seed_fixed_test_account(
+        db_pool,
+        &FixedTestAccountConfig {
+            username,
+            password,
+            domain,
+            email,
+        },
+    )
+    .await
+}
+
+async fn seed_fixed_test_account(
+    db_pool: &Arc<DatabasePool>,
+    config: &FixedTestAccountConfig,
+) -> Result<()> {
+    let native_user_store = NativeUserStore::new(Arc::new(db_pool.global().clone()));
+    if native_user_store
+        .user_exists(&config.username, &config.domain)
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed checking fixed test account: {err}"))?
+    {
+        native_user_store
+            .delete_user(&config.username, &config.domain)
+            .await
+            .map_err(|err| anyhow::anyhow!("Failed resetting fixed test account: {err}"))?;
+    }
+
+    native_user_store
+        .register(RegisterRequest {
+            username: config.username.clone(),
+            domain: config.domain.clone(),
+            password: config.password.clone(),
+            email: config.email.clone(),
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed creating fixed test account: {err}"))?;
+
+    info!(
+        username = %config.username,
+        domain = %config.domain,
+        "Provisioned fixed native test account"
+    );
+    Ok(())
 }
 
 fn spawn_shared_sfu_service(
@@ -1071,6 +1186,7 @@ mod tests {
     use crate::db::{DatabaseConfig, MigrationRunner, PoolConfig};
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
+    use base64::prelude::*;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -1306,5 +1422,78 @@ mod tests {
             .unwrap();
 
         assert!(rows.next().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_seed_fixed_test_account_creates_user() {
+        let state = create_test_state().await;
+        let config = FixedTestAccountConfig {
+            username: "admin".to_string(),
+            password: "admin".to_string(),
+            domain: "localhost".to_string(),
+            email: Some("admin@localhost".to_string()),
+        };
+
+        seed_fixed_test_account(&state.db_pool, &config)
+            .await
+            .unwrap();
+
+        let native_user_store = NativeUserStore::new(Arc::new(state.db_pool.global().clone()));
+        assert!(native_user_store
+            .user_exists(&config.username, &config.domain)
+            .await
+            .unwrap());
+        assert!(native_user_store
+            .verify_password(&config.username, &config.domain, &config.password)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_seed_fixed_test_account_replaces_existing_credentials() {
+        let state = create_test_state().await;
+        let native_user_store = NativeUserStore::new(Arc::new(state.db_pool.global().clone()));
+
+        native_user_store
+            .register(RegisterRequest {
+                username: "admin".to_string(),
+                domain: "localhost".to_string(),
+                password: "old-password".to_string(),
+                email: None,
+            })
+            .await
+            .unwrap();
+
+        let config = FixedTestAccountConfig {
+            username: "admin".to_string(),
+            password: "new-password".to_string(),
+            domain: "localhost".to_string(),
+            email: None,
+        };
+        seed_fixed_test_account(&state.db_pool, &config)
+            .await
+            .unwrap();
+
+        assert!(native_user_store
+            .verify_password(&config.username, &config.domain, &config.password)
+            .await
+            .unwrap());
+        assert!(!native_user_store
+            .verify_password(&config.username, &config.domain, "old-password")
+            .await
+            .unwrap());
+
+        let credentials = native_user_store
+            .get_scram_credentials(&config.username, &config.domain)
+            .await
+            .unwrap()
+            .expect("credentials should exist");
+        let salt = BASE64_STANDARD.decode(credentials.salt_b64).unwrap();
+        let (stored_key, _) = waddle_xmpp::auth::scram::generate_scram_keys(
+            &config.password,
+            &salt,
+            credentials.iterations,
+        );
+        assert_eq!(credentials.stored_key, stored_key);
     }
 }

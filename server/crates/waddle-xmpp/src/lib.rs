@@ -55,7 +55,7 @@ pub use error::{
 };
 pub use parser::{ns, StreamHeader};
 pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter};
-pub use server::{XmppServer, XmppServerConfig};
+pub use server::{generate_ephemeral_tls_config, XmppServer, XmppServerConfig};
 pub use stream::{PreAuthResult, SaslAuthResult};
 pub use types::*;
 pub use xep::xep0077::{RegistrationError, RegistrationRequest};
