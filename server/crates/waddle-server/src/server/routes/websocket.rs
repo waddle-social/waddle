@@ -891,12 +891,16 @@ async fn handle_iq(
     // Jingle IQs addressed to the SFU service.
     if let Some(request_iq) = parsed_iq.as_ref() {
         let sfu_domain = format!("sfu.{domain}");
-        if to.as_deref() == Some(sfu_domain.as_str())
-            && matches!(
-                &request_iq.payload,
-                xmpp_parsers::iq::IqType::Set(elem) if elem.is("jingle", waddle_xmpp::xep::xep0166::NS_JINGLE)
-            )
-        {
+        let is_sfu_target = request_iq
+            .to
+            .as_ref()
+            .map(|jid| jid.domain().as_str() == sfu_domain.as_str())
+            .unwrap_or_else(|| {
+                to.as_deref()
+                    .and_then(|jid| jid.parse::<jid::Jid>().ok())
+                    .is_some_and(|jid| jid.domain().as_str() == sfu_domain.as_str())
+            });
+        if is_sfu_target && waddle_xmpp::xep::xep0166::is_jingle_iq(request_iq) {
             let Some(sender_jid) = session_jid.as_ref().cloned() else {
                 return vec![build_iq_error_xml_with_addresses(
                     &id,
@@ -2446,6 +2450,32 @@ mod tests {
         assert!(
             !response.contains("feature-not-implemented"),
             "Jingle IQ to SFU should no longer be treated as unhandled: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_jingle_to_sfu_with_resource_routes_to_sfu_actor() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="jingle-2" type="set" to="sfu.example.com/focus"><jingle xmlns="urn:xmpp:jingle:1"/></iq>"#;
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(sender_jid),
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+        let response = responses.first().expect("jingle response");
+        assert!(
+            response.contains("bad-request"),
+            "expected bad-request from SFU actor validation: {response}"
+        );
+        assert!(
+            !response.contains("feature-not-implemented"),
+            "Jingle IQ to SFU with resource should no longer be treated as unhandled: {response}"
         );
     }
 
