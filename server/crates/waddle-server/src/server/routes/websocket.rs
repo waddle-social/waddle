@@ -2765,7 +2765,7 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_result_returns_empty_response() {
         let state = create_test_websocket_state().await;
-        let frame = r#"<iq xmlns="jabber:client" id="ack-1" type="result" from="sfu.example.com" to="alice@example.com/web"/>"#;
+        let frame = r#"<iq xmlns="jabber:client" id="ack-1" type="result" from="alice@example.com/web" to="sfu.example.com"/>"#;
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let responses = handle_iq(
             frame,
@@ -2785,7 +2785,7 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_error_returns_empty_response() {
         let state = create_test_websocket_state().await;
-        let frame = r#"<iq xmlns="jabber:client" id="err-1" type="error" from="sfu.example.com" to="alice@example.com/web"><error type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#;
+        let frame = r#"<iq xmlns="jabber:client" id="err-1" type="error" from="alice@example.com/web" to="sfu.example.com"><error type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#;
         let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
         let responses = handle_iq(
             frame,
