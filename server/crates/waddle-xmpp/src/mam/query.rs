@@ -194,7 +194,7 @@ pub fn build_result_messages(
 
 /// Build a single MAM result message.
 fn build_result_message(query_id: &str, to_jid: &str, archived: &ArchivedMessage) -> Message {
-    let inner_msg: Element = archived_inner_message(archived).into();
+    let inner_msg: Element = archived_inner_message(archived);
 
     // Build the delay element
     let delay = Element::builder("delay", DELAY_NS)

@@ -34,6 +34,7 @@ pub mod muc;
 pub mod parser;
 pub mod presence;
 pub mod prometheus;
+pub mod protocol;
 pub mod pubsub;
 pub mod push;
 pub mod registry;

@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use thiserror::Error;
-use uuid::Uuid;
 
 pub mod embedded_sfu;
 pub mod webrtc_rs_sfu;
@@ -102,40 +100,15 @@ impl Default for WebrtcRsSfuConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct MediaSessionRequest {
-    pub room_id: String,
-    pub participant_id: String,
-    pub role: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MediaSession {
-    pub backend: String,
-    pub session_id: String,
-    pub room_id: String,
-    pub participant_id: String,
-    pub role: String,
-    pub join_url: String,
-    pub ice_servers: Vec<String>,
-}
-
-#[derive(Debug, Error)]
-pub enum MediaBackendError {
-    #[error("media backend is disabled")]
-    Disabled,
-    #[error("invalid media request: {0}")]
-    InvalidRequest(String),
-    #[error("media capacity exceeded: {0}")]
-    CapacityExceeded(String),
-}
-
+/// Marker trait for media backends.
+///
+/// At present the only method is [`Self::kind`], used for diagnostic
+/// logging at startup. Session creation is currently served by callers
+/// directly (see `server::routes::channels` / `routes::websocket`) so
+/// this trait is intentionally minimal until that flow is lifted back
+/// into the backend.
 pub trait MediaBackend: Send + Sync {
     fn kind(&self) -> MediaBackendKind;
-    fn create_session(
-        &self,
-        request: MediaSessionRequest,
-    ) -> Result<MediaSession, MediaBackendError>;
 }
 
 #[derive(Debug)]
@@ -145,13 +118,6 @@ impl MediaBackend for DisabledMediaBackend {
     fn kind(&self) -> MediaBackendKind {
         MediaBackendKind::Disabled
     }
-
-    fn create_session(
-        &self,
-        _request: MediaSessionRequest,
-    ) -> Result<MediaSession, MediaBackendError> {
-        Err(MediaBackendError::Disabled)
-    }
 }
 
 pub fn build_media_backend(config: &MediaConfig) -> Arc<dyn MediaBackend> {
@@ -160,10 +126,6 @@ pub fn build_media_backend(config: &MediaConfig) -> Arc<dyn MediaBackend> {
         MediaBackendKind::WebrtcRsSfu => Arc::new(WebrtcRsSfuBackend::new(config.clone())),
         MediaBackendKind::EmbeddedSfu => Arc::new(EmbeddedSfuBackend::new(config.clone())),
     }
-}
-
-pub fn next_media_session_id() -> String {
-    Uuid::now_v7().to_string()
 }
 
 #[cfg(test)]
@@ -191,15 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn disabled_backend_rejects_sessions() {
+    fn disabled_backend_reports_disabled_kind() {
         let config = MediaConfig::default();
         let backend = build_media_backend(&config);
-        let result = backend.create_session(MediaSessionRequest {
-            room_id: "room-1".to_string(),
-            participant_id: "user-1".to_string(),
-            role: "publisher".to_string(),
-        });
-
-        assert!(matches!(result, Err(MediaBackendError::Disabled)));
+        assert_eq!(backend.kind(), MediaBackendKind::Disabled);
     }
 }

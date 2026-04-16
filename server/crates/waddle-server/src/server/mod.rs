@@ -932,6 +932,14 @@ fn create_router_with_sfu(
     // GitHub link enricher for message embeds (fail-open, reads GITHUB_TOKEN from env)
     let github_enricher = Arc::new(waddle_xmpp_xep_github::MessageEnricher::from_env());
 
+    // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
+    // See `waddle_xmpp::protocol` for the state-machine design; any IQ
+    // namespace registered here short-circuits the legacy string-matching
+    // path in `routes::websocket::handle_iq`.
+    let mut stanza_dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
+    waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
+    let stanza_dispatcher = Arc::new(stanza_dispatcher);
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         app_state: state.clone(),
@@ -941,6 +949,7 @@ fn create_router_with_sfu(
         mam_storage,
         github_enricher,
         sfu_service,
+        dispatcher: stanza_dispatcher,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 

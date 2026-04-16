@@ -13,7 +13,6 @@ mod server;
 pub(crate) mod storage;
 mod telemetry;
 mod vcard;
-mod waddle;
 
 pub use config::{ServerConfig, ServerMode};
 

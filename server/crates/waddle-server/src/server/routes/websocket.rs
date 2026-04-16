@@ -31,6 +31,7 @@ use waddle_xmpp::{
         parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
+    protocol::{IqContext as ProtocolIqContext, StanzaDispatcher},
     registry::{ConnectionRegistry, OutboundStanza},
     xep::{build_spaces_metadata_form, NS_REPLY},
     Affiliation, Role, WaddleDetails,
@@ -69,6 +70,10 @@ pub struct WebSocketState {
     pub github_enricher: Arc<MessageEnricher>,
     /// SFU actor used for Jingle call signaling.
     pub sfu_service: kameo::actor::ActorRef<waddle_xmpp::sfu::service_actor::SfuServiceActor>,
+    /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session)
+    /// are routed through this before falling back to the legacy
+    /// string-matching code paths below.
+    pub dispatcher: Arc<StanzaDispatcher>,
 }
 
 /// In-progress SCRAM-SHA-256 authentication state between challenge and response.
@@ -1137,28 +1142,40 @@ async fn handle_iq(
         return vec![];
     }
 
-    // Ping
-    if frame.contains("urn:xmpp:ping") {
-        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
+    // Sans-I/O dispatch: if the IQ namespace has a registered handler in
+    // the protocol dispatcher, route through it and translate the emitted
+    // OutboundEvents into outbound XML frames via `interpret()`.
+    //
+    // Handlers that need async I/O (MAM, roster, Jingle, disco) are not
+    // registered yet — they continue to fall through to the legacy
+    // string-matching branches below until the two-phase async callback
+    // machinery lands.
+    if let (Some(iq), Some(full_jid)) = (parsed_iq.as_ref(), session_jid.as_ref()) {
+        let payload_ns = match &iq.payload {
+            xmpp_parsers::iq::IqType::Get(e) | xmpp_parsers::iq::IqType::Set(e) => {
+                Some(e.ns().to_string())
+            }
+            _ => None,
+        };
+        if let Some(ns) = payload_ns {
+            if state.dispatcher.has_iq_handler(&ns) {
+                let ctx = ProtocolIqContext { domain, full_jid };
+                let events = state.dispatcher.dispatch_iq(iq, &ctx);
+                let outcome = super::interpret::interpret(events).await;
+                if outcome.close {
+                    warn!(
+                        ns = %ns,
+                        "Sans-I/O handler requested transport close; \
+                         WebSocket adapter cannot honour CloseTransport yet"
+                    );
+                }
+                return outcome.frames;
+            }
+        }
     }
 
-    // Session establishment (legacy, but some clients need it)
-    if frame.contains("urn:ietf:params:xml:ns:xmpp-session") {
-        debug!("Session establishment requested");
-        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
-    }
-
-    // Roster query
-    if frame.contains("jabber:iq:roster") {
-        debug!("Roster query");
-        let query = xmpp_parsers::minidom::Element::builder("query", "jabber:iq:roster").build();
-        return vec![build_iq_result_xml(
-            &id,
-            response_from,
-            response_to,
-            Some(query),
-        )];
-    }
+    // jabber:iq:roster is now served by protocol::handlers::roster::RosterHandler
+    // through the sans-I/O dispatcher short-circuit above.
 
     // Jingle IQs addressed to the SFU service.
     if let Some(request_iq) = parsed_iq.as_ref() {
@@ -1716,11 +1733,8 @@ async fn handle_iq(
         }
     }
 
-    // Carbons enable
-    if frame.contains("urn:xmpp:carbons:") {
-        debug!("Carbons request");
-        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
-    }
+    // urn:xmpp:carbons:2 enable/disable is now served by
+    // protocol::handlers::carbons::CarbonsHandler via the short-circuit above.
 
     // XEP-0363: HTTP File Upload slot request
     if frame.contains("urn:xmpp:http:upload:0") {
@@ -2422,6 +2436,9 @@ mod tests {
             "127.0.0.1:9".parse().expect("valid dummy SFU address"),
         ));
 
+        let mut dispatcher = StanzaDispatcher::new();
+        waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
+
         Arc::new(WebSocketState {
             app_state,
             auth_state,
@@ -2430,6 +2447,7 @@ mod tests {
             mam_storage,
             github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
             sfu_service,
+            dispatcher: Arc::new(dispatcher),
         })
     }
 
@@ -2740,6 +2758,7 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_roster_query_returns_parseable_result() {
         let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         let frame = r#"<iq xmlns="jabber:client" id="roster-1" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
         let responses = handle_iq(
             frame,
@@ -2747,7 +2766,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &None,
+            &Some(jid),
         )
         .await;
         assert_eq!(responses.len(), 1);
@@ -2769,6 +2788,7 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_carbons_enable_returns_parseable_result() {
         let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         let frame = r#"<iq xmlns="jabber:client" id="carbons-1" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
         let responses = handle_iq(
             frame,
@@ -2776,7 +2796,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &None,
+            &Some(jid),
         )
         .await;
         assert_eq!(responses.len(), 1);

@@ -48,9 +48,6 @@ pub trait BlobStorage: Send + Sync {
 
     /// Retrieve bytes and metadata for the given key.
     fn get(&self, key: &str) -> BoxFuture<'_, Result<(bytes::Bytes, BlobMeta), StorageError>>;
-
-    /// Check whether a key exists.
-    fn exists(&self, key: &str) -> BoxFuture<'_, Result<bool, StorageError>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,15 +125,6 @@ impl BlobStorage for LocalStorage {
                 .unwrap_or_else(|_| "application/octet-stream".to_string());
 
             Ok((bytes::Bytes::from(data), BlobMeta { content_type }))
-        })
-    }
-
-    fn exists(&self, key: &str) -> BoxFuture<'_, Result<bool, StorageError>> {
-        let path = self.data_path(key);
-        Box::pin(async move {
-            tokio::fs::try_exists(&path)
-                .await
-                .map_err(|e| StorageError::Internal(format!("failed to check existence: {e}")))
         })
     }
 }
@@ -229,18 +217,6 @@ impl BlobStorage for S3Storage {
             Ok((data, BlobMeta { content_type }))
         })
     }
-
-    fn exists(&self, key: &str) -> BoxFuture<'_, Result<bool, StorageError>> {
-        let path = object_store::path::Path::from(key);
-
-        Box::pin(async move {
-            match self.store.head(&path).await {
-                Ok(_) => Ok(true),
-                Err(object_store::Error::NotFound { .. }) => Ok(false),
-                Err(e) => Err(StorageError::Internal(format!("S3 head failed: {e}"))),
-            }
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,14 +277,8 @@ mod tests {
         let key = "test-slot/photo.jpg";
         let data = bytes::Bytes::from_static(b"fake image data");
 
-        // Should not exist yet
-        assert!(!storage.exists(key).await.unwrap());
-
         // Put
         storage.put(key, data.clone(), "image/jpeg").await.unwrap();
-
-        // Exists
-        assert!(storage.exists(key).await.unwrap());
 
         // Get
         let (got_data, meta) = storage.get(key).await.unwrap();

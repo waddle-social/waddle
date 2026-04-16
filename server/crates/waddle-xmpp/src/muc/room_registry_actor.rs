@@ -444,7 +444,7 @@ mod tests {
             .expect("create beta");
 
         let mut rooms: Vec<BareJid> = registry.ask(ListRooms).await.expect("list");
-        rooms.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        rooms.sort_by_key(|a| a.to_string());
 
         assert_eq!(rooms.len(), 2);
         assert_eq!(rooms[0].to_string(), "alpha@muc.example.com");
