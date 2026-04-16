@@ -252,16 +252,43 @@ pub async fn spawn_sfu_net_loop(
                                 .cloned()
                                 .collect();
 
+                            if target_sids.is_empty() {
+                                debug!(source = %source_sid, kind = ?source_kind, "Media received but no other peers in room to forward to");
+                            }
+
                             for target_sid in &target_sids {
                                 let Some(target) = peers.get_mut(target_sid) else { continue };
-                                if target.room_key != *room_key { continue; }
+                                if target.room_key != *room_key {
+                                    debug!(source = %source_sid, target = %target_sid, "Target peer in different room; skipping");
+                                    continue;
+                                }
 
                                 // Find matching Mid on target by media kind
-                                let target_mid = target.mid_for_kind(*source_kind);
-                                let Some(mid) = target_mid else { continue };
+                                let Some(mid) = target.mid_for_kind(*source_kind) else {
+                                    debug!(
+                                        source = %source_sid,
+                                        target = %target_sid,
+                                        kind = ?source_kind,
+                                        known_mids = ?target.media_mids,
+                                        "Target peer has no mid for this media kind; skipping"
+                                    );
+                                    continue;
+                                };
 
-                                let Some(writer) = target.rtc_mut().writer(mid) else { continue };
-                                let Some(pt) = writer.match_params(data.params) else { continue };
+                                let Some(writer) = target.rtc_mut().writer(mid) else {
+                                    debug!(source = %source_sid, target = %target_sid, ?mid, "No writer for target mid; skipping");
+                                    continue;
+                                };
+                                let Some(pt) = writer.match_params(data.params) else {
+                                    debug!(
+                                        source = %source_sid,
+                                        target = %target_sid,
+                                        ?mid,
+                                        source_pt = ?data.params.spec().codec,
+                                        "Target writer refused source payload params; skipping"
+                                    );
+                                    continue;
+                                };
 
                                 if let Err(e) = writer.write(
                                     pt,

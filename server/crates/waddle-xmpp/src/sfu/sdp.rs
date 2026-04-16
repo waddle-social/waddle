@@ -25,6 +25,75 @@ const PARTICIPANT_MAP_NS: &str = "urn:waddle:sfu:participant-map:0";
 /// similar content-grouping semantics in the Jingle session.
 pub(crate) const NS_JINGLE_GROUPING: &str = "urn:xmpp:jingle:apps:grouping:0";
 
+/// XEP-0294 Jingle RTP Header Extensions Negotiation namespace.
+///
+/// Must be propagated through the SDP↔Jingle conversion so that BUNDLE
+/// demultiplexing via the `urn:ietf:params:rtp-hdrext:sdes:mid` header
+/// extension actually works. Without this, str0m receives RTP packets with
+/// no `mid` tag and logs "No mid/SSRC for header" for every single packet
+/// — media is received but dropped because it can't be routed to a track.
+pub(crate) const NS_JINGLE_RTP_HDREXT: &str = "urn:xmpp:jingle:apps:rtp:rtp-hdrext:0";
+
+/// A parsed XEP-0294 `<rtp-hdrext>` entry or SDP `a=extmap:` line.
+struct RtpHeaderExtension {
+    id: u16,
+    uri: String,
+    /// `senders` attribute from XEP-0294; maps to the SDP `/sendonly`,
+    /// `/recvonly`, `/sendrecv`, `/inactive` suffix on `a=extmap:` lines.
+    senders: Option<String>,
+}
+
+/// Extract all `<rtp-hdrext>` children (XEP-0294) from a Jingle `<description>`
+/// element.
+fn parse_rtp_header_extensions(description: &Element) -> Vec<RtpHeaderExtension> {
+    description
+        .children()
+        .filter(|c| c.is("rtp-hdrext", NS_JINGLE_RTP_HDREXT))
+        .filter_map(|c| {
+            let id = c.attr("id")?.parse::<u16>().ok()?;
+            let uri = c.attr("uri")?.to_owned();
+            let senders = c.attr("senders").map(str::to_owned);
+            Some(RtpHeaderExtension { id, uri, senders })
+        })
+        .collect()
+}
+
+/// Format a header extension as the SDP `a=extmap:` line (without `a=` prefix).
+fn extmap_line_suffix(ext: &RtpHeaderExtension) -> String {
+    // XEP-0294 `senders` values → SDP `a=extmap:<id>/<dir>` suffix.
+    // "both" has no suffix (symmetric).
+    let dir = match ext.senders.as_deref() {
+        Some("initiator") => "/sendonly",
+        Some("responder") => "/recvonly",
+        Some("none") => "/inactive",
+        _ => "",
+    };
+    format!("extmap:{}{} {}", ext.id, dir, ext.uri)
+}
+
+/// Parse an SDP `a=extmap:<id>[/dir] <uri>` line (payload after `a=`).
+fn parse_extmap_line(rest: &str) -> Option<RtpHeaderExtension> {
+    let stripped = rest.strip_prefix("extmap:")?;
+    let (id_part, uri) = stripped.split_once(' ')?;
+    let (id_str, senders) = match id_part.split_once('/') {
+        Some((id, dir)) => {
+            let mapped = match dir {
+                "sendonly" => Some("initiator".to_owned()),
+                "recvonly" => Some("responder".to_owned()),
+                "inactive" => Some("none".to_owned()),
+                _ => None,
+            };
+            (id, mapped)
+        }
+        None => (id_part, None),
+    };
+    Some(RtpHeaderExtension {
+        id: id_str.parse::<u16>().ok()?,
+        uri: uri.to_owned(),
+        senders,
+    })
+}
+
 /// Parse `a=group:BUNDLE <mid> <mid> ...` out of an SDP string and return
 /// the list of mid names in the BUNDLE group. Returns an empty vector if no
 /// BUNDLE group is declared. Only the first BUNDLE group is returned.
@@ -86,6 +155,15 @@ pub fn jingle_contents_to_sdp(contents: &[JingleContent]) -> Result<String, Stri
             .description
             .as_ref()
             .and_then(parse_rtp_description_element);
+
+        // XEP-0294 RTP header extensions — must be preserved so the
+        // `urn:ietf:params:rtp-hdrext:sdes:mid` extension is negotiated and
+        // BUNDLE demultiplexing works.
+        let header_exts: Vec<RtpHeaderExtension> = content
+            .description
+            .as_ref()
+            .map(parse_rtp_header_extensions)
+            .unwrap_or_default();
 
         let media_type = rtp_desc
             .as_ref()
@@ -154,6 +232,13 @@ pub fn jingle_contents_to_sdp(contents: &[JingleContent]) -> Result<String, Stri
             }
         }
 
+        // RTP header extensions (XEP-0294 → SDP a=extmap).
+        for ext in &header_exts {
+            sdp.push_str("a=");
+            sdp.push_str(&extmap_line_suffix(ext));
+            sdp.push_str("\r\n");
+        }
+
         // Transport (ICE-UDP + DTLS).
         let transport = content
             .transport
@@ -213,6 +298,7 @@ struct MediaSectionState {
     candidates: Vec<IceUdpCandidate>,
     senders: Option<Senders>,
     pending_setup: Option<FingerprintSetup>,
+    header_extensions: Vec<RtpHeaderExtension>,
 }
 
 impl MediaSectionState {
@@ -228,6 +314,7 @@ impl MediaSectionState {
             candidates: Vec::new(),
             senders: None,
             pending_setup: None,
+            header_extensions: Vec::new(),
         }
     }
 
@@ -292,6 +379,10 @@ impl MediaSectionState {
             if let Some(c) = parse_sdp_candidate_line(rest) {
                 self.candidates.push(c);
             }
+        } else if line.starts_with("a=extmap:") {
+            if let Some(ext) = parse_extmap_line(line.trim_start_matches("a=")) {
+                self.header_extensions.push(ext);
+            }
         }
     }
 
@@ -329,11 +420,26 @@ impl MediaSectionState {
         transport.fingerprints = std::mem::take(&mut self.fingerprints);
         transport.candidates = std::mem::take(&mut self.candidates);
 
+        // Attach XEP-0294 `<rtp-hdrext>` children to the description element —
+        // these carry `urn:ietf:params:rtp-hdrext:sdes:mid` which is required
+        // for BUNDLE demultiplexing. Without them, every incoming RTP packet
+        // is dropped with "No mid/SSRC for header".
+        let mut description = build_rtp_description_element(&desc);
+        for ext in self.header_extensions.drain(..) {
+            let mut builder = Element::builder("rtp-hdrext", NS_JINGLE_RTP_HDREXT)
+                .attr("id", ext.id.to_string().as_str())
+                .attr("uri", ext.uri.as_str());
+            if let Some(senders) = ext.senders {
+                builder = builder.attr("senders", senders.as_str());
+            }
+            description.append_child(builder.build());
+        }
+
         let content = JingleContent {
             creator,
             name: mid,
             senders: self.senders.take(),
-            description: Some(build_rtp_description_element(&desc)),
+            description: Some(description),
             transport: Some(build_ice_udp_transport_element(&transport)),
         };
         contents.push(content);
@@ -885,6 +991,95 @@ mod tests {
             .expect("transport element");
         assert_eq!(transport_el.attr("ufrag"), Some("resp-u"));
         assert_eq!(transport_el.attr("pwd"), Some("resp-p"));
+    }
+
+    #[test]
+    fn jingle_offer_with_hdrext_emits_sdp_extmap_line() {
+        // Regression: without pass-through of XEP-0294 header extensions,
+        // the `urn:ietf:params:rtp-hdrext:sdes:mid` extension is stripped
+        // and str0m drops every incoming RTP packet as "No mid/SSRC for header".
+        let xml = "\
+            <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate' sid='t'>\
+              <content xmlns='urn:xmpp:jingle:1' creator='initiator' name='audio' senders='both'>\
+                <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'>\
+                  <payload-type id='111' name='opus' clockrate='48000' channels='2'/>\
+                  <rtp-hdrext xmlns='urn:xmpp:jingle:apps:rtp:rtp-hdrext:0' id='4' uri='urn:ietf:params:rtp-hdrext:sdes:mid'/>\
+                  <rtp-hdrext xmlns='urn:xmpp:jingle:apps:rtp:rtp-hdrext:0' id='7' uri='urn:ietf:params:rtp-hdrext:ssrc-audio-level' senders='initiator'/>\
+                </description>\
+                <transport xmlns='urn:xmpp:jingle:transports:ice-udp:1'/>\
+              </content>\
+            </jingle>";
+
+        let elem = xml.parse::<Element>().expect("valid xml");
+        let sdp = extract_sdp_offer_from_jingle(&elem).expect("sdp generated");
+
+        assert!(
+            sdp.contains("a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"),
+            "mid extension must survive the round-trip: {sdp}"
+        );
+        assert!(
+            sdp.contains("a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"),
+            "XEP-0294 senders=initiator must become SDP /sendonly: {sdp}"
+        );
+    }
+
+    #[test]
+    fn sdp_extmap_line_becomes_jingle_rtp_hdrext() {
+        let sdp_answer = "\
+            v=0\r\n\
+            o=- 0 0 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            a=group:BUNDLE 0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=mid:0\r\n\
+            a=sendrecv\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+            a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n\
+            a=rtcp-mux\r\n\
+            a=ice-ufrag:u\r\n\
+            a=ice-pwd:p\r\n\
+            a=fingerprint:sha-256 11:22\r\n\
+            a=setup:active\r\n";
+
+        let jingle =
+            build_jingle_session_accept("sid-1", "sfu@x", sdp_answer).expect("build accept");
+
+        let content = jingle
+            .children()
+            .find(|c| c.is("content", NS_JINGLE))
+            .expect("content");
+        let desc = content
+            .children()
+            .find(|c| c.name() == "description")
+            .expect("description");
+
+        let exts: Vec<(&str, &str, Option<&str>)> = desc
+            .children()
+            .filter(|c| c.is("rtp-hdrext", NS_JINGLE_RTP_HDREXT))
+            .map(|c| {
+                (
+                    c.attr("id").unwrap_or(""),
+                    c.attr("uri").unwrap_or(""),
+                    c.attr("senders"),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            exts,
+            vec![
+                ("4", "urn:ietf:params:rtp-hdrext:sdes:mid", None),
+                (
+                    "7",
+                    "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+                    Some("initiator"),
+                ),
+            ],
+            "rtp-hdrext elements must be emitted on the description"
+        );
     }
 
     #[test]
