@@ -198,6 +198,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Push Helm chart
+        run: |
+          helm package server/charts/waddle-server -d /tmp/charts
+          helm push /tmp/charts/waddle-server-*.tgz oci://ghcr.io/waddle-social/waddle/charts
+
       - name: Pin image tag to commit SHA
         working-directory: infrastructure/waddle.cloud
         run: |
