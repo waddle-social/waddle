@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import { Send, Image } from "lucide-vue-next";
+import { Send, Image, Link2, Link2Off } from "lucide-vue-next";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { searchEmoji } from "@/lib/emoji";
@@ -19,10 +19,18 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[]];
+  send: [body: string, markup: MarkupSpan[], suppressPreview?: boolean];
   typing: [];
   selectGif: [url: string];
 }>();
+
+/**
+ * Per-message "Preview link" toggle. Default on; flipping it off sends
+ * a `<no-preview xmlns='urn:waddle:link-preview:0'/>` hint that tells
+ * the server's link-preview enricher to skip this message. Resets back
+ * to true after each successful send so the next message starts fresh.
+ */
+const previewsEnabled = ref(true);
 
 const showGifPicker = ref(false);
 const showMentions = ref(false);
@@ -167,7 +175,11 @@ function onSend(doc: Record<string, unknown>) {
 
   const serialized = serializeTiptapToXep0393(doc as any);
   if (!serialized.body.trim()) return;
-  emit("send", serialized.body, serialized.markup);
+
+  emit("send", serialized.body, serialized.markup, !previewsEnabled.value || undefined);
+
+  // Reset the toggle for the next message.
+  previewsEnabled.value = true;
 }
 
 function onEditorCancel() {
@@ -276,6 +288,16 @@ watch(
       @click="showGifPicker = !showGifPicker"
     >
       <Image class="w-4 h-4" />
+    </button>
+    <button
+      class="h-9 w-9 flex items-center justify-center rounded-xl transition-all duration-200 flex-shrink-0"
+      :class="previewsEnabled ? 'text-muted-foreground hover:bg-muted hover:text-primary' : 'bg-muted text-muted-foreground'"
+      :title="previewsEnabled ? 'Link previews: on — click to skip preview for next message' : 'Link previews: off for next message — click to re-enable'"
+      :disabled="disabled"
+      @click="previewsEnabled = !previewsEnabled"
+    >
+      <Link2 v-if="previewsEnabled" class="w-4 h-4" />
+      <Link2Off v-else class="w-4 h-4" />
     </button>
     <ChatEditor
       :ref="setEditorRef"

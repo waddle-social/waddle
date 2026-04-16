@@ -99,6 +99,7 @@ use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
 use crate::{AppState, Session, XmppError};
 use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
+use waddle_xmpp_xep_link_preview::LinkPreviewEnricher;
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
@@ -169,6 +170,8 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     converting_avatar: bool,
     /// GitHub link enricher for expanding GitHub URLs in messages
     github_enricher: Option<Arc<MessageEnricher>>,
+    /// Generic OG/Twitter-Card link preview enricher for non-GitHub URLs
+    link_preview_enricher: Option<Arc<LinkPreviewEnricher>>,
     /// Whether the server operates in single-tenant mode (XEP-0503).
     /// When true, all spaces are publicly discoverable regardless of membership.
     single_tenant: bool,
@@ -184,7 +187,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender, sfu_service),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, link_preview_enricher, push_store, push_sender, sfu_service),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -202,6 +205,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         registration_enabled: bool,
         pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
         github_enricher: Option<Arc<MessageEnricher>>,
+        link_preview_enricher: Option<Arc<LinkPreviewEnricher>>,
         single_tenant: bool,
         push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
         push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
@@ -234,6 +238,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
             github_enricher,          // GitHub link enrichment (optional)
+            link_preview_enricher,    // Generic OG/Twitter-Card link preview (optional)
             single_tenant,            // XEP-0503: single-tenant mode for spaces
             push_store,               // XEP-0357: push subscription store
             push_sender,              // XEP-0357: push notification sender
@@ -1373,6 +1378,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             let embeds = enricher.enrich_message(&mut msg).await;
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
             crate::metrics::record_github_enrichment(elapsed_ms, embeds as u64);
+        }
+
+        // Generic OG/Twitter-Card link preview enrichment. Runs after
+        // GitHub so GitHub URLs get the richer embed; link-preview skips
+        // URLs already handled. Fail-open.
+        if let Some(ref enricher) = self.link_preview_enricher {
+            let sender_bare = sender_jid.to_bare();
+            let start = std::time::Instant::now();
+            let embeds = enricher.enrich_message(&mut msg, &sender_bare).await;
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            crate::metrics::record_link_preview_enrichment(elapsed_ms, embeds as u64);
         }
 
         // Route based on message type

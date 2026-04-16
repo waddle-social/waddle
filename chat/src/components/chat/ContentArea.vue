@@ -51,7 +51,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[]];
+  send: [body: string, markup: MarkupSpan[], suppressPreview?: boolean];
   typing: [];
   selectGif: [url: string];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
@@ -390,7 +390,7 @@ watch(
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
-      @send="(body, markup) => emit('send', body, markup)"
+      @send="(body, markup, suppressPreview) => emit('send', body, markup, suppressPreview)"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
     />

@@ -25,6 +25,7 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
   if (msg.sharedFile) tm.sharedFile = msg.sharedFile;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.callInvite) tm.callInvite = msg.callInvite;
+  if (msg.preview) tm.preview = msg.preview;
   return tm;
 }
 

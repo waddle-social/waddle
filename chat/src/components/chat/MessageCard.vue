@@ -3,6 +3,7 @@ import { ref, computed, nextTick, watch } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import LinkPreviewCard from "@/components/chat/LinkPreviewCard.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
 import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
@@ -298,6 +299,9 @@ watch(
 
       <!-- Normal display -->
       <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
+
+      <!-- Link preview -->
+      <LinkPreviewCard v-if="!isEditing && message.preview" :preview="message.preview" />
 
       <!-- Reactions -->
       <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">

@@ -654,9 +654,11 @@ async fn run_test_server<S: AppState>(
                         // Enable registration for tests
                         let registration_enabled = true;
                         let st = single_tenant;
+                        let link_preview_enricher =
+                            Some(waddle_xmpp_xep_link_preview::LinkPreviewEnricher::from_env());
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender, sfu
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, link_preview_enricher, st, push_store, push_sender, sfu
                             ).await;
                         });
                     }

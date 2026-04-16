@@ -274,12 +274,16 @@ async function sendGif(url: string) {
   await activeTarget.value.sendMessage(url);
 }
 
-async function sendActiveMessage(body?: string, markup?: MarkupSpan[]) {
+async function sendActiveMessage(
+  body?: string,
+  markup?: MarkupSpan[],
+  suppressPreview?: boolean,
+) {
   if (ui.sidebarMode.value === "dms") {
     await dmMessaging.sendMessage();
     return;
   }
-  await messaging.sendMessage(body, markup);
+  await messaging.sendMessage(body, markup, suppressPreview);
 }
 
 function notifyActiveComposing() {

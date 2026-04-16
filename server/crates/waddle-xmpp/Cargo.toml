@@ -72,6 +72,9 @@ reqwest = { workspace = true }
 # GitHub link enrichment
 waddle-xmpp-xep-github = { path = "../waddle-xmpp-xep-github" }
 
+# Generic link preview enrichment
+waddle-xmpp-xep-link-preview = { path = "../waddle-xmpp-xep-link-preview" }
+
 # Database
 libsql = { workspace = true }
 
@@ -82,3 +85,4 @@ rcgen = "0.13"
 tempfile = "3.14"
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
+wiremock = { workspace = true }

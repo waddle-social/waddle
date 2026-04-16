@@ -3,7 +3,34 @@
     "allow": [
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(bun run:*)"
+      "Bash(bun run:*)",
+      "Bash(bun test *)",
+      "Bash(bun *)",
+      "Bash(bunx astro *)",
+      "Bash(cargo test *)",
+      "Bash(cat /Users/oyr/projects/waddle/waddle/chat/tests/*.test.ts)",
+      "Bash(grep -n \"sendGroupMessage\" /Users/oyr/projects/waddle/waddle/chat/src/lib/xmpp/*.ts /Users/oyr/projects/waddle/waddle/chat/src/lib/xmpp-client.ts)",
+      "Bash(bunx tsc *)",
+      "Bash(grep -E \"\\\\.rs$|^d\")",
+      "Bash(ls *)",
+      "Bash(cargo build *)",
+      "Bash(grep -rn \"pub fn \" /Users/oyr/.cargo/registry/src/index.crates.io-*/hickory-resolver-0.25*/src/resolver.rs)",
+      "Bash(grep -n \"lookup_ip\\\\|pub fn.*lookup\" /Users/oyr/.cargo/registry/src/index.crates.io-*/hickory-resolver-0.25*/src/resolver.rs)",
+      "Bash(cargo check *)",
+      "Bash(rm -r chat/src/lib/link-preview chat/src/pages/api)",
+      "Bash(rm chat/src/lib/editor/link-detection.ts chat/src/lib/xmpp/preview-reference-builder.ts chat/src/components/chat/LinkPreviewDraft.vue chat/tests/link-preview-ssrf.test.ts chat/tests/link-preview-distill.test.ts chat/tests/link-preview-html.test.ts chat/tests/link-preview-fetch.test.ts chat/tests/link-preview-endpoint.test.ts chat/tests/link-detection.test.ts chat/tests/preview-reference-builder.test.ts)",
+      "Bash(flux reconcile *)",
+      "Bash(flux get *)",
+      "Bash(kubectl config *)",
+      "Bash(kubectl get *)",
+      "Bash(git fetch *)",
+      "Bash(kubectl logs *)",
+      "Bash(host sfu.waddle.social)",
+      "Bash(host xmpp.waddle.social)",
+      "Bash(host waddle.social)",
+      "Bash(nc -u -vz -w 3 sfu.waddle.social 30000)",
+      "Bash(timeout 3 bash -c 'echo -n \"test\" | nc -u -w 2 sfu.waddle.social 30000')",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

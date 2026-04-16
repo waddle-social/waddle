@@ -42,6 +42,8 @@ export interface TimelineMessage {
   callInvite?: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string };
   /** XEP-0394: Message Markup offset-based annotations. */
   markup?: MarkupSpan[];
+  /** Waddle link preview (first valid data-reference with nested preview payload). */
+  preview?: import("./xmpp/extensions/preview").WaddleLinkPreview;
 }
 
 export interface CommunityFormData {

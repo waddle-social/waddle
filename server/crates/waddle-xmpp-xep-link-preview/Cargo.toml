@@ -1,0 +1,29 @@
+[package]
+name = "waddle-xmpp-xep-link-preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Waddle Social - Server-side link preview enrichment via OpenGraph/Twitter Card metadata"
+
+[dependencies]
+minidom = { workspace = true }
+xmpp-parsers = { workspace = true }
+jid = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+hickory-resolver = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+bytes = { workspace = true }
+linkify = { workspace = true }
+scraper = { workspace = true }
+moka = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+wiremock = { workspace = true }

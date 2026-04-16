@@ -408,9 +408,17 @@ export class BrowserXmppClient {
   async sendCorrection(w: string, c: string, body: string, replacesId: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
     return this.xmpp ? messaging.sendCorrection(this.xmpp, roomBareJidFor(this.session, w, c), body, replacesId, markup) : null;
   }
-  async sendGroupMessage(w: string, c: string, body: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
+  async sendGroupMessage(
+    w: string,
+    c: string,
+    body: string,
+    markup?: import("@/lib/chat-ui").MarkupSpan[],
+    suppressPreview?: boolean,
+  ): Promise<string | null> {
     await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body, markup) : null;
+    return this.xmpp
+      ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body, markup, suppressPreview)
+      : null;
   }
   async sendCallInvite(
     w: string,

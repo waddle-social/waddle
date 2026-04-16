@@ -188,6 +188,36 @@ pub fn record_github_enrichment(latency_ms: f64, embeds: u64) {
 // can be added here when the github crate gains an opentelemetry dependency.
 
 // ============================================================================
+// Link Preview Enrichment Metrics
+// ============================================================================
+
+/// Histogram for generic link preview enrichment latency.
+pub fn link_preview_enrichment_latency() -> Histogram<f64> {
+    meter()
+        .f64_histogram("xmpp.link_preview.enrichment.latency")
+        .with_description("Generic link preview enrichment latency")
+        .with_unit("ms")
+        .build()
+}
+
+/// Counter for link preview embeds added to messages.
+pub fn link_preview_embeds_added() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.link_preview.embeds.added")
+        .with_description("Link preview elements added to messages")
+        .with_unit("embed")
+        .build()
+}
+
+/// Record a link preview enrichment event.
+pub fn record_link_preview_enrichment(latency_ms: f64, embeds: u64) {
+    link_preview_enrichment_latency().record(latency_ms, &[]);
+    if embeds > 0 {
+        link_preview_embeds_added().add(embeds, &[]);
+    }
+}
+
+// ============================================================================
 // S2S Metrics
 // ============================================================================
 

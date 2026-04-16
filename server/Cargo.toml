@@ -6,6 +6,7 @@ members = [
     "crates/waddle-cli",
     "crates/waddle-xmpp",
     "crates/waddle-xmpp-xep-github",
+    "crates/waddle-xmpp-xep-link-preview",
 ]
 
 [workspace.package]
@@ -66,7 +67,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # HTTP Client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 
 # CLI Arguments & Config
 clap = { version = "4.5", features = ["derive"] }
@@ -102,6 +103,11 @@ hickory-resolver = "0.25"
 lru = "0.12"
 regex = "1.10"
 jsonwebtoken = "9.3"
+linkify = "0.10"
+scraper = "0.21"
+moka = { version = "0.12", features = ["future"] }
+bytes = "1.9"
+wiremock = "0.6"
 
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"

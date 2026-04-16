@@ -450,4 +450,84 @@ mod tests {
         assert!(!d.is_mention());
         assert_eq!(d.ref_type, ReferenceType::Data);
     }
+
+    /// Unknown nested children of `<reference>` (e.g. Waddle's
+    /// `<preview xmlns='urn:waddle:link-preview:0'/>` link-preview payload)
+    /// must survive the full parse → payload-stored → serialize round-trip,
+    /// because routing relies on opaque passthrough of custom namespace
+    /// children to receivers.
+    #[test]
+    fn test_reference_preserves_unknown_nested_child() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+            <body>see https://example.com/a</body>\
+            <reference xmlns='urn:xmpp:reference:0' type='data' begin='4' end='27' uri='https://example.com/a'>\
+                <preview xmlns='urn:waddle:link-preview:0' url='https://example.com/a'>\
+                    <title>Example</title>\
+                    <image src='https://example.com/og.png' width='1200' height='630'/>\
+                </preview>\
+            </reference>\
+        </message>";
+
+        let parsed = xml.parse::<Element>().expect("parses as element");
+        let msg = Message::try_from(parsed).expect("parses as message");
+
+        let reference_elem = msg
+            .payloads
+            .iter()
+            .find(|e| is_reference_element(e))
+            .expect("reference payload preserved");
+
+        let preview = reference_elem
+            .get_child("preview", "urn:waddle:link-preview:0")
+            .expect("preview child preserved under custom namespace");
+
+        assert_eq!(preview.attr("url"), Some("https://example.com/a"));
+
+        let title = preview
+            .get_child("title", "urn:waddle:link-preview:0")
+            .expect("nested title preserved");
+        assert_eq!(title.text(), "Example");
+
+        let image = preview
+            .get_child("image", "urn:waddle:link-preview:0")
+            .expect("nested image preserved");
+        assert_eq!(image.attr("src"), Some("https://example.com/og.png"));
+        assert_eq!(image.attr("width"), Some("1200"));
+        assert_eq!(image.attr("height"), Some("630"));
+    }
+
+    /// After Reference parsing extracts attribute metadata, the original
+    /// `<reference>` element (with its unknown children) must still be
+    /// serializable back to XML for routing.
+    #[test]
+    fn test_reference_unknown_child_survives_serialize() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+            <body>x</body>\
+            <reference xmlns='urn:xmpp:reference:0' type='data' uri='https://example.com/a'>\
+                <preview xmlns='urn:waddle:link-preview:0' url='https://example.com/a'>\
+                    <title>T</title>\
+                </preview>\
+            </reference>\
+        </message>";
+
+        let parsed = xml.parse::<Element>().expect("parses");
+        let msg = Message::try_from(parsed).expect("parses");
+
+        // Round-trip: rebuild the message element and re-serialize.
+        let rebuilt: Element = msg.into();
+        let mut serialized = Vec::new();
+        rebuilt
+            .write_to(&mut serialized)
+            .expect("serialize");
+        let out = String::from_utf8(serialized).expect("utf8");
+
+        assert!(
+            out.contains("urn:waddle:link-preview:0"),
+            "custom namespace must be preserved in serialized output: {out}"
+        );
+        assert!(
+            out.contains("<title"),
+            "nested title must be preserved: {out}"
+        );
+    }
 }

@@ -41,6 +41,9 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   if (msg.markup && msg.markup.length > 0) {
     tm.markup = msg.markup;
   }
+  if (msg.preview) {
+    tm.preview = msg.preview;
+  }
   return tm;
 }
 
@@ -441,7 +444,11 @@ export function useMessaging(
     await loadMessages(activeWaddleId.value, channelId);
   }
 
-  async function sendMessage(body?: string, markup?: MarkupSpan[]) {
+  async function sendMessage(
+    body?: string,
+    markup?: MarkupSpan[],
+    suppressPreview?: boolean,
+  ) {
     const bodyText = body ?? draft.value;
     // markup !== undefined means this came from the rich editor (composer send)
     // undefined means it came from a programmatic send (GIF, etc.)
@@ -461,7 +468,7 @@ export function useMessaging(
     clearActionError();
 
     try {
-      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, markup);
+      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, markup, suppressPreview);
       const isStillCurrentChannel =
         xmppClient.value === client &&
         activeWaddleId.value === waddleId &&
@@ -469,6 +476,8 @@ export function useMessaging(
 
       if (msgId && session.value && isStillCurrentChannel) {
         // Optimistic insert: show message immediately with "sending" status
+        // Optimistic insert: server-generated preview arrives via the
+        // echoed stanza; no preview attached here.
         const optimistic: TimelineMessage = {
           id: msgId,
           author: session.value.username,

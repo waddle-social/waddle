@@ -63,14 +63,20 @@ export function sendCorrection(xmpp: Agent, roomJid: string, body: string, repla
   return msgId;
 }
 
-export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, markup?: MarkupSpan[]): string | null {
+export function sendGroupMessage(
+  xmpp: Agent,
+  roomJid: string,
+  body: string,
+  markup?: MarkupSpan[],
+  suppressPreview?: boolean,
+): string | null {
   const text = body.trim();
   if (!text) return null;
 
   const msgId = crypto.randomUUID();
 
   // XEP-0372: Build reference objects for @mentions
-  const references: Array<{ type: string; uri: string; begin: string; end: string }> = [];
+  const references: Array<Record<string, unknown>> = [];
   const mentionRe = /(?:^|\s)@(\S+)/g;
   let match: RegExpExecArray | null;
   while ((match = mentionRe.exec(text)) !== null) {
@@ -95,6 +101,9 @@ export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, mar
   if (markup && markup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(markup) };
   }
+  // `<no-preview xmlns='urn:waddle:link-preview:0'/>` — sender hint that
+  // tells the server's link-preview enricher to skip this message.
+  if (suppressPreview) msgData.suppressLinkPreview = {};
 
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;

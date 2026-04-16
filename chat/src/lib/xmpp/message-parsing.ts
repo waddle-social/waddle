@@ -7,7 +7,7 @@ import type {
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
-  "body" | "mentions" | "broadcastMention" | "callInvite" | "sharedFile" | "isSticker" | "replacesId" | "markup"
+  "body" | "mentions" | "broadcastMention" | "callInvite" | "sharedFile" | "isSticker" | "replacesId" | "markup" | "preview"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -29,6 +29,7 @@ export function extractMessageExtensions(
   extractCallInvite(msg, base);
   extractFileSharing(msg, base);
   extractMarkup(msg, base);
+  extractLinkPreview(msg, base);
 
   if (ext(msg).sticker) {
     base.isSticker = true;
@@ -164,6 +165,47 @@ function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget)
   if (fs.height) info.height = parseInt(fs.height, 10);
   if (fs.desc) info.desc = fs.desc;
   base.sharedFile = info;
+}
+
+/**
+ * Attach the first valid link preview carried by a `type='data'` reference.
+ *
+ * Anti-spoof: the preview is accepted only if the reference's `begin`/`end`
+ * offsets slice the message body to a string equal to the reference's `uri`,
+ * and the nested `<preview url='...'>` matches that URI.
+ */
+function extractLinkPreview(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const refs = ext(msg).references as Array<{
+    type?: string;
+    uri?: string;
+    begin?: string;
+    end?: string;
+    preview?: import("./extensions/preview").WaddleLinkPreview;
+  }> | undefined;
+  if (!refs?.length) return;
+
+  const body = base.body ?? "";
+
+  for (const ref of refs) {
+    if (ref.type !== "data" || !ref.preview || !ref.uri) continue;
+
+    const begin = parseOffset(ref.begin);
+    const end = parseOffset(ref.end);
+    if (begin === null || end === null) continue;
+    if (begin > end || end > body.length) continue;
+
+    if (body.slice(begin, end) !== ref.uri) continue;
+    if (ref.preview.url !== ref.uri) continue;
+
+    base.preview = ref.preview;
+    return;
+  }
+}
+
+function parseOffset(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 /** XEP-0394: Extract Message Markup annotations. */

@@ -33,6 +33,8 @@ export interface LiveRoomMessage {
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483 */
   callInvite?: CallInviteInfo;
+  /** Waddle link preview (first valid reference with nested preview payload). */
+  preview?: import("./extensions/preview").WaddleLinkPreview;
 }
 
 /** A direct message received/sent via type:"chat" stanzas */
@@ -52,6 +54,8 @@ export interface LiveDmMessage {
   sharedFile?: SharedFileInfo;
   isSticker?: boolean;
   callInvite?: CallInviteInfo;
+  /** Waddle link preview. */
+  preview?: import("./extensions/preview").WaddleLinkPreview;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }

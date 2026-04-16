@@ -93,6 +93,8 @@ pub struct XmppServer<S: AppState> {
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
     /// GitHub link enricher shared across all connections
     github_enricher: Option<Arc<waddle_xmpp_xep_github::MessageEnricher>>,
+    /// Generic OG/Twitter-Card link preview enricher shared across all connections
+    link_preview_enricher: Option<Arc<waddle_xmpp_xep_link_preview::LinkPreviewEnricher>>,
     /// XEP-0357 Push subscription store
     push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
@@ -237,6 +239,12 @@ impl<S: AppState> XmppServer<S> {
             }
         };
 
+        // Create the generic link preview enricher from environment.
+        // Defaults to enabled; WADDLE_LINK_PREVIEW_DISABLE=1 turns it off.
+        let link_preview_enricher = Some(
+            waddle_xmpp_xep_link_preview::LinkPreviewEnricher::from_env(),
+        );
+
         Ok(Self {
             config,
             app_state,
@@ -248,6 +256,7 @@ impl<S: AppState> XmppServer<S> {
             sm_session_registry,
             pubsub_storage,
             github_enricher,
+            link_preview_enricher,
             push_store,
             push_sender,
             sfu_service,
@@ -425,6 +434,7 @@ impl<S: AppState> XmppServer<S> {
             let registration_enabled = self.config.registration_enabled;
             let single_tenant = self.config.single_tenant;
             let github_enricher = self.github_enricher;
+            let link_preview_enricher = self.link_preview_enricher;
             let sfu_service = self.sfu_service;
 
             tokio::spawn(async move {
@@ -457,6 +467,7 @@ impl<S: AppState> XmppServer<S> {
                     let push_store = Arc::clone(&push_store);
                     let push_sender = Arc::clone(&push_sender);
                     let github_enricher = github_enricher.clone();
+                    let link_preview_enricher = link_preview_enricher.clone();
                     let sfu_service = sfu_service.clone();
 
                     tokio::spawn(
@@ -475,6 +486,7 @@ impl<S: AppState> XmppServer<S> {
                                 registration_enabled,
                                 pubsub_storage,
                                 github_enricher,
+                                link_preview_enricher,
                                 single_tenant,
                                 push_store,
                                 push_sender,
