@@ -131,6 +131,7 @@ export function sendCallInvite(xmpp: Agent, roomJid: string, opts: SendCallInvit
   if (opts.sid) callInvite.jingleSid = opts.sid;
   if (opts.jingleJid) callInvite.jingleJid = opts.jingleJid;
   if (externalUri) callInvite.externalUri = externalUri;
+  callInvite.video = !!opts.video;
 
   xmpp.sendMessage({
     id: msgId, to: roomJid, type: "groupchat",

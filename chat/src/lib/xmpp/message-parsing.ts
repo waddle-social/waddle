@@ -59,7 +59,7 @@ function extractExplicitMentions(msg: ReceivedMessage, base: MessageExtensionsTa
 
 function extractCallInvite(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
   const inviteElement = ext(msg).callInvite as
-    | { id?: string; muji?: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string }
+    | { id?: string; muji?: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; video?: boolean }
     | undefined;
   if (!inviteElement) return;
 
@@ -75,6 +75,14 @@ function extractCallInvite(msg: ReceivedMessage, base: MessageExtensionsTarget):
   const resolvedUri = inviteElement.externalUri ?? meeting?.url;
   if (resolvedUri) invite.externalUri = resolvedUri;
   if (meeting?.desc) invite.meetingDesc = meeting.desc;
+
+  // Parse video flag; fall back to inferring from meeting description for older clients.
+  if (typeof inviteElement.video === "boolean") {
+    invite.video = inviteElement.video;
+  } else if (meeting?.desc) {
+    invite.video = meeting.desc.toLowerCase().includes("video");
+  }
+
   base.callInvite = invite;
 }
 

@@ -76,6 +76,7 @@ export interface CallInviteInfo {
   jingleJid?: string;
   externalUri?: string;
   meetingDesc?: string;
+  video?: boolean;
 }
 
 export interface IncomingCallInviteEvent {

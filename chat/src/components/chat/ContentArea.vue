@@ -37,7 +37,7 @@ const props = defineProps<{
   searchResults: { id: string; nick: string; body: string; createdAt: string }[];
   isSearching: boolean;
   mujiPhase: MujiCallPhase;
-  mujiPendingInvite: { fromNick: string; invite: { jingleJid?: string; meetingDesc?: string } } | null;
+  mujiPendingInvite: { fromNick: string; invite: { jingleJid?: string; meetingDesc?: string; video?: boolean } } | null;
   mujiInCall: boolean;
   mujiIsSwitching: boolean;
   mujiCurrentSid: string | null;
@@ -70,7 +70,7 @@ const emit = defineEmits<{
   dismissCallInvite: [];
   toggleMic: [];
   toggleCamera: [];
-  joinCallFromMessage: [invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }];
+  joinCallFromMessage: [invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string; video?: boolean }];
   openDm: [peerJid: string];
 }>();
 
@@ -236,7 +236,7 @@ watch(
       <div class="flex items-center gap-2">
         <button
           class="px-4 py-1.5 text-xs font-semibold uppercase tracking-wider rounded-lg bg-primary text-primary-foreground hover:shadow-[0_0_16px_var(--glow-strong)] transition-all duration-200"
-          @click="mujiInCall ? emit('switchCallInvite', true) : emit('joinCallInvite', true)"
+          @click="mujiInCall ? emit('switchCallInvite', mujiPendingInvite?.invite?.video ?? false) : emit('joinCallInvite', mujiPendingInvite?.invite?.video ?? false)"
         >
           {{ mujiInCall ? "Switch" : "Join" }}
         </button>

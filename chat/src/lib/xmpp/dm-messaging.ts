@@ -74,6 +74,7 @@ export function sendDmCallInvite(
   if (opts.sid) callInvite.jingleSid = opts.sid;
   if (opts.jingleJid) callInvite.jingleJid = opts.jingleJid;
   if (externalUri) callInvite.externalUri = externalUri;
+  callInvite.video = !!opts.video;
   xmpp.sendMessage({
     id: msgId,
     to: peerJid,

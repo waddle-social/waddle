@@ -314,7 +314,7 @@ function clearActiveSearch() {
   activeTarget.value.clearSearch();
 }
 
-function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string }) {
+function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string; video?: boolean }) {
   muji.pendingInvite.value = {
     fromNick: "",
     invite: {
@@ -324,9 +324,10 @@ function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSi
       jingleJid: invite.jingleJid,
       externalUri: invite.externalUri,
       meetingDesc: invite.meetingDesc,
+      video: invite.video,
     },
   };
-  muji.joinPendingInvite(true);
+  muji.joinPendingInvite(invite.video ?? false);
 }
 
 // --- Deep linking ---

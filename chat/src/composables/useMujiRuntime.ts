@@ -84,6 +84,16 @@ function normalizeCallError(
   value: unknown,
   normalizeError: (value: unknown) => string,
 ): string {
+  if (value instanceof DOMException) {
+    switch (value.name) {
+      case "NotFoundError":
+        return "No microphone found. Please connect a microphone and try again.";
+      case "NotAllowedError":
+        return "Microphone access was denied. Please allow microphone access in your browser settings.";
+      case "NotReadableError":
+        return "Your microphone is in use by another application.";
+    }
+  }
   const condition = xmppErrorCondition(value);
   if (condition && CALL_SETUP_UNAVAILABLE_CONDITIONS.has(condition)) {
     return "Calling is unavailable on this server right now.";
@@ -152,7 +162,18 @@ export function useMujiRuntime(
       throw new Error("WebRTC media devices are unavailable in this browser.");
     }
     phase.value = "acquiring-media";
-    return navigator.mediaDevices.getUserMedia({ audio: true, video });
+    if (video) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      } catch (err) {
+        if (err instanceof DOMException && (err.name === "NotFoundError" || err.name === "OverconstrainedError")) {
+          cameraEnabled.value = false;
+          return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        }
+        throw err;
+      }
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
   }
 
   function applyMujiEvent(event: MujiCallEvent) {
@@ -341,7 +362,7 @@ export function useMujiRuntime(
     }
   }
 
-  async function joinPendingInvite(video = true) {
+  async function joinPendingInvite(video = false) {
     const client = xmppClient.value;
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
@@ -370,7 +391,7 @@ export function useMujiRuntime(
     }
   }
 
-  async function switchToPendingInvite(video = true) {
+  async function switchToPendingInvite(video = false) {
     phase.value = "switching";
     await leaveCurrentCall({ clearPendingInvite: false });
     await joinPendingInvite(video);
