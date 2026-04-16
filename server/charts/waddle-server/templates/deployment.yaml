@@ -56,6 +56,7 @@ spec:
             {{- if .Values.sfu.udpPort }}
             - name: sfu-udp
               containerPort: {{ .Values.sfu.udpPort }}
+              hostPort: {{ .Values.sfu.udpPort }}
               protocol: UDP
             {{- end }}
           envFrom:
