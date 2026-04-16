@@ -353,11 +353,4 @@ watch(
   overflow-x: auto;
 }
 
-@media (prefers-color-scheme: dark) {
-  .styled-body :deep(pre.shiki),
-  .styled-body :deep(pre.shiki span) {
-    color: var(--shiki-dark) !important;
-    background-color: var(--shiki-dark-bg) !important;
-  }
-}
 </style>

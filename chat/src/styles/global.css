@@ -296,6 +296,30 @@
   overflow-x: auto;
   margin: 0.5em 0;
 }
+.styled-body pre code {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  font-size: inherit;
+}
+.styled-body pre.shiki,
+.styled-body pre.shiki span {
+  color: var(--shiki-light) !important;
+  background-color: transparent !important;
+}
+.styled-body pre.shiki {
+  background-color: var(--shiki-light-bg) !important;
+}
+@media (prefers-color-scheme: dark) {
+  .styled-body pre.shiki,
+  .styled-body pre.shiki span {
+    color: var(--shiki-dark) !important;
+    background-color: transparent !important;
+  }
+  .styled-body pre.shiki {
+    background-color: var(--shiki-dark-bg) !important;
+  }
+}
 .styled-body blockquote {
   border-left: 2px solid var(--primary);
   padding-left: 0.85em;
