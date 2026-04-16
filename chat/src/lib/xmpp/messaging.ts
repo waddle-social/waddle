@@ -111,6 +111,38 @@ export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, mar
   return msgId;
 }
 
+/** XEP-0447: Send a file-sharing message in a group chat (MUC). */
+export function sendGroupFileMessage(
+  xmpp: Agent,
+  roomJid: string,
+  fileUrl: string,
+  file: { name: string; mediaType: string; size: number; width?: number; height?: number },
+): string {
+  const msgId = crypto.randomUUID();
+  const msgData: Record<string, unknown> = {
+    id: msgId,
+    to: roomJid,
+    type: "groupchat",
+    body: fileUrl,
+    links: [{ url: fileUrl }],
+    fallback: { for: "urn:xmpp:sfs:0" },
+    receipt: { type: "request" },
+    marker: { type: "markable" },
+    processingHints: { store: true },
+    fileSharing: {
+      disposition: "inline",
+      name: file.name,
+      mediaType: file.mediaType,
+      size: String(file.size),
+      ...(file.width ? { width: String(file.width) } : {}),
+      ...(file.height ? { height: String(file.height) } : {}),
+      url: fileUrl,
+    },
+  };
+  xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
+  return msgId;
+}
+
 export interface SendCallInviteOptions {
   inviteId?: string;
   sid?: string;

@@ -45,6 +45,7 @@ export function useDmMessaging(
   const typingUsers = ref<string[]>([]);
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
+  const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const latestCallInvite = ref<{ peerJid: string; invite: CallInviteInfo; fromNick: string } | null>(null);
 
   let messageRequestId = 0;
@@ -263,6 +264,45 @@ export function useDmMessaging(
     }
   }
 
+  async function sendFileMessage(file: File | Blob) {
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    if (!client || !peerJid || !session.value) return;
+
+    const filename = file instanceof File ? file.name : `image-${Date.now()}.png`;
+    uploadProgress.value = { uploading: true, progress: 0, filename };
+    clearActionError();
+
+    try {
+      const msgId = await client.uploadAndSendDirectFile(peerJid, file, (p) => {
+        uploadProgress.value = {
+          uploading: true,
+          progress: p.total > 0 ? p.loaded / p.total : 0,
+          filename,
+        };
+      });
+
+      if (msgId && session.value) {
+        messages.value = [
+          ...messages.value,
+          {
+            id: msgId,
+            author: session.value.username,
+            body: filename,
+            createdAt: new Date().toISOString(),
+            isSelf: true,
+            deliveryStatus: "sending",
+          },
+        ];
+        void scrollToBottom();
+      }
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
+    }
+  }
+
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activePeerJid.value || !session.value) return;
     const msg = messages.value.find((m) => m.id === messageId);
@@ -413,6 +453,8 @@ export function useDmMessaging(
     latestCallInvite,
     loadMessages,
     sendMessage,
+    sendFileMessage,
+    uploadProgress,
     editMessage,
     retractMessage,
     toggleReaction,

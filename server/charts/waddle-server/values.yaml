@@ -104,8 +104,15 @@ config:
   authProvidersJson: ""
   drainTimeoutSeconds: 30
   rustLog: info
+  # S3-compatible blob storage (Cloudflare R2, AWS S3, MinIO).
+  # When s3Endpoint is set, file uploads use S3 instead of local disk.
+  s3Endpoint: ""
+  s3Bucket: ""
   # Extra key/value env vars rendered into ConfigMap data (non-sensitive).
   extraEnv: {}
+
+# Additional Kubernetes Secrets to inject as env vars (e.g. R2 credentials from ExternalSecrets).
+extraSecretRefs: []
 
 telemetry:
   otlpEndpoint: ""

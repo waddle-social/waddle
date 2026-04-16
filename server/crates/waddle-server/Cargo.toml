@@ -41,6 +41,7 @@ xmpp = { workspace = true }
 xmpp-parsers = { workspace = true }
 
 # Object Storage
+bytes = { workspace = true }
 object_store = { workspace = true }
 
 # Serialization

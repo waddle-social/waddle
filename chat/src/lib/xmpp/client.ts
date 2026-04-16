@@ -20,6 +20,7 @@ import * as history from "./history";
 import * as dmMessaging from "./dm-messaging";
 import * as dmHistory from "./dm-history";
 import * as discovery from "./discovery";
+import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 
 type StanzaSaslMechanism = { name: string };
 type StanzaSaslFactory = {
@@ -185,6 +186,7 @@ export class BrowserXmppClient {
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
   private readonly mujiSessions = new Map<string, MujiSession>();
+  private uploadServiceJid: string | null = null;
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -283,6 +285,7 @@ export class BrowserXmppClient {
     this.connected = false;
     this.currentRoom = null;
     this.mujiSessions.clear();
+    this.uploadServiceJid = null;
     try { xmpp.disconnect(); } catch { /* ignore */ }
   }
 
@@ -429,6 +432,55 @@ export class BrowserXmppClient {
     await this.connect();
     await this.switchRoom(w, c);
     if (this.xmpp) messaging.sendCallLeft(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
+  }
+
+  // -- File upload (XEP-0363 + XEP-0447) --
+
+  private async resolveUploadService(): Promise<string> {
+    if (this.uploadServiceJid) return this.uploadServiceJid;
+    await this.connect();
+    if (!this.xmpp) throw new Error("XMPP not connected");
+    const domain = this.session.jid.split("@")[1] ?? "localhost";
+    const jid = await discoverUploadService(this.xmpp, domain);
+    if (!jid) throw new Error("File upload service not available");
+    this.uploadServiceJid = jid;
+    return jid;
+  }
+
+  async uploadAndSendGroupFile(
+    w: string,
+    c: string,
+    file: File | Blob,
+    onProgress?: (progress: UploadProgress) => void,
+  ): Promise<string | null> {
+    await this.connect();
+    await this.switchRoom(w, c);
+    if (!this.xmpp) return null;
+    const uploadDomain = await this.resolveUploadService();
+    const result = await uploadFile(this.xmpp, file, uploadDomain, onProgress);
+    return messaging.sendGroupFileMessage(
+      this.xmpp,
+      roomBareJidFor(this.session, w, c),
+      result.getUrl,
+      { name: result.filename, mediaType: result.contentType, size: result.size },
+    );
+  }
+
+  async uploadAndSendDirectFile(
+    peerJid: string,
+    file: File | Blob,
+    onProgress?: (progress: UploadProgress) => void,
+  ): Promise<string | null> {
+    await this.connect();
+    if (!this.xmpp) return null;
+    const uploadDomain = await this.resolveUploadService();
+    const result = await uploadFile(this.xmpp, file, uploadDomain, onProgress);
+    return dmMessaging.sendDirectFileMessage(
+      this.xmpp,
+      barePeerJid(peerJid),
+      result.getUrl,
+      { name: result.filename, mediaType: result.contentType, size: result.size },
+    );
   }
 
   async sendDirectMessage(peerJid: string, body: string): Promise<string | null> {

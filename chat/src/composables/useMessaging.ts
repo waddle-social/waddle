@@ -78,6 +78,7 @@ export function useMessaging(
   const roomPresence = ref<RoomPresence>({});
   const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
+  const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const activeChannels = ref<Set<string>>(new Set());
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
@@ -530,6 +531,44 @@ export function useMessaging(
     }
   }
 
+  async function sendFileMessage(file: File | Blob) {
+    const client = xmppClient.value;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!client || !waddleId || !channelId || !session.value) return;
+
+    const filename = file instanceof File ? file.name : `image-${Date.now()}.png`;
+    uploadProgress.value = { uploading: true, progress: 0, filename };
+    clearActionError();
+
+    try {
+      const msgId = await client.uploadAndSendGroupFile(waddleId, channelId, file, (p) => {
+        uploadProgress.value = {
+          uploading: true,
+          progress: p.total > 0 ? p.loaded / p.total : 0,
+          filename,
+        };
+      });
+
+      if (msgId && session.value) {
+        const optimistic: TimelineMessage = {
+          id: msgId,
+          author: session.value.username,
+          body: filename,
+          createdAt: new Date().toISOString(),
+          isSelf: true,
+          deliveryStatus: "sending",
+        };
+        messages.value = [...messages.value, optimistic];
+        void scrollToBottom();
+      }
+    } catch (e) {
+      actionError.value = normalizeError(e);
+    } finally {
+      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
+    }
+  }
+
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !session.value)
       return;
@@ -696,6 +735,8 @@ export function useMessaging(
     loadMessages,
     selectChannel,
     sendMessage,
+    sendFileMessage,
+    uploadProgress,
     editMessage,
     retractMessage,
     moderateMessage,
