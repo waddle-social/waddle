@@ -38,6 +38,12 @@ data:
   {{- if .Values.config.s3Bucket }}
   WADDLE_S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
   {{- end }}
+  {{- if .Values.sfu.udpPort }}
+  WADDLE_SFU_UDP_ADDR: {{ printf "0.0.0.0:%d" (int .Values.sfu.udpPort) | quote }}
+  {{- end }}
+  {{- if .Values.sfu.candidateAddr }}
+  WADDLE_SFU_CANDIDATE_ADDR: {{ .Values.sfu.candidateAddr | quote }}
+  {{- end }}
   {{- range $key, $value := .Values.config.extraEnv }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}

@@ -32,6 +32,9 @@ spec:
       mamDbPath: /data/mam.db
       tls:
         secretName: waddle-xmpp-tls
+    sfu:
+      udpPort: 10000
+      candidateAddr: "sfu.waddle.social:10000"
     persistence:
       storageClassName: openebs-mayastor
     service:

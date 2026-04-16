@@ -1206,7 +1206,9 @@ async fn handle_iq(
                         payload: xmpp_parsers::iq::IqType::Set(jingle),
                     };
 
-                    vec![ack_xml, iq_to_xml(accept_iq)]
+                    let accept_xml = iq_to_xml(accept_iq);
+                    debug!(xml = %accept_xml, "Sending Jingle session-accept IQ");
+                    vec![ack_xml, accept_xml]
                 }
                 Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Ack { id }) => {
                     let result_iq = xmpp_parsers::iq::Iq {

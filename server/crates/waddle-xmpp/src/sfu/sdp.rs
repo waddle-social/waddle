@@ -455,12 +455,17 @@ pub fn extract_sdp_offer_from_jingle(jingle: &Element) -> Result<String, String>
 }
 
 /// Builds a `<jingle action="session-accept">` element from an SDP answer string.
-pub fn build_jingle_session_accept(sid: &str, sdp_answer: &str) -> Result<Element, String> {
+pub fn build_jingle_session_accept(
+    sid: &str,
+    responder: &str,
+    sdp_answer: &str,
+) -> Result<Element, String> {
     let contents = sdp_to_jingle_contents(sdp_answer, ContentCreator::Responder)?;
 
     let mut jingle = Element::builder("jingle", NS_JINGLE)
         .attr("action", "session-accept")
         .attr("sid", sid)
+        .attr("responder", responder)
         .build();
 
     for content in &contents {
@@ -793,11 +798,16 @@ mod tests {
             a=fingerprint:sha-256 11:22:33:44\r\n\
             a=setup:active\r\n";
 
-        let element =
-            build_jingle_session_accept("sid-99", sdp_answer).expect("should build accept");
+        let element = build_jingle_session_accept("sid-99", "sfu.waddle.social", sdp_answer)
+            .expect("should build accept");
 
         assert_eq!(element.attr("action"), Some("session-accept"));
         assert_eq!(element.attr("sid"), Some("sid-99"));
+        assert_eq!(
+            element.attr("responder"),
+            Some("sfu.waddle.social"),
+            "session-accept must include responder per XEP-0166"
+        );
         assert_eq!(element.ns(), NS_JINGLE);
 
         // Should have at least one content child.
@@ -861,5 +871,75 @@ mod tests {
     fn sdp_to_jingle_contents_rejects_empty_sdp() {
         let result = sdp_to_jingle_contents("v=0\r\n", ContentCreator::Initiator);
         assert!(result.is_err());
+    }
+
+    /// Verify that wrapping a session-accept Jingle element inside an
+    /// `xmpp_parsers::iq::Iq` and serializing preserves the Jingle namespace.
+    /// stanza.js uses `xmlns="urn:xmpp:jingle:1"` on the `<jingle>` child to
+    /// route the IQ to its Jingle SessionManager — if the namespace is missing
+    /// or inherited from the parent `jabber:client`, the IQ is rejected.
+    #[test]
+    fn session_accept_iq_serialization_preserves_jingle_namespace() {
+        let sdp_answer = "\
+            v=0\r\n\
+            o=- 0 0 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            a=group:BUNDLE audio\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=mid:audio\r\n\
+            a=sendrecv\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtcp-mux\r\n\
+            a=ice-ufrag:u1\r\n\
+            a=ice-pwd:p1\r\n\
+            a=fingerprint:sha-256 AA:BB\r\n\
+            a=setup:active\r\n";
+
+        let jingle = build_jingle_session_accept("test-sid", "sfu.example.com", sdp_answer)
+            .expect("build accept");
+
+        // Wrap in an IQ just like the WebSocket handler does.
+        let iq = xmpp_parsers::iq::Iq {
+            from: Some("sfu.example.com".parse::<jid::Jid>().unwrap()),
+            to: Some("user@example.com/web".parse::<jid::Jid>().unwrap()),
+            id: "sfu-accept-test".to_string(),
+            payload: xmpp_parsers::iq::IqType::Set(jingle),
+        };
+
+        // Serialize to XML via the same path the server uses.
+        let element: Element = iq.into();
+        let mut buf = Vec::new();
+        element
+            .write_to(&mut buf)
+            .expect("serialize should not fail");
+        let xml = String::from_utf8(buf).expect("valid UTF-8");
+
+        assert!(xml.contains("type=\"set\""), "IQ must be type=set: {xml}");
+        assert!(
+            xml.contains("urn:xmpp:jingle:1"),
+            "Jingle namespace must appear in serialized XML — stanza.js needs it to route to SessionManager: {xml}"
+        );
+        assert!(
+            xml.contains("action=\"session-accept\""),
+            "action=session-accept must be present: {xml}"
+        );
+        assert!(
+            xml.contains("sid=\"test-sid\""),
+            "sid must be present: {xml}"
+        );
+        assert!(
+            xml.contains("responder=\"sfu.example.com\""),
+            "responder must be present: {xml}"
+        );
+        assert!(
+            xml.contains("urn:xmpp:jingle:apps:rtp:1"),
+            "RTP description namespace must be present: {xml}"
+        );
+        assert!(
+            xml.contains("urn:xmpp:jingle:transports:ice-udp:1"),
+            "ICE-UDP transport namespace must be present: {xml}"
+        );
     }
 }

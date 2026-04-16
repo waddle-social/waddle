@@ -157,7 +157,7 @@ impl SfuServiceActor {
         };
 
         debug!(sid = %sid, jid = %sender_jid, "Session initiated successfully");
-        match sdp::build_jingle_session_accept(&sid, &answer_sdp) {
+        match sdp::build_jingle_session_accept(&sid, &self.sfu_domain, &answer_sdp) {
             Ok(accept_element) => JingleIqResponse::Accept {
                 id: iq_id,
                 jingle: accept_element,
