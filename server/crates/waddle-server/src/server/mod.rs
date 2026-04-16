@@ -891,6 +891,14 @@ async fn create_router(
         info!("Registered create-channel command for WebSocket");
     }
 
+    // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
+    // See `waddle_xmpp::protocol` for the state-machine design; any IQ
+    // namespace registered here short-circuits the legacy string-matching
+    // path in `routes::websocket::handle_iq`.
+    let mut stanza_dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
+    waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
+    let stanza_dispatcher = Arc::new(stanza_dispatcher);
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         app_state: state.clone(),
@@ -900,6 +908,7 @@ async fn create_router(
         mam_storage,
         command_registry: websocket_command_registry,
         extension_manager,
+        dispatcher: stanza_dispatcher,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 
