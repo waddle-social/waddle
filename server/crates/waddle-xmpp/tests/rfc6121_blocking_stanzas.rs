@@ -63,7 +63,7 @@ async fn rfc6121_s8_5_2_1_1_inbound_message_from_blocked_jid_dropped() {
         .expect("bind bob");
 
     // Alice blocks Bob
-    block_jid(&mut alice, "bob@localhost", "block-bob-1");
+    block_jid(&mut alice, "bob@localhost", "block-bob-1").await;
 
     // Bob sends message to Alice
     bob.send(
@@ -111,7 +111,7 @@ async fn rfc6121_s8_5_2_1_2_inbound_presence_from_blocked_jid_dropped() {
         .expect("bind bob");
 
     // Alice blocks Bob
-    block_jid(&mut alice, "bob@localhost", "block-bob-pres");
+    block_jid(&mut alice, "bob@localhost", "block-bob-pres").await;
 
     // Bob sends directed presence to Alice
     bob.send("<presence to='alice@localhost' xmlns='jabber:client'><status>Blocked presence</status></presence>")
@@ -152,7 +152,7 @@ async fn rfc6121_s8_5_2_1_3_inbound_iq_from_blocked_jid_returns_error() {
         .expect("bind bob");
 
     // Alice blocks Bob
-    block_jid(&mut alice, "bob@localhost", "block-bob-iq");
+    block_jid(&mut alice, "bob@localhost", "block-bob-iq").await;
 
     // Bob sends IQ to Alice
     bob.send(
@@ -198,7 +198,7 @@ async fn rfc6121_s8_5_3_2_1_outbound_message_to_blocked_jid_returns_error() {
         .expect("bind alice");
 
     // Alice blocks Bob
-    block_jid(&mut alice, "bob@localhost", "block-bob-out-msg");
+    block_jid(&mut alice, "bob@localhost", "block-bob-out-msg").await;
 
     // Alice tries to send message to blocked Bob
     alice
@@ -246,7 +246,7 @@ async fn rfc6121_s8_5_3_2_2_outbound_presence_to_blocked_jid_returns_error() {
         .expect("bind alice");
 
     // Alice blocks Bob
-    block_jid(&mut alice, "bob@localhost", "block-bob-out-pres");
+    block_jid(&mut alice, "bob@localhost", "block-bob-out-pres").await;
 
     // Alice sends directed presence to blocked Bob
     alice
@@ -294,7 +294,7 @@ async fn rfc6121_s8_5_3_2_3_outbound_iq_to_blocked_jid_returns_error() {
         .expect("bind alice");
 
     // Alice blocks Bob
-    block_jid(&mut alice, "bob@localhost", "block-bob-out-iq");
+    block_jid(&mut alice, "bob@localhost", "block-bob-out-iq").await;
 
     // Alice sends IQ to blocked Bob
     alice

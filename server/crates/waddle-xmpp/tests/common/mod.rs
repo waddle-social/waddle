@@ -2,6 +2,13 @@
 //!
 //! Provides helpers for starting test servers, generating TLS certificates,
 //! and simulating XMPP client connections.
+//!
+//! Integration tests each compile as a standalone crate that re-includes this
+//! module, so helpers consumed by only some tests appear unused to the rest.
+//! Silence `dead_code` at module scope rather than fragmenting the shared
+//! helpers.
+
+#![allow(dead_code)]
 
 use std::io::{BufReader, Cursor};
 use std::net::SocketAddr;

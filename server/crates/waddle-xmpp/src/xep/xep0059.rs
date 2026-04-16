@@ -708,8 +708,8 @@ mod tests {
         let response = RsmResponse::new().with_count(0);
         let elem = build_rsm_response_element(&response);
 
-        assert!(elem.children().find(|c| c.name() == "first").is_none());
-        assert!(elem.children().find(|c| c.name() == "last").is_none());
+        assert!(!elem.children().any(|c| c.name() == "first"));
+        assert!(!elem.children().any(|c| c.name() == "last"));
 
         let count = elem
             .children()
