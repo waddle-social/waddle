@@ -14,6 +14,7 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
+import { executeSendFileMessage } from "./sendFileMessageHelper";
 
 function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -537,36 +538,17 @@ export function useMessaging(
     const channelId = activeChannelId.value;
     if (!client || !waddleId || !channelId || !session.value) return;
 
-    const filename = file instanceof File ? file.name : `image-${Date.now()}.png`;
-    uploadProgress.value = { uploading: true, progress: 0, filename };
-    clearActionError();
-
-    try {
-      const msgId = await client.uploadAndSendGroupFile(waddleId, channelId, file, (p) => {
-        uploadProgress.value = {
-          uploading: true,
-          progress: p.total > 0 ? p.loaded / p.total : 0,
-          filename,
-        };
-      });
-
-      if (msgId && session.value) {
-        const optimistic: TimelineMessage = {
-          id: msgId,
-          author: session.value.username,
-          body: filename,
-          createdAt: new Date().toISOString(),
-          isSelf: true,
-          deliveryStatus: "sending",
-        };
-        messages.value = [...messages.value, optimistic];
-        void scrollToBottom();
-      }
-    } catch (e) {
-      actionError.value = normalizeError(e);
-    } finally {
-      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
-    }
+    await executeSendFileMessage({
+      file,
+      username: session.value.username,
+      uploadProgress,
+      messages,
+      actionError,
+      clearActionError,
+      scrollToBottom,
+      normalizeError,
+      doUpload: (f, onProgress) => client.uploadAndSendGroupFile(waddleId, channelId, f, onProgress),
+    });
   }
 
   async function toggleReaction(messageId: string, emoji: string) {

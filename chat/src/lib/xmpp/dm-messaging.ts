@@ -86,6 +86,7 @@ export function sendDirectFileMessage(
       ...(file.height ? { height: String(file.height) } : {}),
       url: fileUrl,
     },
+  // stanza.js types don't include XEP-0447 fileSharing/fallback custom extensions
   } as Record<string, unknown>);
   return msgId;
 }

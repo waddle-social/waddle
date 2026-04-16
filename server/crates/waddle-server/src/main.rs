@@ -10,7 +10,7 @@ mod media;
 mod messages;
 mod permissions;
 mod server;
-pub mod storage;
+pub(crate) mod storage;
 mod telemetry;
 mod vcard;
 mod waddle;

@@ -452,35 +452,37 @@ export class BrowserXmppClient {
     c: string,
     file: File | Blob,
     onProgress?: (progress: UploadProgress) => void,
-  ): Promise<string | null> {
+  ): Promise<{ msgId: string; fileUrl: string } | null> {
     await this.connect();
     await this.switchRoom(w, c);
     if (!this.xmpp) return null;
     const uploadDomain = await this.resolveUploadService();
     const result = await uploadFile(this.xmpp, file, uploadDomain, onProgress);
-    return messaging.sendGroupFileMessage(
+    const msgId = messaging.sendGroupFileMessage(
       this.xmpp,
       roomBareJidFor(this.session, w, c),
       result.getUrl,
       { name: result.filename, mediaType: result.contentType, size: result.size },
     );
+    return { msgId, fileUrl: result.getUrl };
   }
 
   async uploadAndSendDirectFile(
     peerJid: string,
     file: File | Blob,
     onProgress?: (progress: UploadProgress) => void,
-  ): Promise<string | null> {
+  ): Promise<{ msgId: string; fileUrl: string } | null> {
     await this.connect();
     if (!this.xmpp) return null;
     const uploadDomain = await this.resolveUploadService();
     const result = await uploadFile(this.xmpp, file, uploadDomain, onProgress);
-    return dmMessaging.sendDirectFileMessage(
+    const msgId = dmMessaging.sendDirectFileMessage(
       this.xmpp,
       barePeerJid(peerJid),
       result.getUrl,
       { name: result.filename, mediaType: result.contentType, size: result.size },
     );
+    return { msgId, fileUrl: result.getUrl };
   }
 
   async sendDirectMessage(peerJid: string, body: string): Promise<string | null> {

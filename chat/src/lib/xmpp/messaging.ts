@@ -139,6 +139,7 @@ export function sendGroupFileMessage(
       url: fileUrl,
     },
   };
+  // stanza.js types don't include XEP-0447 fileSharing/fallback custom extensions
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
 }
