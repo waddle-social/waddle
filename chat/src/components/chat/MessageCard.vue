@@ -165,13 +165,13 @@ watch(
   <!-- Normal message -->
   <div
     v-else
-    class="group flex gap-3 px-3 py-2 rounded-xl transition-all duration-200 animate-message-in"
+    class="group relative flex gap-3 px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
     ]"
   >
     <button
-      class="mt-0.5 rounded-lg"
+      class="mt-0.5 rounded-lg shrink-0"
       type="button"
       @click.stop="emitAvatarClick"
     >
@@ -204,23 +204,6 @@ watch(
           :title="message.readBy.join(', ')"
         >
           Read by {{ message.readBy.length }}
-        </span>
-        <!-- Action toolbar -->
-        <span v-if="message.isSelf && !isEditing" class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 ml-auto">
-          <button
-            class="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-all duration-200"
-            title="Edit message"
-            @click="startEdit"
-          >
-            <Pencil class="w-3 h-3" />
-          </button>
-          <button
-            class="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-all duration-200"
-            title="Delete message"
-            @click="emit('retract', message.id)"
-          >
-            <Trash2 class="w-3 h-3" />
-          </button>
         </span>
       </div>
 
@@ -299,8 +282,8 @@ watch(
       <!-- Normal display -->
       <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
 
-      <!-- Reactions -->
-      <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-2">
+      <!-- Existing reactions (inline, always visible when present) -->
+      <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-1.5">
         <button
           v-for="(nicks, emoji) in message.reactions"
           :key="emoji"
@@ -311,35 +294,44 @@ watch(
           <span>{{ emoji }}</span>
           <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
         </button>
-        <button
-          class="opacity-0 group-hover:opacity-100 inline-flex items-center px-2 py-0.5 text-[12px] text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-all duration-200"
-          title="Add reaction"
-          @click.stop
-        >
-          <span class="relative">
-            <SmilePlus class="w-3 h-3" />
-            <span class="absolute left-full top-1/2 -translate-y-1/2 ml-1 flex gap-0.5 whitespace-nowrap">
-              <button
-                v-for="e in quickEmojis"
-                :key="e"
-                class="hover:scale-125 transition-transform duration-150"
-                @click="emit('react', message.id, e)"
-              >{{ e }}</button>
-            </span>
-          </span>
-        </button>
       </div>
+    </div>
 
-      <!-- Quick react (no reactions yet) -->
-      <div v-else class="opacity-0 group-hover:opacity-100 flex gap-0.5 mt-1.5 transition-opacity">
+    <!-- Floating action toolbar — absolute so no layout space when hidden -->
+    <div
+      v-if="!isEditing"
+      class="absolute -top-3 right-3 z-10 opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto transition-opacity duration-150 flex items-center gap-0.5 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1"
+    >
+      <button
+        v-for="e in quickEmojis"
+        :key="e"
+        class="h-6 w-6 flex items-center justify-center text-[14px] leading-none rounded-md hover:bg-muted hover:scale-110 transition-all duration-150"
+        :title="`React with ${e}`"
+        @click="emit('react', message.id, e)"
+      >{{ e }}</button>
+      <button
+        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        title="Add reaction"
+      >
+        <SmilePlus class="w-3.5 h-3.5" />
+      </button>
+      <template v-if="message.isSelf">
+        <div class="w-px h-4 bg-border mx-0.5" />
         <button
-          v-for="e in quickEmojis"
-          :key="e"
-          class="text-[13px] hover:scale-125 transition-transform duration-150 p-0.5"
-          :title="`React with ${e}`"
-          @click="emit('react', message.id, e)"
-        >{{ e }}</button>
-      </div>
+          class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+          title="Edit message"
+          @click="startEdit"
+        >
+          <Pencil class="w-3.5 h-3.5" />
+        </button>
+        <button
+          class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
+          title="Delete message"
+          @click="emit('retract', message.id)"
+        >
+          <Trash2 class="w-3.5 h-3.5" />
+        </button>
+      </template>
     </div>
   </div>
 </template>

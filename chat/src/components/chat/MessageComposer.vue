@@ -296,7 +296,7 @@ watch(
     </div>
 
     <button
-      class="h-9 w-9 flex items-center justify-center rounded-xl transition-all duration-200 flex-shrink-0"
+      class="h-10 w-10 flex items-center justify-center rounded-xl transition-all duration-200 flex-shrink-0"
       :class="showGifPicker ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-primary'"
       title="GIF"
       :disabled="disabled"
