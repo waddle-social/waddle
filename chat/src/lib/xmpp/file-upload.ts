@@ -163,10 +163,15 @@ function parseSlotResponse(response: any): SlotInfo {
     throw new Error("Upload slot response missing: server did not return a valid slot");
   }
 
+  // stanza.js XEP-0363 mapping:
+  //   <put url="...">  -> slot.upload.url  (with headers at slot.upload.headers)
+  //   <get url="..."/> -> slot.download     (plain string)
+  // Fall back to raw XML property names (slot.put / slot.get) for other parsers.
   const putUrl: string | undefined =
-    slot.put?.url ?? slot.put?.href ?? (typeof slot.put === "string" ? slot.put : undefined);
+    slot.upload?.url ?? slot.put?.url ?? (typeof slot.put === "string" ? slot.put : undefined);
   const getUrl: string | undefined =
-    slot.get?.url ?? slot.get?.href ?? (typeof slot.get === "string" ? slot.get : undefined);
+    (typeof slot.download === "string" ? slot.download : undefined) ??
+    slot.get?.url ?? (typeof slot.get === "string" ? slot.get : undefined);
 
   if (!putUrl || !getUrl) {
     throw new Error("Upload slot missing PUT or GET URL");
@@ -174,7 +179,7 @@ function parseSlotResponse(response: any): SlotInfo {
 
   // Extract optional headers the server requires on the PUT request
   const putHeaders: Array<[string, string]> = [];
-  const rawHeaders = slot.put?.headers ?? slot.put?.header ?? [];
+  const rawHeaders = slot.upload?.headers ?? slot.put?.headers ?? slot.put?.header ?? [];
   const headerList = Array.isArray(rawHeaders) ? rawHeaders : [rawHeaders];
   for (const h of headerList) {
     if (h && typeof h.name === "string" && typeof h.value === "string") {
