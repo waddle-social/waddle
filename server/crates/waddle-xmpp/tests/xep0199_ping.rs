@@ -5,8 +5,7 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, ping_query, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, ping_query, RawXmppClient, TestServer,
 };
 
 #[tokio::test]

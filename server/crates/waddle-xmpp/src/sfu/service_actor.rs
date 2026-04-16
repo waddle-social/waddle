@@ -38,13 +38,8 @@ impl SfuServiceActor {
 
     async fn resolve_candidate_addr(&self) -> SocketAddr {
         if let Ok(raw_addr) = std::env::var("WADDLE_SFU_CANDIDATE_ADDR") {
-            match raw_addr.parse::<SocketAddr>() {
-                Ok(candidate_addr) => return candidate_addr,
-                Err(err) => warn!(
-                    value = %raw_addr,
-                    error = %err,
-                    "Ignoring invalid WADDLE_SFU_CANDIDATE_ADDR"
-                ),
+            if let Some(candidate_addr) = Self::resolve_env_candidate(&raw_addr).await {
+                return candidate_addr;
             }
         }
 
@@ -90,6 +85,58 @@ impl SfuServiceActor {
             "Falling back to loopback SFU candidate address; set WADDLE_SFU_CANDIDATE_ADDR for production"
         );
         fallback
+    }
+
+    /// Parse `WADDLE_SFU_CANDIDATE_ADDR` as either an `ip:port` literal or a
+    /// `host:port` that resolves via DNS. Returns `None` for empty values or
+    /// when resolution yields no usable address (logging a warning in that
+    /// case), so callers can fall back to other discovery paths.
+    async fn resolve_env_candidate(raw_addr: &str) -> Option<SocketAddr> {
+        let trimmed = raw_addr.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        if let Ok(candidate_addr) = trimmed.parse::<SocketAddr>() {
+            return Some(candidate_addr);
+        }
+
+        match tokio::net::lookup_host(trimmed).await {
+            Ok(addresses) => {
+                let resolved: Vec<SocketAddr> = addresses
+                    .filter(|addr| {
+                        let ip = addr.ip();
+                        !ip.is_unspecified() && !ip.is_loopback()
+                    })
+                    .collect();
+                if let Some(addr) = resolved
+                    .iter()
+                    .copied()
+                    .find(|a| a.is_ipv4())
+                    .or_else(|| resolved.first().copied())
+                {
+                    info!(
+                        value = %trimmed,
+                        candidate = %addr,
+                        "Resolved WADDLE_SFU_CANDIDATE_ADDR via DNS"
+                    );
+                    return Some(addr);
+                }
+                warn!(
+                    value = %trimmed,
+                    "WADDLE_SFU_CANDIDATE_ADDR resolved but produced no usable addresses"
+                );
+                None
+            }
+            Err(err) => {
+                warn!(
+                    value = %trimmed,
+                    error = %err,
+                    "Failed to resolve WADDLE_SFU_CANDIDATE_ADDR; ignoring"
+                );
+                None
+            }
+        }
     }
 
     async fn handle_session_initiate(
@@ -323,5 +370,45 @@ mod tests {
         // Actor spawned successfully
         let key = RoomKey("test".to_string());
         assert!(registry.get_room(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_env_candidate_accepts_ip_literal() {
+        let addr = SfuServiceActor::resolve_env_candidate("198.51.100.7:30000").await;
+        assert_eq!(
+            addr,
+            Some("198.51.100.7:30000".parse().expect("valid addr"))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_env_candidate_trims_whitespace_around_ip_literal() {
+        let addr = SfuServiceActor::resolve_env_candidate("  198.51.100.7:30000  ").await;
+        assert_eq!(
+            addr,
+            Some("198.51.100.7:30000".parse().expect("valid addr"))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_env_candidate_returns_none_for_empty() {
+        assert_eq!(SfuServiceActor::resolve_env_candidate("").await, None);
+        assert_eq!(SfuServiceActor::resolve_env_candidate("   ").await, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_env_candidate_returns_none_for_unresolvable_hostname() {
+        // RFC 2606 reserves .invalid for guaranteed non-resolution.
+        let addr = SfuServiceActor::resolve_env_candidate(
+            "definitely-not-a-real-host.waddle.invalid:30000",
+        )
+        .await;
+        assert_eq!(addr, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_env_candidate_returns_none_for_garbage() {
+        let addr = SfuServiceActor::resolve_env_candidate("not a socket addr").await;
+        assert_eq!(addr, None);
     }
 }

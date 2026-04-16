@@ -24,11 +24,15 @@ enum ForwardEvent {
         kind: MediaKind,
     },
     /// Media data received from a peer — forward to all others in the room.
+    ///
+    /// `MediaData` is boxed to keep `ForwardEvent` small: without this the
+    /// media variant dominates the enum size and every other variant pays the
+    /// cost (`clippy::large_enum_variant`).
     Media {
         source_sid: String,
         room_key: RoomKey,
         source_kind: MediaKind,
-        data: MediaData,
+        data: Box<MediaData>,
     },
     /// A peer requested a keyframe — forward to the source of that track.
     Keyframe {
@@ -191,7 +195,7 @@ pub async fn spawn_sfu_net_loop(
                                             source_sid: sid.clone(),
                                             room_key: peer_room_key.clone(),
                                             source_kind: kind,
-                                            data,
+                                            data: Box::new(data),
                                         });
                                     }
                                     Event::KeyframeRequest(req) => {

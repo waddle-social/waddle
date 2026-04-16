@@ -4,10 +4,7 @@
 
 mod common;
 
-use common::{
-    disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer,
-    DEFAULT_TIMEOUT,
-};
+use common::{disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer};
 
 #[tokio::test]
 async fn xep0352_server_disco_advertises_csi() {

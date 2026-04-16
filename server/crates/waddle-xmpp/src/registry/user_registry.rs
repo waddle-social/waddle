@@ -261,7 +261,7 @@ mod tests {
 
         let mut users = registry.ask(ListUsers).await.expect("ask failed");
 
-        users.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        users.sort_by_key(|a| a.to_string());
 
         assert_eq!(users.len(), 2);
         assert_eq!(users[0], bare("alice"));

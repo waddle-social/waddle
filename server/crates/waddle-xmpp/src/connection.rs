@@ -3884,10 +3884,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.app_state.native_user_exists(node.as_str()).await
     }
 
-    /// Handle a disco#info query.
-    ///
-    /// Returns identity and supported features for:
-    /// - Server domain: Server identity + server features
     /// Handle a Jingle IQ addressed to the SFU component (`sfu.{domain}`).
     ///
     /// Forwards the IQ to the SfuServiceActor and sends the response back to
