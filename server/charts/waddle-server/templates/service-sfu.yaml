@@ -13,6 +13,6 @@ spec:
     - name: sfu-udp
       port: {{ .Values.sfu.udpPort }}
       targetPort: sfu-udp
-      nodePort: {{ .Values.sfu.udpPort }}
+      nodePort: {{ .Values.sfu.nodePort }}
       protocol: UDP
 {{- end }}
