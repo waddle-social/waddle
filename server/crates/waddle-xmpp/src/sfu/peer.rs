@@ -207,6 +207,29 @@ mod tests {
     }
 
     #[test]
+    fn peer_local_addr_is_the_advertised_ice_candidate_not_the_socket_bind() {
+        // Regression: the SFU UDP socket binds to 0.0.0.0:PORT for I/O, but
+        // str0m's ICE agent matches incoming packets to local candidates by
+        // exact `destination` address. The net loop must label received
+        // packets with `peer.local_addr()` (the candidate we registered via
+        // `Candidate::host(local_addr, "udp")`), otherwise str0m silently
+        // discards every STUN request with
+        // "Discarding STUN request on unknown interface: 0.0.0.0:PORT"
+        // and ICE never completes. See net.rs Branch 1.
+        let advertised: SocketAddr = "203.0.113.42:30000".parse().expect("valid addr");
+        let peer = SfuPeer::new_for_testing(
+            "regression-sid".to_string(),
+            RoomKey("w_c".to_string()),
+            advertised,
+        );
+        assert_eq!(
+            peer.local_addr(),
+            advertised,
+            "peer.local_addr() must return the advertised candidate, not any socket bind address"
+        );
+    }
+
+    #[test]
     fn iceudp_host_candidate_round_trips_into_str0m() {
         use crate::xep::xep0176::{CandidateType, IceUdpCandidate};
         let c = IceUdpCandidate::new(

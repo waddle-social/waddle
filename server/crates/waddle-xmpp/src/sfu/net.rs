@@ -78,24 +78,33 @@ pub async fn spawn_sfu_net_loop(
                         trace!(src = %source, len = len, "SFU UDP packet received");
 
                         let now = Instant::now();
-                        let receive = match Receive::new(
-                            Protocol::Udp,
-                            source,
-                            local_addr,
-                            &buf[..len],
-                        ) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                trace!(error = %e, "Failed to parse incoming datagram");
-                                continue;
-                            }
-                        };
-
-                        let input = Input::Receive(now, receive);
-
                         let mut peers = peer_store.peers().write().await;
                         let mut matched = false;
+
+                        // Each peer declares its own public ICE candidate address
+                        // (e.g. the NodePort-reachable IP:port). The socket is
+                        // bound to 0.0.0.0:PORT for I/O, but str0m's ICE agent
+                        // matches incoming packets to local candidates by exact
+                        // `destination` address. Label the packet with the peer's
+                        // candidate address — NOT the socket's bind address — so
+                        // str0m finds the registered candidate and emits the STUN
+                        // binding response. Using `local_addr` here (0.0.0.0:PORT)
+                        // silently discards every STUN request with
+                        // "Discarding STUN request on unknown interface".
                         for peer in peers.values_mut() {
+                            let receive = match Receive::new(
+                                Protocol::Udp,
+                                source,
+                                peer.local_addr(),
+                                &buf[..len],
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    trace!(error = %e, "Failed to parse incoming datagram");
+                                    break;
+                                }
+                            };
+                            let input = Input::Receive(now, receive);
                             if peer.accepts(&input) {
                                 if let Err(e) = peer.handle_input(input) {
                                     warn!(sid = %peer.sid, error = %e, "Peer failed to handle input");
