@@ -24,7 +24,7 @@ use waddle_xmpp::{
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
         build_disco_items_response, parse_disco_info_query, parse_disco_items_query,
-        spaces_service_features, DiscoItem, Feature, Identity,
+        spaces_service_features, upload_service_features, DiscoItem, Feature, Identity,
     },
     mam::{
         add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
@@ -48,6 +48,10 @@ use crate::server::routes::waddles::{
 };
 use crate::server::AppState;
 use waddle_xmpp::auth::ScramServer;
+use waddle_xmpp::xep::xep0363::{
+    build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
+    parse_upload_request, sanitize_filename, UploadError, UploadSlot,
+};
 
 /// WebSocket state containing all necessary registries for message routing
 pub struct WebSocketState {
@@ -1366,6 +1370,15 @@ async fn handle_iq(
                 return vec![iq_to_xml(response)];
             }
 
+            // Disco info on upload service (XEP-0363)
+            let upload_domain = format!("upload.{domain}");
+            if to.as_deref() == Some(upload_domain.as_str()) {
+                let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
+                let features = upload_service_features();
+                let response = build_disco_info_response(request_iq, &identities, &features, None);
+                return vec![iq_to_xml(response)];
+            }
+
             // Disco info on server
             let identities = vec![Identity::server(Some("Waddle"))];
             let features = vec![
@@ -1536,9 +1549,13 @@ async fn handle_iq(
             }
 
             debug!("Disco items query on server");
+            let upload_domain = format!("upload.{domain}");
+            let sfu_domain = format!("sfu.{domain}");
             let items = vec![
                 DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
+                DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                 DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
+                DiscoItem::sfu_service(&sfu_domain, Some("Waddle SFU")),
             ];
             let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
@@ -1696,6 +1713,96 @@ async fn handle_iq(
     if frame.contains("urn:xmpp:carbons:") {
         debug!("Carbons request");
         return vec![build_iq_result_xml(&id, response_from, response_to, None)];
+    }
+
+    // XEP-0363: HTTP File Upload slot request
+    if frame.contains("urn:xmpp:http:upload:0") {
+        if let Some(request_iq) = parsed_iq.as_ref() {
+            if is_upload_request(request_iq) {
+                let request = match parse_upload_request(request_iq) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        return vec![build_upload_error(&id, &e)];
+                    }
+                };
+
+                // Check file size limits (default 10 MB)
+                let max_size: u64 = std::env::var("WADDLE_MAX_UPLOAD_SIZE")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(10 * 1024 * 1024);
+
+                if request.size > max_size {
+                    return vec![build_upload_error(
+                        &id,
+                        &UploadError::FileTooLarge { max_size },
+                    )];
+                }
+
+                let safe_filename = sanitize_filename(&request.filename);
+                let content_type =
+                    effective_content_type(request.content_type.as_deref()).to_string();
+                let slot_id = uuid::Uuid::new_v4().to_string();
+                let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
+
+                let base_url = std::env::var("WADDLE_BASE_URL")
+                    .unwrap_or_else(|_| format!("https://{}", domain));
+                let base_url = base_url.trim_end_matches('/');
+                let put_url = format!("{}/api/upload/{}", base_url, slot_id);
+                let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
+
+                let db = state.app_state.db_pool.global();
+                let conn = match db.guard().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to connect to database for upload slot");
+                        return vec![build_upload_error(
+                            &id,
+                            &UploadError::InternalError(format!("Database error: {}", e)),
+                        )];
+                    }
+                };
+
+                if let Err(e) = conn
+                    .execute(
+                        "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                        libsql::params![
+                            slot_id.clone(),
+                            authenticated_session
+                                .as_ref()
+                                .map(|s| format!("{}@{}", s.xmpp_localpart, domain))
+                                .unwrap_or_else(|| "unknown@localhost".to_string()),
+                            safe_filename.clone(),
+                            request.size as i64,
+                            content_type.clone(),
+                            expires_at,
+                        ],
+                    )
+                    .await
+                {
+                    warn!(error = %e, "Failed to create upload slot in database");
+                    return vec![build_upload_error(
+                        &id,
+                        &UploadError::InternalError(format!("Database error: {}", e)),
+                    )];
+                }
+
+                debug!(
+                    slot_id = %slot_id,
+                    put_url = %put_url,
+                    get_url = %get_url,
+                    "Created upload slot via WebSocket"
+                );
+
+                let slot = UploadSlot {
+                    put_url,
+                    put_headers: vec![("Content-Type".to_string(), content_type)],
+                    get_url,
+                };
+                let response = build_upload_slot_response(request_iq, &slot);
+                return vec![iq_to_xml(response)];
+            }
+        }
     }
 
     // Unknown IQ - log it and return error
