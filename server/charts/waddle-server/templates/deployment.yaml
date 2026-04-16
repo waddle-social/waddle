@@ -60,6 +60,10 @@ spec:
             - secretRef:
                 name: {{ include "waddle-server.secretName" . }}
             {{- end }}
+            {{- range .Values.extraSecretRefs }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
           env:
             - name: WADDLE_DB_PATH
               value: {{ printf "%s/%s" .Values.persistence.mountPath .Values.persistence.dbFileName | quote }}

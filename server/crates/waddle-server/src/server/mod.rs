@@ -64,20 +64,39 @@ pub struct AppState {
     pub db_pool: Arc<DatabasePool>,
     /// Media backend used for call session generation.
     pub media_backend: Arc<dyn MediaBackend>,
+    /// Blob storage backend for file uploads (XEP-0363).
+    pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
 }
 
 impl AppState {
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
-        Self::new_with_media(db_pool, build_media_backend(&MediaConfig::default()))
+        let blob_storage = crate::storage::build_blob_storage()
+            .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
+        Self::new_with_deps(
+            db_pool,
+            build_media_backend(&MediaConfig::default()),
+            blob_storage,
+        )
     }
 
     pub fn new_with_media(
         db_pool: Arc<DatabasePool>,
         media_backend: Arc<dyn MediaBackend>,
     ) -> Self {
+        let blob_storage = crate::storage::build_blob_storage()
+            .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
+        Self::new_with_deps(db_pool, media_backend, blob_storage)
+    }
+
+    pub fn new_with_deps(
+        db_pool: Arc<DatabasePool>,
+        media_backend: Arc<dyn MediaBackend>,
+        blob_storage: Arc<dyn crate::storage::BlobStorage>,
+    ) -> Self {
         Self {
             db_pool,
             media_backend,
+            blob_storage,
         }
     }
 }
@@ -455,9 +474,12 @@ pub async fn start_with_config(
 
     // Create HTTP state (shares db_pool via Arc)
     let media_backend = build_media_backend(&server_config.media);
-    let state = Arc::new(AppState::new_with_media(
+    let blob_storage = crate::storage::build_blob_storage()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
+    let state = Arc::new(AppState::new_with_deps(
         Arc::clone(&db_pool),
         media_backend,
+        blob_storage,
     ));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;

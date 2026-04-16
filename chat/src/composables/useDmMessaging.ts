@@ -11,6 +11,7 @@ import type {
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
+import { executeSendFileMessage } from "./sendFileMessageHelper";
 
 function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -45,6 +46,7 @@ export function useDmMessaging(
   const typingUsers = ref<string[]>([]);
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
+  const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const latestCallInvite = ref<{ peerJid: string; invite: CallInviteInfo; fromNick: string } | null>(null);
 
   let messageRequestId = 0;
@@ -263,6 +265,24 @@ export function useDmMessaging(
     }
   }
 
+  async function sendFileMessage(file: File | Blob) {
+    const client = xmppClient.value;
+    const peerJid = activePeerJid.value;
+    if (!client || !peerJid || !session.value) return;
+
+    await executeSendFileMessage({
+      file,
+      username: session.value.username,
+      uploadProgress,
+      messages,
+      actionError,
+      clearActionError,
+      scrollToBottom,
+      normalizeError,
+      doUpload: (f, onProgress) => client.uploadAndSendDirectFile(peerJid, f, onProgress),
+    });
+  }
+
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activePeerJid.value || !session.value) return;
     const msg = messages.value.find((m) => m.id === messageId);
@@ -413,6 +433,8 @@ export function useDmMessaging(
     latestCallInvite,
     loadMessages,
     sendMessage,
+    sendFileMessage,
+    uploadProgress,
     editMessage,
     retractMessage,
     toggleReaction,

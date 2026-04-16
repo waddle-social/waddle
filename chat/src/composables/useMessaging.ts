@@ -14,6 +14,7 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
+import { executeSendFileMessage } from "./sendFileMessageHelper";
 
 function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -78,6 +79,7 @@ export function useMessaging(
   const roomPresence = ref<RoomPresence>({});
   const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
+  const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
   const activeChannels = ref<Set<string>>(new Set());
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
@@ -530,6 +532,25 @@ export function useMessaging(
     }
   }
 
+  async function sendFileMessage(file: File | Blob) {
+    const client = xmppClient.value;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!client || !waddleId || !channelId || !session.value) return;
+
+    await executeSendFileMessage({
+      file,
+      username: session.value.username,
+      uploadProgress,
+      messages,
+      actionError,
+      clearActionError,
+      scrollToBottom,
+      normalizeError,
+      doUpload: (f, onProgress) => client.uploadAndSendGroupFile(waddleId, channelId, f, onProgress),
+    });
+  }
+
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !session.value)
       return;
@@ -696,6 +717,8 @@ export function useMessaging(
     loadMessages,
     selectChannel,
     sendMessage,
+    sendFileMessage,
+    uploadProgress,
     editMessage,
     retractMessage,
     moderateMessage,

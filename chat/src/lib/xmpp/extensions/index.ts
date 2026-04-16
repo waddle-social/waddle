@@ -4,6 +4,7 @@ import hats from "./hats";
 import references from "./references";
 import retraction from "./retraction";
 import reactions from "./reactions";
+import fallback from "./fallback";
 import fileSharing from "./file-sharing";
 import stickers from "./stickers";
 import calls from "./calls";
@@ -16,6 +17,7 @@ const allDefinitions = [
   ...references,
   ...retraction,
   ...reactions,
+  ...fallback,
   ...fileSharing,
   ...stickers,
   ...calls,

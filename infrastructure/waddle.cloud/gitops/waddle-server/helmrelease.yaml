@@ -23,6 +23,10 @@ spec:
     config:
       baseUrl: https://xmpp.waddle.social
       corsOrigins: https://waddle.chat,http://localhost:4321
+      s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
+      s3Bucket: "waddle-server-files"
+    extraSecretRefs:
+      - waddle-r2-credentials
     xmpp:
       domain: waddle.social
       mamDbPath: /data/mam.db

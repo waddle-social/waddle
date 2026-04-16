@@ -1,6 +1,8 @@
 /** XEP-0363: HTTP File Upload for sharing images and files in chat. */
 import type { Agent } from "stanza";
 
+export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+
 export interface UploadResult {
   getUrl: string;
   filename: string;
@@ -28,16 +30,17 @@ export async function discoverUploadService(xmpp: Agent, domain: string): Promis
   try {
     const items = await xmpp.getDiscoItems(domain);
 
-    for (const item of items.items ?? []) {
-      try {
+    const results = await Promise.allSettled(
+      (items.items ?? []).map(async (item) => {
         const info = await xmpp.getDiscoInfo(item.jid);
         const hasUpload = info.features?.some(
           (f: any) => f === "urn:xmpp:http:upload:0" || f.var === "urn:xmpp:http:upload:0",
         );
-        if (hasUpload) return item.jid ?? null;
-      } catch {
-        continue;
-      }
+        return hasUpload ? item.jid : null;
+      }),
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) return r.value;
     }
     return null;
   } catch {

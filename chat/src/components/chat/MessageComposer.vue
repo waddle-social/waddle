@@ -5,6 +5,7 @@ import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import { extractImageFromEvent } from "@/lib/xmpp/file-upload";
 import type { MarkupSpan } from "@/lib/chat-ui";
 
 const draft = defineModel<string>("draft", { required: true });
@@ -16,12 +17,14 @@ const props = defineProps<{
   tenorApiKey: string;
   memberNames: string[];
   slowModeCooldown: number;
+  uploadProgress: { uploading: boolean; progress: number; filename: string };
 }>();
 
 const emit = defineEmits<{
   send: [body: string, markup: MarkupSpan[]];
   typing: [];
   selectGif: [url: string];
+  fileUpload: [file: File | Blob];
 }>();
 
 const showGifPicker = ref(false);
@@ -210,6 +213,14 @@ function onGifSelected(url: string) {
   emit("selectGif", url);
 }
 
+function onPaste(e: ClipboardEvent) {
+  const file = extractImageFromEvent(e);
+  if (file) {
+    e.preventDefault();
+    emit("fileUpload", file);
+  }
+}
+
 // Clear editor content when draft is reset externally (e.g. after successful send)
 watch(
   () => draft.value,
@@ -222,7 +233,23 @@ watch(
 </script>
 
 <template>
-  <div class="relative px-4 py-3 flex items-center gap-2.5 flex-shrink-0" @keydown="onKeydown">
+  <div class="relative px-4 py-3 flex-shrink-0" @keydown="onKeydown" @paste="onPaste">
+    <!-- Upload progress bar -->
+    <div
+      v-if="uploadProgress.uploading"
+      class="flex items-center gap-2 text-[11px] text-muted-foreground mb-2 animate-fade-in"
+    >
+      <span class="truncate max-w-40">Uploading {{ uploadProgress.filename }}...</span>
+      <div class="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+        <div
+          class="h-full bg-primary rounded-full transition-all duration-300"
+          :style="{ width: `${Math.round(uploadProgress.progress * 100)}%` }"
+        />
+      </div>
+      <span class="tabular-nums font-mono">{{ Math.round(uploadProgress.progress * 100) }}%</span>
+    </div>
+
+    <div class="flex items-center gap-2.5">
     <GifPicker
       v-if="showGifPicker"
       :api-key="tenorApiKey"
@@ -293,5 +320,6 @@ watch(
       <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
       <Send v-else class="w-4 h-4" />
     </button>
+    </div>
   </div>
 </template>

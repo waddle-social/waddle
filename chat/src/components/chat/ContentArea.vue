@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Hash, MessageCircle, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff } from "lucide-vue-next";
+import { Hash, MessageCircle, Settings, Search, X, Phone, Video, PhoneOff, Mic, MicOff, VideoOff, Upload } from "lucide-vue-next";
+import { extractImageFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { MujiCallPhase, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
@@ -48,12 +49,14 @@ const props = defineProps<{
   mujiError: string;
   mujiLocalStream: MediaStream | null;
   mujiRemoteParticipants: Map<string, { jid: string; stream: MediaStream }>;
+  uploadProgress: { uploading: boolean; progress: number; filename: string };
 }>();
 
 const emit = defineEmits<{
   send: [body: string, markup: MarkupSpan[]];
   typing: [];
   selectGif: [url: string];
+  fileUpload: [file: File | Blob];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
@@ -121,6 +124,32 @@ function openPopoverDm() {
   popoverAuthor.value = null;
 }
 
+// -- Drag-and-drop file upload --
+const isDragging = ref(false);
+let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function onDragEnter(e: DragEvent) {
+  e.preventDefault();
+  if (!e.dataTransfer?.types.includes("Files")) return;
+  if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
+  isDragging.value = true;
+}
+
+function onDragOver(e: DragEvent) {
+  e.preventDefault();
+}
+
+function onDragLeave() {
+  dragLeaveTimeout = setTimeout(() => { isDragging.value = false; }, 50);
+}
+
+function onDrop(e: DragEvent) {
+  e.preventDefault();
+  isDragging.value = false;
+  const file = extractImageFromEvent(e);
+  if (file) emit("fileUpload", file);
+}
+
 // XEP-0333: Send displayed marker for the latest non-self message
 watch(
   () => props.messages,
@@ -135,7 +164,22 @@ watch(
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0 min-h-0 bg-background">
+  <div
+    class="flex-1 flex flex-col min-w-0 min-h-0 bg-background relative"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
+    <!-- Drop zone overlay -->
+    <div
+      v-if="isDragging"
+      class="absolute inset-0 z-50 bg-primary/10 border-2 border-dashed border-primary rounded-xl flex flex-col items-center justify-center pointer-events-none animate-fade-in"
+    >
+      <Upload class="w-8 h-8 text-primary mb-2" />
+      <span class="text-primary font-display font-bold text-lg">Drop image to upload</span>
+    </div>
+
     <!-- Header — sleek, floating feel -->
     <div class="h-14 border-b border-border px-6 flex items-center justify-between flex-shrink-0 glass-surface">
       <div class="flex items-center gap-3">
@@ -390,9 +434,11 @@ watch(
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
+      :upload-progress="uploadProgress"
       @send="(body, markup) => emit('send', body, markup)"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
+      @file-upload="(file) => emit('fileUpload', file)"
     />
     <UserPopover
       :open="!!popoverAuthor"

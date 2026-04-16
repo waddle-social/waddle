@@ -32,6 +32,12 @@ data:
   {{- if .Values.telemetry.serviceVersion }}
   OTEL_SERVICE_VERSION: {{ .Values.telemetry.serviceVersion | quote }}
   {{- end }}
+  {{- if .Values.config.s3Endpoint }}
+  WADDLE_S3_ENDPOINT: {{ .Values.config.s3Endpoint | quote }}
+  {{- end }}
+  {{- if .Values.config.s3Bucket }}
+  WADDLE_S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
+  {{- end }}
   {{- range $key, $value := .Values.config.extraEnv }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}

@@ -18,32 +18,22 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, instrument, warn};
 
-/// Extended application state for upload routes
+/// Extended application state for upload routes.
+///
+/// File storage is delegated to the `BlobStorage` trait on `AppState`,
+/// which may be local filesystem or S3-compatible (e.g. Cloudflare R2).
 pub struct UploadState {
-    /// Core app state
+    /// Core app state (includes blob storage backend)
     pub app_state: Arc<AppState>,
-    /// Base directory for file storage
-    pub upload_dir: PathBuf,
 }
 
 impl UploadState {
     /// Create new upload state
     pub fn new(app_state: Arc<AppState>) -> Self {
-        // Get upload directory from environment or use default
-        let upload_dir = std::env::var("WADDLE_UPLOAD_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./uploads"));
-
-        Self {
-            app_state,
-            upload_dir,
-        }
+        Self { app_state }
     }
 
     /// Get the global database reference
@@ -368,51 +358,18 @@ pub async fn upload_handler(
         }
     }
 
-    // Create storage directory if it doesn't exist
-    let slot_dir = state.upload_dir.join(&slot_id);
-    if let Err(err) = fs::create_dir_all(&slot_dir).await {
-        error!("Failed to create upload directory {:?}: {}", slot_dir, err);
-        return upload_error_to_response(UploadError::Storage(format!(
-            "Failed to create storage directory: {}",
-            err
-        )))
-        .into_response();
-    }
-
-    // Build file path: upload_dir/slot_id/filename
-    let file_path = slot_dir.join(&slot.filename);
+    // Store via blob storage backend (local filesystem or S3/R2)
     let storage_key = format!("{}/{}", slot_id, slot.filename);
 
-    // Write file to disk
-    let mut file = match fs::File::create(&file_path).await {
-        Ok(f) => f,
-        Err(err) => {
-            error!("Failed to create file {:?}: {}", file_path, err);
-            return upload_error_to_response(UploadError::Storage(format!(
-                "Failed to create file: {}",
-                err
-            )))
-            .into_response();
-        }
-    };
-
-    // Write the body bytes to file
-    if let Err(err) = file.write_all(&body).await {
-        error!("Failed to write to file: {}", err);
-        // Clean up partial file
-        let _ = fs::remove_file(&file_path).await;
+    if let Err(err) = state
+        .app_state
+        .blob_storage
+        .put(&storage_key, body.clone(), &slot.content_type)
+        .await
+    {
+        error!("Failed to store blob: {}", err);
         return upload_error_to_response(UploadError::Storage(format!(
-            "Failed to write file: {}",
-            err
-        )))
-        .into_response();
-    }
-
-    // Sync file to disk
-    if let Err(err) = file.sync_all().await {
-        error!("Failed to sync file: {}", err);
-        return upload_error_to_response(UploadError::Storage(format!(
-            "Failed to sync file: {}",
+            "Failed to store file: {}",
             err
         )))
         .into_response();
@@ -421,14 +378,12 @@ pub async fn upload_handler(
     // Update slot status in database
     if let Err(err) = mark_slot_uploaded(state.global_db(), &slot_id, &storage_key).await {
         error!("Failed to update slot status: {}", err);
-        // File is written but database update failed - this is a problem
-        // We should still return success since the file is stored
         warn!("File uploaded but database status update failed");
     }
 
     info!(
-        "Upload complete: {} bytes written to {:?}",
-        body_size, file_path
+        "Upload complete: {} bytes stored at {}",
+        body_size, storage_key
     );
 
     StatusCode::CREATED.into_response()
@@ -505,24 +460,19 @@ pub async fn download_handler(
         }
     };
 
-    // Build file path
-    let file_path = state.upload_dir.join(&storage_key);
-
-    // Check if file exists
-    if !file_path.exists() {
-        error!("File not found on disk: {:?}", file_path);
-        return upload_error_to_response(UploadError::FileNotFound(format!(
-            "File '{}' not found on server",
-            filename
-        )))
-        .into_response();
-    }
-
-    // Read file
-    let file_contents = match fs::read(&file_path).await {
-        Ok(data) => data,
+    // Retrieve from blob storage backend
+    let (file_contents, blob_meta) = match state.app_state.blob_storage.get(&storage_key).await {
+        Ok(result) => result,
+        Err(crate::storage::StorageError::NotFound(_)) => {
+            error!("File not found in storage: {}", storage_key);
+            return upload_error_to_response(UploadError::FileNotFound(format!(
+                "File '{}' not found on server",
+                filename
+            )))
+            .into_response();
+        }
         Err(err) => {
-            error!("Failed to read file {:?}: {}", file_path, err);
+            error!("Failed to read from storage: {}", err);
             return upload_error_to_response(UploadError::Storage(format!(
                 "Failed to read file: {}",
                 err
@@ -534,23 +484,25 @@ pub async fn download_handler(
     // Build response with appropriate headers
     let mut headers = HeaderMap::new();
 
-    // Set Content-Type
-    if let Ok(content_type) = slot.content_type.parse() {
-        headers.insert(header::CONTENT_TYPE, content_type);
+    // Use content-type from blob metadata (authoritative), fall back to DB
+    let content_type = if blob_meta.content_type != "application/octet-stream" {
+        blob_meta.content_type
+    } else {
+        slot.content_type
+    };
+    if let Ok(ct) = content_type.parse() {
+        headers.insert(header::CONTENT_TYPE, ct);
     }
 
-    // Set Content-Length
     if let Ok(content_length) = file_contents.len().to_string().parse() {
         headers.insert(header::CONTENT_LENGTH, content_length);
     }
 
-    // Set Content-Disposition for download
     let disposition = format!("inline; filename=\"{}\"", slot.filename);
     if let Ok(disp) = disposition.parse() {
         headers.insert(header::CONTENT_DISPOSITION, disp);
     }
 
-    // Set Cache-Control for immutable files
     if let Ok(cache) = "public, max-age=31536000, immutable".parse() {
         headers.insert(header::CACHE_CONTROL, cache);
     }
@@ -573,7 +525,7 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn create_test_upload_state() -> Arc<UploadState> {
+    async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig::default();
         let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
@@ -582,16 +534,20 @@ mod tests {
         let runner = MigrationRunner::global();
         runner.run(db_pool.global()).await.unwrap();
 
-        let app_state = Arc::new(AppState::new(Arc::new(db_pool)));
-
-        // Create upload state with temp directory
+        // Create temp dir for local blob storage
         let upload_dir = std::env::temp_dir().join(format!("waddle-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&upload_dir).unwrap();
 
-        Arc::new(UploadState {
-            app_state,
-            upload_dir,
-        })
+        let blob_storage: Arc<dyn crate::storage::BlobStorage> =
+            Arc::new(crate::storage::LocalStorage::new(upload_dir.clone()));
+
+        let app_state = Arc::new(AppState::new_with_deps(
+            Arc::new(db_pool),
+            crate::media::build_media_backend(&crate::media::MediaConfig::default()),
+            blob_storage,
+        ));
+
+        (Arc::new(UploadState::new(app_state)), upload_dir)
     }
 
     async fn create_test_slot(
@@ -636,7 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_to_valid_slot() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
         let file_content = b"Hello, World!";
 
@@ -667,7 +623,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
 
         // Verify file was written
-        let file_path = state.upload_dir.join(&slot_id).join("test.txt");
+        let file_path = upload_dir.join(&slot_id).join("test.txt");
         assert!(file_path.exists());
 
         let saved_content = std::fs::read(&file_path).unwrap();
@@ -682,12 +638,12 @@ mod tests {
         assert!(slot.storage_key.is_some());
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_upload_options_cors_headers() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
         let app = router(state.clone());
 
@@ -722,12 +678,12 @@ mod tests {
             .headers()
             .contains_key("access-control-allow-headers"));
 
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_upload_to_nonexistent_slot() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let app = router(state.clone());
 
         let response = app
@@ -750,12 +706,12 @@ mod tests {
         assert_eq!(json["error"], "slot_not_found");
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_upload_to_expired_slot() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
 
         create_expired_slot(&state, &slot_id).await;
@@ -782,12 +738,12 @@ mod tests {
         assert_eq!(json["error"], "slot_expired");
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_upload_size_mismatch() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
 
         // Create slot expecting 100 bytes
@@ -816,12 +772,12 @@ mod tests {
         assert_eq!(json["error"], "size_mismatch");
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_download_uploaded_file() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
         let file_content = b"Test file content";
 
@@ -885,12 +841,12 @@ mod tests {
         assert_eq!(body.as_ref(), file_content);
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_download_nonexistent_file() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let app = router(state.clone());
 
         let response = app
@@ -907,12 +863,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_download_pending_slot() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
 
         // Create a slot but don't upload to it
@@ -942,12 +898,12 @@ mod tests {
             .contains("not yet uploaded"));
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 
     #[tokio::test]
     async fn test_double_upload_fails() {
-        let state = create_test_upload_state().await;
+        let (state, upload_dir) = create_test_upload_state().await;
         let slot_id = uuid::Uuid::new_v4().to_string();
         let file_content = b"Hello, World!";
 
@@ -1000,6 +956,6 @@ mod tests {
         assert_eq!(json["error"], "slot_already_used");
 
         // Cleanup
-        std::fs::remove_dir_all(&state.upload_dir).ok();
+        std::fs::remove_dir_all(&upload_dir).ok();
     }
 }

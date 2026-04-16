@@ -274,6 +274,18 @@ async function sendGif(url: string) {
   await activeTarget.value.sendMessage(url);
 }
 
+const activeUploadProgress = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
+);
+
+async function sendActiveFileMessage(file: File | Blob) {
+  if (ui.sidebarMode.value === "dms") {
+    await dmMessaging.sendFileMessage(file);
+    return;
+  }
+  await messaging.sendFileMessage(file);
+}
+
 async function sendActiveMessage(body?: string, markup?: MarkupSpan[]) {
   if (ui.sidebarMode.value === "dms") {
     await dmMessaging.sendMessage();
@@ -834,9 +846,11 @@ onUnmounted(() => {
         :muji-error="muji.error.value"
         :muji-local-stream="muji.localStream.value"
         :muji-remote-participants="muji.remoteParticipants.value"
+        :upload-progress="activeUploadProgress"
         @send="sendActiveMessage"
         @typing="notifyActiveComposing"
         @select-gif="sendGif"
+        @file-upload="sendActiveFileMessage"
         @edit-message="editActiveMessage"
         @retract-message="retractActiveMessage"
         @react-message="reactActiveMessage"
