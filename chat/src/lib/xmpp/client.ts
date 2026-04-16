@@ -442,7 +442,7 @@ export class BrowserXmppClient {
     if (!this.xmpp) throw new Error("XMPP not connected");
     const domain = this.session.jid.split("@")[1] ?? "localhost";
     const jid = await discoverUploadService(this.xmpp, domain);
-    if (!jid) throw new Error("File upload service not available");
+    if (!jid) throw new Error(`File upload service not available (domain: ${domain})`);
     this.uploadServiceJid = jid;
     return jid;
   }

@@ -21,31 +21,69 @@ interface SlotInfo {
   getUrl: string;
 }
 
+const UPLOAD_FEATURE = "urn:xmpp:http:upload:0";
+
+function hasUploadFeature(info: { features?: any[] }): boolean {
+  return (
+    info.features?.some(
+      (f: any) => f === UPLOAD_FEATURE || f.var === UPLOAD_FEATURE,
+    ) ?? false
+  );
+}
+
 /**
  * Discover the HTTP Upload service JID via disco#items.
  * Looks for a service advertising urn:xmpp:http:upload:0.
+ * Falls back to querying upload.{domain} directly if standard discovery fails.
  * Returns null if not found.
  */
 export async function discoverUploadService(xmpp: Agent, domain: string): Promise<string | null> {
+  // Primary path: standard XEP-0030 disco#items discovery
   try {
     const items = await xmpp.getDiscoItems(domain);
+    const discoItems = items.items ?? [];
+
+    if (discoItems.length === 0) {
+      console.warn("[file-upload] disco#items to", domain, "returned zero items");
+    }
 
     const results = await Promise.allSettled(
-      (items.items ?? []).map(async (item) => {
+      discoItems.map(async (item) => {
         const info = await xmpp.getDiscoInfo(item.jid);
-        const hasUpload = info.features?.some(
-          (f: any) => f === "urn:xmpp:http:upload:0" || f.var === "urn:xmpp:http:upload:0",
-        );
-        return hasUpload ? item.jid : null;
+        return hasUploadFeature(info) ? item.jid : null;
       }),
     );
+
     for (const r of results) {
       if (r.status === "fulfilled" && r.value) return r.value;
     }
-    return null;
-  } catch {
-    return null;
+
+    const rejected = results.filter((r) => r.status === "rejected");
+    if (rejected.length > 0) {
+      console.warn(
+        "[file-upload] disco#info failed for",
+        rejected.length,
+        "of",
+        discoItems.length,
+        "items:",
+        rejected.map((r) => (r as PromiseRejectedResult).reason),
+      );
+    }
+  } catch (err) {
+    console.warn("[file-upload] disco#items discovery failed:", err);
   }
+
+  // Fallback: directly query upload.{domain} (known server convention)
+  const fallbackJid = `upload.${domain}`;
+  try {
+    const info = await xmpp.getDiscoInfo(fallbackJid);
+    if (hasUploadFeature(info)) return fallbackJid;
+    console.warn("[file-upload] fallback", fallbackJid, "lacks upload feature");
+  } catch (err) {
+    console.warn("[file-upload] fallback", fallbackJid, "failed:", err);
+  }
+
+  return null;
 }
 
 /**
