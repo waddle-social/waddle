@@ -3,10 +3,12 @@
 //! Receives Jingle IQs addressed to `sfu.{domain}` and dispatches them
 //! to the appropriate [`SfuRoomActor`].
 
+use super::peer::iceudp_candidate_to_str0m;
 use super::room_actor::{AddParticipant, RemoveParticipant, SfuRoomActor};
 use super::sdp;
 use super::{RoomKey, SfuRegistry};
-use crate::xep::xep0166::NS_JINGLE;
+use crate::xep::xep0166::{parse_jingle_content_element, NS_JINGLE};
+use crate::xep::xep0176::parse_ice_udp_transport_element;
 use jid::FullJid;
 use kameo::Actor;
 use minidom::Element;
@@ -219,6 +221,63 @@ impl SfuServiceActor {
         }
     }
 
+    /// Handle a trickle-ICE `transport-info` Jingle IQ by feeding each candidate
+    /// into the matching peer's str0m `Rtc`. Without this, the Rtc only has
+    /// whatever candidates were embedded in the original SDP offer and cannot
+    /// validate incoming STUN binding requests against the browser's actual
+    /// gathered candidates.
+    async fn handle_transport_info(
+        &self,
+        iq_id: String,
+        sid: String,
+        jingle: &Element,
+    ) -> JingleIqResponse {
+        let candidates: Vec<_> = jingle
+            .children()
+            .filter(|c| c.is("content", NS_JINGLE))
+            .filter_map(parse_jingle_content_element)
+            .filter_map(|content| content.transport)
+            .filter_map(|transport_el| parse_ice_udp_transport_element(&transport_el))
+            .flat_map(|transport| transport.candidates.into_iter())
+            .collect();
+
+        if candidates.is_empty() {
+            debug!(sid = %sid, "transport-info contained no candidates");
+            return JingleIqResponse::Ack { id: iq_id };
+        }
+
+        let mut peers = self.registry.peer_store.peers().write().await;
+        let Some(peer) = peers.get_mut(&sid) else {
+            warn!(
+                sid = %sid,
+                count = candidates.len(),
+                "transport-info for unknown SID; dropping candidates"
+            );
+            return JingleIqResponse::Ack { id: iq_id };
+        };
+
+        let mut accepted = 0usize;
+        for candidate in &candidates {
+            match iceudp_candidate_to_str0m(candidate) {
+                Ok(c) => {
+                    peer.add_remote_candidate(c);
+                    accepted += 1;
+                }
+                Err(err) => warn!(
+                    sid = %sid,
+                    ip = %candidate.ip,
+                    port = candidate.port,
+                    kind = %candidate.candidate_type.as_str(),
+                    error = %err,
+                    "Skipping unparseable remote candidate"
+                ),
+            }
+        }
+
+        debug!(sid = %sid, accepted, total = candidates.len(), "Added remote ICE candidates from transport-info");
+        JingleIqResponse::Ack { id: iq_id }
+    }
+
     async fn handle_session_terminate(&self, iq_id: String, sid: String) -> JingleIqResponse {
         let room_key = match RoomKey::from_session_id(&sid) {
             Some(key) => key,
@@ -336,10 +395,7 @@ impl kameo::message::Message<HandleJingleIq> for SfuServiceActor {
                     .await
             }
             "session-terminate" => self.handle_session_terminate(iq_id, sid).await,
-            "transport-info" => {
-                debug!(sid = %sid, "transport-info acknowledged (placeholder)");
-                JingleIqResponse::Ack { id: iq_id }
-            }
+            "transport-info" => self.handle_transport_info(iq_id, sid, jingle).await,
             other => {
                 warn!(action = %other, sid = %sid, "Unsupported Jingle action");
                 JingleIqResponse::Rejection {
@@ -410,5 +466,77 @@ mod tests {
     async fn resolve_env_candidate_returns_none_for_garbage() {
         let addr = SfuServiceActor::resolve_env_candidate("not a socket addr").await;
         assert_eq!(addr, None);
+    }
+
+    #[tokio::test]
+    async fn transport_info_feeds_candidates_into_peer() {
+        // Regression: transport-info IQs used to be "acknowledged (placeholder)"
+        // — trickle-ICE candidates from the browser were dropped, leaving str0m
+        // with only the candidates embedded in the initial SDP offer.
+        use crate::sfu::peer::SfuPeer;
+
+        let registry = Arc::new(SfuRegistry::new());
+        let actor = SfuServiceActor::new(
+            "sfu.waddle.social".to_string(),
+            registry.clone(),
+            "127.0.0.1:10000".parse().expect("valid addr"),
+        );
+
+        let sid = "w_c_abcdef".to_string();
+        let peer = SfuPeer::new_for_testing(
+            sid.clone(),
+            RoomKey("w_c".to_string()),
+            "127.0.0.1:10000".parse().expect("valid addr"),
+        );
+        registry.peer_store.insert(sid.clone(), peer).await;
+
+        let xml = format!(
+            "<jingle xmlns='urn:xmpp:jingle:1' action='transport-info' sid='{sid}'>\
+               <content xmlns='urn:xmpp:jingle:1' creator='initiator' name='audio' senders='both'>\
+                 <transport xmlns='urn:xmpp:jingle:transports:ice-udp:1' ufrag='abc' pwd='xyzverylong1234567890abc'>\
+                   <candidate foundation='1' component='1' protocol='udp' priority='2130706431' ip='192.0.2.1' port='3478' type='host'/>\
+                   <candidate foundation='2' component='1' protocol='udp' priority='1677721855' ip='198.51.100.7' port='54321' type='srflx'/>\
+                 </transport>\
+               </content>\
+             </jingle>"
+        );
+        let jingle = xml.parse::<Element>().expect("valid xml");
+
+        let response = actor
+            .handle_transport_info("iq-42".to_string(), sid.clone(), &jingle)
+            .await;
+        match response {
+            JingleIqResponse::Ack { id } => assert_eq!(id, "iq-42"),
+            _ => panic!("expected Ack from transport-info"),
+        }
+
+        // Peer stays alive; adding remote candidates must not tear it down.
+        let peers = registry.peer_store.peers().read().await;
+        assert!(peers.get(&sid).expect("peer present").is_alive());
+    }
+
+    #[tokio::test]
+    async fn transport_info_for_unknown_sid_is_acked_not_errored() {
+        // Unknown SIDs must not trigger an IQ error back to the client —
+        // candidates can arrive briefly after session teardown; log + Ack.
+        let registry = Arc::new(SfuRegistry::new());
+        let actor = SfuServiceActor::new(
+            "sfu.waddle.social".to_string(),
+            registry,
+            "127.0.0.1:10000".parse().expect("valid addr"),
+        );
+
+        let xml = "<jingle xmlns='urn:xmpp:jingle:1' action='transport-info' sid='bogus'>\
+                     <content xmlns='urn:xmpp:jingle:1' creator='initiator' name='audio' senders='both'>\
+                       <transport xmlns='urn:xmpp:jingle:transports:ice-udp:1'>\
+                         <candidate foundation='1' component='1' protocol='udp' priority='1' ip='192.0.2.1' port='3478' type='host'/>\
+                       </transport>\
+                     </content>\
+                   </jingle>";
+        let jingle = xml.parse::<Element>().expect("valid xml");
+        let response = actor
+            .handle_transport_info("iq-99".to_string(), "bogus".to_string(), &jingle)
+            .await;
+        assert!(matches!(response, JingleIqResponse::Ack { id } if id == "iq-99"));
     }
 }

@@ -5,13 +5,14 @@
 //!    collect media events into a queue.
 //! 2. Forward collected media data to other peers in the same room.
 
+use super::peer::ice_state_is_terminal;
 use super::{PeerStore, RoomKey};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
-use str0m::{Event, IceConnectionState, Input, Output};
+use str0m::{Event, Input, Output};
 use tokio::net::UdpSocket;
 use tracing::{debug, info, trace, warn};
 
@@ -157,7 +158,7 @@ pub async fn spawn_sfu_net_loop(
                                     }
                                     Event::IceConnectionStateChange(state) => {
                                         debug!(sid = %sid, state = ?state, "SFU peer ICE state changed");
-                                        if state == IceConnectionState::Disconnected {
+                                        if ice_state_is_terminal(state) {
                                             peer.disconnect();
                                         }
                                     }
