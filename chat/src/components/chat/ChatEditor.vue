@@ -150,6 +150,7 @@ defineExpose({
 <style>
 .chat-editor .ProseMirror {
   outline: none;
+  width: 100%;
   min-height: 1.25rem;
   max-height: 10rem;
   overflow-y: auto;
