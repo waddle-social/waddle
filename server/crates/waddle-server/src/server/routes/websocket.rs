@@ -1114,6 +1114,18 @@ async fn handle_iq(
     let response_from = to.as_deref();
     let response_to = from.as_deref();
 
+    // IQ result/error stanzas require no server response — silently accept them.
+    // This handles client acks for server-initiated IQ sets (e.g. Jingle session-accept).
+    if let Some(ref iq) = parsed_iq {
+        if matches!(
+            &iq.payload,
+            xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_)
+        ) {
+            debug!(id = %id, "Ignoring IQ result/error stanza");
+            return vec![];
+        }
+    }
+
     // Ping
     if frame.contains("urn:xmpp:ping") {
         return vec![build_iq_result_xml(&id, response_from, response_to, None)];
@@ -1177,17 +1189,24 @@ async fn handle_iq(
 
             return match response {
                 Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Accept { id, jingle }) => {
-                    let result_iq = xmpp_parsers::iq::Iq {
+                    // XEP-0166: session-accept must be a separate IQ set, not
+                    // embedded in the IQ result.  Send an empty ack first, then
+                    // the session-accept as its own IQ set stanza.
+                    let ack_xml =
+                        build_iq_result_xml(&id, reply_from.as_deref(), reply_to.as_deref(), None);
+
+                    let accept_iq = xmpp_parsers::iq::Iq {
                         from: reply_from
                             .as_deref()
                             .and_then(|jid| jid.parse::<jid::Jid>().ok()),
                         to: reply_to
                             .as_deref()
                             .and_then(|jid| jid.parse::<jid::Jid>().ok()),
-                        id,
-                        payload: xmpp_parsers::iq::IqType::Result(Some(jingle)),
+                        id: format!("sfu-accept-{}", uuid::Uuid::new_v4()),
+                        payload: xmpp_parsers::iq::IqType::Set(jingle),
                     };
-                    vec![iq_to_xml(result_iq)]
+
+                    vec![ack_xml, iq_to_xml(accept_iq)]
                 }
                 Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Ack { id }) => {
                     let result_iq = xmpp_parsers::iq::Iq {
@@ -2740,6 +2759,46 @@ mod tests {
         assert!(
             !response.contains("feature-not-implemented"),
             "Jingle IQ to SFU with resource should no longer be treated as unhandled: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_result_returns_empty_response() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="ack-1" type="result" from="alice@example.com/web" to="sfu.example.com"/>"#;
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(sender_jid),
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "IQ result should produce no response, got: {responses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_error_returns_empty_response() {
+        let state = create_test_websocket_state().await;
+        let frame = r#"<iq xmlns="jabber:client" id="err-1" type="error" from="alice@example.com/web" to="sfu.example.com"><error type="cancel"><feature-not-implemented xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>"#;
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(sender_jid),
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "IQ error should produce no response, got: {responses:?}"
         );
     }
 

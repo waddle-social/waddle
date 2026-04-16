@@ -3913,13 +3913,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         match response {
             crate::sfu::service_actor::JingleIqResponse::Accept { id, jingle } => {
-                let result_iq = xmpp_parsers::iq::Iq {
+                // XEP-0166: session-accept must be a separate IQ set, not
+                // embedded in the IQ result.  Send an empty ack first, then
+                // the session-accept as its own IQ set stanza.
+                let ack_iq = xmpp_parsers::iq::Iq {
                     from: iq.to.clone(),
                     to: iq.from.clone(),
                     id,
-                    payload: IqType::Result(Some(jingle)),
+                    payload: IqType::Result(None),
                 };
-                self.stream.write_stanza(&Stanza::Iq(result_iq)).await
+                self.stream.write_stanza(&Stanza::Iq(ack_iq)).await?;
+
+                let accept_iq = xmpp_parsers::iq::Iq {
+                    from: iq.to.clone(),
+                    to: iq.from.clone(),
+                    id: format!("sfu-accept-{}", uuid::Uuid::new_v4()),
+                    payload: IqType::Set(jingle),
+                };
+                self.stream.write_stanza(&Stanza::Iq(accept_iq)).await
             }
             crate::sfu::service_actor::JingleIqResponse::Ack { id } => {
                 let result_iq = xmpp_parsers::iq::Iq {
