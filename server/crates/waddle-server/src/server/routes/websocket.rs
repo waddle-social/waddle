@@ -1120,6 +1120,8 @@ async fn handle_iq(
 
     // IQ result/error stanzas require no server response — silently accept them.
     // This handles client acks for server-initiated IQ sets (e.g. Jingle session-accept).
+    // Check parsed IQ first, then fall back to raw XML for malformed stanzas that
+    // xmpp_parsers can't parse (e.g. error IQs missing a defined-condition element).
     if let Some(ref iq) = parsed_iq {
         if matches!(
             &iq.payload,
@@ -1128,6 +1130,11 @@ async fn handle_iq(
             debug!(id = %id, "Ignoring IQ result/error stanza");
             return vec![];
         }
+    } else if extract_attr(frame, "type").as_deref() == Some("error")
+        || extract_attr(frame, "type").as_deref() == Some("result")
+    {
+        debug!(id = %id, "Ignoring unparseable IQ result/error stanza");
+        return vec![];
     }
 
     // Ping

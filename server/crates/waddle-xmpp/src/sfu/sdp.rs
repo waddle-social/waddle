@@ -460,7 +460,7 @@ pub fn build_jingle_session_accept(
     responder: &str,
     sdp_answer: &str,
 ) -> Result<Element, String> {
-    let contents = sdp_to_jingle_contents(sdp_answer, ContentCreator::Responder)?;
+    let contents = sdp_to_jingle_contents(sdp_answer, ContentCreator::Initiator)?;
 
     let mut jingle = Element::builder("jingle", NS_JINGLE)
         .attr("action", "session-accept")
@@ -821,7 +821,7 @@ mod tests {
             .children()
             .find(|c| c.is("content", NS_JINGLE))
             .expect("content element");
-        assert_eq!(content_el.attr("creator"), Some("responder"));
+        assert_eq!(content_el.attr("creator"), Some("initiator"));
         assert_eq!(content_el.attr("name"), Some("audio"));
 
         // Verify description child.
