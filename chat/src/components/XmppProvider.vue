@@ -3,6 +3,7 @@ import { onMounted, onUnmounted } from "vue";
 import { useAuth } from "@/composables/useAuth";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
+import { createServerAuth } from "@/lib/server-auth";
 
 const props = defineProps<{
   serverBaseUrl: string;
@@ -24,7 +25,18 @@ async function bootstrap() {
   syncStoreFromAuth();
 
   if (auth.appState.value === "ready" && auth.session.value) {
-    connectionStore.client = new BrowserXmppClient(auth.session.value);
+    const client = new BrowserXmppClient(auth.session.value);
+    const serverUrl = auth.activeServerUrl.value;
+    client.setRefreshSession(async () => {
+      const serverAuth = createServerAuth(serverUrl);
+      const refreshed = await serverAuth.getSession(auth.session.value?.session_id);
+      if (refreshed && !refreshed.is_expired) {
+        auth.session.value = refreshed;
+        syncStoreFromAuth();
+      }
+      return refreshed;
+    });
+    connectionStore.client = client;
   }
 }
 

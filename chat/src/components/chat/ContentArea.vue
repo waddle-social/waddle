@@ -196,9 +196,13 @@ watch(
         >
           <span
             class="w-1.5 h-1.5 rounded-full inline-block"
-            :class="xmppStatus.state === 'error' ? 'bg-destructive' : 'bg-warning animate-pulse'"
+            :class="{
+              'bg-destructive': xmppStatus.state === 'error',
+              'bg-warning animate-pulse': xmppStatus.state === 'reconnecting',
+              'bg-muted-foreground': xmppStatus.state === 'offline',
+            }"
           />
-          {{ xmppStatus.state }}
+          {{ xmppStatus.state === 'reconnecting' ? 'reconnecting...' : xmppStatus.state }}
         </div>
       </div>
       <div class="flex gap-1">

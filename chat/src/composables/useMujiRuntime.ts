@@ -500,9 +500,9 @@ export function useMujiRuntime(
   });
 
   watch(xmppStatus, (status) => {
-    if (status.state === "offline" && (phase.value === "active" || phase.value === "dialing" || phase.value === "ringing")) {
+    if (status.state === "reconnecting" && (phase.value === "active" || phase.value === "dialing" || phase.value === "ringing")) {
       phase.value = "reconnecting";
-      void xmppClient.value?.connect().catch(() => undefined);
+      // Stanza's autoReconnect handles the transport — no manual connect() needed
       return;
     }
     if (status.state === "online" && phase.value === "reconnecting") {

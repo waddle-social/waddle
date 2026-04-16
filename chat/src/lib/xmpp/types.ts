@@ -6,7 +6,7 @@ export interface RemoteParticipant {
 }
 
 export interface XmppStatusSnapshot {
-  state: string;
+  state: "online" | "offline" | "reconnecting" | "error";
   detail: string;
 }
 

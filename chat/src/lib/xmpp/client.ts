@@ -179,6 +179,8 @@ export class BrowserXmppClient {
   private xmpp: Agent | null = null;
   private connectPromise: Promise<void> | null = null;
   private connected = false;
+  private destroying = false;
+  private refreshSession: (() => Promise<WaddleSession | null>) | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
@@ -209,16 +211,37 @@ export class BrowserXmppClient {
   setMujiCallHandler(h: (event: MujiCallEvent) => void) { this.mujiCallHandler = h; }
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.presenceHandler = h; }
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.lastSeenHandler = h; }
+  setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
 
   // -- Connection lifecycle --
 
   async connect() {
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
+
+    // If the Agent exists but is disconnected, Stanza's autoReconnect is
+    // handling backoff — just wait for the next session:started.
+    if (this.xmpp && !this.destroying) {
+      const xmpp = this.xmpp;
+      this.connectPromise = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          cleanup();
+          this.connectPromise = null;
+          reject(new Error("Reconnection timed out"));
+        }, 60_000);
+        const cleanup = () => { clearTimeout(timeout); xmpp.off("session:started", onReady); };
+        const onReady = () => { cleanup(); this.connectPromise = null; resolve(); };
+        xmpp.on("session:started", onReady);
+      });
+      return this.connectPromise;
+    }
+
+    // Fresh connection — tear down any stale agent
     if (this.xmpp) {
       try { this.xmpp.disconnect(); } catch { /* ignore stale client */ }
       this.xmpp = null;
     }
+    this.destroying = false;
     this.currentRoom = null;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
@@ -233,7 +256,7 @@ export class BrowserXmppClient {
       credentials: { token: this.session.session_id },
       resource: this.resource,
       transports: { websocket: this.session.xmpp_websocket_url, bosh: false },
-      autoReconnect: false,
+      autoReconnect: true,
       useStreamManagement: false,
       sendReceipts: false, chatMarkers: false,
     });
@@ -272,6 +295,7 @@ export class BrowserXmppClient {
 
   async disconnect() {
     if (!this.xmpp) return;
+    this.destroying = true;
     const currentRoom = this.currentRoom;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
@@ -803,30 +827,76 @@ export class BrowserXmppClient {
           console.warn("Failed to refresh roster presence subscriptions", error);
         }
       }
-    });
-    xmpp.on("disconnected", (err) => {
-      if (this.xmpp === xmpp) {
-        this.connected = false;
-        this.connectPromise = null;
-        this.xmpp = null;
+
+      // Rejoin room if we were in one before the disconnect
+      const roomToRejoin = this.currentRoom;
+      if (roomToRejoin) {
         this.currentRoom = null;
-        this.roomSwitchPromise = null;
-        this.roomSwitchTarget = null;
-        this.mujiSessions.clear();
         this.roomHats = {};
         this.hatsHandler?.({});
         this.roomPresence = {};
         this.presenceHandler?.({});
-        this.stopSelfPing();
+        try {
+          await this.performRoomSwitch(roomToRejoin);
+        } catch (error) {
+          console.warn("Failed to rejoin room after reconnect", error);
+        }
       }
-      const detail = err?.message ?? "Live room connection offline";
-      this.statusHandler?.({ state: "offline", detail });
+    });
+    xmpp.on("disconnected", (err) => {
+      if (this.xmpp !== xmpp) return;
+
+      this.connected = false;
+      this.connectPromise = null;
+      this.stopSelfPing();
+      this.mujiSessions.clear();
+
+      if (this.destroying) {
+        // Intentional disconnect — full cleanup
+        this.xmpp = null;
+        this.currentRoom = null;
+        this.roomSwitchPromise = null;
+        this.roomSwitchTarget = null;
+        this.roomHats = {};
+        this.hatsHandler?.({});
+        this.roomPresence = {};
+        this.presenceHandler?.({});
+        this.statusHandler?.({ state: "offline", detail: err?.message ?? "Disconnected" });
+      } else {
+        // Unexpected drop — keep xmpp + currentRoom alive for auto-reconnect
+        this.statusHandler?.({ state: "reconnecting", detail: err?.message ?? "Connection lost, reconnecting..." });
+      }
       console.error("XMPP disconnected", err);
     });
     xmpp.on("stream:error", (streamError, err) => {
-      const detail = err?.message ?? streamError?.condition ?? "Stream error";
-      this.statusHandler?.({ state: "error", detail });
+      const condition = streamError?.condition;
+      const fatal = condition === "not-authorized" || condition === "host-unknown" || condition === "host-gone";
+      if (fatal) {
+        this.destroying = true;
+      }
+      const detail = err?.message ?? condition ?? "Stream error";
+      this.statusHandler?.({ state: fatal ? "error" : "reconnecting", detail });
       console.error("XMPP stream error", detail);
+    });
+    xmpp.on("auth:failed" as any, async () => {
+      if (this.xmpp !== xmpp) return;
+      if (!this.refreshSession) {
+        this.destroying = true;
+        this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
+        return;
+      }
+      try {
+        const refreshed = await this.refreshSession();
+        if (refreshed) {
+          (xmpp.config as any).credentials = { token: refreshed.session_id };
+        } else {
+          this.destroying = true;
+          this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
+        }
+      } catch {
+        this.destroying = true;
+        this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
+      }
     });
 
     xmpp.on("muc:available", (pres: ReceivedMUCPresence) => {
