@@ -42,6 +42,12 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+    - name: sfu-udp
+      protocol: UDP
+      port: 10000
+      allowedRoutes:
+        namespaces:
+          from: All
     - name: teleport-passthrough
       protocol: TLS
       port: 443

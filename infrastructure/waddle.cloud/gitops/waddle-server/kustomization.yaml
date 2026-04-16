@@ -8,4 +8,5 @@ resources:
   - helmrelease.yaml
   - httproute.yaml
   - httproute-http-redirect.yaml
+  - udproute.yaml
   - reference-grant.yaml
