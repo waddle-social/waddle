@@ -38,7 +38,7 @@ schema.#Project & {
 	}
 
 	tasks: {
-		install: {
+		install: schema.#Task & {
 			command: "bun"
 			args: ["install", "--frozen-lockfile", "--cwd", ".."]
 			inputs: [
@@ -47,7 +47,7 @@ schema.#Project & {
 				"package.json",
 			]
 		}
-		generateTypes: {
+		generateTypes: schema.#Task & {
 			command: "bun"
 			args: ["run", "generate-types"]
 			dependsOn: [install]
@@ -61,12 +61,12 @@ schema.#Project & {
 				"worker-configuration.d.ts",
 			]
 		}
-		dev: {
+		dev: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "dev", "--local", "--port", "4321"]
 			dependsOn: [build]
 		}
-		build: {
+		build: schema.#Task & {
 			command: "bun"
 			args: ["run", "build"]
 			dependsOn: [generateTypes]
@@ -84,7 +84,7 @@ schema.#Project & {
 				"dist/**",
 			]
 		}
-		deployPreview: {
+		deployPreview: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "versions", "upload"]
 			dependsOn: [build]
@@ -95,7 +95,7 @@ schema.#Project & {
 				".wrangler/**",
 			]
 		}
-		deployProduction: {
+		deployProduction: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "deploy"]
 			dependsOn: [build]
@@ -114,9 +114,11 @@ schema.#Project & {
 	}
 
 	services: chat: {
-		dir:     "chat"
-		command: "bun"
-		args: ["x", "wrangler", "dev", "--local", "--port", "4321"]
+		dir: "chat"
+		entrypoint: schema.#Command & {
+			command: "bun"
+			args: ["x", "wrangler", "dev", "--local", "--port", "4321"]
+		}
 		description: "Astro chat frontend (Wrangler local dev)"
 		readiness: {
 			kind: "port"
