@@ -1,7 +1,7 @@
 //! SDP ↔ Jingle conversion helpers.
 //!
-//! Converts between standard Jingle XML (XEP-0166, XEP-0167, XEP-0176, XEP-0320)
-//! and raw SDP strings consumed by str0m.
+//! Converts between standard Jingle XML (XEP-0166, XEP-0167, XEP-0176, XEP-0320,
+//! XEP-0338) and raw SDP strings consumed by str0m.
 
 use minidom::Element;
 
@@ -20,6 +20,42 @@ use crate::xep::xep0176::{
 use crate::xep::xep0320::{DtlsFingerprint, FingerprintSetup};
 
 const PARTICIPANT_MAP_NS: &str = "urn:waddle:sfu:participant-map:0";
+
+/// XEP-0338 Jingle Grouping Framework namespace — advertises BUNDLE and
+/// similar content-grouping semantics in the Jingle session.
+pub(crate) const NS_JINGLE_GROUPING: &str = "urn:xmpp:jingle:apps:grouping:0";
+
+/// Parse `a=group:BUNDLE <mid> <mid> ...` out of an SDP string and return
+/// the list of mid names in the BUNDLE group. Returns an empty vector if no
+/// BUNDLE group is declared. Only the first BUNDLE group is returned.
+fn extract_bundle_mids(sdp: &str) -> Vec<String> {
+    sdp.lines()
+        .find_map(|line| line.strip_prefix("a=group:BUNDLE "))
+        .map(|rest| {
+            rest.split_whitespace()
+                .map(|m| m.to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// Build a XEP-0338 `<group semantics='BUNDLE'>` element with `<content name='X'/>`
+/// children referencing each mid. Returns `None` for an empty mid list so the
+/// caller can skip appending an empty group.
+fn build_bundle_group_element(mids: &[String]) -> Option<Element> {
+    if mids.is_empty() {
+        return None;
+    }
+    let mut group = Element::builder("group", NS_JINGLE_GROUPING).attr("semantics", "BUNDLE");
+    for mid in mids {
+        group = group.append(
+            Element::builder("content", NS_JINGLE_GROUPING)
+                .attr("name", mid.as_str())
+                .build(),
+        );
+    }
+    Some(group.build())
+}
 
 // ---------------------------------------------------------------------------
 // Jingle → SDP
@@ -455,18 +491,29 @@ pub fn extract_sdp_offer_from_jingle(jingle: &Element) -> Result<String, String>
 }
 
 /// Builds a `<jingle action="session-accept">` element from an SDP answer string.
+///
+/// Emits the XEP-0338 `<group semantics='BUNDLE'>` element when the answer SDP
+/// advertises `a=group:BUNDLE ...`. Without it, stanza.js (and other Jingle
+/// clients) cannot reconstruct `a=group:BUNDLE` when converting the accept
+/// back to SDP, so browsers treat each m-section as an independent transport
+/// and the non-primary ones (typically video) never complete ICE.
 pub fn build_jingle_session_accept(
     sid: &str,
     responder: &str,
     sdp_answer: &str,
 ) -> Result<Element, String> {
     let contents = sdp_to_jingle_contents(sdp_answer, ContentCreator::Initiator)?;
+    let bundle_mids = extract_bundle_mids(sdp_answer);
 
     let mut jingle = Element::builder("jingle", NS_JINGLE)
         .attr("action", "session-accept")
         .attr("sid", sid)
         .attr("responder", responder)
         .build();
+
+    if let Some(group) = build_bundle_group_element(&bundle_mids) {
+        jingle.append_child(group);
+    }
 
     for content in &contents {
         jingle.append_child(build_jingle_content_element(content));
@@ -838,6 +885,98 @@ mod tests {
             .expect("transport element");
         assert_eq!(transport_el.attr("ufrag"), Some("resp-u"));
         assert_eq!(transport_el.attr("pwd"), Some("resp-p"));
+    }
+
+    #[test]
+    fn extracts_bundle_mids_from_sdp() {
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio video\r\n";
+        assert_eq!(extract_bundle_mids(sdp), vec!["audio", "video"]);
+    }
+
+    #[test]
+    fn extract_bundle_mids_returns_empty_without_group_line() {
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n";
+        assert!(extract_bundle_mids(sdp).is_empty());
+    }
+
+    #[test]
+    fn session_accept_includes_xep0338_bundle_group() {
+        // Regression: the browser needs the Jingle <group semantics='BUNDLE'>
+        // element to reconstruct `a=group:BUNDLE` in the remote SDP. Without
+        // it, audio and video use separate transports and only one completes
+        // ICE, so remote media is never visible.
+        let sdp_answer = "\
+            v=0\r\n\
+            o=- 0 0 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            a=group:BUNDLE 0 1\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=mid:0\r\n\
+            a=sendrecv\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtcp-mux\r\n\
+            a=ice-ufrag:ru\r\n\
+            a=ice-pwd:rp\r\n\
+            a=fingerprint:sha-256 11:22:33\r\n\
+            a=setup:active\r\n\
+            m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=mid:1\r\n\
+            a=sendrecv\r\n\
+            a=rtpmap:96 VP8/90000\r\n\
+            a=rtcp-mux\r\n\
+            a=ice-ufrag:ru\r\n\
+            a=ice-pwd:rp\r\n\
+            a=fingerprint:sha-256 11:22:33\r\n\
+            a=setup:active\r\n";
+
+        let element = build_jingle_session_accept("sid-42", "sfu@x", sdp_answer)
+            .expect("should build accept");
+
+        let group = element
+            .children()
+            .find(|c| c.is("group", NS_JINGLE_GROUPING))
+            .expect("<group> must be emitted when SDP has a=group:BUNDLE");
+        assert_eq!(group.attr("semantics"), Some("BUNDLE"));
+
+        let contents: Vec<&str> = group
+            .children()
+            .filter(|c| c.is("content", NS_JINGLE_GROUPING))
+            .filter_map(|c| c.attr("name"))
+            .collect();
+        assert_eq!(contents, vec!["0", "1"]);
+    }
+
+    #[test]
+    fn session_accept_omits_group_when_no_bundle_in_sdp() {
+        let sdp_answer = "\
+            v=0\r\n\
+            o=- 0 0 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=mid:audio\r\n\
+            a=sendrecv\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtcp-mux\r\n\
+            a=ice-ufrag:u\r\n\
+            a=ice-pwd:p\r\n\
+            a=fingerprint:sha-256 11:22:33\r\n\
+            a=setup:active\r\n";
+
+        let element =
+            build_jingle_session_accept("sid-1", "sfu@x", sdp_answer).expect("should build accept");
+
+        let has_group = element
+            .children()
+            .any(|c| c.is("group", NS_JINGLE_GROUPING));
+        assert!(
+            !has_group,
+            "no group element should be emitted without a=group:BUNDLE"
+        );
     }
 
     #[test]
