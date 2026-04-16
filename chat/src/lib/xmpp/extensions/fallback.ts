@@ -6,10 +6,23 @@
  *     <body/>
  *   </fallback>
  */
-import type { DefinitionOptions } from "stanza/jxt";
+import type { DefinitionOptions, FieldDefinition } from "stanza/jxt";
 import { attribute } from "stanza/jxt";
+import XMLElement from "stanza/jxt/Element";
 
 const NS_FALLBACK = "urn:xmpp:fallback:0";
+
+/** Always exports an empty <body/> child element inside <fallback/>. */
+const bodyChild: FieldDefinition<boolean> = {
+  importer(xml: XMLElement) {
+    return xml.getChild("body") !== undefined;
+  },
+  exporter(xml: XMLElement, value: boolean) {
+    if (value && !xml.getChild("body")) {
+      xml.appendChild(new XMLElement("body"));
+    }
+  },
+};
 
 const definitions: DefinitionOptions[] = [
   {
@@ -17,6 +30,7 @@ const definitions: DefinitionOptions[] = [
     element: "fallback",
     fields: {
       for: attribute("for"),
+      body: bodyChild,
     },
     namespace: NS_FALLBACK,
   },

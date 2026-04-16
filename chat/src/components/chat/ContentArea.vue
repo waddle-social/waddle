@@ -130,6 +130,7 @@ let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function onDragEnter(e: DragEvent) {
   e.preventDefault();
+  if (!e.dataTransfer?.types.includes("Files")) return;
   if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
   isDragging.value = true;
 }

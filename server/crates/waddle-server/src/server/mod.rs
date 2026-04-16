@@ -70,8 +70,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
-        let blob_storage =
-            crate::storage::build_blob_storage().expect("failed to initialize blob storage");
+        let blob_storage = crate::storage::build_blob_storage()
+            .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
         Self::new_with_deps(
             db_pool,
             build_media_backend(&MediaConfig::default()),
@@ -83,8 +83,8 @@ impl AppState {
         db_pool: Arc<DatabasePool>,
         media_backend: Arc<dyn MediaBackend>,
     ) -> Self {
-        let blob_storage =
-            crate::storage::build_blob_storage().expect("failed to initialize blob storage");
+        let blob_storage = crate::storage::build_blob_storage()
+            .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
         Self::new_with_deps(db_pool, media_backend, blob_storage)
     }
 

@@ -125,7 +125,7 @@ export function sendGroupFileMessage(
     type: "groupchat",
     body: fileUrl,
     links: [{ url: fileUrl }],
-    fallback: { for: "urn:xmpp:sfs:0" },
+    fallback: { for: "urn:xmpp:sfs:0", body: true },
     receipt: { type: "request" },
     marker: { type: "markable" },
     processingHints: { store: true },

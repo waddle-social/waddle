@@ -133,7 +133,11 @@ impl BlobStorage for LocalStorage {
 
     fn exists(&self, key: &str) -> BoxFuture<'_, Result<bool, StorageError>> {
         let path = self.data_path(key);
-        Box::pin(async move { Ok(path.exists()) })
+        Box::pin(async move {
+            tokio::fs::try_exists(&path)
+                .await
+                .map_err(|e| StorageError::Internal(format!("failed to check existence: {e}")))
+        })
     }
 }
 
