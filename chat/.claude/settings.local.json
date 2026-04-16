@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cue version:*)",
+      "Bash(timeout 10 cue vet ./...)",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(gtimeout 10 cue vet ./...)",
+      "Bash(cue mod:*)",
+      "Bash(grep:*)",
+      "Bash(ls /Users/rawkode/Code/src/github.com/cuenv/cuenv/contrib/contributors/*.cue)",
+      "Bash(wc -l /Users/rawkode/Code/src/github.com/cuenv/cuenv/schema/*.cue)"
+    ],
+    "additionalDirectories": [
+      "/Users/rawkode/Code/src/github.com/cuenv/cuenv"
+    ]
+  }
+}

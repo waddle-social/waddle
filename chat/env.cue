@@ -22,35 +22,25 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			"tasks": [tasks.deployMain]
+			"tasks": [tasks.deploy]
 		}
 		pullRequest: {
 			environment: "production"
 			when: {
 				pullRequest: true
 			}
-			"tasks": [tasks.deployPreview]
+			"tasks": [tasks.preview]
 			annotations: "Preview URL": schema.#TaskCaptureRef & {
-				cuenvTask:    "deployPreview"
+				cuenvTask:    "preview"
 				cuenvCapture: "previewUrl"
 			}
 		}
 	}
 
 	tasks: {
-		install: schema.#Task & {
-			command: "bun"
-			args: ["install", "--frozen-lockfile", "--cwd", ".."]
-			inputs: [
-				"../package.json",
-				"../bun.lock",
-				"package.json",
-			]
-		}
 		generateTypes: schema.#Task & {
 			command: "bun"
 			args: ["run", "generate-types"]
-			dependsOn: [install]
 			inputs: [
 				"../package.json",
 				"../bun.lock",
@@ -61,11 +51,13 @@ schema.#Project & {
 				"worker-configuration.d.ts",
 			]
 		}
+
 		dev: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "dev", "--local", "--port", "4321"]
 			dependsOn: [build]
 		}
+
 		build: schema.#Task & {
 			command: "bun"
 			args: ["run", "build"]
@@ -84,7 +76,8 @@ schema.#Project & {
 				"dist/**",
 			]
 		}
-		deployPreview: schema.#Task & {
+
+		preview: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "versions", "upload"]
 			dependsOn: [build]
@@ -95,7 +88,8 @@ schema.#Project & {
 				".wrangler/**",
 			]
 		}
-		deployProduction: schema.#Task & {
+
+		deploy: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "deploy"]
 			dependsOn: [build]
@@ -106,10 +100,6 @@ schema.#Project & {
 			outputs: [
 				".wrangler/**",
 			]
-		}
-		deployMain: schema.#Task & {
-			command: "true"
-			dependsOn: [deployProduction]
 		}
 	}
 
