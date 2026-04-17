@@ -75,11 +75,6 @@ pub struct VerifySubmitRequest {
     pub user_code: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct VerifySubmitResponse {
-    pub authorization_url: String,
-}
-
 fn escape_html_attr(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -386,10 +381,7 @@ pub async fn device_verify_submit_handler(
     {
         Ok(url) => {
             info!(provider = %provider.id, "Device flow continuing via provider authorization");
-            Json(VerifySubmitResponse {
-                authorization_url: url,
-            })
-            .into_response()
+            axum::response::Redirect::temporary(&url).into_response()
         }
         Err(err) => (
             StatusCode::BAD_GATEWAY,
