@@ -5,7 +5,7 @@ members = [
     "crates/waddle-server",
     "crates/waddle-cli",
     "crates/waddle-xmpp",
-    "crates/waddle-xmpp-xep-github",
+    "crates/waddle-extensions",
 ]
 
 [workspace.package]
@@ -120,4 +120,3 @@ codegen-units = 4
 [profile.dev]
 opt-level = 0
 debug = true
-

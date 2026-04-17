@@ -38,7 +38,7 @@ use waddle_xmpp::{
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
-use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
+use waddle_extensions::{message_has_embed_for_namespaces, ExtensionManager};
 
 use super::auth::AuthState;
 use crate::auth::{localpart_to_jid, NativeUserStore, Session};
@@ -65,8 +65,8 @@ pub struct WebSocketState {
     pub muc_registry: Arc<MucRoomRegistry>,
     /// Shared XMPP MAM storage for archived message history.
     pub mam_storage: Arc<LibSqlMamStorage>,
-    /// GitHub link enricher for message embeds
-    pub github_enricher: Arc<MessageEnricher>,
+    /// Runtime extension manager for message embeds + feature advertisements
+    pub extension_manager: Arc<ExtensionManager>,
 }
 
 /// In-progress SCRAM-SHA-256 authentication state between challenge and response.
@@ -1163,7 +1163,14 @@ async fn handle_iq(
         if let Some(request_iq) = parsed_iq.as_ref() {
             if to.as_deref() == Some(muc_domain) {
                 let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-                let features = vec![Feature::muc(), Feature::replies(), Feature::waddle_github()];
+                let mut features = vec![Feature::muc(), Feature::replies()];
+                features.extend(
+                    state
+                        .extension_manager
+                        .extension_features()
+                        .into_iter()
+                        .map(|ns| Feature::new(&ns)),
+                );
                 let response = build_disco_info_response(request_iq, &identities, &features, None);
                 return vec![iq_to_xml(response)];
             }
@@ -1178,12 +1185,14 @@ async fn handle_iq(
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string());
                         let identities = vec![Identity::muc_room(Some(&room_name))];
-                        let features = vec![
-                            Feature::muc(),
-                            Feature::mam(),
-                            Feature::replies(),
-                            Feature::waddle_github(),
-                        ];
+                        let mut features = vec![Feature::muc(), Feature::mam(), Feature::replies()];
+                        features.extend(
+                            state
+                                .extension_manager
+                                .extension_features()
+                                .into_iter()
+                                .map(|ns| Feature::new(&ns)),
+                        );
                         let response =
                             build_disco_info_response(request_iq, &identities, &features, None);
                         return vec![iq_to_xml(response)];
@@ -1289,14 +1298,20 @@ async fn handle_iq(
 
             // Disco info on server
             let identities = vec![Identity::server(Some("Waddle"))];
-            let features = vec![
+            let mut features = vec![
                 Feature::ping(),
                 Feature::replies(),
-                Feature::waddle_github(),
                 Feature::disco_info(),
                 Feature::disco_items(),
                 Feature::spaces(),
             ];
+            features.extend(
+                state
+                    .extension_manager
+                    .extension_features()
+                    .into_iter()
+                    .map(|ns| Feature::new(&ns)),
+            );
             let response = build_disco_info_response(request_iq, &identities, &features, None);
             return vec![iq_to_xml(response)];
         }
@@ -1803,7 +1818,7 @@ async fn handle_message(
         prototype.to = None;
 
         // Enrich: detect GitHub links and append embed XML elements (fail-open)
-        let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
+        let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
 
         // Archive body-bearing room messages in XMPP MAM storage.
         if let Some(archive_id) = archive_groupchat_message(state, &room_jid, &prototype).await {
@@ -1855,8 +1870,11 @@ async fn handle_message(
             prototype.type_ = XmppMessageType::Chat;
 
             // Enrich: detect GitHub links and append embed XML elements
-            let _embeds_added = state.github_enricher.enrich_message(&mut prototype).await;
-            let has_github_embed = message_has_github_embed(&prototype);
+            let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
+            let has_github_embed = message_has_embed_for_namespaces(
+                &prototype,
+                state.extension_manager.feature_namespaces(),
+            );
 
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
             archive_direct_message(state, sender_jid, to_jid, &prototype).await;
@@ -2288,7 +2306,6 @@ mod tests {
     use crate::server::AppState;
     use std::sync::Arc;
     use tokio::sync::mpsc;
-    use waddle_xmpp_xep_github::GitHubClient;
 
     async fn create_test_websocket_state() -> Arc<WebSocketState> {
         let config = DatabaseConfig::default();
@@ -2321,7 +2338,7 @@ mod tests {
             connection_registry: Arc::new(ConnectionRegistry::new()),
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
             mam_storage,
-            github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
+            extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
         })
     }
 

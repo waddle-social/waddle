@@ -1,0 +1,23 @@
+[package]
+name = "waddle-extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Waddle Wasm extension runtime and OCI loader"
+
+[dependencies]
+anyhow = { workspace = true }
+futures = { workspace = true }
+minidom = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+xmpp-parsers = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

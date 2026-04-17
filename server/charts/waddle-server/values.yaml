@@ -96,6 +96,15 @@ xmpp:
   nativeAuthEnabled: true
   registrationEnabled: false
 
+extensions:
+  enabled: true
+  cacheDir: /var/lib/waddle/extensions
+  modules:
+    - name: github-enricher
+      registry: ghcr.io/waddle-social/waddle/extensions/github-enricher
+      tag: latest
+      config: {}
+
 config:
   mode: homeserver
   baseUrl: https://waddle.local

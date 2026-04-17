@@ -66,8 +66,8 @@ pbkdf2 = { version = "0.12", features = ["hmac"] }
 # HTTP client (for Web Push notifications)
 reqwest = { workspace = true }
 
-# GitHub link enrichment
-waddle-xmpp-xep-github = { path = "../waddle-xmpp-xep-github" }
+# Wasm extension runtime
+waddle-extensions = { path = "../waddle-extensions" }
 
 # Ephemeral TLS certificate generation
 rcgen = "0.13"

@@ -1,0 +1,55 @@
+name: Extension GitHub Enricher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/extensions/github-enricher/**"
+      - ".github/workflows/extension-github-enricher.yml"
+  pull_request:
+    paths:
+      - "server/extensions/github-enricher/**"
+      - ".github/workflows/extension-github-enricher.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Build github-enricher wasm component
+        run: cargo build --release --target wasm32-wasip2 --manifest-path extensions/github-enricher/Cargo.toml
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: Push OCI artifact to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ghcr.io/waddle-social/waddle/extensions/github-enricher
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WASM_FILE="target/wasm32-wasip2/release/github_enricher.wasm"
+          echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          TAG="${{ github.ref_name }}"
+          oras push "${IMAGE}:${TAG}" \
+            --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
+            "${WASM_FILE}:application/wasm"
+          oras push "${IMAGE}:latest" \
+            --artifact-type application/vnd.waddle.extension.wasm.v1+wasm \
+            "${WASM_FILE}:application/wasm"

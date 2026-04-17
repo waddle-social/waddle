@@ -5540,6 +5540,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "waddle-extensions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "minidom",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "xmpp-parsers",
+]
+
+[[package]]
 name = "waddle-server"
 version = "0.1.0"
 dependencies = [
@@ -5595,8 +5611,8 @@ dependencies = [
  "urlencoding",
  "uuid",
  "waddle-ecdysis",
+ "waddle-extensions",
  "waddle-xmpp",
- "waddle-xmpp-xep-github",
  "wiremock",
  "xmpp",
  "xmpp-parsers",
@@ -5642,23 +5658,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "waddle-xmpp-xep-github",
- "xmpp-parsers",
-]
-
-[[package]]
-name = "waddle-xmpp-xep-github"
-version = "0.1.0"
-dependencies = [
- "futures",
- "lru",
- "minidom",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
+ "waddle-extensions",
  "xmpp-parsers",
 ]
 

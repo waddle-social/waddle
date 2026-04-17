@@ -1,21 +1,23 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(bun run:*)",
+      "WebFetch(domain:xmpp.org)",
+      "Bash(wc -l /Users/rawkode/Code/src/github.com/waddle-social/waddle/server/crates/waddle-xmpp/src/*.rs)",
       "Bash(gh pr:*)",
-      "Read(//tmp/**)",
-      "Bash(git fetch:*)",
+      "mcp__claude_ai_GitHub__issue_read",
       "Bash(cargo check:*)",
-      "Bash(printf '<?xml version=\"1.0\"?><stream:stream xmlns=\"jabber:client\" xmlns:stream=\"http://etherx.jabber.org/streams\" to=\"localhost\" version=\"1.0\">')",
-      "Bash(timeout 2 openssl s_client -connect localhost:5222 -starttls xmpp -quiet)",
-      "Bash(printf '<stream:stream xmlns=\"jabber:client\" xmlns:stream=\"http://etherx.jabber.org/streams\" to=\"localhost\" version=\"1.0\">')",
-      "Bash(nc -w 2 localhost 5222)",
       "Bash(cargo test:*)",
-      "Bash(python3 -c \"import websockets; print\\('ok'\\)\")",
-      "Bash(python3 -c \"import websocket; print\\('ok'\\)\")",
-      "Bash(python3:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(grep -r 'cuenv up' /Users/rawkode/Code/src/github.com/cuenv/cuenv --include=*.md --include=*.rs)",
+      "Bash(grep \"\\\\.cue$\")",
+      "Bash(gh api:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git branch:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }
