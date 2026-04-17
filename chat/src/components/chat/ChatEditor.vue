@@ -126,17 +126,16 @@ defineExpose({
 <template>
   <div class="relative" :class="compact ? '' : 'flex-1'" @click="editor?.commands.focus()">
     <div
-      class="chat-editor rounded-xl bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
+      class="chat-editor flex items-center rounded-xl bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
       :class="[
-        compact ? 'min-h-9' : 'min-h-10',
+        compact ? 'min-h-9 py-1' : 'min-h-10 py-1.5',
         disabled ? 'opacity-40 pointer-events-none' : '',
       ]"
     >
       <EditorContent
         v-if="editor"
         :editor="editor"
-        class="flex items-center w-full"
-        :class="compact ? 'py-1.5' : 'py-2.5'"
+        class="w-full"
       />
     </div>
     <EditorBubbleToolbar v-if="editor && !compact" :editor="editor" />
