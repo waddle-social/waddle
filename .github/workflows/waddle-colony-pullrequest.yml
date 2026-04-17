@@ -45,10 +45,14 @@ jobs:
       run: curl -sSL -o /usr/local/bin/cuenv https://github.com/cuenv/cuenv/releases/latest/download/cuenv-linux-x64 && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: cuenv:contributor:bun.workspace.setup
+      run: 'true'
     - name: Setup 1Password
       run: cuenv exec -- cuenv secrets setup onepassword
       env:
         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+    - name: Install Bun dependencies
+      run: cuenv exec -- bun install --frozen-lockfile
     - name: 'Run pipeline: pullRequest'
       run: cuenv ci --pipeline pullRequest --path colony
       env:

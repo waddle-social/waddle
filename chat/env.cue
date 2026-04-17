@@ -18,6 +18,7 @@ schema.#Project & {
 		c.#Nix,
 		c.#CuenvRelease,
 		c.#OnePassword,
+		c.#BunWorkspace,
 	]
 
 	ci: pipelines: {
