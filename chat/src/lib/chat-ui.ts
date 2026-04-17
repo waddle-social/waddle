@@ -38,8 +38,6 @@ export interface TimelineMessage {
   sharedFile?: { name?: string; mediaType?: string; size?: number; width?: number; height?: number; desc?: string; url: string; disposition: "inline" | "attachment" };
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
-  /** XEP-0482/0483: Call invite info. */
-  callInvite?: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string };
   /** XEP-0394: Message Markup offset-based annotations. */
   markup?: MarkupSpan[];
 }

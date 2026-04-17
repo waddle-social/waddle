@@ -2,16 +2,15 @@
 import { createClient } from "stanza";
 import type { Agent } from "stanza";
 import type { ReceivedMUCPresence, ReceivedMessage, ReceivedPresence } from "stanza/protocol";
-import type MediaSession from "stanza/jingle/MediaSession";
 import type { WaddleSession } from "../server-auth";
 import type { WaddleHat } from "./extensions/hats";
 import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
   DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, LiveDmMessage, LiveRoomMessage,
-  MujiCallEvent, OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
+  OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, XmppStatusSnapshot,
 } from "./types";
-import { barePeerJid, roomBareJidFor, sfuServiceJidFor } from "./jid";
+import { barePeerJid, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
 import { dispatchGroupchat, ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
@@ -27,39 +26,6 @@ type StanzaSaslFactory = {
   disable(mechanism: string): void;
   mechanisms?: StanzaSaslMechanism[];
 };
-
-type MujiSession = MediaSession & {
-  sid: string;
-  peerID: string;
-  state: string;
-  connectionState: string;
-  pc: RTCPeerConnection;
-  includesAudio: boolean;
-  includesVideo: boolean;
-  addTrack(track: MediaStreamTrack, stream: MediaStream): Promise<void>;
-  start(opts?: RTCOfferOptions): Promise<void>;
-  accept(opts?: RTCAnswerOptions): Promise<void>;
-  end(reason?: string, silent?: boolean): void;
-};
-
-function requireMujiSessionShape(session: unknown): MujiSession {
-  if (typeof session !== "object" || session === null) {
-    throw new Error("Stanza returned an invalid media session object");
-  }
-
-  const candidate = session as Partial<MujiSession>;
-  if (
-    typeof candidate.sid !== "string"
-    || typeof candidate.start !== "function"
-    || typeof candidate.accept !== "function"
-    || typeof candidate.addTrack !== "function"
-    || typeof candidate.end !== "function"
-  ) {
-    throw new Error("Stanza media session shape mismatch");
-  }
-
-  return session as MujiSession;
-}
 
 const DISABLED_SASL_MECHANISMS = [
   "EXTERNAL",
@@ -173,7 +139,6 @@ export class BrowserXmppClient {
   private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
-  private mujiCallHandler: ((event: MujiCallEvent) => void) | null = null;
   private presenceHandler: ((presence: RoomPresence) => void) | null = null;
   private lastSeenHandler: ((nick: string, timestamp: number) => void) | null = null;
   private xmpp: Agent | null = null;
@@ -187,7 +152,6 @@ export class BrowserXmppClient {
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
-  private readonly mujiSessions = new Map<string, MujiSession>();
   private uploadServiceJid: string | null = null;
 
   constructor(session: WaddleSession) { this.session = session; }
@@ -208,7 +172,6 @@ export class BrowserXmppClient {
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
   setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
-  setMujiCallHandler(h: (event: MujiCallEvent) => void) { this.mujiCallHandler = h; }
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.presenceHandler = h; }
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.lastSeenHandler = h; }
   setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
@@ -245,7 +208,6 @@ export class BrowserXmppClient {
     this.currentRoom = null;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
-    this.mujiSessions.clear();
     this.roomHats = {};
     this.hatsHandler?.({});
     this.roomPresence = {};
@@ -263,11 +225,6 @@ export class BrowserXmppClient {
     // Only keep OAUTHBEARER; session tokens aren't SCRAM/PLAIN passwords
     keepOnlyOAuthBearer(xmpp);
     registerWaddleExtensions(xmpp);
-    if (xmpp.jingle) {
-      xmpp.jingle.config.iceServers = [
-        { urls: 'stun:stun.l.google.com:19302' },
-      ];
-    }
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
 
@@ -308,7 +265,6 @@ export class BrowserXmppClient {
     this.connectPromise = null;
     this.connected = false;
     this.currentRoom = null;
-    this.mujiSessions.clear();
     this.uploadServiceJid = null;
     try { xmpp.disconnect(); } catch { /* ignore */ }
   }
@@ -439,24 +395,6 @@ export class BrowserXmppClient {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body, markup) : null;
   }
-  async sendCallInvite(
-    w: string,
-    c: string,
-    opts: { sid?: string; jingleJid?: string; externalUri?: string; video: boolean; muji?: boolean },
-  ): Promise<string | null> {
-    await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? messaging.sendCallInvite(this.xmpp, roomBareJidFor(this.session, w, c), opts) : null;
-  }
-  async sendCallReject(w: string, c: string, inviteId: string): Promise<void> {
-    await this.connect();
-    await this.switchRoom(w, c);
-    if (this.xmpp) messaging.sendCallReject(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
-  }
-  async sendCallLeft(w: string, c: string, inviteId?: string): Promise<void> {
-    await this.connect();
-    await this.switchRoom(w, c);
-    if (this.xmpp) messaging.sendCallLeft(this.xmpp, roomBareJidFor(this.session, w, c), inviteId);
-  }
 
   // -- File upload (XEP-0363 + XEP-0447) --
 
@@ -537,100 +475,6 @@ export class BrowserXmppClient {
   async sendDmReaction(peerJid: string, messageId: string, emojis: string[]): Promise<void> {
     await this.connect();
     if (this.xmpp) dmMessaging.sendDmReaction(this.xmpp, barePeerJid(peerJid), messageId, emojis);
-  }
-
-  async sendDmCallInvite(
-    peerJid: string,
-    opts: { sid?: string; jingleJid?: string; externalUri?: string; video: boolean; muji?: boolean },
-  ): Promise<string | null> {
-    await this.connect();
-    return this.xmpp ? dmMessaging.sendDmCallInvite(this.xmpp, barePeerJid(peerJid), opts) : null;
-  }
-
-  async startMujiCall(
-    w: string,
-    c: string,
-    localStream: MediaStream,
-    opts: { video: boolean; sid?: string; serviceJid?: string } = { video: true },
-  ): Promise<{ sid: string; serviceJid: string } | null> {
-    await this.connect();
-    await this.switchRoom(w, c);
-    if (!this.xmpp?.jingle) return null;
-
-    const serviceJid = opts.serviceJid ?? sfuServiceJidFor(this.session);
-    const sid = opts.sid ?? `${w}_${c}_${crypto.randomUUID()}`;
-
-    // Create real Jingle session to the SFU
-    const session = requireMujiSessionShape(
-      this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream),
-    );
-    this.mujiSessions.set(session.sid, session);
-
-    await session.start({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: opts.video,
-    });
-
-    // Broadcast invite to room
-    await this.sendCallInvite(w, c, {
-      muji: true,
-      sid,
-      jingleJid: serviceJid,
-      externalUri: `xmpp:${serviceJid}?jingle;sid=${sid}`,
-      video: opts.video,
-    });
-
-    return { sid, serviceJid };
-  }
-
-  async joinMujiCall(
-    w: string,
-    c: string,
-    localStream: MediaStream,
-    invite: { sid?: string; jingleJid?: string; video?: boolean },
-  ): Promise<{ sid: string; serviceJid: string } | null> {
-    await this.connect();
-    await this.switchRoom(w, c);
-    if (!this.xmpp?.jingle) return null;
-
-    const serviceJid = invite.jingleJid ?? sfuServiceJidFor(this.session);
-    const sid = `${w}_${c}_${crypto.randomUUID()}`;
-
-    const session = requireMujiSessionShape(
-      this.xmpp.jingle.createMediaSession(serviceJid, sid, localStream),
-    );
-    this.mujiSessions.set(session.sid, session);
-    await session.start({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: invite.video ?? true,
-    });
-    return { sid: session.sid, serviceJid };
-  }
-
-  endMujiCall(sid?: string) {
-    if (sid) {
-      const session = this.mujiSessions.get(sid);
-      if (!session) return;
-      session.end("success");
-      this.mujiSessions.delete(sid);
-      return;
-    }
-
-    for (const session of this.mujiSessions.values()) {
-      session.end("success");
-    }
-    this.mujiSessions.clear();
-  }
-
-  async acceptMujiCall(sid: string, localStream: MediaStream) {
-    const session = this.mujiSessions.get(sid);
-    if (!session || session.state !== "pending") return;
-    for (const track of localStream.getTracks()) {
-      if (!session.pc.getSenders().some((sender) => sender.track?.id === track.id)) {
-        await session.addTrack(track, localStream);
-      }
-    }
-    await session.accept();
   }
 
   async enablePushNotifications(opts: {
@@ -733,79 +577,7 @@ export class BrowserXmppClient {
     catch { this.roomDisconnectHandler?.(); }
   }
 
-  private wireMujiEvents(xmpp: Agent) {
-    if (!xmpp.jingle) return;
-
-    xmpp.on("jingle:incoming", (session) => {
-      const mediaSession = session as MujiSession;
-      this.mujiSessions.set(mediaSession.sid, mediaSession);
-      this.mujiCallHandler?.({
-        type: "incoming",
-        sid: mediaSession.sid,
-        peerJid: mediaSession.peerID,
-        includesAudio: mediaSession.includesAudio,
-        includesVideo: mediaSession.includesVideo,
-      });
-    });
-
-    xmpp.on("jingle:outgoing", (session) => {
-      const mediaSession = session as MujiSession;
-      this.mujiSessions.set(mediaSession.sid, mediaSession);
-      this.mujiCallHandler?.({
-        type: "outgoing",
-        sid: mediaSession.sid,
-        peerJid: mediaSession.peerID,
-      });
-    });
-
-    xmpp.on("jingle:accepted", (session) => {
-      const mediaSession = session as MujiSession;
-      this.mujiSessions.set(mediaSession.sid, mediaSession);
-      this.mujiCallHandler?.({ type: "accepted", sid: mediaSession.sid });
-    });
-
-    xmpp.on("jingle:terminated", (session, reason) => {
-      const mediaSession = session as MujiSession;
-      this.mujiSessions.delete(mediaSession.sid);
-      const event: MujiCallEvent = {
-        type: "terminated",
-        sid: mediaSession.sid,
-      };
-      if (reason?.condition) event.reason = reason.condition;
-      this.mujiCallHandler?.(event);
-    });
-
-    xmpp.jingle.on("peerTrackAdded", (session, track, stream) => {
-      const mediaSession = session as MujiSession;
-      this.mujiCallHandler?.({
-        type: "peer-track-added",
-        sid: mediaSession.sid,
-        track,
-        stream,
-      });
-    });
-
-    xmpp.jingle.on("peerTrackRemoved", (session, track) => {
-      const mediaSession = session as MujiSession;
-      this.mujiCallHandler?.({
-        type: "peer-track-removed",
-        sid: mediaSession.sid,
-        track,
-      });
-    });
-
-    xmpp.jingle.on("connectionState", (session, state) => {
-      const mediaSession = session as MujiSession;
-      this.mujiCallHandler?.({
-        type: "connection-state",
-        sid: mediaSession.sid,
-        state,
-      });
-    });
-  }
-
   private wireEvents(xmpp: Agent) {
-    this.wireMujiEvents(xmpp);
     xmpp.on("session:started", async () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
@@ -849,7 +621,6 @@ export class BrowserXmppClient {
       this.connected = false;
       this.connectPromise = null;
       this.stopSelfPing();
-      this.mujiSessions.clear();
 
       if (this.destroying) {
         // Intentional disconnect — full cleanup

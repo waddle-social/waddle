@@ -53,11 +53,6 @@ spec:
               protocol: TCP
             {{- end }}
             {{- end }}
-            {{- if .Values.sfu.udpPort }}
-            - name: sfu-udp
-              containerPort: {{ .Values.sfu.udpPort }}
-              protocol: UDP
-            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "waddle-server.configMapName" . }}

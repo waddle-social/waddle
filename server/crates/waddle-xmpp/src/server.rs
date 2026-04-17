@@ -24,8 +24,6 @@ use crate::s2s::{S2sListener, S2sListenerConfig};
 use crate::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
 use crate::{AppState, XmppError};
 
-type SfuServiceActorRef = kameo::actor::ActorRef<crate::sfu::service_actor::SfuServiceActor>;
-
 /// XMPP server configuration.
 #[derive(Debug, Clone)]
 pub struct XmppServerConfig {
@@ -139,8 +137,6 @@ pub struct XmppServer<S: AppState> {
     push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
     push_sender: Arc<dyn WebPushSender + Send + Sync>,
-    /// SFU service actor for Jingle-based media calls
-    sfu_service: SfuServiceActorRef,
     /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
     c2s_listener: TcpListener,
     /// S2S listener — passed in if S2S federation is enabled.
@@ -161,48 +157,6 @@ impl<S: AppState> XmppServer<S> {
         c2s_listener: TcpListener,
         s2s_listener: Option<TcpListener>,
         shutdown_token: tokio_util::sync::CancellationToken,
-    ) -> Result<Self, XmppError> {
-        Self::new_internal(
-            config,
-            app_state,
-            c2s_listener,
-            s2s_listener,
-            shutdown_token,
-            None,
-        )
-        .await
-    }
-
-    /// Create a new XMPP server instance using an externally managed SFU service actor.
-    ///
-    /// This allows callers to share one SFU runtime across multiple transports
-    /// (for example, native C2S and RFC7395 WebSocket).
-    pub async fn new_with_sfu(
-        config: XmppServerConfig,
-        app_state: Arc<S>,
-        c2s_listener: TcpListener,
-        s2s_listener: Option<TcpListener>,
-        shutdown_token: tokio_util::sync::CancellationToken,
-        sfu_service: SfuServiceActorRef,
-    ) -> Result<Self, XmppError> {
-        Self::new_internal(
-            config,
-            app_state,
-            c2s_listener,
-            s2s_listener,
-            shutdown_token,
-            Some(sfu_service),
-        )
-        .await
-    }
-
-    async fn new_internal(
-        config: XmppServerConfig,
-        app_state: Arc<S>,
-        c2s_listener: TcpListener,
-        s2s_listener: Option<TcpListener>,
-        shutdown_token: tokio_util::sync::CancellationToken,
-        external_sfu_service: Option<SfuServiceActorRef>,
     ) -> Result<Self, XmppError> {
         let tls_acceptor = Self::load_tls_config(&config)?;
 
@@ -236,37 +190,6 @@ impl<S: AppState> XmppServer<S> {
         let push_sender: Arc<dyn WebPushSender + Send + Sync> = Arc::new(HttpWebPushSender::new());
         info!("Push notification store initialized");
 
-        let sfu_service = if let Some(service) = external_sfu_service {
-            info!("Using externally provided SFU service actor");
-            service
-        } else {
-            // Create a standalone SFU runtime when no external runtime is provided.
-            let sfu_domain = format!("sfu.{}", config.domain);
-            let sfu_registry = Arc::new(crate::sfu::SfuRegistry::new());
-            let sfu_udp_addr: SocketAddr = "0.0.0.0:10000".parse().map_err(|e| {
-                XmppError::internal_server_error(Some(format!("Invalid SFU UDP addr: {e}")))
-            })?;
-            let service = kameo::spawn(crate::sfu::service_actor::SfuServiceActor::new(
-                sfu_domain,
-                Arc::clone(&sfu_registry),
-                sfu_udp_addr,
-            ));
-            info!("SFU service actor initialized");
-
-            let sfu_shutdown = shutdown_token.clone();
-            let sfu_peer_store = Arc::clone(&sfu_registry.peer_store);
-            tokio::spawn(async move {
-                if let Err(e) =
-                    crate::sfu::net::spawn_sfu_net_loop(sfu_udp_addr, sfu_peer_store, sfu_shutdown)
-                        .await
-                {
-                    tracing::error!(error = %e, "SFU net loop failed to start");
-                }
-            });
-
-            service
-        };
-
         // Create the GitHub link enricher from environment
         let github_enricher = {
             let enricher = waddle_xmpp_xep_github::MessageEnricher::from_env();
@@ -292,7 +215,6 @@ impl<S: AppState> XmppServer<S> {
             github_enricher,
             push_store,
             push_sender,
-            sfu_service,
             c2s_listener,
             s2s_listener,
             shutdown_token,
@@ -467,7 +389,6 @@ impl<S: AppState> XmppServer<S> {
             let registration_enabled = self.config.registration_enabled;
             let single_tenant = self.config.single_tenant;
             let github_enricher = self.github_enricher;
-            let sfu_service = self.sfu_service;
 
             tokio::spawn(async move {
                 loop {
@@ -499,7 +420,6 @@ impl<S: AppState> XmppServer<S> {
                     let push_store = Arc::clone(&push_store);
                     let push_sender = Arc::clone(&push_sender);
                     let github_enricher = github_enricher.clone();
-                    let sfu_service = sfu_service.clone();
 
                     tokio::spawn(
                         async move {
@@ -520,7 +440,6 @@ impl<S: AppState> XmppServer<S> {
                                 single_tenant,
                                 push_store,
                                 push_sender,
-                                sfu_service,
                             )
                             .await
                             {

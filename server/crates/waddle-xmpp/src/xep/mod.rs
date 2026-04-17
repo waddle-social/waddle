@@ -23,8 +23,6 @@
 //!   with UTC timestamp and timezone offset.
 //! - **XEP-0203**: Delayed Delivery - Timestamps on delayed/offline/history
 //!   messages via `<delay/>` element with stamp and from attributes.
-//! - **XEP-0215**: External Service Discovery - STUN/TURN server discovery
-//!   for WebRTC NAT traversal with credentials and transport config.
 //! - **XEP-0292**: vCard4 Over XMPP - Modern user profiles via PEP with
 //!   full name, nickname, email, photo, bio, and more.
 //! - **XEP-0300**: Cryptographic Hash Functions - Standardized hash algorithm
@@ -75,10 +73,6 @@
 //!   with attachment target and typed payloads.
 //! - **XEP-0472**: Pubsub Social Feed - Social posts and activity feeds
 //!   via PubSub with title, body, author, and publication metadata.
-//! - **XEP-0482**: Call Invites - Invite/accept/reject/retract/left flow
-//!   with explicit join methods (`<muji/>`, `<jingle/>`, `<external/>`).
-//! - **XEP-0483**: HTTP Online Meetings - Jitsi/BBB meeting links via
-//!   IQ request/response and shareable meeting elements in messages.
 //! - **XEP-0490**: Message Displayed Synchronization - Cross-device read
 //!   state sync via PEP with stanza-id references.
 //! - **XEP-0492**: Chat Notification Settings - Per-room notification levels
@@ -109,16 +103,12 @@
 //! - **XEP-0115**: Entity Capabilities - Efficient service discovery caching
 //!   via capability hashes included in presence stanzas.
 //! - **XEP-0153**: vCard-Based Avatars - Avatar hash in presence stanzas.
-//! - **XEP-0166**: Jingle - Core session negotiation framework for media calls.
-//! - **XEP-0167**: Jingle RTP Sessions - RTP media description payloads for Jingle.
-//! - **XEP-0176**: Jingle ICE-UDP Transport - ICE candidate and transport signaling.
 //! - **XEP-0191**: Blocking Command - User blocking capability for managing
 //!   blocklists and silently dropping messages from blocked JIDs.
 //! - **XEP-0199**: XMPP Ping - Simple ping/pong for connection liveness.
 //! - **XEP-0223**: Persistent Storage Best Practices - Profile of PubSub.
 //! - **XEP-0249**: Direct MUC Invitations - Simple message-based invitations
 //!   for inviting users directly to MUC rooms.
-//! - **XEP-0272**: Multiparty Jingle (Muji) - Presence-driven group call signaling.
 //! - **XEP-0352**: Client State Indication - Allows clients to indicate
 //!   active/inactive state for traffic optimization.
 //! - **XEP-0363**: HTTP File Upload - Server-side support for HTTP-based
@@ -131,7 +121,6 @@
 //! - **XEP-0508**: Forums - Forum-style threaded discussions with
 //!   thread-create and thread-reply elements for topic-based MUC.
 //! - **XEP-0503**: Server-side Spaces - Community discovery via pubsub (read-only Phase A).
-//! - **XEP-0320**: DTLS-SRTP Fingerprints - DTLS fingerprint signaling for Jingle.
 
 pub mod xep0004;
 pub mod xep0012;
@@ -147,26 +136,20 @@ pub mod xep0085;
 pub mod xep0106;
 pub mod xep0115;
 pub mod xep0153;
-pub mod xep0166;
-pub mod xep0167;
 pub mod xep0172;
-pub mod xep0176;
 pub mod xep0184;
 pub mod xep0191;
 pub mod xep0199;
 pub mod xep0202;
 pub mod xep0203;
-pub mod xep0215;
 pub mod xep0223;
 pub mod xep0249;
-pub mod xep0272;
 pub mod xep0292;
 pub mod xep0297;
 pub mod xep0300;
 pub mod xep0308;
 pub mod xep0317;
 pub mod xep0319;
-pub mod xep0320;
 pub mod xep0333;
 pub mod xep0334;
 pub mod xep0352;
@@ -198,8 +181,6 @@ pub mod xep0469;
 pub mod xep0470;
 pub mod xep0471;
 pub mod xep0472;
-pub mod xep0482;
-pub mod xep0483;
 pub mod xep0486;
 pub mod xep0488;
 pub mod xep0490;
@@ -290,27 +271,9 @@ pub use xep0199::{build_ping_result, is_ping, NS_PING};
 
 pub use xep0106::{escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping};
 
-pub use xep0166::{
-    build_jingle_content_element, build_jingle_element, build_jingle_reason_element,
-    build_jingle_result, is_jingle_element, is_jingle_iq, parse_jingle_content_element,
-    parse_jingle_element, parse_jingle_iq, parse_jingle_reason_element, ContentCreator, Jingle,
-    JingleAction, JingleContent, JingleReason, ReasonCondition, Senders, NS_JINGLE,
-};
-
-pub use xep0167::{
-    build_rtp_description_element, is_rtp_description_element, parse_rtp_description_element,
-    MediaType, RtpDescription, RtpParameter, RtpPayloadType, NS_JINGLE_RTP,
-};
-
 pub use xep0172::{
     build_nick_element, extract_nickname_from_message, extract_nickname_from_presence, has_nick,
     is_nick_element, set_nickname, strip_nickname, Nickname, NicknameCarrier, NS_NICK,
-};
-
-pub use xep0176::{
-    build_candidate_element, build_ice_udp_transport_element, is_ice_udp_transport_element,
-    parse_candidate_element, parse_ice_udp_transport_element, CandidateType, IceUdpCandidate,
-    IceUdpTransport, NS_JINGLE_ICE_UDP,
 };
 
 pub use xep0202::{
@@ -321,11 +284,6 @@ pub use xep0203::{
     add_delay, add_delay_stamp, build_delay_element, build_delay_element_simple,
     extract_delay_from_message, extract_delay_stamp, has_delay, is_delay_element,
     parse_delay_element, strip_delay, DelayCarrier, DelayError, DelayInfo, NS_DELAY,
-};
-
-pub use xep0215::{
-    build_services_response, is_extdisco_request, parse_services_response, ExternalService,
-    ServiceType, Transport as ExtDiscoTransport, NS_EXTDISCO,
 };
 
 pub use xep0292::{
@@ -344,11 +302,6 @@ pub use xep0297::{
     ForwardedMessage, ForwardingCarrier, NS_FORWARD,
 };
 
-pub use xep0272::{
-    build_muji_element, extract_muji_from_presence, has_muji, is_muji_element, parse_muji_element,
-    set_muji, strip_muji, Muji, MujiCarrier, MujiStatus, NS_MUJI,
-};
-
 pub use xep0308::{
     build_correction_message, build_replace_element, extract_correction_from_message,
     extract_replaces_id, is_correction_message, is_replace_element, set_correction,
@@ -363,11 +316,6 @@ pub use xep0317::{
 pub use xep0319::{
     add_idle, build_idle_element, extract_idle_from_presence, has_idle, is_idle_element,
     parse_idle_element, strip_idle, IdleCarrier, IdleError, IdleInfo, NS_IDLE,
-};
-
-pub use xep0320::{
-    build_fingerprint_element, is_fingerprint_element, parse_fingerprint_element, DtlsFingerprint,
-    FingerprintSetup, NS_JINGLE_DTLS,
 };
 
 pub use xep0333::{
@@ -554,19 +502,6 @@ pub use xep0470::{
 pub use xep0472::{
     build_feed_entry_element, is_feed_entry, parse_feed_entry, FeedEntry, NS_SOCIAL_FEED,
     PUBSUB_NODE_FEED,
-};
-
-pub use xep0482::{
-    build_accept_element as build_call_accept, build_invite_element as build_call_invite,
-    build_left_element as build_call_left, build_reject_element as build_call_reject,
-    build_retract_element as build_call_retract, extract_call_action, has_call_invite, CallAccept,
-    CallAction, CallInvite, CallInviteCarrier, CallJoinMethod, NS_CALL_INVITES,
-};
-
-pub use xep0483::{
-    build_meeting_message_element, build_meeting_request, build_meeting_response,
-    extract_meeting_from_iq, extract_meeting_from_message, is_meeting_element, is_meeting_request,
-    set_meeting, strip_meeting, Meeting, MeetingCarrier, MeetingType, NS_ONLINE_MEETINGS,
 };
 
 pub use xep0490::{

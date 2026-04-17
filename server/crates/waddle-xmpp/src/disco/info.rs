@@ -75,11 +75,6 @@ impl Identity {
     pub fn spaces_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
-
-    /// SFU service identity (category="component", type="generic").
-    pub fn sfu_service(name: Option<&str>) -> Self {
-        Self::new("component", "generic", name)
-    }
 }
 
 /// Feature element for disco#info response.
@@ -177,11 +172,6 @@ impl Feature {
         Self::new("urn:xmpp:ping")
     }
 
-    /// XEP-0215 External Service Discovery feature
-    pub fn extdisco() -> Self {
-        Self::new("urn:xmpp:extdisco:2")
-    }
-
     /// XEP-0047 In-Band Bytestreams feature
     pub fn ibb() -> Self {
         Self::new("http://jabber.org/protocol/ibb")
@@ -260,31 +250,6 @@ impl Feature {
     /// XEP-0421 Occupant ID feature.
     pub fn occupant_id() -> Self {
         Self::new("urn:xmpp:occupant-id:0")
-    }
-
-    /// XEP-0166 Jingle feature.
-    pub fn jingle() -> Self {
-        Self::new("urn:xmpp:jingle:1")
-    }
-
-    /// XEP-0167 Jingle RTP feature.
-    pub fn jingle_rtp() -> Self {
-        Self::new("urn:xmpp:jingle:apps:rtp:1")
-    }
-
-    /// XEP-0176 Jingle ICE-UDP feature.
-    pub fn jingle_ice_udp() -> Self {
-        Self::new("urn:xmpp:jingle:transports:ice-udp:1")
-    }
-
-    /// XEP-0320 Jingle DTLS-SRTP feature.
-    pub fn jingle_dtls() -> Self {
-        Self::new("urn:xmpp:jingle:apps:dtls:0")
-    }
-
-    /// XEP-0272 Muji feature.
-    pub fn muji() -> Self {
-        Self::new("urn:xmpp:muji:0")
     }
 
     /// MUC room features (XEP-0045)
@@ -491,7 +456,6 @@ pub fn server_features() -> Vec<Feature> {
         Feature::blocking(),
         Feature::last_activity(),
         Feature::ping(),
-        Feature::extdisco(),
         Feature::server_info(),
         Feature::commands(),
         Feature::csi(),
@@ -556,20 +520,6 @@ pub fn spaces_service_features() -> Vec<Feature> {
     ]
 }
 
-/// Get features for the SFU service component.
-///
-/// Advertises Jingle signaling support for multi-party media via Muji.
-pub fn sfu_service_features() -> Vec<Feature> {
-    vec![
-        Feature::disco_info(),
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_ice_udp(),
-        Feature::jingle_dtls(),
-        Feature::muji(),
-    ]
-}
-
 /// Get the standard MUC service features.
 pub fn muc_service_features() -> Vec<Feature> {
     vec![
@@ -587,11 +537,6 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_ice_udp(),
-        Feature::jingle_dtls(),
-        Feature::muji(),
         Feature::replies(),
         Feature::waddle_github(),
         Feature::vcard(),
@@ -710,11 +655,6 @@ mod tests {
     fn test_muc_room_features() {
         let features = muc_room_features(true, true, false);
         assert!(features.contains(&Feature::muc()));
-        assert!(features.contains(&Feature::jingle()));
-        assert!(features.contains(&Feature::jingle_rtp()));
-        assert!(features.contains(&Feature::jingle_ice_udp()));
-        assert!(features.contains(&Feature::jingle_dtls()));
-        assert!(features.contains(&Feature::muji()));
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));

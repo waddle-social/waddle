@@ -41,7 +41,6 @@ pub mod roster;
 pub mod routing;
 pub mod s2s;
 pub mod server;
-pub mod sfu;
 pub mod stream;
 pub mod stream_management;
 pub mod xep;
@@ -516,29 +515,6 @@ pub async fn start<S: AppState>(
         c2s_listener,
         s2s_listener,
         shutdown_token,
-    )
-    .await
-}
-
-/// Start the XMPP server with a caller-provided SFU service actor.
-///
-/// Use this when multiple transports (for example C2S TCP + WebSocket) must
-/// share one SFU runtime.
-pub async fn start_with_sfu<S: AppState>(
-    config: XmppServerConfig,
-    app_state: Arc<S>,
-    c2s_listener: tokio::net::TcpListener,
-    s2s_listener: Option<tokio::net::TcpListener>,
-    shutdown_token: tokio_util::sync::CancellationToken,
-    sfu_service: kameo::actor::ActorRef<sfu::service_actor::SfuServiceActor>,
-) -> Result<XmppServer<S>, XmppError> {
-    XmppServer::new_with_sfu(
-        config,
-        app_state,
-        c2s_listener,
-        s2s_listener,
-        shutdown_token,
-        sfu_service,
     )
     .await
 }

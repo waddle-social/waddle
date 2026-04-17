@@ -5,7 +5,6 @@ import { useMembers } from "@/composables/useMembers";
 import { useDmConversations } from "@/composables/useDmConversations";
 import { useDmMessaging } from "@/composables/useDmMessaging";
 import { useMessaging } from "@/composables/useMessaging";
-import { useMujiRuntime } from "@/composables/useMujiRuntime";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
@@ -87,16 +86,6 @@ const dmMessaging = useDmMessaging(
   ui.normalizeError,
   ui.actionError,
   ui.clearActionError,
-);
-
-const muji = useMujiRuntime(
-  session,
-  xmppClient,
-  messaging.xmppStatus,
-  waddles.activeWaddleId,
-  waddles.activeChannelId,
-  messaging.latestCallInvite,
-  ui.normalizeError,
 );
 
 const contentAreaRef = ref<ComponentPublicInstance & { messagesContainer: HTMLDivElement | null } | null>(null);
@@ -326,22 +315,6 @@ function clearActiveSearch() {
   activeTarget.value.clearSearch();
 }
 
-function joinCallFromMessage(invite: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string; video?: boolean }) {
-  muji.pendingInvite.value = {
-    fromNick: "",
-    invite: {
-      inviteId: invite.inviteId,
-      muji: invite.muji,
-      jingleSid: invite.jingleSid,
-      jingleJid: invite.jingleJid,
-      externalUri: invite.externalUri,
-      meetingDesc: invite.meetingDesc,
-      video: invite.video,
-    },
-  };
-  muji.joinPendingInvite(invite.video ?? false);
-}
-
 // --- Deep linking ---
 
 function updateUrl() {
@@ -445,7 +418,6 @@ async function onConnectionReady() {
 // --- Actions ---
 
 async function handleLogout() {
-  muji.endCall();
   messaging.disconnect();
   dmMessaging.disconnect();
   waddles.clearData();
@@ -626,7 +598,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
-  muji.endCall();
   messaging.disconnect();
   dmMessaging.disconnect();
 });
@@ -834,18 +805,6 @@ onUnmounted(() => {
         :slow-mode-cooldown="messaging.slowModeCooldown.value"
         :search-results="activeSearchResults"
         :is-searching="activeIsSearching"
-        :muji-phase="muji.phase.value"
-        :muji-pending-invite="muji.pendingInvite.value"
-        :muji-in-call="muji.inCall.value"
-        :muji-is-switching="muji.isSwitching.value"
-        :muji-current-sid="muji.sid.value"
-        :muji-has-remote-tracks="muji.hasRemoteTracks.value"
-        :muji-mic-enabled="muji.micEnabled.value"
-        :muji-camera-enabled="muji.cameraEnabled.value"
-        :muji-service-jid="muji.serviceJid.value"
-        :muji-error="muji.error.value"
-        :muji-local-stream="muji.localStream.value"
-        :muji-remote-participants="muji.remoteParticipants.value"
         :upload-progress="activeUploadProgress"
         @send="sendActiveMessage"
         @typing="notifyActiveComposing"
@@ -858,16 +817,6 @@ onUnmounted(() => {
         @search="searchActiveMessages"
         @clear-search="clearActiveSearch"
         @edit-channel="openChannelEdit"
-        @start-audio-call="muji.startAudioCall"
-        @start-video-call="muji.startVideoCall"
-        @end-call="muji.endCall"
-        @join-call-invite="muji.joinPendingInvite"
-        @switch-call-invite="muji.switchToPendingInvite"
-        @decline-call-invite="muji.declineInvite"
-        @dismiss-call-invite="muji.dismissInvite"
-        @toggle-mic="muji.toggleMicrophone"
-        @toggle-camera="muji.toggleCamera"
-        @join-call-from-message="joinCallFromMessage"
         @open-dm="handleOpenDm"
       />
     </div>
