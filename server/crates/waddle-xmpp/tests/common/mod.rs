@@ -631,15 +631,6 @@ async fn run_test_server<S: AppState>(
     let push_sender: std::sync::Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
 
-    // Create SFU service actor for tests
-    let sfu_domain = format!("sfu.{}", domain);
-    let sfu_registry = std::sync::Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
-    let sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
-        sfu_domain,
-        sfu_registry,
-        "127.0.0.1:0".parse().unwrap(),
-    ));
-
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -657,13 +648,12 @@ async fn run_test_server<S: AppState>(
                         let pubsub = Arc::clone(&pubsub_storage);
                         let push_store = Arc::clone(&push_store);
                         let push_sender = Arc::clone(&push_sender);
-                        let sfu = sfu_service.clone();
                         // Enable registration for tests
                         let registration_enabled = true;
                         let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender, sfu
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender
                             ).await;
                         });
                     }

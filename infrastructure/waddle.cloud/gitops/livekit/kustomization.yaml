@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - external-secret.yaml
+  - helmrepository.yaml
+  - redis-service.yaml
+  - redis-statefulset.yaml
+  - helmrelease.yaml
+  - httproute.yaml
+  - httproute-http-redirect.yaml
+  - reference-grant.yaml

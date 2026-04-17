@@ -25,6 +25,10 @@ spec:
       corsOrigins: https://waddle.chat,http://localhost:4321
       s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
       s3Bucket: "waddle-server-files"
+      extraEnv:
+        WADDLE_MEDIA_BACKEND: livekit
+        WADDLE_MEDIA_LIVEKIT_URL: https://livekit.apps.waddle.chat
+        WADDLE_MEDIA_LIVEKIT_ROOM_PREFIX: waddle
     extraSecretRefs:
       - waddle-r2-credentials
     xmpp:
@@ -32,10 +36,6 @@ spec:
       mamDbPath: /data/mam.db
       tls:
         secretName: waddle-xmpp-tls
-    sfu:
-      udpPort: 10000
-      nodePort: 30000
-      candidateAddr: "sfu.waddle.social:30000"
     persistence:
       storageClassName: openebs-mayastor
     service:

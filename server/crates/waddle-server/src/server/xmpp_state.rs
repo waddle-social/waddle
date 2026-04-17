@@ -13,7 +13,9 @@ use crate::auth::{
 };
 use crate::db::actor::DbActor;
 use crate::db::{Database, DatabasePool, MigrationRunner};
+use crate::media::MediaBackend;
 use crate::permissions::{Object, PermissionService, Subject};
+use crate::server::media_join::{create_channel_media_session, MediaJoinError};
 use crate::server::routes::channels::list_channels_from_db as list_channels_for_waddle_from_db;
 use crate::server::routes::waddles::list_user_waddles as list_user_waddles_from_db;
 use crate::vcard::VCardStore;
@@ -42,6 +44,8 @@ pub struct XmppAppState {
     db: Arc<Database>,
     /// Database pool for per-waddle database access (auto-join enumeration)
     db_pool: Option<Arc<DatabasePool>>,
+    /// Media backend used for XMPP-native call joins.
+    media_backend: Option<Arc<dyn MediaBackend>>,
 }
 
 impl XmppAppState {
@@ -71,6 +75,7 @@ impl XmppAppState {
             vcard_store,
             db,
             db_pool: None,
+            media_backend: None,
         }
     }
 
@@ -80,6 +85,12 @@ impl XmppAppState {
     /// to per-waddle SQLite databases.
     pub fn with_db_pool(mut self, db_pool: Arc<DatabasePool>) -> Self {
         self.db_pool = Some(db_pool);
+        self
+    }
+
+    /// Set the media backend for XMPP-native call joins.
+    pub fn with_media_backend(mut self, media_backend: Arc<dyn MediaBackend>) -> Self {
+        self.media_backend = Some(media_backend);
         self
     }
 
@@ -254,6 +265,75 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// Get the XMPP server domain.
     fn domain(&self) -> &str {
         &self.domain
+    }
+
+    async fn create_media_session(
+        &self,
+        requester_jid: &jid::BareJid,
+        requester_user_id: &str,
+        waddle_id: &str,
+        channel_id: &str,
+        media_type: waddle_xmpp::MediaType,
+    ) -> Result<waddle_xmpp::MediaSessionInfo, XmppError> {
+        let db_pool = self.db_pool.as_ref().ok_or_else(|| {
+            XmppError::internal("media join requires database pool access".to_string())
+        })?;
+        let media_backend = self.media_backend.as_ref().ok_or_else(|| {
+            XmppError::service_unavailable(Some(
+                "media backend is unavailable".to_string(),
+            ))
+        })?;
+
+        let media_type = match media_type {
+            waddle_xmpp::MediaType::Audio => crate::media::MediaType::Audio,
+            waddle_xmpp::MediaType::Video => crate::media::MediaType::Video,
+        };
+
+        let session = create_channel_media_session(
+            db_pool,
+            media_backend,
+            requester_jid,
+            requester_user_id,
+            waddle_id,
+            channel_id,
+            media_type,
+        )
+        .await
+        .map_err(|err| match err {
+            MediaJoinError::PermissionDenied => {
+                XmppError::forbidden(Some("not allowed to join calls in this channel".to_string()))
+            }
+            MediaJoinError::ChannelNotFound => {
+                XmppError::item_not_found(Some("channel not found".to_string()))
+            }
+            MediaJoinError::Database(message) => XmppError::internal(message),
+            MediaJoinError::Backend(crate::media::MediaBackendError::Disabled) => {
+                XmppError::service_unavailable(Some("media backend is disabled".to_string()))
+            }
+            MediaJoinError::Backend(crate::media::MediaBackendError::InvalidRequest(message)) => {
+                XmppError::bad_request(Some(message))
+            }
+            MediaJoinError::Backend(crate::media::MediaBackendError::Misconfigured(message)) => {
+                XmppError::internal(message)
+            }
+        })?;
+
+        Ok(waddle_xmpp::MediaSessionInfo {
+            backend: session.backend,
+            room_name: session.room_name,
+            participant_id: session.participant_id,
+            participant_name: session.participant_name,
+            media_type: match session.media_type {
+                crate::media::MediaType::Audio => waddle_xmpp::MediaType::Audio,
+                crate::media::MediaType::Video => waddle_xmpp::MediaType::Video,
+            },
+            server_url: session.server_url,
+            token: session.token,
+            expires_at: session.expires_at,
+            can_publish: session.can_publish,
+            can_publish_data: session.can_publish_data,
+            can_subscribe: session.can_subscribe,
+        })
     }
 
     /// Get the OAuth discovery URL for XMPP OAUTHBEARER (XEP-0493).

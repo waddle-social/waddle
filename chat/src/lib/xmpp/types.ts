@@ -85,6 +85,20 @@ export interface IncomingCallInviteEvent {
   invite: CallInviteInfo;
 }
 
+export interface MediaJoinSession {
+  backend: string;
+  roomName: string;
+  participantId: string;
+  participantName: string;
+  mediaType: "audio" | "video";
+  serverUrl: string;
+  token: string;
+  expiresAt: string;
+  canPublish: boolean;
+  canPublishData: boolean;
+  canSubscribe: boolean;
+}
+
 export type MujiCallPhase =
   | "idle"
   | "acquiring-media"
@@ -95,16 +109,6 @@ export type MujiCallPhase =
   | "reconnecting"
   | "ending"
   | "error";
-
-export type MujiCallEvent =
-  | { type: "incoming"; sid: string; peerJid: string; includesAudio: boolean; includesVideo: boolean }
-  | { type: "outgoing"; sid: string; peerJid: string }
-  | { type: "accepted"; sid: string }
-  | { type: "terminated"; sid: string; reason?: string }
-  | { type: "connection-state"; sid: string; state: string }
-  | { type: "peer-track-added"; sid: string; track: MediaStreamTrack; stream: MediaStream }
-  | { type: "peer-track-removed"; sid: string; track: MediaStreamTrack }
-  | { type: "error"; detail: string; sid?: string };
 
 export type ChatStateType = "active" | "composing" | "paused" | "inactive" | "gone";
 

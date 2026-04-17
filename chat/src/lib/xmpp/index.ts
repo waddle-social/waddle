@@ -14,7 +14,7 @@ export type {
   IncomingCallInviteEvent,
   LiveDmMessage,
   LiveRoomMessage,
-  MujiCallEvent,
+  MediaJoinSession,
   MujiCallPhase,
   OccupantHat,
   PresenceUpdateEvent,

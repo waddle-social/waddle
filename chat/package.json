@@ -33,6 +33,7 @@
     "astro": "^6.0.8",
     "emojilib": "^4.0.2",
     "events": "^3.3.0",
+    "livekit-client": "^2.18.3",
     "lucide-vue-next": "^0.509.0",
     "marked": "^15.0.7",
     "shiki": "^4.0.2",

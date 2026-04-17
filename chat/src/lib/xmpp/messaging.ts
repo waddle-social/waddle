@@ -156,7 +156,7 @@ export interface SendCallInviteOptions {
 export function sendCallInvite(xmpp: Agent, roomJid: string, opts: SendCallInviteOptions): string {
   const msgId = opts.inviteId ?? crypto.randomUUID();
   const label = opts.video ? "Video call" : "Audio call";
-  const externalUri = opts.externalUri ?? (opts.jingleJid ? `xmpp:${opts.jingleJid}` : undefined);
+  const externalUri = opts.externalUri;
   const callInvite: Record<string, unknown> = {
     id: msgId,
     muji: opts.muji ?? true,
@@ -168,7 +168,7 @@ export function sendCallInvite(xmpp: Agent, roomJid: string, opts: SendCallInvit
 
   xmpp.sendMessage({
     id: msgId, to: roomJid, type: "groupchat",
-    body: opts.sid ? `${label} started` : (externalUri ? `${label}: ${externalUri}` : label),
+    body: opts.sid ? `${label} started` : label,
     callInvite,
     meeting: { type: "muji", ...(externalUri ? { url: externalUri } : {}), desc: label },
     processingHints: { store: true },

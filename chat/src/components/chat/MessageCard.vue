@@ -146,8 +146,8 @@ watch(
   >
     <div class="h-px flex-1 bg-border" />
     <div class="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-muted/40 text-[12px] text-muted-foreground">
-      <Phone v-if="message.callInvite && !message.callInvite.jingleSid && !message.callInvite.externalUri" class="w-3 h-3 text-primary/60" />
-      <Video v-else class="w-3.5 h-3.5 text-primary/60" />
+      <Video v-if="message.callInvite?.video" class="w-3.5 h-3.5 text-primary/60" />
+      <Phone v-else class="w-3 h-3 text-primary/60" />
       <span>
         <span class="font-medium text-foreground/70">{{ message.author }}</span>
         · {{ message.callInvite?.meetingDesc ?? message.body }}

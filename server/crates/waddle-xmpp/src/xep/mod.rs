@@ -210,6 +210,7 @@ pub mod xep0502;
 pub mod xep0503;
 pub mod xep0508;
 pub mod xep0513;
+pub mod waddle_media;
 
 pub use xep0004::{
     find_data_form, is_data_form, DataForm, DataFormError, Field, FieldOption, FieldType, FormType,
@@ -217,6 +218,10 @@ pub use xep0004::{
 };
 
 pub use xep0012::{build_last_activity_response, is_last_activity_query, NS_LAST_ACTIVITY};
+pub use waddle_media::{
+    build_media_session_response, is_media_join_request, parse_media_join_request,
+    MediaJoinRequest, NS_WADDLE_MEDIA,
+};
 
 pub use xep0047::{
     build_ibb_close, build_ibb_data_element, build_ibb_data_iq, build_ibb_item_not_found,

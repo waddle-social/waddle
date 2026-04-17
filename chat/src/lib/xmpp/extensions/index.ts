@@ -11,6 +11,7 @@ import calls from "./calls";
 import mentions from "./mentions";
 import push from "./push";
 import markup from "./markup";
+import media from "./media";
 
 const allDefinitions = [
   ...hats,
@@ -24,6 +25,7 @@ const allDefinitions = [
   ...mentions,
   ...push,
   ...markup,
+  ...media,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {

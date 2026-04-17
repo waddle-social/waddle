@@ -39,7 +39,7 @@ export interface TimelineMessage {
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0482/0483: Call invite info. */
-  callInvite?: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string };
+  callInvite?: { inviteId: string; muji: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; meetingDesc?: string; video?: boolean };
   /** XEP-0394: Message Markup offset-based annotations. */
   markup?: MarkupSpan[];
 }

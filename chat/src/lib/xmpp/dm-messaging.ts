@@ -98,7 +98,7 @@ export function sendDmCallInvite(
 ): string {
   const msgId = opts.inviteId ?? crypto.randomUUID();
   const label = opts.video ? "Video call" : "Audio call";
-  const externalUri = opts.externalUri ?? (opts.jingleJid ? `xmpp:${opts.jingleJid}` : undefined);
+  const externalUri = opts.externalUri;
   const callInvite: Record<string, unknown> = {
     id: msgId,
     muji: opts.muji ?? false,
@@ -111,7 +111,7 @@ export function sendDmCallInvite(
     id: msgId,
     to: peerJid,
     type: "chat",
-    body: opts.sid ? `${label} started` : (externalUri ? `${label}: ${externalUri}` : label),
+    body: opts.sid ? `${label} started` : label,
     callInvite,
     meeting: { type: "dm", ...(externalUri ? { url: externalUri } : {}), desc: label },
     processingHints: { store: true },

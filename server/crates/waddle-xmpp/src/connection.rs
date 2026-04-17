@@ -24,8 +24,7 @@ use crate::disco::{
     build_disco_info_response_with_extensions, build_disco_items_response,
     build_server_info_abuse_form, is_disco_info_query, is_disco_items_query, muc_room_features,
     muc_service_features, parse_disco_info_query, parse_disco_items_query, pubsub_service_features,
-    server_features, sfu_service_features, spaces_service_features, upload_service_features,
-    DiscoItem, Identity,
+    server_features, spaces_service_features, upload_service_features, DiscoItem, Identity,
 };
 use crate::isr::{
     build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore,
@@ -97,6 +96,9 @@ use crate::xep::xep0363::{
 };
 use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
+use crate::xep::{
+    build_media_session_response, is_media_join_request, parse_media_join_request,
+};
 use crate::{AppState, Session, XmppError};
 use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
@@ -176,15 +178,13 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
     push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
-    /// SFU service actor for Jingle-based media calls
-    sfu_service: Option<kameo::actor::ActorRef<crate::sfu::service_actor::SfuServiceActor>>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender, sfu_service),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -205,7 +205,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         single_tenant: bool,
         push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
         push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
-        sfu_service: kameo::actor::ActorRef<crate::sfu::service_actor::SfuServiceActor>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -237,7 +236,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             single_tenant,            // XEP-0503: single-tenant mode for spaces
             push_store,               // XEP-0357: push subscription store
             push_sender,              // XEP-0357: push notification sender
-            sfu_service: Some(sfu_service), // SFU service actor for Jingle media calls
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -3679,14 +3677,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
-        // Route Jingle IQs addressed to sfu.{domain} to the SFU service
-        if let Some(to_jid) = &iq.to {
-            let sfu_domain = format!("sfu.{}", self.domain);
-            if to_jid.domain().as_str() == sfu_domain && crate::xep::xep0166::is_jingle_iq(&iq) {
-                return self.handle_sfu_jingle_iq(iq).await;
-            }
-        }
-
         // IQ result/error stanzas addressed to the server are terminal and should
         // not trigger additional error responses.
         if matches!(&iq.payload, IqType::Result(_) | IqType::Error(_)) {
@@ -3722,6 +3712,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a ping request (XEP-0199)
         if is_ping(&iq) {
             return self.handle_ping(iq).await;
+        }
+
+        if is_media_join_request(&iq) {
+            return self.handle_media_join_request(iq).await;
         }
 
         // Check if this is a last activity query (XEP-0012)
@@ -3884,65 +3878,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.app_state.native_user_exists(node.as_str()).await
     }
 
-    /// Handle a Jingle IQ addressed to the SFU component (`sfu.{domain}`).
-    ///
-    /// Forwards the IQ to the SfuServiceActor and sends the response back to
-    /// the client.
-    async fn handle_sfu_jingle_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
-        let sfu = self.sfu_service.as_ref().ok_or_else(|| {
-            XmppError::service_unavailable(Some("SFU service not available".to_string()))
-        })?;
-
-        let sender_jid = self
-            .jid
-            .as_ref()
-            .ok_or_else(|| XmppError::not_authorized(Some("Not authenticated".to_string())))?
-            .clone();
-
-        let response = sfu
-            .ask(crate::sfu::service_actor::HandleJingleIq {
-                iq: iq.clone(),
-                sender_jid,
-            })
-            .await
-            .map_err(|e| XmppError::internal_server_error(Some(format!("SFU actor error: {e}"))))?;
-
-        match response {
-            crate::sfu::service_actor::JingleIqResponse::Accept { id, jingle } => {
-                // XEP-0166: session-accept must be a separate IQ set, not
-                // embedded in the IQ result.  Send an empty ack first, then
-                // the session-accept as its own IQ set stanza.
-                let ack_iq = xmpp_parsers::iq::Iq {
-                    from: iq.to.clone(),
-                    to: iq.from.clone(),
-                    id,
-                    payload: IqType::Result(None),
-                };
-                self.stream.write_stanza(&Stanza::Iq(ack_iq)).await?;
-
-                let accept_iq = xmpp_parsers::iq::Iq {
-                    from: iq.to.clone(),
-                    to: iq.from.clone(),
-                    id: format!("sfu-accept-{}", uuid::Uuid::new_v4()),
-                    payload: IqType::Set(jingle),
-                };
-                self.stream.write_stanza(&Stanza::Iq(accept_iq)).await
-            }
-            crate::sfu::service_actor::JingleIqResponse::Ack { id } => {
-                let result_iq = xmpp_parsers::iq::Iq {
-                    from: iq.to.clone(),
-                    to: iq.from.clone(),
-                    id,
-                    payload: IqType::Result(None),
-                };
-                self.stream.write_stanza(&Stanza::Iq(result_iq)).await
-            }
-            crate::sfu::service_actor::JingleIqResponse::Rejection { id: _, reason } => {
-                Err(XmppError::bad_request(Some(reason)))
-            }
-        }
-    }
-
     /// - MUC domain: Conference service identity + MUC features
     /// - MUC room: Conference room identity + room features
     /// - Upload domain: Upload service identity + upload features
@@ -3956,7 +3891,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
-        let sfu_domain = format!("sfu.{}", self.domain);
 
         // Determine what entity is being queried
         let (identities, features, extensions) = match query.target.as_deref() {
@@ -4036,15 +3970,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         vec![],
                     )
                 }
-            }
-            // Query to SFU domain
-            Some(target) if target == sfu_domain => {
-                debug!(domain = %sfu_domain, "disco#info query to SFU domain");
-                (
-                    vec![Identity::sfu_service(Some("Waddle SFU"))],
-                    sfu_service_features(),
-                    vec![],
-                )
             }
             // Query to MUC room
             Some(target) if target.ends_with(&format!("@{}", muc_domain)) => {
@@ -4211,7 +4136,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
-        let sfu_domain = format!("sfu.{}", self.domain);
 
         // Determine what entity is being queried
         let items = match query.target.as_deref() {
@@ -4223,7 +4147,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
                     DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
-                    DiscoItem::sfu_service(&sfu_domain, Some("Waddle SFU")),
                 ]
             }
             // Query to MUC domain - return room list
@@ -4285,7 +4208,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
                     DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
-                    DiscoItem::sfu_service(&sfu_domain, Some("Waddle SFU")),
                 ]
             }
         };
@@ -4600,6 +4522,35 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             None,
         );
         self.stream.write_raw(&error).await?;
+        Ok(())
+    }
+
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_media_join_request(
+        &mut self,
+        iq: xmpp_parsers::iq::Iq,
+    ) -> Result<(), XmppError> {
+        let sender_jid = self.jid.as_ref().map(|jid| jid.to_bare()).ok_or_else(|| {
+            XmppError::not_authorized(Some("Session not established".to_string()))
+        })?;
+        let session = self.session.as_ref().ok_or_else(|| {
+            XmppError::not_authorized(Some("Session not established".to_string()))
+        })?;
+        let request = parse_media_join_request(&iq)?;
+
+        let media_session = self
+            .app_state
+            .create_media_session(
+                &sender_jid,
+                &session.user_id,
+                &request.waddle_id,
+                &request.channel_id,
+                request.media_type,
+            )
+            .await?;
+
+        let response = build_media_session_response(&iq, &media_session);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
         Ok(())
     }
 

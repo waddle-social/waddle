@@ -38,7 +38,7 @@ const props = defineProps<{
   searchResults: { id: string; nick: string; body: string; createdAt: string }[];
   isSearching: boolean;
   mujiPhase: MujiCallPhase;
-  mujiPendingInvite: { fromNick: string; invite: { jingleJid?: string; meetingDesc?: string; video?: boolean } } | null;
+  mujiPendingInvite: { fromNick: string; invite: { jingleJid?: string; externalUri?: string; meetingDesc?: string; video?: boolean } } | null;
   mujiInCall: boolean;
   mujiIsSwitching: boolean;
   mujiCurrentSid: string | null;
@@ -278,7 +278,7 @@ watch(
           <span v-if="mujiInCall"> while you're already in a call</span>
         </div>
         <div class="text-xs text-muted-foreground truncate">
-          {{ mujiPendingInvite.invite.meetingDesc ?? mujiPendingInvite.invite.jingleJid ?? "Muji call invite" }}
+          {{ mujiPendingInvite.invite.meetingDesc ?? mujiPendingInvite.invite.externalUri ?? mujiPendingInvite.invite.jingleJid ?? "Call invite" }}
         </div>
       </div>
       <div class="flex items-center gap-2">

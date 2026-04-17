@@ -41,7 +41,6 @@ pub mod roster;
 pub mod routing;
 pub mod s2s;
 pub mod server;
-pub mod sfu;
 pub mod stream;
 pub mod stream_management;
 pub mod xep;
@@ -219,6 +218,19 @@ pub trait AppState: Send + Sync + 'static {
     fn upload_enabled(&self) -> bool {
         true // Enabled by default
     }
+
+    /// Create channel-scoped media join details for an authenticated user.
+    ///
+    /// This keeps call control on XMPP while delegating the media plane to an
+    /// external engine such as LiveKit.
+    fn create_media_session(
+        &self,
+        requester_jid: &jid::BareJid,
+        requester_user_id: &str,
+        waddle_id: &str,
+        channel_id: &str,
+        media_type: MediaType,
+    ) -> impl std::future::Future<Output = Result<MediaSessionInfo, XmppError>> + Send;
 
     // =========================================================================
     // RFC 6121 Roster Storage Methods
@@ -473,6 +485,50 @@ pub struct UploadSlotInfo {
     pub put_headers: Vec<(String, String)>,
 }
 
+/// Media transport type requested for a call join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaType {
+    Audio,
+    Video,
+}
+
+impl MediaType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+impl std::str::FromStr for MediaType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "audio" => Ok(Self::Audio),
+            "video" => Ok(Self::Video),
+            other => Err(format!("unsupported media type: {other}")),
+        }
+    }
+}
+
+/// Media join details returned to clients over XMPP.
+#[derive(Debug, Clone)]
+pub struct MediaSessionInfo {
+    pub backend: String,
+    pub room_name: String,
+    pub participant_id: String,
+    pub participant_name: String,
+    pub media_type: MediaType,
+    pub server_url: String,
+    pub token: String,
+    pub expires_at: String,
+    pub can_publish: bool,
+    pub can_publish_data: bool,
+    pub can_subscribe: bool,
+}
+
 /// User session information.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -516,29 +572,6 @@ pub async fn start<S: AppState>(
         c2s_listener,
         s2s_listener,
         shutdown_token,
-    )
-    .await
-}
-
-/// Start the XMPP server with a caller-provided SFU service actor.
-///
-/// Use this when multiple transports (for example C2S TCP + WebSocket) must
-/// share one SFU runtime.
-pub async fn start_with_sfu<S: AppState>(
-    config: XmppServerConfig,
-    app_state: Arc<S>,
-    c2s_listener: tokio::net::TcpListener,
-    s2s_listener: Option<tokio::net::TcpListener>,
-    shutdown_token: tokio_util::sync::CancellationToken,
-    sfu_service: kameo::actor::ActorRef<sfu::service_actor::SfuServiceActor>,
-) -> Result<XmppServer<S>, XmppError> {
-    XmppServer::new_with_sfu(
-        config,
-        app_state,
-        c2s_listener,
-        s2s_listener,
-        shutdown_token,
-        sfu_service,
     )
     .await
 }

@@ -81,11 +81,6 @@ persistence:
   mamDbFileName: mam.db
   uploadSubPath: uploads
 
-sfu:
-  udpPort: 10000
-  nodePort: 30000
-  candidateAddr: ""
-
 xmpp:
   enabled: true
   domain: waddle.local

@@ -65,18 +65,12 @@ cuenv task dev
   - Shorthand examples: `debug`, `info`, `warn`, `error`
   - Full filter examples: `info,waddle_server=debug,waddle_xmpp=debug`
 - Default logging filter (when neither env var is set): `info,waddle_server=debug,waddle_xmpp=debug`
-- `WADDLE_MEDIA_BACKEND`: Media backend selector (`disabled`, `webrtc-rs-sfu`, or `embedded-sfu`).
-- `WADDLE_MEDIA_PUBLIC_BASE_URL`: Public base URL used to generate media join endpoints.
-- `WADDLE_MEDIA_SFU_SIGNALING_PATH`: Path prefix used for SFU signaling URLs (default `/v1/media/sfu`).
-- `WADDLE_MEDIA_SFU_ROOM_PREFIX`: Prefix applied to generated SFU room ids (default `waddle`).
-- `WADDLE_MEDIA_SFU_ICE_SERVERS_JSON`: JSON array of ICE/STUN/TURN servers.
-- `WADDLE_MEDIA_EMBEDDED_SIGNALING_PATH`: Path prefix for embedded SFU join URLs (default `/v1/media/sfu/embedded`).
-- `WADDLE_MEDIA_EMBEDDED_ROOM_PREFIX`: Prefix applied to embedded SFU room ids (default `waddle`).
-- `WADDLE_MEDIA_EMBEDDED_MAX_ROOMS`: Hard cap on concurrent embedded SFU rooms (default `128`).
-- `WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM`: Hard cap per embedded SFU room (default `32`).
-- `WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS`: Hard cap on total embedded SFU sessions (default `1024`).
-- `WADDLE_SFU_UDP_ADDR`: UDP bind address for XMPP-native SFU media (default `0.0.0.0:10000`).
-- `WADDLE_SFU_CANDIDATE_ADDR`: Optional advertised ICE host candidate address (`ip:port`) used by SFU Jingle answers. Set this in production when binding SFU on `0.0.0.0`.
+- `WADDLE_MEDIA_BACKEND`: Media backend selector (`disabled` or `livekit`).
+- `WADDLE_MEDIA_LIVEKIT_URL`: Public LiveKit signaling URL returned to clients for XMPP-native media joins.
+- `WADDLE_MEDIA_LIVEKIT_API_KEY`: LiveKit server API key used to mint join tokens.
+- `WADDLE_MEDIA_LIVEKIT_API_SECRET`: LiveKit server API secret used to sign join tokens.
+- `WADDLE_MEDIA_LIVEKIT_ROOM_PREFIX`: Prefix applied to generated LiveKit room names (default `waddle`).
+- `WADDLE_MEDIA_LIVEKIT_TOKEN_TTL_SECS`: Lifetime of server-issued LiveKit join tokens in seconds (default `3600`).
 - `WADDLE_CERTS_EPHEMERAL`: Generate ephemeral self-signed TLS certificates in memory at startup (also available as `--ephemeral-certs` CLI flag).
 - `WADDLE_TEST_FIXED_ACCOUNT_ENABLED`: Enable boot-time provisioning of a deterministic native XMPP account for integration tests.
 - `WADDLE_TEST_FIXED_ACCOUNT_USERNAME`: Native account username (default `admin`).

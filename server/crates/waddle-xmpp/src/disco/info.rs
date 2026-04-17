@@ -76,10 +76,6 @@ impl Identity {
         Self::new("pubsub", "service", name)
     }
 
-    /// SFU service identity (category="component", type="generic").
-    pub fn sfu_service(name: Option<&str>) -> Self {
-        Self::new("component", "generic", name)
-    }
 }
 
 /// Feature element for disco#info response.
@@ -120,6 +116,11 @@ impl Feature {
     /// Waddle GitHub embed feature namespace.
     pub fn waddle_github() -> Self {
         Self::new("urn:waddle:github:0")
+    }
+
+    /// Waddle XMPP-native media join feature namespace.
+    pub fn waddle_media() -> Self {
+        Self::new("urn:waddle:media:0")
     }
 
     /// Stream Management feature
@@ -480,6 +481,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::mam(),
         Feature::replies(),
         Feature::waddle_github(),
+        Feature::waddle_media(),
         Feature::stream_management(),
         Feature::roster(),
         Feature::carbons(),
@@ -556,20 +558,6 @@ pub fn spaces_service_features() -> Vec<Feature> {
     ]
 }
 
-/// Get features for the SFU service component.
-///
-/// Advertises Jingle signaling support for multi-party media via Muji.
-pub fn sfu_service_features() -> Vec<Feature> {
-    vec![
-        Feature::disco_info(),
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_ice_udp(),
-        Feature::jingle_dtls(),
-        Feature::muji(),
-    ]
-}
-
 /// Get the standard MUC service features.
 pub fn muc_service_features() -> Vec<Feature> {
     vec![
@@ -587,11 +575,6 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::disco_info(),
         Feature::muc(),
         Feature::mam(),
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_ice_udp(),
-        Feature::jingle_dtls(),
-        Feature::muji(),
         Feature::replies(),
         Feature::waddle_github(),
         Feature::vcard(),
@@ -703,6 +686,7 @@ mod tests {
         assert!(features.contains(&Feature::mam()));
         assert!(features.contains(&Feature::replies()));
         assert!(features.contains(&Feature::waddle_github()));
+        assert!(features.contains(&Feature::waddle_media()));
         assert!(features.contains(&Feature::stream_management()));
     }
 
@@ -710,11 +694,6 @@ mod tests {
     fn test_muc_room_features() {
         let features = muc_room_features(true, true, false);
         assert!(features.contains(&Feature::muc()));
-        assert!(features.contains(&Feature::jingle()));
-        assert!(features.contains(&Feature::jingle_rtp()));
-        assert!(features.contains(&Feature::jingle_ice_udp()));
-        assert!(features.contains(&Feature::jingle_dtls()));
-        assert!(features.contains(&Feature::muji()));
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));

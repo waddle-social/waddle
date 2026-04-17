@@ -1,10 +1,10 @@
 import { computed, ref, watch, type Ref } from "vue";
+import { Room, RoomEvent, Track } from "livekit-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import type {
   BrowserXmppClient,
   CallInviteInfo,
   IncomingCallInviteEvent,
-  MujiCallEvent,
   MujiCallPhase,
   RemoteParticipant,
   XmppStatusSnapshot,
@@ -17,8 +17,7 @@ interface PendingInvite {
 }
 
 interface RecoverableCall {
-  sid: string;
-  serviceJid: string;
+  inviteId: string;
   waddleId: string;
   channelId: string;
   video: boolean;
@@ -27,23 +26,6 @@ interface RecoverableCall {
 function stopStream(stream: MediaStream | null) {
   if (!stream) return;
   for (const track of stream.getTracks()) track.stop();
-}
-
-function nickFromJid(jid: string): string {
-  const value = jid.trim();
-  if (!value) return "unknown";
-
-  const resourceIndex = value.indexOf("/");
-  if (resourceIndex >= 0 && resourceIndex < value.length - 1) {
-    return value.slice(resourceIndex + 1);
-  }
-
-  const localpartIndex = value.indexOf("@");
-  if (localpartIndex > 0) {
-    return value.slice(0, localpartIndex);
-  }
-
-  return value;
 }
 
 const CALL_SETUP_UNAVAILABLE_CONDITIONS = new Set([
@@ -123,6 +105,9 @@ export function useMujiRuntime(
   const recoverableCall = ref<RecoverableCall | null>(null);
   let leavePromise: Promise<void> | null = null;
   let rejoinPromise: Promise<void> | null = null;
+  let room: Room | null = null;
+  let roomToken: symbol | null = null;
+  let roomDisconnecting = false;
 
   const inCall = computed(() => phase.value !== "idle" && phase.value !== "error");
   const isSwitching = computed(() => phase.value === "switching");
@@ -144,13 +129,36 @@ export function useMujiRuntime(
     recoverableCall.value = null;
   }
 
-  function trackRecoverableCall(nextSid: string, nextServiceJid: string, video: boolean) {
+  function syncRemoteParticipants(activeRoom: Room) {
+    const next = new Map<string, RemoteParticipant>();
+
+    for (const participant of activeRoom.remoteParticipants.values()) {
+      const tracks = Array.from(participant.trackPublications.values())
+        .flatMap((publication) => (publication.track ? [publication.track.mediaStreamTrack] : []))
+        .filter((track) => track.readyState === "live");
+      if (tracks.length === 0) continue;
+
+      next.set(participant.identity, {
+        jid: participant.name || participant.identity,
+        stream: new MediaStream(tracks),
+      });
+    }
+
+    remoteParticipants.value = next;
+    hasRemoteTracks.value = next.size > 0;
+  }
+
+  function applyConnectedPhase(fallback: MujiCallPhase = "dialing") {
+    if (phase.value === "ending" || phase.value === "switching") return;
+    phase.value = hasRemoteTracks.value ? "active" : fallback;
+  }
+
+  function trackRecoverableCall(inviteId: string, video: boolean) {
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
     if (!waddleId || !channelId) return;
     recoverableCall.value = {
-      sid: nextSid,
-      serviceJid: nextServiceJid,
+      inviteId,
       waddleId,
       channelId,
       video,
@@ -161,6 +169,7 @@ export function useMujiRuntime(
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("WebRTC media devices are unavailable in this browser.");
     }
+
     phase.value = "acquiring-media";
     if (video) {
       try {
@@ -168,132 +177,156 @@ export function useMujiRuntime(
       } catch (err) {
         if (err instanceof DOMException && (err.name === "NotFoundError" || err.name === "OverconstrainedError")) {
           cameraEnabled.value = false;
-          return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         }
         throw err;
       }
     }
+
+    cameraEnabled.value = false;
     return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
   }
 
-  function applyMujiEvent(event: MujiCallEvent) {
-    if (event.type === "incoming") {
-      if (localStream.value && (phase.value === "dialing" || phase.value === "active")) {
-        sid.value = event.sid;
-        serviceJid.value = event.peerJid;
-        void xmppClient.value?.acceptMujiCall(event.sid, localStream.value).catch((err) => {
-          phase.value = "error";
-          error.value = normalizeCallError(err, normalizeError);
-        });
-        return;
-      }
-      if (!pendingInvite.value) {
-        pendingInvite.value = {
-          fromNick: nickFromJid(event.peerJid),
-          invite: { inviteId: event.sid, muji: true, jingleSid: event.sid, jingleJid: event.peerJid },
-        };
-      }
-      if (!inCall.value) {
-        phase.value = "ringing";
-      }
-      sid.value = event.sid;
-      serviceJid.value = event.peerJid;
-      return;
-    }
-    if (event.type === "outgoing") {
-      phase.value = "dialing";
-      sid.value = event.sid;
-      serviceJid.value = event.peerJid;
-      trackRecoverableCall(event.sid, event.peerJid, cameraEnabled.value);
-      return;
-    }
-    if (event.type === "accepted") {
-      phase.value = "active";
-      sid.value = event.sid;
-      return;
-    }
-    if (event.type === "connection-state") {
-      if (event.state === "connected" || event.state === "completed") phase.value = "active";
-      if (event.state === "failed") {
-        phase.value = "error";
-        error.value = "Call connection failed.";
-      }
-      return;
-    }
-    if (event.type === "peer-track-added") {
-      sid.value = event.sid;
-      phase.value = "active";
+  async function disconnectRoom() {
+    const activeRoom = room;
+    room = null;
+    roomToken = null;
+    clearRemoteMediaState();
+    if (!activeRoom) return;
 
-      const streamId = event.stream?.id ?? "unknown";
-      const existing = remoteParticipants.value.get(streamId);
-      if (existing) {
-        if (!existing.stream.getTracks().some((t) => t.id === event.track.id)) {
-          existing.stream.addTrack(event.track);
-        }
-      } else {
-        const stream = new MediaStream([event.track]);
-        remoteParticipants.value.set(streamId, {
-          jid: streamId,
-          stream,
-        });
-      }
-      remoteParticipants.value = new Map(remoteParticipants.value);
-      hasRemoteTracks.value = remoteParticipants.value.size > 0;
-      return;
-    }
-    if (event.type === "peer-track-removed") {
-      for (const [key, participant] of remoteParticipants.value) {
-        const tracks = participant.stream.getTracks();
-        const trackIdx = tracks.findIndex((t) => t.id === event.track.id);
-        if (trackIdx >= 0) {
-          participant.stream.removeTrack(tracks[trackIdx]!);
-          if (participant.stream.getTracks().length === 0) {
-            remoteParticipants.value.delete(key);
-          }
-          break;
-        }
-      }
-      remoteParticipants.value = new Map(remoteParticipants.value);
-      hasRemoteTracks.value = remoteParticipants.value.size > 0;
-      return;
-    }
-    if (event.type === "terminated") {
-      if (!sid.value || sid.value === event.sid) {
-        resetCallState();
-      }
-      return;
-    }
-    if (event.type === "error") {
-      phase.value = "error";
-      error.value = event.detail;
+    roomDisconnecting = true;
+    try {
+      await activeRoom.disconnect();
+    } finally {
+      roomDisconnecting = false;
     }
   }
 
-  watch(xmppClient, (client) => {
-    if (!client) {
-      resetCallState();
-      return;
+  async function publishLocalTracks(activeRoom: Room, stream: MediaStream) {
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack) {
+      throw new Error("No microphone track is available for this call.");
     }
-    client.setMujiCallHandler((event) => {
-      applyMujiEvent(event);
-    });
-  });
 
-  watch(latestCallInvite, (event) => {
-    if (!event) return;
-    if (sid.value && event.invite.jingleSid && event.invite.jingleSid === sid.value) return;
-    pendingInvite.value = {
-      roomJid: event.roomJid,
-      fromNick: event.nick,
-      invite: event.invite,
+    await activeRoom.localParticipant.publishTrack(audioTrack, {
+      source: Track.Source.Microphone,
+    });
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      await activeRoom.localParticipant.publishTrack(videoTrack, {
+        source: Track.Source.Camera,
+      });
+    }
+
+    micEnabled.value = audioTrack.enabled;
+    cameraEnabled.value = !!videoTrack && videoTrack.enabled;
+  }
+
+  function bindRoomEvents(activeRoom: Room, token: symbol) {
+    const ifCurrent = (handler: () => void) => {
+      if (room !== activeRoom || roomToken !== token) return;
+      handler();
     };
-  });
+
+    activeRoom.on(RoomEvent.ParticipantConnected, () => {
+      ifCurrent(() => {
+        syncRemoteParticipants(activeRoom);
+        applyConnectedPhase();
+      });
+    });
+
+    activeRoom.on(RoomEvent.ParticipantDisconnected, () => {
+      ifCurrent(() => {
+        syncRemoteParticipants(activeRoom);
+        applyConnectedPhase();
+      });
+    });
+
+    activeRoom.on(RoomEvent.TrackSubscribed, () => {
+      ifCurrent(() => {
+        syncRemoteParticipants(activeRoom);
+        applyConnectedPhase("active");
+      });
+    });
+
+    activeRoom.on(RoomEvent.TrackUnsubscribed, () => {
+      ifCurrent(() => {
+        syncRemoteParticipants(activeRoom);
+        applyConnectedPhase();
+      });
+    });
+
+    activeRoom.on(RoomEvent.Reconnecting, () => {
+      ifCurrent(() => {
+        phase.value = "reconnecting";
+      });
+    });
+
+    activeRoom.on(RoomEvent.Reconnected, () => {
+      ifCurrent(() => {
+        syncRemoteParticipants(activeRoom);
+        applyConnectedPhase();
+      });
+    });
+
+    activeRoom.on(RoomEvent.Disconnected, () => {
+      if (!room || room !== activeRoom || roomToken !== token) return;
+
+      room = null;
+      roomToken = null;
+      clearRemoteMediaState();
+
+      if (roomDisconnecting) return;
+      if (!recoverableCall.value) {
+        phase.value = "idle";
+        return;
+      }
+
+      phase.value = "reconnecting";
+      if (xmppStatus.value.state === "online") {
+        void attemptRejoin();
+      }
+    });
+  }
+
+  async function connectToMediaRoom(
+    client: BrowserXmppClient,
+    waddleId: string,
+    channelId: string,
+    stream: MediaStream,
+    video: boolean,
+  ) {
+    const sessionInfo = await client.requestChannelMediaJoin(waddleId, channelId, { video });
+    const nextRoom = new Room();
+    const nextToken = Symbol("livekit-room");
+
+    room = nextRoom;
+    roomToken = nextToken;
+    serviceJid.value = sessionInfo.roomName;
+    bindRoomEvents(nextRoom, nextToken);
+
+    try {
+      await nextRoom.connect(sessionInfo.serverUrl, sessionInfo.token);
+      await publishLocalTracks(nextRoom, stream);
+      syncRemoteParticipants(nextRoom);
+      applyConnectedPhase();
+      return sessionInfo;
+    } catch (err) {
+      if (room === nextRoom && roomToken === nextToken) {
+        await disconnectRoom();
+      }
+      throw err;
+    }
+  }
 
   async function leaveCurrentCall(opts: { clearPendingInvite?: boolean } = {}) {
     if (leavePromise) return leavePromise;
-    const activeSid = sid.value;
+
+    const activeInviteId = sid.value ?? recoverableCall.value?.inviteId;
     const context = recoverableCall.value;
-    if (!activeSid && !context) {
+    const activeRoom = room;
+    if (!activeInviteId && !context && !activeRoom) {
       resetCallState();
       return;
     }
@@ -303,15 +336,14 @@ export function useMujiRuntime(
       phase.value = "ending";
       try {
         const client = xmppClient.value;
-        const activeCallId = activeSid ?? context?.sid;
         if (client && context) {
           try {
-            await client.sendCallLeft(context.waddleId, context.channelId, activeCallId);
+            await client.sendCallLeft(context.waddleId, context.channelId, activeInviteId);
           } catch {
             // best-effort leave signal
           }
         }
-        client?.endMujiCall(activeCallId);
+        await disconnectRoom();
       } finally {
         resetCallState();
         if (clearPendingInvite) pendingInvite.value = null;
@@ -338,23 +370,37 @@ export function useMujiRuntime(
     const channelId = activeChannelId.value;
     if (!client || !waddleId || !channelId) return;
     if (!(await ensureNotInCall("start another one"))) return;
+
     error.value = "";
     try {
       const stream = await acquireLocalMedia(video);
+      const actualVideo = stream.getVideoTracks().length > 0;
       localStream.value = stream;
-      const result = await client.startMujiCall(
+
+      const sessionInfo = await connectToMediaRoom(
+        client,
         waddleId,
         channelId,
         stream,
-        { video },
+        actualVideo,
       );
-      if (!result) throw new Error("Failed to start Muji session.");
-      sid.value = result.sid;
-      serviceJid.value = result.serviceJid;
-      trackRecoverableCall(result.sid, result.serviceJid, video);
+
+      const inviteId = await client.sendCallInvite(waddleId, channelId, {
+        externalUri: undefined,
+        video: actualVideo,
+        muji: true,
+      });
+      if (!inviteId) {
+        throw new Error("Failed to send the call invite.");
+      }
+
+      sid.value = inviteId;
+      serviceJid.value = sessionInfo.roomName;
+      trackRecoverableCall(inviteId, actualVideo);
       pendingInvite.value = null;
-      phase.value = "dialing";
+      applyConnectedPhase("dialing");
     } catch (err) {
+      await disconnectRoom();
       phase.value = "error";
       error.value = normalizeCallError(err, normalizeError);
       stopStream(localStream.value);
@@ -369,21 +415,28 @@ export function useMujiRuntime(
     const invite = pendingInvite.value?.invite;
     if (!client || !waddleId || !channelId || !invite) return;
     if (!(await ensureNotInCall("accept this invite"))) return;
+
     error.value = "";
     try {
       const stream = await acquireLocalMedia(video);
+      const actualVideo = stream.getVideoTracks().length > 0;
       localStream.value = stream;
-      const joinOpts: { sid?: string; jingleJid?: string; video?: boolean } = { video };
-      if (invite.jingleSid) joinOpts.sid = invite.jingleSid;
-      if (invite.jingleJid) joinOpts.jingleJid = invite.jingleJid;
-      const result = await client.joinMujiCall(waddleId, channelId, stream, joinOpts);
-      if (!result) throw new Error("Failed to join Muji session.");
-      sid.value = result.sid;
-      serviceJid.value = result.serviceJid;
-      trackRecoverableCall(result.sid, result.serviceJid, video);
+
+      const sessionInfo = await connectToMediaRoom(
+        client,
+        waddleId,
+        channelId,
+        stream,
+        actualVideo,
+      );
+
+      sid.value = invite.inviteId;
+      serviceJid.value = sessionInfo.roomName;
+      trackRecoverableCall(invite.inviteId, actualVideo);
       pendingInvite.value = null;
-      phase.value = "dialing";
+      applyConnectedPhase("dialing");
     } catch (err) {
+      await disconnectRoom();
       phase.value = "error";
       error.value = normalizeCallError(err, normalizeError);
       stopStream(localStream.value);
@@ -415,59 +468,99 @@ export function useMujiRuntime(
   function dismissInvite() {
     pendingInvite.value = null;
     if (phase.value === "ringing") {
-      phase.value = sid.value ? "dialing" : "idle";
+      phase.value = recoverableCall.value ? "dialing" : "idle";
     }
   }
 
-  function toggleMicrophone() {
-    if (!localStream.value) return;
-    micEnabled.value = !micEnabled.value;
-    for (const track of localStream.value.getAudioTracks()) {
-      track.enabled = micEnabled.value;
+  async function toggleMicrophone() {
+    const stream = localStream.value;
+    if (!stream || !room) return;
+
+    try {
+      const nextEnabled = !micEnabled.value;
+      await room.localParticipant.setMicrophoneEnabled(nextEnabled);
+      for (const track of stream.getAudioTracks()) {
+        track.enabled = nextEnabled;
+      }
+      micEnabled.value = nextEnabled;
+    } catch (err) {
+      error.value = normalizeCallError(err, normalizeError);
     }
   }
 
-  function toggleCamera() {
-    if (!localStream.value) return;
-    cameraEnabled.value = !cameraEnabled.value;
-    for (const track of localStream.value.getVideoTracks()) {
-      track.enabled = cameraEnabled.value;
-    }
-    if (recoverableCall.value) {
-      recoverableCall.value = {
-        ...recoverableCall.value,
-        video: cameraEnabled.value,
-      };
+  async function toggleCamera() {
+    const stream = localStream.value;
+    if (!stream || !room) return;
+
+    try {
+      const publication = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      if (publication?.track) {
+        await room.localParticipant.unpublishTrack(publication.track);
+        for (const track of stream.getVideoTracks()) {
+          stream.removeTrack(track);
+          track.stop();
+        }
+        cameraEnabled.value = false;
+        if (recoverableCall.value) {
+          recoverableCall.value = { ...recoverableCall.value, video: false };
+        }
+        return;
+      }
+
+      const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const videoTrack = videoStream.getVideoTracks()[0];
+      if (!videoTrack) {
+        throw new Error("No camera track is available for this call.");
+      }
+
+      stream.addTrack(videoTrack);
+      await room.localParticipant.publishTrack(videoTrack, {
+        source: Track.Source.Camera,
+      });
+      cameraEnabled.value = true;
+      if (recoverableCall.value) {
+        recoverableCall.value = { ...recoverableCall.value, video: true };
+      }
+    } catch (err) {
+      error.value = normalizeCallError(err, normalizeError);
     }
   }
 
   async function attemptRejoin() {
     if (rejoinPromise) return rejoinPromise;
+
     const call = recoverableCall.value;
     const client = xmppClient.value;
     if (!call || !client) return;
     if (activeWaddleId.value !== call.waddleId || activeChannelId.value !== call.channelId) return;
+    if (xmppStatus.value.state !== "online") return;
 
     rejoinPromise = (async () => {
-      if (phase.value !== "reconnecting") return;
       error.value = "";
+      phase.value = "reconnecting";
+
       try {
         let stream = localStream.value;
-        const hasLiveTrack = !!stream?.getTracks().some((track) => track.readyState === "live");
-        if (!hasLiveTrack) {
+        const hasLiveTracks = !!stream?.getTracks().some((track) => track.readyState === "live");
+        if (!hasLiveTracks) {
           stream = await acquireLocalMedia(call.video);
           localStream.value = stream;
         }
-        const result = await client.joinMujiCall(call.waddleId, call.channelId, stream!, {
-          sid: call.sid,
-          jingleJid: call.serviceJid,
-          video: call.video,
-        });
-        if (!result) throw new Error("Failed to rejoin call after reconnect.");
-        sid.value = result.sid;
-        serviceJid.value = result.serviceJid;
-        trackRecoverableCall(result.sid, result.serviceJid, call.video);
-        phase.value = "dialing";
+
+        await disconnectRoom();
+        const actualVideo = stream!.getVideoTracks().length > 0;
+        const sessionInfo = await connectToMediaRoom(
+          client,
+          call.waddleId,
+          call.channelId,
+          stream!,
+          actualVideo,
+        );
+
+        sid.value = call.inviteId;
+        serviceJid.value = sessionInfo.roomName;
+        trackRecoverableCall(call.inviteId, actualVideo);
+        applyConnectedPhase("dialing");
       } catch (err) {
         phase.value = "error";
         error.value = normalizeCallError(err, normalizeError);
@@ -485,6 +578,27 @@ export function useMujiRuntime(
     await leaveCurrentCall();
   }
 
+  watch(xmppClient, (client) => {
+    if (!client) {
+      void leaveCurrentCall();
+    }
+  });
+
+  watch(latestCallInvite, (event) => {
+    if (!event) return;
+    if (sid.value && event.invite.inviteId === sid.value) return;
+
+    pendingInvite.value = {
+      roomJid: event.roomJid,
+      fromNick: event.nick,
+      invite: event.invite,
+    };
+
+    if (!recoverableCall.value) {
+      phase.value = "ringing";
+    }
+  });
+
   watch([activeWaddleId, activeChannelId], ([nextWaddleId, nextChannelId], [prevWaddleId, prevChannelId]) => {
     if (nextWaddleId !== prevWaddleId || nextChannelId !== prevChannelId) {
       pendingInvite.value = null;
@@ -500,12 +614,12 @@ export function useMujiRuntime(
   });
 
   watch(xmppStatus, (status) => {
-    if (status.state === "reconnecting" && (phase.value === "active" || phase.value === "dialing" || phase.value === "ringing")) {
+    if (status.state === "reconnecting" && inCall.value && phase.value !== "ending" && phase.value !== "switching") {
       phase.value = "reconnecting";
-      // Stanza's autoReconnect handles the transport — no manual connect() needed
       return;
     }
-    if (status.state === "online" && phase.value === "reconnecting") {
+
+    if (status.state === "online" && phase.value === "reconnecting" && !room) {
       void attemptRejoin();
     }
   });

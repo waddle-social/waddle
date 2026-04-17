@@ -32,7 +32,10 @@ use waddle_xmpp::{
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
     registry::{ConnectionRegistry, OutboundStanza},
-    xep::{build_spaces_metadata_form, NS_REPLY},
+    xep::{
+        build_media_session_response, build_spaces_metadata_form, is_media_join_request,
+        parse_media_join_request, NS_REPLY,
+    },
     Affiliation, Role, WaddleDetails,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
@@ -42,6 +45,7 @@ use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
 use crate::auth::{localpart_to_jid, NativeUserStore, Session};
+use crate::server::media_join::{create_channel_media_session, MediaJoinError};
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
@@ -67,8 +71,6 @@ pub struct WebSocketState {
     pub mam_storage: Arc<LibSqlMamStorage>,
     /// GitHub link enricher for message embeds
     pub github_enricher: Arc<MessageEnricher>,
-    /// SFU actor used for Jingle call signaling.
-    pub sfu_service: kameo::actor::ActorRef<waddle_xmpp::sfu::service_actor::SfuServiceActor>,
 }
 
 /// In-progress SCRAM-SHA-256 authentication state between challenge and response.
@@ -1142,6 +1144,129 @@ async fn handle_iq(
         return vec![build_iq_result_xml(&id, response_from, response_to, None)];
     }
 
+    if let Some(request_iq) = parsed_iq.as_ref() {
+        if is_media_join_request(request_iq) {
+            let session = match authenticated_session.as_ref() {
+                Some(session) => session,
+                None => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "auth",
+                        "not-authorized",
+                    )]
+                }
+            };
+            let sender_jid = match session_jid.as_ref() {
+                Some(jid) => jid.to_bare(),
+                None => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "auth",
+                        "not-authorized",
+                    )]
+                }
+            };
+            let request = match parse_media_join_request(request_iq) {
+                Ok(request) => request,
+                Err(_) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "modify",
+                        "bad-request",
+                    )]
+                }
+            };
+
+            let media_session = match create_channel_media_session(
+                &state.app_state.db_pool,
+                &state.app_state.media_backend,
+                &sender_jid,
+                &session.user_id,
+                &request.waddle_id,
+                &request.channel_id,
+                match request.media_type {
+                    waddle_xmpp::MediaType::Audio => crate::media::MediaType::Audio,
+                    waddle_xmpp::MediaType::Video => crate::media::MediaType::Video,
+                },
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(MediaJoinError::PermissionDenied) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "auth",
+                        "forbidden",
+                    )]
+                }
+                Err(MediaJoinError::ChannelNotFound) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "cancel",
+                        "item-not-found",
+                    )]
+                }
+                Err(MediaJoinError::Backend(crate::media::MediaBackendError::Disabled)) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "cancel",
+                        "service-unavailable",
+                    )]
+                }
+                Err(MediaJoinError::Backend(crate::media::MediaBackendError::InvalidRequest(_))) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "modify",
+                        "bad-request",
+                    )]
+                }
+                Err(MediaJoinError::Backend(crate::media::MediaBackendError::Misconfigured(_)))
+                | Err(MediaJoinError::Database(_)) => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "wait",
+                        "internal-server-error",
+                    )]
+                }
+            };
+
+            let response = build_media_session_response(
+                request_iq,
+                &waddle_xmpp::MediaSessionInfo {
+                    backend: media_session.backend,
+                    room_name: media_session.room_name,
+                    participant_id: media_session.participant_id,
+                    participant_name: media_session.participant_name,
+                    media_type: request.media_type,
+                    server_url: media_session.server_url,
+                    token: media_session.token,
+                    expires_at: media_session.expires_at,
+                    can_publish: media_session.can_publish,
+                    can_publish_data: media_session.can_publish_data,
+                    can_subscribe: media_session.can_subscribe,
+                },
+            );
+
+            return vec![iq_to_xml(response)];
+        }
+    }
+
     // Session establishment (legacy, but some clients need it)
     if frame.contains("urn:ietf:params:xml:ns:xmpp-session") {
         debug!("Session establishment requested");
@@ -1158,103 +1283,6 @@ async fn handle_iq(
             response_to,
             Some(query),
         )];
-    }
-
-    // Jingle IQs addressed to the SFU service.
-    if let Some(request_iq) = parsed_iq.as_ref() {
-        let sfu_domain = format!("sfu.{domain}");
-        let is_sfu_target = request_iq
-            .to
-            .as_ref()
-            .map(|jid| jid.domain().as_str() == sfu_domain.as_str())
-            .unwrap_or_else(|| {
-                to.as_deref()
-                    .and_then(|jid| jid.parse::<jid::Jid>().ok())
-                    .is_some_and(|jid| jid.domain().as_str() == sfu_domain.as_str())
-            });
-        if is_sfu_target && waddle_xmpp::xep::xep0166::is_jingle_iq(request_iq) {
-            let Some(sender_jid) = session_jid.as_ref().cloned() else {
-                return vec![build_iq_error_xml_with_addresses(
-                    &id,
-                    response_from,
-                    response_to,
-                    "auth",
-                    "not-authorized",
-                )];
-            };
-
-            let reply_from = request_iq.to.as_ref().map(ToString::to_string);
-            let reply_to = request_iq
-                .from
-                .as_ref()
-                .map(ToString::to_string)
-                .or_else(|| Some(sender_jid.to_string()));
-
-            let response = state
-                .sfu_service
-                .ask(waddle_xmpp::sfu::service_actor::HandleJingleIq {
-                    iq: request_iq.clone(),
-                    sender_jid,
-                })
-                .await;
-
-            return match response {
-                Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Accept { id, jingle }) => {
-                    // XEP-0166: session-accept must be a separate IQ set, not
-                    // embedded in the IQ result.  Send an empty ack first, then
-                    // the session-accept as its own IQ set stanza.
-                    let ack_xml =
-                        build_iq_result_xml(&id, reply_from.as_deref(), reply_to.as_deref(), None);
-
-                    let accept_iq = xmpp_parsers::iq::Iq {
-                        from: reply_from
-                            .as_deref()
-                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
-                        to: reply_to
-                            .as_deref()
-                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
-                        id: format!("sfu-accept-{}", uuid::Uuid::new_v4()),
-                        payload: xmpp_parsers::iq::IqType::Set(jingle),
-                    };
-
-                    let accept_xml = iq_to_xml(accept_iq);
-                    debug!(xml = %accept_xml, "Sending Jingle session-accept IQ");
-                    vec![ack_xml, accept_xml]
-                }
-                Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Ack { id }) => {
-                    let result_iq = xmpp_parsers::iq::Iq {
-                        from: reply_from
-                            .as_deref()
-                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
-                        to: reply_to
-                            .as_deref()
-                            .and_then(|jid| jid.parse::<jid::Jid>().ok()),
-                        id,
-                        payload: xmpp_parsers::iq::IqType::Result(None),
-                    };
-                    vec![iq_to_xml(result_iq)]
-                }
-                Ok(waddle_xmpp::sfu::service_actor::JingleIqResponse::Rejection { id, .. }) => {
-                    vec![build_iq_error_xml_with_addresses(
-                        &id,
-                        reply_from.as_deref(),
-                        reply_to.as_deref(),
-                        "modify",
-                        "bad-request",
-                    )]
-                }
-                Err(err) => {
-                    warn!(error = %err, "SFU actor call failed");
-                    vec![build_iq_error_xml_with_addresses(
-                        &id,
-                        reply_from.as_deref(),
-                        reply_to.as_deref(),
-                        "wait",
-                        "internal-server-error",
-                    )]
-                }
-            };
-        }
     }
 
     // Disco info on MUC service
@@ -1392,6 +1420,7 @@ async fn handle_iq(
                 Feature::ping(),
                 Feature::replies(),
                 Feature::waddle_github(),
+                Feature::waddle_media(),
                 Feature::disco_info(),
                 Feature::disco_items(),
                 Feature::spaces(),
@@ -1557,12 +1586,10 @@ async fn handle_iq(
 
             debug!("Disco items query on server");
             let upload_domain = format!("upload.{domain}");
-            let sfu_domain = format!("sfu.{domain}");
             let items = vec![
                 DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
                 DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                 DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
-                DiscoItem::sfu_service(&sfu_domain, Some("Waddle SFU")),
             ];
             let response = build_disco_items_response(request_iq, &items, None);
             return vec![iq_to_xml(response)];
@@ -2415,13 +2442,6 @@ mod tests {
         let mam_conn = mam_db.connect().expect("mam conn");
         let mam_storage = Arc::new(LibSqlMamStorage::new(mam_conn));
         mam_storage.initialize().await.expect("mam init");
-        let sfu_registry = Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
-        let sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
-            "sfu.example.com".to_string(),
-            sfu_registry,
-            "127.0.0.1:9".parse().expect("valid dummy SFU address"),
-        ));
-
         Arc::new(WebSocketState {
             app_state,
             auth_state,
@@ -2429,7 +2449,6 @@ mod tests {
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
             mam_storage,
             github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
-            sfu_service,
         })
     }
 
@@ -2824,58 +2843,6 @@ mod tests {
             xmpp_parsers::iq::IqType::Error(_) => {}
             other => panic!("expected IQ error payload, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn handle_iq_jingle_to_sfu_routes_to_sfu_actor() {
-        let state = create_test_websocket_state().await;
-        let frame = r#"<iq xmlns="jabber:client" id="jingle-1" type="set" to="sfu.example.com"><jingle xmlns="urn:xmpp:jingle:1"/></iq>"#;
-        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
-        let responses = handle_iq(
-            frame,
-            "example.com",
-            "muc.example.com",
-            state.as_ref(),
-            &None,
-            &Some(sender_jid),
-        )
-        .await;
-        assert_eq!(responses.len(), 1);
-        let response = responses.first().expect("jingle response");
-        assert!(
-            response.contains("bad-request"),
-            "expected bad-request from SFU actor validation: {response}"
-        );
-        assert!(
-            !response.contains("feature-not-implemented"),
-            "Jingle IQ to SFU should no longer be treated as unhandled: {response}"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_iq_jingle_to_sfu_with_resource_routes_to_sfu_actor() {
-        let state = create_test_websocket_state().await;
-        let frame = r#"<iq xmlns="jabber:client" id="jingle-2" type="set" to="sfu.example.com/focus"><jingle xmlns="urn:xmpp:jingle:1"/></iq>"#;
-        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
-        let responses = handle_iq(
-            frame,
-            "example.com",
-            "muc.example.com",
-            state.as_ref(),
-            &None,
-            &Some(sender_jid),
-        )
-        .await;
-        assert_eq!(responses.len(), 1);
-        let response = responses.first().expect("jingle response");
-        assert!(
-            response.contains("bad-request"),
-            "expected bad-request from SFU actor validation: {response}"
-        );
-        assert!(
-            !response.contains("feature-not-implemented"),
-            "Jingle IQ to SFU with resource should no longer be treated as unhandled: {response}"
-        );
     }
 
     #[tokio::test]

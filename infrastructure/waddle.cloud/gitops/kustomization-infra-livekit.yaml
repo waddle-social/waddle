@@ -1,17 +1,16 @@
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: infra-waddle-server
+  name: infra-livekit
   namespace: flux-system
 spec:
   dependsOn:
     - name: infra-cilium-gateway
-    - name: infra-external-dns
-    - name: infra-livekit
+    - name: infra-external-secrets
   interval: 10m
   retryInterval: 1m
   timeout: 15m
-  path: ./waddle-server
+  path: ./livekit
   prune: true
   wait: true
   sourceRef:
@@ -20,5 +19,5 @@ spec:
   healthChecks:
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
-      name: waddle-server
-      namespace: waddle
+      name: livekit-server
+      namespace: livekit

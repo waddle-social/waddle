@@ -1,7 +1,7 @@
 //! Server configuration.
 
 use crate::auth::providers::AuthProviderConfig;
-use crate::media::{EmbeddedSfuConfig, MediaBackendKind, MediaConfig, WebrtcRsSfuConfig};
+use crate::media::{LivekitConfig, MediaBackendKind, MediaConfig};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
@@ -121,66 +121,33 @@ impl ServerConfig {
         let media_backend = std::env::var("WADDLE_MEDIA_BACKEND")
             .unwrap_or_else(|_| "disabled".to_string())
             .parse::<MediaBackendKind>()?;
-        let media_public_base_url =
-            std::env::var("WADDLE_MEDIA_PUBLIC_BASE_URL").unwrap_or_else(|_| base_url.clone());
-        let media_signaling_path = std::env::var("WADDLE_MEDIA_SFU_SIGNALING_PATH")
-            .unwrap_or_else(|_| "/v1/media/sfu".to_string());
-        let media_room_prefix =
-            std::env::var("WADDLE_MEDIA_SFU_ROOM_PREFIX").unwrap_or_else(|_| "waddle".to_string());
-        let media_ice_servers = std::env::var("WADDLE_MEDIA_SFU_ICE_SERVERS_JSON")
-            .ok()
-            .map(|raw| {
-                serde_json::from_str::<Vec<String>>(&raw)
-                    .map_err(|e| format!("invalid WADDLE_MEDIA_SFU_ICE_SERVERS_JSON array: {}", e))
-            })
-            .transpose()?
-            .unwrap_or_else(|| vec!["stun:stun.l.google.com:19302".to_string()]);
-        let media_embedded_signaling_path = std::env::var("WADDLE_MEDIA_EMBEDDED_SIGNALING_PATH")
-            .unwrap_or_else(|_| "/v1/media/sfu/embedded".to_string());
-        let media_embedded_room_prefix = std::env::var("WADDLE_MEDIA_EMBEDDED_ROOM_PREFIX")
+        let media_livekit_url = std::env::var("WADDLE_MEDIA_LIVEKIT_URL")
+            .unwrap_or_else(|_| std::env::var("LIVEKIT_URL").unwrap_or_else(|_| base_url.clone()));
+        let media_livekit_api_key = std::env::var("WADDLE_MEDIA_LIVEKIT_API_KEY")
+            .or_else(|_| std::env::var("LIVEKIT_API_KEY"))
+            .unwrap_or_default();
+        let media_livekit_api_secret = std::env::var("WADDLE_MEDIA_LIVEKIT_API_SECRET")
+            .or_else(|_| std::env::var("LIVEKIT_API_SECRET"))
+            .unwrap_or_default();
+        let media_livekit_room_prefix = std::env::var("WADDLE_MEDIA_LIVEKIT_ROOM_PREFIX")
             .unwrap_or_else(|_| "waddle".to_string());
-        let media_embedded_max_rooms = std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_ROOMS")
+        let media_livekit_token_ttl_secs = std::env::var("WADDLE_MEDIA_LIVEKIT_TOKEN_TTL_SECS")
             .ok()
             .map(|raw| {
-                raw.parse::<usize>()
-                    .map_err(|e| format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_ROOMS: {e}"))
+                raw.parse::<i64>()
+                    .map_err(|e| format!("invalid WADDLE_MEDIA_LIVEKIT_TOKEN_TTL_SECS: {e}"))
             })
             .transpose()?
-            .unwrap_or(128);
-        let media_embedded_max_participants_per_room =
-            std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM")
-                .ok()
-                .map(|raw| {
-                    raw.parse::<usize>().map_err(|e| {
-                        format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM: {e}")
-                    })
-                })
-                .transpose()?
-                .unwrap_or(32);
-        let media_embedded_max_sessions = std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS")
-            .ok()
-            .map(|raw| {
-                raw.parse::<usize>()
-                    .map_err(|e| format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS: {e}"))
-            })
-            .transpose()?
-            .unwrap_or(1024);
+            .unwrap_or(3600);
 
         let media = MediaConfig {
             backend: media_backend,
-            public_base_url: media_public_base_url,
-            webrtc_rs_sfu: WebrtcRsSfuConfig {
-                signaling_path: media_signaling_path,
-                room_prefix: media_room_prefix,
-                ice_servers: media_ice_servers.clone(),
-            },
-            embedded_sfu: EmbeddedSfuConfig {
-                signaling_path: media_embedded_signaling_path,
-                room_prefix: media_embedded_room_prefix,
-                ice_servers: media_ice_servers,
-                max_rooms: media_embedded_max_rooms,
-                max_participants_per_room: media_embedded_max_participants_per_room,
-                max_sessions: media_embedded_max_sessions,
+            livekit: LivekitConfig {
+                url: media_livekit_url,
+                api_key: media_livekit_api_key,
+                api_secret: media_livekit_api_secret,
+                room_prefix: media_livekit_room_prefix,
+                token_ttl_secs: media_livekit_token_ttl_secs,
             },
         };
 
