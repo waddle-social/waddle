@@ -3,6 +3,7 @@ import { ref, computed, nextTick, watch } from "vue";
 import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
 import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
@@ -119,6 +120,23 @@ watch(
   },
   { immediate: true },
 );
+
+const pickerOpen = ref(false);
+const pickerAnchor = ref<HTMLElement | null>(null);
+
+function openPicker(event: MouseEvent) {
+  pickerAnchor.value = event.currentTarget as HTMLElement;
+  pickerOpen.value = true;
+}
+
+function onPickerSelect(emoji: string) {
+  emit("react", props.message.id, emoji);
+  pickerOpen.value = false;
+}
+
+function hasSelfReacted(nicks: string[]): boolean {
+  return !!props.currentUser && nicks.includes(props.currentUser);
+}
 </script>
 
 <template>
@@ -287,12 +305,20 @@ watch(
         <button
           v-for="(nicks, emoji) in message.reactions"
           :key="emoji"
-          class="inline-flex items-center gap-1 px-2 py-0.5 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+          class="inline-flex items-center gap-1 px-2 py-0.5 text-[12px] rounded-lg transition-all duration-200"
+          :class="hasSelfReacted(nicks) ? 'bg-primary/10 ring-1 ring-primary hover:bg-primary/15' : 'bg-muted/60 hover:bg-muted'"
           :title="nicks.join(', ')"
           @click="emit('react', message.id, emoji)"
         >
           <span>{{ emoji }}</span>
           <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
+        </button>
+        <button
+          class="inline-flex items-center px-2 py-0.5 rounded-lg bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground transition-all duration-200"
+          title="Add reaction"
+          @click="openPicker"
+        >
+          <SmilePlus class="w-3 h-3" />
         </button>
       </div>
     </div>
@@ -312,6 +338,7 @@ watch(
       <button
         class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Add reaction"
+        @click="openPicker"
       >
         <SmilePlus class="w-3.5 h-3.5" />
       </button>
@@ -333,6 +360,13 @@ watch(
         </button>
       </template>
     </div>
+
+    <EmojiPicker
+      :open="pickerOpen"
+      :anchor="pickerAnchor"
+      @select="onPickerSelect"
+      @close="pickerOpen = false"
+    />
   </div>
 </template>
 
