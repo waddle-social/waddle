@@ -10,18 +10,13 @@ description = "Waddle Wasm extension runtime and OCI loader"
 [dependencies]
 anyhow = { workspace = true }
 futures = { workspace = true }
-kameo = { workspace = true }
 minidom = { workspace = true }
-oci-client = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-wasmtime = { workspace = true }
-wasmtime-wasi = { workspace = true }
-wasmtime-wasi-http = { workspace = true }
 xmpp-parsers = { workspace = true }
 
 [dev-dependencies]

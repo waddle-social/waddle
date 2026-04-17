@@ -19,7 +19,7 @@ impl OciExtensionPuller {
     pub fn pull_module(&self, module: &ExtensionModuleConfig) -> Result<Option<PathBuf>> {
         let _ = &self.cache_dir;
         let _ = module;
-        // Pulling from GHCR is intentionally fail-open for now.
+        // TODO(phase2): Implement OCI artifact pulling from GHCR.
         Ok(None)
     }
 }

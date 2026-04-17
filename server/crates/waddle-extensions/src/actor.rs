@@ -19,7 +19,7 @@ impl WasmExtensionActor {
         _body: String,
         _links: Vec<DetectedLink>,
     ) -> Vec<EmbedElement> {
-        // Fail-open no-op placeholder until extension components are pulled and wired.
+        // TODO(phase2): Wire wasmtime runtime to execute extension WASM modules via WIT contract.
         Vec::new()
     }
 }
