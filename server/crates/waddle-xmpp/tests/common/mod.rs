@@ -79,8 +79,6 @@ fn touch_common_symbols() {
     let _ = init_test_env as fn();
     let _ = establish_bound_session;
     let _ = disco_info_query;
-    let _ = extdisco_services_query;
-    let _ = extdisco_services_set_query;
     let _ = join_muc_room;
     let _ = ping_query;
 }
@@ -631,15 +629,6 @@ async fn run_test_server<S: AppState>(
     let push_sender: std::sync::Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
 
-    // Create SFU service actor for tests
-    let sfu_domain = format!("sfu.{}", domain);
-    let sfu_registry = std::sync::Arc::new(waddle_xmpp::sfu::SfuRegistry::new());
-    let sfu_service = kameo::spawn(waddle_xmpp::sfu::service_actor::SfuServiceActor::new(
-        sfu_domain,
-        sfu_registry,
-        "127.0.0.1:0".parse().unwrap(),
-    ));
-
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -657,13 +646,12 @@ async fn run_test_server<S: AppState>(
                         let pubsub = Arc::clone(&pubsub_storage);
                         let push_store = Arc::clone(&push_store);
                         let push_sender = Arc::clone(&push_sender);
-                        let sfu = sfu_service.clone();
                         // Enable registration for tests
                         let registration_enabled = true;
                         let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender, sfu
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender
                             ).await;
                         });
                     }
@@ -978,40 +966,6 @@ pub async fn disco_info_query(
         .send(&format!(
             "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
                 <query xmlns='http://jabber.org/protocol/disco#info'/>\
-            </iq>",
-            id, to
-        ))
-        .await?;
-    read_iq_response(client).await
-}
-
-/// Send an XEP-0215 external services query.
-pub async fn extdisco_services_query(
-    client: &mut RawXmppClient,
-    to: &str,
-    id: &str,
-) -> std::io::Result<String> {
-    client
-        .send(&format!(
-            "<iq type='get' id='{}' to='{}' xmlns='jabber:client'>\
-                <services xmlns='urn:xmpp:extdisco:2'/>\
-            </iq>",
-            id, to
-        ))
-        .await?;
-    read_iq_response(client).await
-}
-
-/// Send an invalid XEP-0215 extdisco IQ set request (negative path).
-pub async fn extdisco_services_set_query(
-    client: &mut RawXmppClient,
-    to: &str,
-    id: &str,
-) -> std::io::Result<String> {
-    client
-        .send(&format!(
-            "<iq type='set' id='{}' to='{}' xmlns='jabber:client'>\
-                <services xmlns='urn:xmpp:extdisco:2'/>\
             </iq>",
             id, to
         ))

@@ -7,7 +7,6 @@ import reactions from "./reactions";
 import fallback from "./fallback";
 import fileSharing from "./file-sharing";
 import stickers from "./stickers";
-import calls from "./calls";
 import mentions from "./mentions";
 import push from "./push";
 import markup from "./markup";
@@ -20,7 +19,6 @@ const allDefinitions = [
   ...fallback,
   ...fileSharing,
   ...stickers,
-  ...calls,
   ...mentions,
   ...push,
   ...markup,

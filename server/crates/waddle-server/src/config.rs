@@ -1,7 +1,6 @@
 //! Server configuration.
 
 use crate::auth::providers::AuthProviderConfig;
-use crate::media::{EmbeddedSfuConfig, MediaBackendKind, MediaConfig, WebrtcRsSfuConfig};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
@@ -86,8 +85,6 @@ pub struct ServerConfig {
     /// When true, all spaces are publicly discoverable (single-tenant mode).
     /// Controlled by `WADDLE_SINGLE_TENANT` env var.
     pub single_tenant: bool,
-    /// Media backend configuration.
-    pub media: MediaConfig,
 }
 
 impl Default for ServerConfig {
@@ -98,7 +95,6 @@ impl Default for ServerConfig {
             session_key: None,
             auth: AuthConfig::default(),
             single_tenant: false,
-            media: MediaConfig::default(),
         }
     }
 }
@@ -118,79 +114,12 @@ impl ServerConfig {
             .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
 
-        let media_backend = std::env::var("WADDLE_MEDIA_BACKEND")
-            .unwrap_or_else(|_| "disabled".to_string())
-            .parse::<MediaBackendKind>()?;
-        let media_public_base_url =
-            std::env::var("WADDLE_MEDIA_PUBLIC_BASE_URL").unwrap_or_else(|_| base_url.clone());
-        let media_signaling_path = std::env::var("WADDLE_MEDIA_SFU_SIGNALING_PATH")
-            .unwrap_or_else(|_| "/v1/media/sfu".to_string());
-        let media_room_prefix =
-            std::env::var("WADDLE_MEDIA_SFU_ROOM_PREFIX").unwrap_or_else(|_| "waddle".to_string());
-        let media_ice_servers = std::env::var("WADDLE_MEDIA_SFU_ICE_SERVERS_JSON")
-            .ok()
-            .map(|raw| {
-                serde_json::from_str::<Vec<String>>(&raw)
-                    .map_err(|e| format!("invalid WADDLE_MEDIA_SFU_ICE_SERVERS_JSON array: {}", e))
-            })
-            .transpose()?
-            .unwrap_or_else(|| vec!["stun:stun.l.google.com:19302".to_string()]);
-        let media_embedded_signaling_path = std::env::var("WADDLE_MEDIA_EMBEDDED_SIGNALING_PATH")
-            .unwrap_or_else(|_| "/v1/media/sfu/embedded".to_string());
-        let media_embedded_room_prefix = std::env::var("WADDLE_MEDIA_EMBEDDED_ROOM_PREFIX")
-            .unwrap_or_else(|_| "waddle".to_string());
-        let media_embedded_max_rooms = std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_ROOMS")
-            .ok()
-            .map(|raw| {
-                raw.parse::<usize>()
-                    .map_err(|e| format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_ROOMS: {e}"))
-            })
-            .transpose()?
-            .unwrap_or(128);
-        let media_embedded_max_participants_per_room =
-            std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM")
-                .ok()
-                .map(|raw| {
-                    raw.parse::<usize>().map_err(|e| {
-                        format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_PARTICIPANTS_PER_ROOM: {e}")
-                    })
-                })
-                .transpose()?
-                .unwrap_or(32);
-        let media_embedded_max_sessions = std::env::var("WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS")
-            .ok()
-            .map(|raw| {
-                raw.parse::<usize>()
-                    .map_err(|e| format!("invalid WADDLE_MEDIA_EMBEDDED_MAX_SESSIONS: {e}"))
-            })
-            .transpose()?
-            .unwrap_or(1024);
-
-        let media = MediaConfig {
-            backend: media_backend,
-            public_base_url: media_public_base_url,
-            webrtc_rs_sfu: WebrtcRsSfuConfig {
-                signaling_path: media_signaling_path,
-                room_prefix: media_room_prefix,
-                ice_servers: media_ice_servers.clone(),
-            },
-            embedded_sfu: EmbeddedSfuConfig {
-                signaling_path: media_embedded_signaling_path,
-                room_prefix: media_embedded_room_prefix,
-                ice_servers: media_ice_servers,
-                max_rooms: media_embedded_max_rooms,
-                max_participants_per_room: media_embedded_max_participants_per_room,
-                max_sessions: media_embedded_max_sessions,
-            },
-        };
-
         Ok(Self {
             mode,
             base_url,
             session_key,
             auth,
             single_tenant,
-            media,
         })
     }
 
@@ -218,7 +147,6 @@ impl ServerConfig {
                 "disabled"
             }
         );
-        info!("Media backend: {}", self.media.backend);
     }
 
     #[cfg(test)]
@@ -229,7 +157,6 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             single_tenant: false,
-            media: MediaConfig::default(),
         }
     }
 
@@ -241,7 +168,6 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             single_tenant: false,
-            media: MediaConfig::default(),
         }
     }
 }

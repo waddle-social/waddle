@@ -2,7 +2,6 @@ import { nextTick, ref, type Ref } from "vue";
 import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
 import type {
   BrowserXmppClient,
-  CallInviteInfo,
   ChatStateType,
   DmChatStateEvent,
   DmDisplayedEvent,
@@ -25,7 +24,6 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
   if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.sharedFile) tm.sharedFile = msg.sharedFile;
   if (msg.isSticker) tm.isSticker = true;
-  if (msg.callInvite) tm.callInvite = msg.callInvite;
   return tm;
 }
 
@@ -47,7 +45,6 @@ export function useDmMessaging(
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
-  const latestCallInvite = ref<{ peerJid: string; invite: CallInviteInfo; fromNick: string } | null>(null);
 
   let messageRequestId = 0;
   let searchRequestId = 0;
@@ -182,7 +179,7 @@ export function useDmMessaging(
             body: msg.body,
             markup: msg.markup,
           });
-        } else if (msg.body || msg.callInvite || msg.sharedFile || msg.isSticker) {
+        } else if (msg.body || msg.sharedFile || msg.isSticker) {
           regular.push(msg);
         }
       }
@@ -399,9 +396,6 @@ export function useDmMessaging(
       return;
     }
     mergeLiveMessage(fromLiveDmMessage(session.value, msg));
-    if (msg.callInvite && msg.nick !== session.value.username) {
-      latestCallInvite.value = { peerJid: msg.peerJid, invite: msg.callInvite, fromNick: msg.nick };
-    }
   }
 
   function onChatState(event: DmChatStateEvent) {
@@ -430,7 +424,6 @@ export function useDmMessaging(
     timelineEl,
     searchResults,
     isSearching,
-    latestCallInvite,
     loadMessages,
     sendMessage,
     sendFileMessage,

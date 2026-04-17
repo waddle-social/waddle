@@ -75,8 +75,6 @@ pub struct RouterConfig {
     pub muc_domain: String,
     /// The Spaces subdomain (e.g., "spaces.waddle.social") for XEP-0503
     pub spaces_domain: String,
-    /// The SFU subdomain (e.g., "sfu.waddle.social")
-    pub sfu_domain: String,
     /// Whether S2S federation is enabled
     pub federation_enabled: bool,
 }
@@ -86,12 +84,10 @@ impl RouterConfig {
     pub fn new(local_domain: String) -> Self {
         let muc_domain = format!("muc.{}", local_domain);
         let spaces_domain = format!("spaces.{}", local_domain);
-        let sfu_domain = format!("sfu.{}", local_domain);
         Self {
             local_domain,
             muc_domain,
             spaces_domain,
-            sfu_domain,
             federation_enabled: false,
         }
     }
@@ -118,8 +114,6 @@ pub enum RoutingDestination {
     LocalMuc,
     /// JID is for the Spaces service on this server (XEP-0503)
     LocalSpaces,
-    /// JID is for the SFU service on this server
-    LocalSfu,
     /// JID is on a remote server (requires S2S)
     Remote {
         /// The remote domain
@@ -136,7 +130,7 @@ pub struct StanzaRouter {
     config: RouterConfig,
     /// Connection registry for local users
     connection_registry: Arc<ConnectionRegistry>,
-    /// MUC room registry for Muji/Jingle participant validation.
+    /// MUC room registry for participant lookups.
     muc_room_registry: Option<Arc<MucRoomRegistry>>,
     /// S2S connection pool for remote servers (None if federation disabled)
     s2s_pool: Option<Arc<S2sConnectionPool>>,
@@ -172,7 +166,7 @@ impl StanzaRouter {
         }
     }
 
-    /// Attach a MUC room registry for Muji/Jingle routing validation.
+    /// Attach a MUC room registry for routing validation.
     pub fn with_muc_room_registry(mut self, registry: Arc<MucRoomRegistry>) -> Self {
         self.muc_room_registry = Some(registry);
         self
@@ -209,8 +203,6 @@ impl StanzaRouter {
             RoutingDestination::LocalMuc
         } else if domain == self.config.spaces_domain {
             RoutingDestination::LocalSpaces
-        } else if domain == self.config.sfu_domain {
-            RoutingDestination::LocalSfu
         } else {
             RoutingDestination::Remote {
                 domain: domain.to_string(),
@@ -225,23 +217,12 @@ impl StanzaRouter {
             RoutingDestination::Local
                 | RoutingDestination::LocalMuc
                 | RoutingDestination::LocalSpaces
-                | RoutingDestination::LocalSfu
         )
     }
 
     /// Check if a JID is for the local MUC service.
     pub fn is_muc_jid(&self, jid: &Jid) -> bool {
         matches!(self.get_destination(jid), RoutingDestination::LocalMuc)
-    }
-
-    /// Check if a JID is for the local SFU service.
-    pub fn is_sfu_jid(&self, jid: &Jid) -> bool {
-        jid.domain().as_str() == self.config.sfu_domain
-    }
-
-    /// Return the SFU domain for this server.
-    pub fn sfu_domain(&self) -> &str {
-        &self.config.sfu_domain
     }
 
     /// Check if a JID requires S2S federation.
@@ -269,10 +250,8 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_message_local(message).await,
-            RoutingDestination::LocalMuc
-            | RoutingDestination::LocalSpaces
-            | RoutingDestination::LocalSfu => {
-                // MUC/Spaces/SFU messages should be handled by their respective services,
+            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
+                // MUC/Spaces messages should be handled by their respective services,
                 // not by this router directly. Return as local.
                 debug!("Message to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
@@ -405,10 +384,8 @@ impl StanzaRouter {
 
         match self.get_destination(to_jid) {
             RoutingDestination::Local => self.route_presence_local(presence).await,
-            RoutingDestination::LocalMuc
-            | RoutingDestination::LocalSpaces
-            | RoutingDestination::LocalSfu => {
-                // MUC/Spaces/SFU presence should be handled by their respective services
+            RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
+                // MUC/Spaces presence should be handled by their respective services
                 debug!("Presence to local service should be handled by service handler");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
@@ -534,15 +511,8 @@ impl StanzaRouter {
             RoutingDestination::Local => self.route_iq_local(iq).await,
             RoutingDestination::LocalMuc => self.route_iq_local_muc(iq, Some(sender_jid)).await,
             RoutingDestination::LocalSpaces => {
-                // MUC/Spaces IQs should be handled by their respective services
+                // Spaces IQs should be handled by their service
                 debug!("IQ to local service should be handled by service handler");
-                Ok(RoutingResult::DeliveredLocal {
-                    delivered_count: 0,
-                    offline_count: 0,
-                })
-            }
-            RoutingDestination::LocalSfu => {
-                debug!("IQ to local SFU service — not yet wired");
                 Ok(RoutingResult::DeliveredLocal {
                     delivered_count: 0,
                     offline_count: 0,
@@ -562,14 +532,6 @@ impl StanzaRouter {
             .to
             .clone()
             .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
-
-        if self.is_muc_jid(&to_jid) {
-            let sender = iq
-                .from
-                .as_ref()
-                .and_then(|jid| jid.clone().try_into_full().ok());
-            self.validate_muc_jingle_iq(&iq, sender.as_ref()).await?;
-        }
 
         self.route_iq_local_unchecked(iq, to_jid).await
     }
@@ -618,86 +580,16 @@ impl StanzaRouter {
     }
 
     /// Route IQs addressed to the local MUC domain.
-    ///
-    /// For safety, Jingle IQs addressed to a bare room JID are rejected because
-    /// bare-JID fan-out would otherwise deliver to an arbitrary occupant resource.
     async fn route_iq_local_muc(
         &self,
         iq: Iq,
-        sender_jid: Option<&FullJid>,
+        _sender_jid: Option<&FullJid>,
     ) -> Result<RoutingResult, XmppError> {
         let to_jid = iq
             .to
             .clone()
             .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
-        self.validate_muc_jingle_iq(&iq, sender_jid).await?;
         self.route_iq_local_unchecked(iq, to_jid).await
-    }
-
-    async fn validate_muc_jingle_iq(
-        &self,
-        iq: &Iq,
-        sender_jid: Option<&FullJid>,
-    ) -> Result<(), XmppError> {
-        if !crate::xep::is_jingle_iq(iq) {
-            return Ok(());
-        }
-
-        let to_jid = iq
-            .to
-            .as_ref()
-            .ok_or_else(|| XmppError::bad_request(Some("IQ has no destination".to_string())))?;
-
-        let to_full = to_jid.clone().try_into_full().map_err(|_| {
-            XmppError::bad_request(Some(
-                "Jingle IQ to local MUC must target a full JID".to_string(),
-            ))
-        })?;
-        let room_jid = to_full.to_bare();
-        let target_nick = to_full.resource().as_str();
-
-        let registry = self.muc_room_registry.as_ref().ok_or_else(|| {
-            XmppError::service_unavailable(Some(
-                "MUC registry unavailable for Jingle routing validation".to_string(),
-            ))
-        })?;
-        let room_data = registry.get_room_data(&room_jid).ok_or_else(|| {
-            XmppError::item_not_found(Some(format!("MUC room {} not found", room_jid)))
-        })?;
-        let room = room_data.read().await;
-
-        if room.get_occupant(target_nick).is_none() {
-            return Err(XmppError::item_not_found(Some(format!(
-                "Target occupant '{}' not found in room",
-                target_nick
-            ))));
-        }
-
-        let effective_sender = iq
-            .from
-            .as_ref()
-            .and_then(|jid| jid.clone().try_into_full().ok())
-            .or_else(|| sender_jid.cloned())
-            .ok_or_else(|| {
-                XmppError::bad_request(Some(
-                    "Jingle IQ to local MUC requires a full sender JID".to_string(),
-                ))
-            })?;
-
-        let sender_in_room = if effective_sender.to_bare() == room_jid {
-            room.get_occupant(effective_sender.resource().as_str())
-                .is_some()
-        } else {
-            room.find_occupant_by_real_jid(&effective_sender).is_some()
-        };
-
-        if !sender_in_room {
-            return Err(XmppError::forbidden(Some(
-                "Sender is not an occupant of target room".to_string(),
-            )));
-        }
-
-        Ok(())
     }
 
     /// Route IQ to a remote server via S2S.
@@ -763,8 +655,6 @@ fn iq_to_xml(iq: &Iq) -> Result<String, XmppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::muc::{MucRoomRegistry, Occupant, RoomConfig};
-    use crate::types::{Affiliation, Role};
     use minidom::Element;
     use tokio::sync::mpsc;
 
@@ -779,46 +669,6 @@ mod tests {
     fn parse_iq(xml: &str) -> Iq {
         let elem: Element = xml.parse().expect("valid xml");
         Iq::try_from(elem).expect("valid iq")
-    }
-
-    async fn create_router_with_test_room() -> (StanzaRouter, Arc<ConnectionRegistry>) {
-        let config = create_test_config();
-        let registry = Arc::new(ConnectionRegistry::new());
-        let muc_registry = Arc::new(MucRoomRegistry::new("muc.waddle.social".to_string()));
-
-        let room_jid: BareJid = "room@muc.waddle.social".parse().unwrap();
-        muc_registry
-            .create_room(
-                room_jid.clone(),
-                "waddle-1".to_string(),
-                "channel-1".to_string(),
-                RoomConfig::default(),
-            )
-            .unwrap();
-
-        let room_data = muc_registry.get_room_data(&room_jid).expect("room data");
-        let mut room = room_data.write().await;
-        room.add_occupant(Occupant {
-            real_jid: "sender@waddle.social/resource".parse().unwrap(),
-            nick: "sender-nick".to_string(),
-            role: Role::Participant,
-            affiliation: Affiliation::Member,
-            is_remote: false,
-            home_server: None,
-        });
-        room.add_occupant(Occupant {
-            real_jid: "target@waddle.social/resource".parse().unwrap(),
-            nick: "target-nick".to_string(),
-            role: Role::Participant,
-            affiliation: Affiliation::Member,
-            is_remote: false,
-            home_server: None,
-        });
-        drop(room);
-
-        let router = StanzaRouter::new(config, Arc::clone(&registry), None)
-            .with_muc_room_registry(muc_registry);
-        (router, registry)
     }
 
     #[test]
@@ -1021,140 +871,5 @@ mod tests {
             }
         ));
         assert!(rx.recv().await.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_route_iq_local_muc_rejects_bare_jid_jingle() {
-        let config = create_test_config();
-        let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
-
-        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let iq = parse_iq(
-            r#"<iq xmlns='jabber:client' type='set' from='sender@waddle.social/resource' to='room@muc.waddle.social' id='iq-jingle-1'>
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-initiate' sid='abc123'/>
-            </iq>"#,
-        );
-
-        let result = router.route_iq(iq, &sender_jid).await;
-        assert!(matches!(
-            result,
-            Err(XmppError::Stanza {
-                condition: crate::StanzaErrorCondition::BadRequest,
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_route_iq_local_muc_jingle_routes_when_sender_and_target_are_room_occupants() {
-        let (router, registry) = create_router_with_test_room().await;
-        let (tx, mut rx) = mpsc::channel(16);
-        let target_room_jid: FullJid = "room@muc.waddle.social/target-nick".parse().unwrap();
-        registry.register(target_room_jid, tx);
-
-        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let iq = parse_iq(
-            r#"<iq xmlns='jabber:client' type='set' from='sender@waddle.social/resource' to='room@muc.waddle.social/target-nick' id='iq-jingle-2'>
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
-            </iq>"#,
-        );
-
-        let result = router.route_iq(iq, &sender_jid).await.unwrap();
-        assert!(matches!(
-            result,
-            RoutingResult::DeliveredLocal {
-                delivered_count: 1,
-                offline_count: 0
-            }
-        ));
-        assert!(rx.recv().await.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_route_iq_local_muc_jingle_rejects_non_occupant_sender() {
-        let (router, _registry) = create_router_with_test_room().await;
-        let sender_jid: FullJid = "outsider@waddle.social/resource".parse().unwrap();
-        let iq = parse_iq(
-            r#"<iq xmlns='jabber:client' type='set' from='outsider@waddle.social/resource' to='room@muc.waddle.social/target-nick' id='iq-jingle-3'>
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
-            </iq>"#,
-        );
-
-        let result = router.route_iq(iq, &sender_jid).await;
-        assert!(matches!(
-            result,
-            Err(XmppError::Stanza {
-                condition: crate::StanzaErrorCondition::Forbidden,
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_route_iq_local_muc_jingle_rejects_missing_target_occupant() {
-        let (router, _registry) = create_router_with_test_room().await;
-        let sender_jid: FullJid = "sender@waddle.social/resource".parse().unwrap();
-        let iq = parse_iq(
-            r#"<iq xmlns='jabber:client' type='set' from='sender@waddle.social/resource' to='room@muc.waddle.social/missing-nick' id='iq-jingle-4'>
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
-            </iq>"#,
-        );
-
-        let result = router.route_iq(iq, &sender_jid).await;
-        assert!(matches!(
-            result,
-            Err(XmppError::Stanza {
-                condition: crate::StanzaErrorCondition::ItemNotFound,
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_route_iq_local_validates_inbound_jingle_sender_membership() {
-        let (router, _registry) = create_router_with_test_room().await;
-        let iq = parse_iq(
-            r#"<iq xmlns='jabber:client' type='set' from='outsider@waddle.social/resource' to='room@muc.waddle.social/target-nick' id='iq-jingle-5'>
-                <jingle xmlns='urn:xmpp:jingle:1' action='session-info' sid='abc123'/>
-            </iq>"#,
-        );
-
-        let result = router.route_iq_local(iq).await;
-        assert!(matches!(
-            result,
-            Err(XmppError::Stanza {
-                condition: crate::StanzaErrorCondition::Forbidden,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn routes_sfu_domain_to_local_sfu() {
-        let config = RouterConfig::new("waddle.social".to_string());
-        let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
-        let dest = router.get_destination_for_domain("sfu.waddle.social");
-        assert_eq!(dest, RoutingDestination::LocalSfu);
-    }
-
-    #[test]
-    fn sfu_domain_does_not_match_muc_or_local() {
-        let config = RouterConfig::new("waddle.social".to_string());
-        let registry = Arc::new(ConnectionRegistry::new());
-        let router = StanzaRouter::new(config, registry, None);
-        assert_eq!(
-            router.get_destination_for_domain("waddle.social"),
-            RoutingDestination::Local
-        );
-        assert_eq!(
-            router.get_destination_for_domain("muc.waddle.social"),
-            RoutingDestination::LocalMuc
-        );
-        assert_eq!(
-            router.get_destination_for_domain("sfu.waddle.social"),
-            RoutingDestination::LocalSfu
-        );
     }
 }

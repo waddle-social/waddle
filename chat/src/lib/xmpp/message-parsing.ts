@@ -1,13 +1,13 @@
 /** Inbound message parsing — extracts XEP extension data from stanza messages. */
 import type { ReceivedMessage } from "stanza/protocol";
 import type {
-  CallInviteInfo, ChatStateEvent, ChatStateType, DisplayedEvent,
+  ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
 } from "./types";
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
-  "body" | "mentions" | "broadcastMention" | "callInvite" | "sharedFile" | "isSticker" | "replacesId" | "markup"
+  "body" | "mentions" | "broadcastMention" | "sharedFile" | "isSticker" | "replacesId" | "markup"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -26,7 +26,6 @@ export function extractMessageExtensions(
 
   extractReferences(msg, base);
   extractExplicitMentions(msg, base);
-  extractCallInvite(msg, base);
   extractFileSharing(msg, base);
   extractMarkup(msg, base);
 
@@ -55,35 +54,6 @@ function extractExplicitMentions(msg: ReceivedMessage, base: MessageExtensionsTa
     if (m.type === "everyone") { base.broadcastMention = "everyone"; return; }
     if (m.type === "here") { base.broadcastMention = "here"; return; }
   }
-}
-
-function extractCallInvite(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const inviteElement = ext(msg).callInvite as
-    | { id?: string; muji?: boolean; jingleSid?: string; jingleJid?: string; externalUri?: string; video?: boolean }
-    | undefined;
-  if (!inviteElement) return;
-
-  const invite: CallInviteInfo = {
-    inviteId: inviteElement.id ?? msg.id ?? crypto.randomUUID(),
-    muji: inviteElement.muji ?? false,
-  };
-
-  if (inviteElement.jingleSid) invite.jingleSid = inviteElement.jingleSid;
-  if (inviteElement.jingleJid) invite.jingleJid = inviteElement.jingleJid;
-
-  const meeting = ext(msg).meeting as { url?: string; desc?: string } | undefined;
-  const resolvedUri = inviteElement.externalUri ?? meeting?.url;
-  if (resolvedUri) invite.externalUri = resolvedUri;
-  if (meeting?.desc) invite.meetingDesc = meeting.desc;
-
-  // Parse video flag; fall back to inferring from meeting description for older clients.
-  if (typeof inviteElement.video === "boolean") {
-    invite.video = inviteElement.video;
-  } else if (meeting?.desc) {
-    invite.video = meeting.desc.toLowerCase().includes("video");
-  }
-
-  base.callInvite = invite;
 }
 
 /** Callbacks the groupchat dispatcher invokes on the client. */

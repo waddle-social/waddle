@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from "vue";
-import { Check, CheckCheck, Pencil, SmilePlus, Trash2, Phone, Video, FileDown } from "lucide-vue-next";
+import { Check, CheckCheck, Pencil, SmilePlus, Trash2, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
@@ -40,13 +40,10 @@ const emit = defineEmits<{
   edit: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
-  joinCall: [invite: NonNullable<TimelineMessage["callInvite"]>];
   avatarClick: [author: string];
 }>();
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
-
-const isSystemEvent = computed(() => !!props.message.callInvite);
 
 const styledHtml = computed(() => renderStyledBody(props.message.body, props.message.markup));
 const styledBodyRef = ref<HTMLDivElement | null>(null);
@@ -137,29 +134,6 @@ watch(
       </div>
       <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
     </div>
-  </div>
-
-  <!-- System event (call invites, etc.) -->
-  <div
-    v-else-if="isSystemEvent"
-    class="flex items-center justify-center gap-3 py-3 animate-message-in"
-  >
-    <div class="h-px flex-1 bg-border" />
-    <div class="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-muted/40 text-[12px] text-muted-foreground">
-      <Phone v-if="message.callInvite && !message.callInvite.jingleSid && !message.callInvite.externalUri" class="w-3 h-3 text-primary/60" />
-      <Video v-else class="w-3.5 h-3.5 text-primary/60" />
-      <span>
-        <span class="font-medium text-foreground/70">{{ message.author }}</span>
-        · {{ message.callInvite?.meetingDesc ?? message.body }}
-      </span>
-      <span class="text-[10px] font-mono text-muted-foreground/50 tabular-nums">{{ formatStamp(message.createdAt) }}</span>
-      <button
-        v-if="message.callInvite"
-        class="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-all duration-200"
-        @click="emit('joinCall', message.callInvite!)"
-      >Join</button>
-    </div>
-    <div class="h-px flex-1 bg-border" />
   </div>
 
   <!-- Normal message -->

@@ -90,31 +90,3 @@ export function sendDirectFileMessage(
   } as Record<string, unknown>);
   return msgId;
 }
-
-export function sendDmCallInvite(
-  xmpp: Agent,
-  peerJid: string,
-  opts: { inviteId?: string; sid?: string; jingleJid?: string; externalUri?: string; video: boolean; muji?: boolean },
-): string {
-  const msgId = opts.inviteId ?? crypto.randomUUID();
-  const label = opts.video ? "Video call" : "Audio call";
-  const externalUri = opts.externalUri ?? (opts.jingleJid ? `xmpp:${opts.jingleJid}` : undefined);
-  const callInvite: Record<string, unknown> = {
-    id: msgId,
-    muji: opts.muji ?? false,
-  };
-  if (opts.sid) callInvite.jingleSid = opts.sid;
-  if (opts.jingleJid) callInvite.jingleJid = opts.jingleJid;
-  if (externalUri) callInvite.externalUri = externalUri;
-  callInvite.video = !!opts.video;
-  xmpp.sendMessage({
-    id: msgId,
-    to: peerJid,
-    type: "chat",
-    body: opts.sid ? `${label} started` : (externalUri ? `${label}: ${externalUri}` : label),
-    callInvite,
-    meeting: { type: "dm", ...(externalUri ? { url: externalUri } : {}), desc: label },
-    processingHints: { store: true },
-  } as Record<string, unknown>);
-  return msgId;
-}

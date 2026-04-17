@@ -51,7 +51,6 @@ impl TestServer {
             .env("WADDLE_XMPP_C2S_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_XMPP_MAM_DB", ":memory:")
-            .env("WADDLE_SFU_UDP_ADDR", "127.0.0.1:0")
             .env("WADDLE_HTTP_PORT_FILE", &port_file)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

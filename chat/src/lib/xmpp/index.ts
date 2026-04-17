@@ -1,7 +1,6 @@
 export { BrowserXmppClient } from "./client";
 export { barePeerJid, roomBareJidFor } from "./jid";
 export type {
-  CallInviteInfo,
   ChatStateEvent,
   ChatStateType,
   DmChatStateEvent,
@@ -11,15 +10,11 @@ export type {
   DiscoveredChannel,
   DiscoveredWaddle,
   DisplayedEvent,
-  IncomingCallInviteEvent,
   LiveDmMessage,
   LiveRoomMessage,
-  MujiCallEvent,
-  MujiCallPhase,
   OccupantHat,
   PresenceUpdateEvent,
   ReactionEvent,
-  RemoteParticipant,
   RoomActivityEvent,
   OccupantPresence,
   RoomHats,
