@@ -4,6 +4,7 @@ use crate::auth::providers::AuthProviderConfig;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use tracing::info;
+use waddle_extensions::ExtensionConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -85,6 +86,8 @@ pub struct ServerConfig {
     /// When true, all spaces are publicly discoverable (single-tenant mode).
     /// Controlled by `WADDLE_SINGLE_TENANT` env var.
     pub single_tenant: bool,
+    /// Runtime extension configuration.
+    pub extensions: ExtensionConfig,
 }
 
 impl Default for ServerConfig {
@@ -95,6 +98,7 @@ impl Default for ServerConfig {
             session_key: None,
             auth: AuthConfig::default(),
             single_tenant: false,
+            extensions: ExtensionConfig::default(),
         }
     }
 }
@@ -113,6 +117,8 @@ impl ServerConfig {
         let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
             .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
+        let extensions =
+            ExtensionConfig::from_env().map_err(|e| format!("invalid extension config: {e}"))?;
 
         Ok(Self {
             mode,
@@ -120,6 +126,7 @@ impl ServerConfig {
             session_key,
             auth,
             single_tenant,
+            extensions,
         })
     }
 
@@ -157,6 +164,7 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             single_tenant: false,
+            extensions: ExtensionConfig::default(),
         }
     }
 
@@ -168,6 +176,7 @@ impl ServerConfig {
             session_key: Some("test-key-32-bytes-long-for-aes!".to_string()),
             auth: AuthConfig::default(),
             single_tenant: false,
+            extensions: ExtensionConfig::default(),
         }
     }
 }

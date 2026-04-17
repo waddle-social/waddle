@@ -15,6 +15,7 @@ data:
   WADDLE_XMPP_S2S_ADDR: {{ .Values.xmpp.s2sAddr | quote }}
   WADDLE_NATIVE_AUTH_ENABLED: {{ .Values.xmpp.nativeAuthEnabled | toString | quote }}
   WADDLE_REGISTRATION_ENABLED: {{ .Values.xmpp.registrationEnabled | toString | quote }}
+  WADDLE_EXTENSIONS_JSON: {{ .Values.extensions | toJson | quote }}
   WADDLE_DRAIN_TIMEOUT_SECS: {{ .Values.config.drainTimeoutSeconds | toString | quote }}
   RUST_LOG: {{ .Values.config.rustLog | quote }}
   {{- if .Values.config.corsOrigins }}

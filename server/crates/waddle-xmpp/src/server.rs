@@ -11,6 +11,7 @@ use rustls::ServerConfig as RustlsServerConfig;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, warn, Instrument};
+use waddle_extensions::{ExtensionConfig, ExtensionManager};
 
 use crate::connection::ConnectionActor;
 use crate::isr::{create_shared_store, SharedIsrTokenStore};
@@ -55,6 +56,8 @@ pub struct XmppServerConfig {
     /// When true, all spaces are publicly discoverable regardless of membership.
     /// Controlled by `WADDLE_SINGLE_TENANT` env var.
     pub single_tenant: bool,
+    /// Runtime extension configuration.
+    pub extensions: ExtensionConfig,
 }
 
 impl Default for XmppServerConfig {
@@ -71,6 +74,7 @@ impl Default for XmppServerConfig {
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
             single_tenant: false,
+            extensions: ExtensionConfig::default(),
         }
     }
 }
@@ -131,8 +135,8 @@ pub struct XmppServer<S: AppState> {
     sm_session_registry: Arc<dyn SmSessionRegistry>,
     /// XEP-0060/0163 PubSub/PEP storage shared across all connections
     pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
-    /// GitHub link enricher shared across all connections
-    github_enricher: Option<Arc<waddle_xmpp_xep_github::MessageEnricher>>,
+    /// Runtime extension manager shared across all connections
+    extension_manager: Arc<ExtensionManager>,
     /// XEP-0357 Push subscription store
     push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
@@ -190,17 +194,11 @@ impl<S: AppState> XmppServer<S> {
         let push_sender: Arc<dyn WebPushSender + Send + Sync> = Arc::new(HttpWebPushSender::new());
         info!("Push notification store initialized");
 
-        // Create the GitHub link enricher from environment
-        let github_enricher = {
-            let enricher = waddle_xmpp_xep_github::MessageEnricher::from_env();
-            if enricher.is_enabled() {
-                info!("GitHub link enrichment enabled");
-                Some(Arc::new(enricher))
-            } else {
-                info!("GitHub link enrichment disabled");
-                None
-            }
-        };
+        // Create runtime extension manager from config (fail-open behavior handled internally).
+        let extension_manager = Arc::new(
+            ExtensionManager::from_config(config.extensions.clone())
+                .map_err(|e| XmppError::config(format!("Failed to initialize extensions: {e}")))?,
+        );
 
         Ok(Self {
             config,
@@ -212,7 +210,7 @@ impl<S: AppState> XmppServer<S> {
             isr_token_store,
             sm_session_registry,
             pubsub_storage,
-            github_enricher,
+            extension_manager,
             push_store,
             push_sender,
             c2s_listener,
@@ -388,7 +386,7 @@ impl<S: AppState> XmppServer<S> {
             let push_sender = self.push_sender;
             let registration_enabled = self.config.registration_enabled;
             let single_tenant = self.config.single_tenant;
-            let github_enricher = self.github_enricher;
+            let extension_manager = self.extension_manager;
 
             tokio::spawn(async move {
                 loop {
@@ -419,7 +417,7 @@ impl<S: AppState> XmppServer<S> {
                     let pubsub_storage = Arc::clone(&pubsub_storage);
                     let push_store = Arc::clone(&push_store);
                     let push_sender = Arc::clone(&push_sender);
-                    let github_enricher = github_enricher.clone();
+                    let extension_manager = extension_manager.clone();
 
                     tokio::spawn(
                         async move {
@@ -436,7 +434,7 @@ impl<S: AppState> XmppServer<S> {
                                 sm_session_registry,
                                 registration_enabled,
                                 pubsub_storage,
-                                github_enricher,
+                                extension_manager,
                                 single_tenant,
                                 push_store,
                                 push_sender,

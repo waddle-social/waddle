@@ -5,7 +5,7 @@ members = [
     "crates/waddle-server",
     "crates/waddle-cli",
     "crates/waddle-xmpp",
-    "crates/waddle-xmpp-xep-github",
+    "crates/waddle-extensions",
 ]
 
 [workspace.package]
@@ -101,6 +101,12 @@ lru = "0.12"
 regex = "1.10"
 jsonwebtoken = "9.3"
 
+# Wasm extension runtime + OCI
+wasmtime = { version = "29", features = ["component-model"] }
+wasmtime-wasi = "29"
+wasmtime-wasi-http = "29"
+oci-client = "0.14"
+
 # Markdown/Syntax (CLI)
 pulldown-cmark = "0.12"
 syntect = "5.2"
@@ -120,4 +126,3 @@ codegen-units = 4
 [profile.dev]
 opt-level = 0
 debug = true
-

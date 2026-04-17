@@ -97,7 +97,7 @@ use crate::xep::xep0363::{
 use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
 use crate::{AppState, Session, XmppError};
-use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
+use waddle_extensions::{message_has_embed_for_namespaces, ExtensionManager};
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
@@ -108,6 +108,18 @@ enum BareMessageDelivery {
     AllNonNegative,
     /// Deliver to one highest-priority resource or all when priorities tie.
     HighestOrAll,
+}
+
+fn merge_extension_features(
+    mut features: Vec<crate::disco::Feature>,
+    extension_features: &[crate::disco::Feature],
+) -> Vec<crate::disco::Feature> {
+    for feature in extension_features {
+        if !features.contains(feature) {
+            features.push(feature.clone());
+        }
+    }
+    features
 }
 
 /// Receiver for outbound stanzas to be sent to this connection.
@@ -166,8 +178,8 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     last_available_presence: Option<xmpp_parsers::presence::Presence>,
     /// XEP-0398 guard flag to prevent infinite avatar conversion loops
     converting_avatar: bool,
-    /// GitHub link enricher for expanding GitHub URLs in messages
-    github_enricher: Option<Arc<MessageEnricher>>,
+    /// Wasm extension runtime manager for message enrichments and feature advertisements
+    extension_manager: Arc<ExtensionManager>,
     /// Whether the server operates in single-tenant mode (XEP-0503).
     /// When true, all spaces are publicly discoverable regardless of membership.
     single_tenant: bool,
@@ -181,7 +193,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, github_enricher, push_store, push_sender),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, extension_manager, push_store, push_sender),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -198,7 +210,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         sm_session_registry: Arc<dyn SmSessionRegistry>,
         registration_enabled: bool,
         pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
-        github_enricher: Option<Arc<MessageEnricher>>,
+        extension_manager: Arc<ExtensionManager>,
         single_tenant: bool,
         push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
         push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
@@ -229,7 +241,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             avatar_hash: None,   // XEP-0153: computed on bind from stored vCard
             last_available_presence: None,
             converting_avatar: false, // XEP-0398: guard against infinite conversion loops
-            github_enricher,          // GitHub link enrichment (optional)
+            extension_manager,        // Runtime extension enrichment + dynamic feature discovery
             single_tenant,            // XEP-0503: single-tenant mode for spaces
             push_store,               // XEP-0357: push subscription store
             push_sender,              // XEP-0357: push notification sender
@@ -1359,16 +1371,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_direct_invite(msg, invite, sender_jid).await;
         }
 
-        // GitHub link enrichment: detect GitHub URLs in body and append metadata
+        // Runtime extension enrichment: detect links and append extension payload
         // elements. Done once here before fan-out (carbons, MAM, routing).
         // Fail-open: errors are logged but never block message delivery.
         let mut msg = msg;
-        if let Some(ref enricher) = self.github_enricher {
-            let start = std::time::Instant::now();
-            let embeds = enricher.enrich_message(&mut msg).await;
-            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-            crate::metrics::record_github_enrichment(elapsed_ms, embeds as u64);
-        }
+        let start = std::time::Instant::now();
+        let embeds = self.extension_manager.enrich_message(&mut msg).await;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        crate::metrics::record_extension_enrichment(elapsed_ms, embeds as u64);
 
         // Route based on message type
         match msg.type_ {
@@ -2019,9 +2029,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             self.send_sent_carbons(&msg_with_from).await;
         }
 
-        // Echo enriched GitHub direct messages back to sender so clients can
+        // Echo enriched extension payloads back to sender so clients can
         // merge upgraded embed metadata for already-sent messages.
-        if message_has_github_embed(&msg_with_from) {
+        if message_has_embed_for_namespaces(
+            &msg_with_from,
+            self.extension_manager.feature_namespaces(),
+        ) {
             let echo = msg_with_from.clone();
             if let Err(error) = self.stream.write_stanza(&Stanza::Message(echo)).await {
                 warn!(
@@ -3876,6 +3889,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
+        let extension_features: Vec<crate::disco::Feature> = self
+            .extension_manager
+            .extension_features()
+            .into_iter()
+            .map(|ns| crate::disco::Feature::new(&ns))
+            .collect();
 
         // Determine what entity is being queried
         let (identities, features, extensions) = match query.target.as_deref() {
@@ -3884,7 +3903,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 debug!(domain = %self.domain, "disco#info query to server domain");
                 (
                     vec![Identity::server(Some("Waddle XMPP Server"))],
-                    server_features(),
+                    merge_extension_features(server_features(), &extension_features),
                     vec![build_server_info_abuse_form(&self.domain)],
                 )
             }
@@ -3893,7 +3912,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 debug!(domain = %muc_domain, "disco#info query to MUC domain");
                 (
                     vec![Identity::muc_service(Some("Multi-User Chat"))],
-                    muc_service_features(),
+                    merge_extension_features(muc_service_features(), &extension_features),
                     vec![],
                 )
             }
@@ -3967,10 +3986,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     debug!(room = %room_jid, "disco#info query to MUC room");
                     (
                         vec![Identity::muc_room(Some(&room.config.name))],
-                        muc_room_features(
-                            room.config.persistent,
-                            room.config.members_only,
-                            room.config.moderated,
+                        merge_extension_features(
+                            muc_room_features(
+                                room.config.persistent,
+                                room.config.members_only,
+                                room.config.moderated,
+                            ),
+                            &extension_features,
                         ),
                         vec![],
                     )
@@ -4084,7 +4106,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 debug!(target = ?query.target, "disco#info query (defaulting to server)");
                 (
                     vec![Identity::server(Some("Waddle XMPP Server"))],
-                    server_features(),
+                    merge_extension_features(server_features(), &extension_features),
                     vec![build_server_info_abuse_form(&self.domain)],
                 )
             }

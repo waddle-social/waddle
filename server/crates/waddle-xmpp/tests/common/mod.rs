@@ -628,6 +628,8 @@ async fn run_test_server<S: AppState>(
         std::sync::Arc::new(waddle_xmpp::push::InMemoryPushStore::new());
     let push_sender: std::sync::Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync> =
         std::sync::Arc::new(waddle_xmpp::push::HttpWebPushSender::new());
+    let extension_manager =
+        Arc::new(waddle_extensions::ExtensionManager::from_env().expect("extension manager"));
 
     loop {
         tokio::select! {
@@ -646,12 +648,13 @@ async fn run_test_server<S: AppState>(
                         let pubsub = Arc::clone(&pubsub_storage);
                         let push_store = Arc::clone(&push_store);
                         let push_sender = Arc::clone(&push_sender);
+                        let ext = Arc::clone(&extension_manager);
                         // Enable registration for tests
                         let registration_enabled = true;
                         let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, None, st, push_store, push_sender
+                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, ext, st, push_store, push_sender
                             ).await;
                         });
                     }

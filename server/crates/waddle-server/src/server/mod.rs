@@ -29,6 +29,7 @@ use tower_http::{
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::{info, warn, Level};
+use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::XmppServerConfig;
 use waddle_xmpp::{mam::LibSqlMamStorage, muc::MucRoomRegistry, registry::ConnectionRegistry};
 
@@ -116,6 +117,8 @@ pub struct XmppConfig {
     /// Whether to generate ephemeral self-signed TLS certificates in memory.
     /// Enabled via `WADDLE_CERTS_EPHEMERAL=true` or `--ephemeral-certs`.
     pub ephemeral_certs: bool,
+    /// Runtime extension configuration.
+    pub extensions: ExtensionConfig,
 }
 
 impl Default for XmppConfig {
@@ -132,6 +135,7 @@ impl Default for XmppConfig {
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
             single_tenant: false,
+            extensions: ExtensionConfig::default(),
             acme: XmppAcmeConfig {
                 enabled: false,
                 email: None,
@@ -209,6 +213,10 @@ impl XmppConfig {
             .unwrap_or_else(|_| "0.0.0.0:5269".to_string())
             .parse()
             .unwrap_or_else(|_| "0.0.0.0:5269".parse().expect("Valid fallback S2S address"));
+        let extensions = ExtensionConfig::from_env().unwrap_or_else(|error| {
+            warn!(error = %error, "Invalid extension config from environment; using defaults");
+            ExtensionConfig::default()
+        });
 
         let ephemeral_certs = std::env::var("WADDLE_CERTS_EPHEMERAL")
             .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -227,6 +235,7 @@ impl XmppConfig {
             native_auth_enabled,
             registration_enabled,
             single_tenant,
+            extensions,
             acme: XmppAcmeConfig {
                 enabled: acme_enabled,
                 email: acme_email,
@@ -258,6 +267,7 @@ impl XmppConfig {
             native_auth_enabled: self.native_auth_enabled,
             registration_enabled: self.registration_enabled,
             single_tenant: self.single_tenant,
+            extensions: self.extensions.clone(),
         }
     }
 }
@@ -826,8 +836,17 @@ fn create_router(
     let muc_domain = format!("muc.{}", xmpp_domain);
     let muc_registry = Arc::new(MucRoomRegistry::new(muc_domain));
 
-    // GitHub link enricher for message embeds (fail-open, reads GITHUB_TOKEN from env)
-    let github_enricher = Arc::new(waddle_xmpp_xep_github::MessageEnricher::from_env());
+    let extension_manager = Arc::new(
+        ExtensionManager::from_config(server_config.extensions.clone()).unwrap_or_else(|error| {
+            warn!(error = %error, "Failed to initialize extension manager; continuing fail-open");
+            ExtensionManager::from_config(ExtensionConfig {
+                enabled: false,
+                cache_dir: String::new(),
+                modules: Vec::new(),
+            })
+            .expect("BUG: failed to create disabled ExtensionManager")
+        }),
+    );
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
@@ -836,7 +855,7 @@ fn create_router(
         connection_registry,
         muc_registry,
         mam_storage,
-        github_enricher,
+        extension_manager,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 
