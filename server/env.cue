@@ -8,14 +8,20 @@ import (
 schema.#Project & {
 	name: "waddle-server"
 
+	runtime: {
+		type:  "nix"
+		flake: ".."
+	}
+
 	ci: providers: ["github"]
 	ci: contributors: [
+		c.#Nix,
 		c.#CuenvRelease,
 		c.#OnePassword,
 	]
 
 	tasks: {
-		build: {
+		build: schema.#Task & {
 			command: "cargo"
 			args: ["build", "--bin", "waddle-server"]
 			inputs: [
@@ -25,7 +31,7 @@ schema.#Project & {
 			]
 		}
 
-		dev: {
+		dev: schema.#Task & {
 			command: "cargo"
 			args: [
 				"run",

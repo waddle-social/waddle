@@ -1,0 +1,19 @@
+version = 3
+
+[runtimes.chat]
+type = "nix"
+flake = ".."
+digest = "sha256:25223788b0503216458257e1093a50b8206d248df694e0d6dbf20d229567fea3"
+lockfile = "chat/../flake.lock"
+
+[runtimes.colony]
+type = "nix"
+flake = ".."
+digest = "sha256:25223788b0503216458257e1093a50b8206d248df694e0d6dbf20d229567fea3"
+lockfile = "colony/../flake.lock"
+
+[runtimes."infrastructure/waddle.cloud"]
+type = "nix"
+flake = "../.."
+digest = "sha256:25223788b0503216458257e1093a50b8206d248df694e0d6dbf20d229567fea3"
+lockfile = "infrastructure/waddle.cloud/../../flake.lock"

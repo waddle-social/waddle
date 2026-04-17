@@ -18,6 +18,9 @@ node_modules
 
 # direnv
 .direnv
+
+# Nix
+result
 dist/
 build/
 coverage/

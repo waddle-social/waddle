@@ -8,8 +8,14 @@ import (
 schema.#Project & {
 	name: "waddle-chat"
 
+	runtime: {
+		type:  "nix"
+		flake: ".."
+	}
+
 	ci: providers: ["github"]
 	ci: contributors: [
+		c.#Nix,
 		c.#CuenvRelease,
 		c.#OnePassword,
 	]
