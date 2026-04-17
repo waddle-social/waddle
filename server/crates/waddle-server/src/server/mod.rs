@@ -65,6 +65,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Test-only default constructor — uses a disabled media backend
+    /// and the filesystem blob storage from `WADDLE_UPLOAD_DIR`.
+    /// Production code should call [`Self::new_with_deps`] so each
+    /// dependency is explicit.
+    #[cfg(test)]
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
         let blob_storage = crate::storage::build_blob_storage()
             .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
@@ -480,15 +485,15 @@ pub async fn start_with_config(
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
     let http_handle = tokio::spawn(async move {
-        start_http_server(
-            http_state,
-            http_server_config,
+        start_http_server(HttpServerDeps {
+            state: http_state,
+            server_config: http_server_config,
             xmpp_native_auth_enabled,
-            http_mam_storage,
+            mam_storage: http_mam_storage,
             acme_http01_challenge_service,
-            http_listener,
-            http_stop,
-        )
+            listener: http_listener,
+            stop_token: http_stop,
+        })
         .await
     });
 
@@ -578,8 +583,8 @@ pub async fn start_with_config(
     }
 }
 
-/// Start the HTTP server with graceful shutdown support.
-async fn start_http_server(
+/// Bundle of parameters for [`start_http_server`].
+struct HttpServerDeps {
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
@@ -587,7 +592,20 @@ async fn start_http_server(
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
-) -> Result<()> {
+}
+
+/// Start the HTTP server with graceful shutdown support.
+async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
+    let HttpServerDeps {
+        state,
+        server_config,
+        xmpp_native_auth_enabled,
+        mam_storage,
+        acme_http01_challenge_service,
+        listener,
+        stop_token,
+    } = deps;
+
     let app = create_router(
         state,
         server_config,
