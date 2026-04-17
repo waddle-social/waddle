@@ -84,6 +84,33 @@ struct PendingScramAuth {
     username: String,
 }
 
+/// Per-connection mutable state threaded through the legacy dispatch path.
+///
+/// The sans-I/O refactor (`waddle_xmpp::protocol::phase::ConnectionPhase`)
+/// will replace these loose booleans with an enum state machine. Until
+/// that migration completes (see the tracking PR), bundling them into a
+/// single struct cuts the per-function argument count and makes the
+/// invariants easier to audit.
+struct LegacyConnState {
+    authenticated: bool,
+    session_jid: Option<FullJid>,
+    authenticated_session: Option<Session>,
+    resource_bound: bool,
+    pending_scram: Option<PendingScramAuth>,
+}
+
+impl LegacyConnState {
+    fn new() -> Self {
+        Self {
+            authenticated: false,
+            session_jid: None,
+            authenticated_session: None,
+            resource_bound: false,
+            pending_scram: None,
+        }
+    }
+}
+
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
     Router::new()
@@ -119,12 +146,8 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundStanza>(OUTBOUND_CHANNEL_SIZE);
 
     // Track connection state
-    let mut authenticated = false;
-    let mut session_jid: Option<FullJid> = None;
-    let mut authenticated_session: Option<Session> = None;
+    let mut conn = LegacyConnState::new();
     let mut registered = false;
-    let mut resource_bound = false;
-    let mut pending_scram: Option<PendingScramAuth> = None;
 
     loop {
         tokio::select! {
@@ -139,17 +162,13 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             &text,
                             &domain,
                             &state,
-                            &mut authenticated,
-                            &mut session_jid,
-                            &mut authenticated_session,
-                            &mut resource_bound,
-                            &mut pending_scram,
+                            &mut conn,
                         ).await;
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if authenticated && resource_bound && session_jid.is_some() && !registered {
-                            if let Some(ref jid) = session_jid {
+                        if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() && !registered {
+                            if let Some(ref jid) = conn.session_jid {
                                 state.connection_registry.register(jid.clone(), outbound_tx.clone());
                                 registered = true;
                                 info!(jid = %jid, "WebSocket connection registered");
@@ -213,7 +232,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     }
 
     // Unregister connection on disconnect
-    if let Some(ref jid) = session_jid {
+    if let Some(ref jid) = conn.session_jid {
         state.connection_registry.unregister(jid);
         info!(jid = %jid, "WebSocket connection unregistered");
 
@@ -437,12 +456,19 @@ async fn handle_xmpp_frame(
     frame: &str,
     domain: &str,
     state: &WebSocketState,
-    authenticated: &mut bool,
-    session_jid: &mut Option<FullJid>,
-    authenticated_session: &mut Option<Session>,
-    resource_bound: &mut bool,
-    pending_scram: &mut Option<PendingScramAuth>,
+    conn: &mut LegacyConnState,
 ) -> Vec<String> {
+    // Split the bundle into the individual `&mut` borrows the legacy body
+    // expects. Once the sans-I/O migration lands (see the protocol module
+    // tracking PR), the whole body becomes a single
+    // `machine.handle(InboundEvent)` call and this shim goes away.
+    let LegacyConnState {
+        authenticated,
+        session_jid,
+        authenticated_session,
+        resource_bound,
+        pending_scram,
+    } = conn;
     let frame = frame.trim();
     let muc_domain = format!("muc.{}", domain);
 
@@ -2020,12 +2046,9 @@ async fn archive_groupchat_message(
     room_jid: &BareJid,
     message: &xmpp_parsers::message::Message,
 ) -> Option<String> {
-    let Some(body) = prototype_body(message)
+    let body = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return None;
-    };
+        .filter(|value| !value.is_empty())?;
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
@@ -2465,21 +2488,13 @@ mod tests {
     #[tokio::test]
     async fn websocket_features_advertise_oauthbearer() {
         let state = create_test_websocket_state().await;
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
+        let mut conn = LegacyConnState::new();
 
-        let mut pending_scram = None;
         let responses = handle_xmpp_frame(
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
             "example.com",
             state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
+            &mut conn,
         )
         .await;
 
@@ -2508,29 +2523,15 @@ mod tests {
                 .append(BASE64_STANDARD.encode("\0alice\0session-token"))
                 .build(),
         );
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
-        let mut pending_scram = None;
+        let mut conn = LegacyConnState::new();
 
-        let responses = handle_xmpp_frame(
-            &frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_failure_xml("invalid-mechanism")]);
-        assert!(!authenticated);
-        assert!(!resource_bound);
-        assert!(session_jid.is_none());
-        assert!(authenticated_session.is_none());
+        assert!(!conn.authenticated);
+        assert!(!conn.resource_bound);
+        assert!(conn.session_jid.is_none());
+        assert!(conn.authenticated_session.is_none());
     }
 
     #[tokio::test]
@@ -2544,36 +2545,26 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
-        let mut pending_scram = None;
+        let mut conn = LegacyConnState::new();
 
-        let responses = handle_xmpp_frame(
-            &frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_success_xml()]);
-        assert!(authenticated);
-        assert!(!resource_bound);
+        assert!(conn.authenticated);
+        assert!(!conn.resource_bound);
         assert_eq!(
-            authenticated_session.as_ref().map(|s| s.user_id.as_str()),
+            conn.authenticated_session
+                .as_ref()
+                .map(|s| s.user_id.as_str()),
             Some(session.user_id.as_str())
         );
         let expected_bare =
             localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
         assert_eq!(
-            session_jid.as_ref().map(|jid| jid.to_bare().to_string()),
+            conn.session_jid
+                .as_ref()
+                .map(|jid| jid.to_bare().to_string()),
             Some(expected_bare)
         );
     }
@@ -2604,38 +2595,16 @@ mod tests {
                 )
                 .build(),
         );
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
-        let mut pending_scram = None;
+        let mut conn = LegacyConnState::new();
 
-        let auth_responses = handle_xmpp_frame(
-            &auth_frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
 
-        let bind_responses = handle_xmpp_frame(
-            &bind_frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let bind_responses =
+            handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
 
-        assert!(resource_bound);
+        assert!(conn.resource_bound);
         assert_eq!(bind_responses.len(), 1);
 
         let response = Element::from_str(&bind_responses[0]).expect("bind response XML");
@@ -2655,7 +2624,7 @@ mod tests {
                 .expect("session localpart should produce JID");
         assert_eq!(jid.text(), format!("{expected_bare}/web"));
         assert_eq!(
-            session_jid.as_ref().map(ToString::to_string),
+            conn.session_jid.as_ref().map(ToString::to_string),
             Some(format!("{expected_bare}/web"))
         );
     }

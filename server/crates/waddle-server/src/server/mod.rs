@@ -1,7 +1,9 @@
 use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::{ServerConfig, ServerInfo};
 use crate::db::{DatabasePool, PoolHealth};
-use crate::media::{build_media_backend, MediaBackend, MediaConfig};
+#[cfg(test)]
+use crate::media::MediaConfig;
+use crate::media::{build_media_backend, MediaBackend};
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -69,6 +71,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Test-only default constructor — uses a disabled media backend
+    /// and the filesystem blob storage from `WADDLE_UPLOAD_DIR`.
+    /// Production code should call [`Self::new_with_deps`] so each
+    /// dependency is explicit.
+    #[cfg(test)]
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
         let blob_storage = crate::storage::build_blob_storage()
             .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
@@ -77,15 +84,6 @@ impl AppState {
             build_media_backend(&MediaConfig::default()),
             blob_storage,
         )
-    }
-
-    pub fn new_with_media(
-        db_pool: Arc<DatabasePool>,
-        media_backend: Arc<dyn MediaBackend>,
-    ) -> Self {
-        let blob_storage = crate::storage::build_blob_storage()
-            .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
-        Self::new_with_deps(db_pool, media_backend, blob_storage)
     }
 
     pub fn new_with_deps(
@@ -497,16 +495,16 @@ pub async fn start_with_config(
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
     let http_handle = tokio::spawn(async move {
-        start_http_server(
-            http_state,
-            http_server_config,
+        start_http_server(HttpServerDeps {
+            state: http_state,
+            server_config: http_server_config,
             xmpp_native_auth_enabled,
-            http_mam_storage,
-            http_sfu_service,
+            mam_storage: http_mam_storage,
+            sfu_service: http_sfu_service,
             acme_http01_challenge_service,
-            http_listener,
-            http_stop,
-        )
+            listener: http_listener,
+            stop_token: http_stop,
+        })
         .await
     });
 
@@ -598,8 +596,8 @@ pub async fn start_with_config(
     }
 }
 
-/// Start the HTTP server with graceful shutdown support.
-async fn start_http_server(
+/// Bundle of parameters for [`start_http_server`].
+struct HttpServerDeps {
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
@@ -608,7 +606,21 @@ async fn start_http_server(
     acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     listener: tokio::net::TcpListener,
     stop_token: tokio_util::sync::CancellationToken,
-) -> Result<()> {
+}
+
+/// Start the HTTP server with graceful shutdown support.
+async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
+    let HttpServerDeps {
+        state,
+        server_config,
+        xmpp_native_auth_enabled,
+        mam_storage,
+        sfu_service,
+        acme_http01_challenge_service,
+        listener,
+        stop_token,
+    } = deps;
+
     info!(media_backend = %state.media_backend.kind(), "Configured media backend");
     let app = create_router_with_sfu(
         state,
@@ -878,7 +890,12 @@ fn build_cors(origins: Option<&str>) -> CorsLayer {
     }
 }
 
-/// Create the Axum router with all routes and middleware
+/// Create the Axum router with all routes and middleware.
+///
+/// Test-only wrapper around [`create_router_with_sfu`] that spawns a
+/// dummy SFU actor; production code in [`ServerMode::run`] builds a
+/// real SFU and calls `create_router_with_sfu` directly.
+#[cfg(test)]
 fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
