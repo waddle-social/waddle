@@ -138,10 +138,10 @@ export interface SendGroupMessageOptions {
  * Send a groupchat message. Supports XEP-0447 attachments, XEP-0461 replies with
  * XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
  *
- * Every message carries a `<thread>` child: replies inherit their parent's
- * thread id, and originals self-identify as the root of a new thread with
- * `threadId === msgId`. Per XEP-0201 this lets MAM-by-thread return the root
- * and lets clients detect "this message starts a thread" from the stanza alone.
+ * `<reply>` and `<thread>` are independent: a bare `<reply>` is a quote that
+ * stays inline in the feed; a `<thread>` tags membership in a conversation
+ * group and moves the message into the thread panel. The caller passes
+ * `threadId` only when it explicitly wants the message threaded.
  *
  * Pass a pre-generated `id` when the caller already created an optimistic
  * timeline entry so the stanza ID matches.
@@ -205,10 +205,10 @@ export function sendGroupMessage(
   if (replyTo) {
     msgData.reply = { to: replyTo.author, id: replyTo.id };
   }
-  // XEP-0201: always attach `<thread>`. Inherited id for replies; own msgId
-  // for originals so the root self-identifies and MAM thread queries return it.
-  msgData.thread = threadId ?? msgId;
-  if (parentThreadId) msgData.parentThread = parentThreadId;
+  if (threadId) {
+    msgData.thread = threadId;
+    if (parentThreadId) msgData.parentThread = parentThreadId;
+  }
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);
     msgData.links = files!.map((f) => ({ url: f.url }));

@@ -84,30 +84,28 @@ describe("groupchat replies + threads", () => {
     expect(call.fallbacks).toBeUndefined();
   });
 
-  test("original messages self-identify as their own thread root (XEP-0201)", () => {
-    // Per XEP-0201, every message SHOULD carry <thread>. Originals use their
-    // own msgId so MAM-by-thread can retrieve the whole conversation — root
-    // included — and the index can detect "this starts a thread" from the
-    // stanza alone.
+  test("omits <thread> when no threadId is supplied (bare reply stays inline)", () => {
+    // XEP-0201 threading is opt-in. Plain messages and bare XEP-0461 replies
+    // carry no <thread>; only the thread panel composer supplies threadId.
     const xmpp = makeAgent();
 
-    const messageId = sendGroupMessage(xmpp, "general@muc.waddle.social", "starting a topic");
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "starting a topic");
 
     const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
-    expect(call.thread).toBe(messageId);
+    expect(call.thread).toBeUndefined();
     expect(call.parentThread).toBeUndefined();
   });
 
-  test("explicit threadId overrides the default self-thread id", () => {
+  test("omits <thread> on a bare reply (reply and thread are independent)", () => {
     const xmpp = makeAgent();
 
-    sendGroupMessage(xmpp, "general@muc.waddle.social", "reply body", {
-      replyTo: { id: "root-1", author: "general@muc.waddle.social/alice" },
-      threadId: "root-1",
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "inline quote", {
+      replyTo: { id: "msg-1", author: "general@muc.waddle.social/alice", body: "hi" },
     });
 
     const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
-    expect(call.thread).toBe("root-1");
+    expect(call.reply).toEqual({ to: "general@muc.waddle.social/alice", id: "msg-1" });
+    expect(call.thread).toBeUndefined();
   });
 
   test("rebases rich markup spans when a reply fallback prefix is prepended", () => {
