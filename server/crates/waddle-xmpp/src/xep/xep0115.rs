@@ -270,8 +270,11 @@ pub fn build_waddle_caps_element() -> Element {
     build_caps_element(WADDLE_CAPS_NODE, &identities, &features)
 }
 
-/// Ensure a payload list contains a single entity capabilities advertisement.
-pub fn ensure_waddle_caps_payload(payloads: &mut Vec<Element>) {
+/// Ensure a payload list contains an entity capabilities advertisement.
+///
+/// If the payload list already contains any XEP-0115 `<c/>` element, it is
+/// preserved as-is to avoid duplicating caps payloads in the same stanza.
+pub fn ensure_caps_payload(payloads: &mut Vec<Element>) {
     if payloads
         .iter()
         .any(|payload| payload.name() == "c" && payload.ns() == NS_CAPS)
@@ -591,11 +594,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_waddle_caps_payload_adds_caps_once() {
+    fn test_ensure_caps_payload_adds_caps_once() {
         let mut payloads = Vec::new();
 
-        ensure_waddle_caps_payload(&mut payloads);
-        ensure_waddle_caps_payload(&mut payloads);
+        ensure_caps_payload(&mut payloads);
+        ensure_caps_payload(&mut payloads);
 
         let caps_payloads: Vec<_> = payloads
             .iter()
@@ -606,11 +609,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_waddle_caps_payload_preserves_existing_caps() {
+    fn test_ensure_caps_payload_preserves_existing_caps() {
         let existing = Caps::new("https://example.com/caps", "existing").build_element();
         let mut payloads = vec![existing.clone()];
 
-        ensure_waddle_caps_payload(&mut payloads);
+        ensure_caps_payload(&mut payloads);
 
         assert_eq!(payloads, vec![existing]);
     }

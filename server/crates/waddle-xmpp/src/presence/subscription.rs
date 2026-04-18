@@ -272,7 +272,7 @@ pub fn build_available_presence(
         pres.statuses.insert(String::new(), status_text.to_string());
     }
 
-    crate::xep::ensure_waddle_caps_payload(&mut pres.payloads);
+    crate::xep::ensure_caps_payload(&mut pres.payloads);
 
     pres
 }
