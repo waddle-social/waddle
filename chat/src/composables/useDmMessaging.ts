@@ -16,8 +16,6 @@ import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { dmKey, getLastSeen, setLastSeen } from "@/lib/last-seen-store";
 
-const AT_BOTTOM_THRESHOLD = 48;
-
 function fromLiveDmMessage(
   session: WaddleSession,
   msg: LiveDmMessage,
@@ -78,16 +76,22 @@ export function useDmMessaging(
   // identical text doesn't mis-target already-reconciled messages.
   const pendingEchoClientIds = new Set<string>();
 
-  // Re-pin to bottom for a short window after the initial scroll so late DOM
-  // mutations (images, avatars) don't strand the user above the newest
-  // message. Same pattern as useMessaging.ts.
   async function scrollToBottom() {
     await nextTick();
     await nextTick();
     const el = timelineEl.value;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-    if (typeof ResizeObserver === "undefined") return;
+  }
+
+  // Initial-load variant: re-pin for ~500ms so late layout (images, avatars,
+  // markup reflow) doesn't strand the user above the newest message. Not
+  // used per-message — ResizeObserver allocation per live message would be
+  // O(n) overhead. Same pattern as useMessaging.ts.
+  async function scrollToBottomAndPin() {
+    await scrollToBottom();
+    const el = timelineEl.value;
+    if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       el.scrollTop = el.scrollHeight;
     });
@@ -98,21 +102,26 @@ export function useDmMessaging(
     setTimeout(() => observer.disconnect(), 500);
   }
 
-  function isAtBottom(): boolean {
-    const el = timelineEl.value;
-    if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD;
-  }
-
   async function scrollFirstUnseenIntoView(messageId: string) {
     await nextTick();
     await nextTick();
     const el = timelineEl.value;
     if (!el) return;
+    // Prefer the divider so it stays on-screen; message-level fallback only
+    // if the divider hasn't rendered yet.
+    const divider = el.querySelector("[data-new-messages-divider]");
+    if (divider && typeof (divider as HTMLElement).scrollIntoView === "function") {
+      (divider as HTMLElement).scrollIntoView({ block: "start" });
+      return;
+    }
     const target = findMessageElementById(el, messageId);
     if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
       (target as HTMLElement).scrollIntoView({ block: "start" });
     }
+  }
+
+  function isFeedVisible(m: TimelineMessage): boolean {
+    return !m.threadId || m.id === m.threadId;
   }
 
   function addTypingUser(nick: string) {
@@ -213,10 +222,10 @@ export function useDmMessaging(
       return;
     }
     const peerJid = activePeerJid.value;
-    const wasAtBottom = isAtBottom();
     messages.value = [...messages.value, msg];
+    // Always snaps to bottom, so last-seen advances in lockstep.
     void scrollToBottom();
-    if (wasAtBottom && peerJid) {
+    if (peerJid && isFeedVisible(msg)) {
       setLastSeen(dmKey(barePeerJid(peerJid)), msg.id);
     }
   }
@@ -265,6 +274,7 @@ export function useDmMessaging(
     if (!session.value) return;
     const requestId = ++messageRequestId;
     isLoadingMessages.value = true;
+    firstUnseenId.value = null;
     clearActionError();
     try {
       const mamResults = xmppClient.value ? await xmppClient.value.queryPersonalMam(peerJid, 100) : [];
@@ -329,24 +339,24 @@ export function useDmMessaging(
       if (requestId === messageRequestId) isLoadingMessages.value = false;
 
       // See useMessaging.loadMessages — same last-seen anchor semantics,
-      // keyed by peer bare JID.
+      // keyed by peer bare JID. Anchor is computed against feed-visible
+      // messages so it always matches something ContentArea renders.
       const key = dmKey(barePeerJid(peerJid));
       const lastSeenId = getLastSeen(key);
       const lastSeenIdx = lastSeenId
         ? timeline.findIndex((m) => m.id === lastSeenId)
         : -1;
-      if (lastSeenIdx !== -1 && lastSeenIdx < timeline.length - 1) {
-        const firstUnseen = timeline[lastSeenIdx + 1];
-        firstUnseenId.value = firstUnseen?.id ?? null;
-        if (firstUnseen) {
-          await scrollFirstUnseenIntoView(firstUnseen.id);
-        } else {
-          await scrollToBottom();
-        }
+      const firstUnseen =
+        lastSeenIdx !== -1 && lastSeenIdx < timeline.length - 1
+          ? timeline.slice(lastSeenIdx + 1).find(isFeedVisible)
+          : undefined;
+      if (firstUnseen) {
+        firstUnseenId.value = firstUnseen.id;
+        await scrollFirstUnseenIntoView(firstUnseen.id);
       } else {
         firstUnseenId.value = null;
-        await scrollToBottom();
-        const newest = timeline[timeline.length - 1];
+        await scrollToBottomAndPin();
+        const newest = [...timeline].reverse().find(isFeedVisible);
         if (newest) setLastSeen(key, newest.id);
       }
     } catch (e) {
@@ -554,6 +564,7 @@ export function useDmMessaging(
     messageRequestId++;
     messages.value = [];
     isLoadingMessages.value = false;
+    firstUnseenId.value = null;
     clearTypingState();
   }
 
@@ -562,6 +573,7 @@ export function useDmMessaging(
     searchRequestId++;
     isLoadingMessages.value = false;
     isSearching.value = false;
+    firstUnseenId.value = null;
     clearTypingState();
   }
 
