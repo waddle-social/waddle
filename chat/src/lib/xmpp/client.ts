@@ -150,6 +150,9 @@ export class BrowserXmppClient {
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private visibilityListener: (() => void) | null = null;
+  private onlineListener: (() => void) | null = null;
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
   private uploadServiceJid: string | null = null;
@@ -260,6 +263,7 @@ export class BrowserXmppClient {
       try { await this.xmpp.leaveRoom(currentRoom, this.session.username); } catch { /* best-effort */ }
     }
     this.stopSelfPing();
+    this.stopKeepAlive();
     const xmpp = this.xmpp;
     this.xmpp = null;
     this.connectPromise = null;
@@ -577,10 +581,68 @@ export class BrowserXmppClient {
     catch { this.roomDisconnectHandler?.(); }
   }
 
+  /**
+   * Keep the websocket alive in the background by pinging the server every
+   * 30s. Also triggers an immediate ping when the tab becomes visible or the
+   * browser regains network, so users who return to a backgrounded tab aren't
+   * silently disconnected.
+   */
+  private startKeepAlive() {
+    this.stopKeepAlive();
+    this.keepAliveTimer = setInterval(() => { void this.pingServer(); }, 30_000);
+
+    if (typeof document !== "undefined") {
+      this.visibilityListener = () => {
+        if (document.visibilityState === "visible") void this.pingServer();
+      };
+      document.addEventListener("visibilitychange", this.visibilityListener);
+    }
+    if (typeof window !== "undefined") {
+      this.onlineListener = () => { void this.pingServer(); };
+      window.addEventListener("online", this.onlineListener);
+    }
+  }
+
+  private stopKeepAlive() {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
+    if (this.visibilityListener && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.visibilityListener);
+      this.visibilityListener = null;
+    }
+    if (this.onlineListener && typeof window !== "undefined") {
+      window.removeEventListener("online", this.onlineListener);
+      this.onlineListener = null;
+    }
+  }
+
+  private async pingServer() {
+    const xmpp = this.xmpp;
+    if (!xmpp || !this.connected || this.destroying) return;
+    const domain = this.session.jid.split("@")[1];
+    if (!domain) return;
+    try {
+      await Promise.race([
+        xmpp.sendIQ({ type: "get", to: domain, ping: true } as Parameters<Agent["sendIQ"]>[0]),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("ping timeout")), 10_000)),
+      ]);
+    } catch (err) {
+      // Server-side XMPP errors (e.g. service-unavailable) mean the connection
+      // is alive — don't tear it down.
+      if (xmppErrorCondition(err)) return;
+      // Transport-level failure — drop the socket so autoReconnect re-opens it.
+      if (this.xmpp !== xmpp) return;
+      try { xmpp.disconnect(); } catch { /* ignore */ }
+    }
+  }
+
   private wireEvents(xmpp: Agent) {
     xmpp.on("session:started", async () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
+      this.startKeepAlive();
       this.statusHandler?.({ state: "online", detail: "Connection ready" });
       try {
         await xmpp.enableCarbons();
@@ -621,6 +683,7 @@ export class BrowserXmppClient {
       this.connected = false;
       this.connectPromise = null;
       this.stopSelfPing();
+      this.stopKeepAlive();
 
       if (this.destroying) {
         // Intentional disconnect — full cleanup
