@@ -28,10 +28,9 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[]];
+  send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
   typing: [];
   selectGif: [url: string];
-  fileUpload: [file: File | Blob];
 }>();
 
 const showGifPicker = ref(false);
@@ -208,19 +207,17 @@ function onSend(doc: Record<string, unknown>) {
   if (!text && attachments.length === 0) return;
 
   // Detach attachments before emitting so re-entry (e.g. Enter burst) cannot
-  // double-send them. Revoke preview URLs after the parent has consumed files.
+  // double-send them. Revoke preview URLs once ownership transfers to the parent.
+  const files = attachments.map((a) => a.file);
   if (attachments.length > 0) {
     pendingAttachments.value = [];
-    for (const a of attachments) {
-      emit("fileUpload", a.file);
-      URL.revokeObjectURL(a.previewUrl);
-    }
+    for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
   }
 
-  if (text) {
-    emit("send", serialized.body, serialized.markup);
-  }
+  emit("send", serialized.body, serialized.markup, files.length > 0 ? files : undefined);
 }
+
+defineExpose({ addAttachments });
 
 function onEditorCancel() {
   if (showMentions.value || showEmoji.value) {

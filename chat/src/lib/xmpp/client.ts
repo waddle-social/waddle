@@ -395,9 +395,15 @@ export class BrowserXmppClient {
   async sendCorrection(w: string, c: string, body: string, replacesId: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
     return this.xmpp ? messaging.sendCorrection(this.xmpp, roomBareJidFor(this.session, w, c), body, replacesId, markup) : null;
   }
-  async sendGroupMessage(w: string, c: string, body: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
+  async sendGroupMessage(
+    w: string,
+    c: string,
+    body: string,
+    markup?: import("@/lib/chat-ui").MarkupSpan[],
+    files?: messaging.OutboundFileAttachment[],
+  ): Promise<string | null> {
     await this.connect(); await this.switchRoom(w, c);
-    return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body, markup) : null;
+    return this.xmpp ? messaging.sendGroupMessage(this.xmpp, roomBareJidFor(this.session, w, c), body, markup, files) : null;
   }
 
   // -- File upload (XEP-0363 + XEP-0447) --
@@ -413,47 +419,42 @@ export class BrowserXmppClient {
     return jid;
   }
 
-  async uploadAndSendGroupFile(
-    w: string,
-    c: string,
-    file: File | Blob,
-    onProgress?: (progress: UploadProgress) => void,
-  ): Promise<{ msgId: string; fileUrl: string } | null> {
+  /** Upload files and return attachment metadata ready for outbound send. */
+  async uploadAttachments(
+    files: ReadonlyArray<File | Blob>,
+    onProgress?: (overall: UploadProgress, index: number) => void,
+  ): Promise<messaging.OutboundFileAttachment[]> {
     await this.connect();
-    await this.switchRoom(w, c);
-    if (!this.xmpp) return null;
+    if (!this.xmpp) throw new Error("XMPP not connected");
     const uploadDomain = await this.resolveUploadService();
-    const result = await uploadFile(this.xmpp, file, uploadDomain, onProgress);
-    const msgId = messaging.sendGroupFileMessage(
-      this.xmpp,
-      roomBareJidFor(this.session, w, c),
-      result.getUrl,
-      { name: result.filename, mediaType: result.contentType, size: result.size },
-    );
-    return { msgId, fileUrl: result.getUrl };
+    const totals = files.map((f) => f.size);
+    const loaded = files.map(() => 0);
+    const grandTotal = totals.reduce((a, b) => a + b, 0);
+    const results: messaging.OutboundFileAttachment[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const result = await uploadFile(this.xmpp, file, uploadDomain, (p) => {
+        loaded[i] = p.loaded;
+        const loadedSum = loaded.reduce((a, b) => a + b, 0);
+        onProgress?.({ loaded: loadedSum, total: grandTotal }, i);
+      });
+      results.push({
+        url: result.getUrl,
+        name: result.filename,
+        mediaType: result.contentType,
+        size: result.size,
+      });
+    }
+    return results;
   }
 
-  async uploadAndSendDirectFile(
+  async sendDirectMessage(
     peerJid: string,
-    file: File | Blob,
-    onProgress?: (progress: UploadProgress) => void,
-  ): Promise<{ msgId: string; fileUrl: string } | null> {
+    body: string,
+    files?: messaging.OutboundFileAttachment[],
+  ): Promise<string | null> {
     await this.connect();
-    if (!this.xmpp) return null;
-    const uploadDomain = await this.resolveUploadService();
-    const result = await uploadFile(this.xmpp, file, uploadDomain, onProgress);
-    const msgId = dmMessaging.sendDirectFileMessage(
-      this.xmpp,
-      barePeerJid(peerJid),
-      result.getUrl,
-      { name: result.filename, mediaType: result.contentType, size: result.size },
-    );
-    return { msgId, fileUrl: result.getUrl };
-  }
-
-  async sendDirectMessage(peerJid: string, body: string): Promise<string | null> {
-    await this.connect();
-    return this.xmpp ? dmMessaging.sendDirectMessage(this.xmpp, barePeerJid(peerJid), body) : null;
+    return this.xmpp ? dmMessaging.sendDirectMessage(this.xmpp, barePeerJid(peerJid), body, files) : null;
   }
 
   async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> {
@@ -558,6 +559,26 @@ export class BrowserXmppClient {
     return this.xmpp
       ? discovery.discoverWaddles(this.xmpp, this.session.jid)
       : [];
+  }
+
+  /**
+   * XEP-0092 Software Version — ask the user's home server what it is running.
+   * Returns null if the query fails (e.g. federation, timeout, feature not
+   * supported by a third-party server).
+   */
+  async getServerVersion(): Promise<{ name?: string; version?: string; os?: string } | null> {
+    await this.connect();
+    if (!this.xmpp) return null;
+    const domain = this.session.jid.split("@")[1];
+    if (!domain) return null;
+    try {
+      return await this.xmpp.getSoftwareVersion(domain);
+    } catch (err) {
+      if (!isOptionalXmppFeatureError(err)) {
+        console.warn("Failed to query XEP-0092 software version", err);
+      }
+      return null;
+    }
   }
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
     await this.connect();

@@ -7,6 +7,7 @@ import { useDmMessaging } from "@/composables/useDmMessaging";
 import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
+import { useVersion } from "@/composables/useVersion";
 import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import { barePeerJid } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
@@ -147,6 +148,7 @@ const activeDmPeer = computed(() => {
 });
 
 const notifications = useNotifications();
+const version = useVersion(xmppClient);
 const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
   const avatars: Record<string, string | null> = {};
 
@@ -267,20 +269,12 @@ const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
 );
 
-async function sendActiveFileMessage(file: File | Blob) {
+async function sendActiveMessage(body?: string, markup?: MarkupSpan[], files?: Array<File | Blob>) {
   if (ui.sidebarMode.value === "dms") {
-    await dmMessaging.sendFileMessage(file);
+    await dmMessaging.sendMessage(body, markup, files);
     return;
   }
-  await messaging.sendFileMessage(file);
-}
-
-async function sendActiveMessage(body?: string, markup?: MarkupSpan[]) {
-  if (ui.sidebarMode.value === "dms") {
-    await dmMessaging.sendMessage();
-    return;
-  }
-  await messaging.sendMessage(body, markup);
+  await messaging.sendMessage(body, markup, files);
 }
 
 function notifyActiveComposing() {
@@ -656,6 +650,8 @@ onUnmounted(() => {
             :active-sidebar-mode="ui.sidebarMode.value"
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
+            :web-commit-sha="version.webCommitSha.value"
+            :server-version="version.serverVersion.value"
             horizontal
             @select-waddle="selectWaddle($event)"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
@@ -742,6 +738,8 @@ onUnmounted(() => {
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
+          :web-commit-sha="version.webCommitSha.value"
+          :server-version="version.serverVersion.value"
           @select-waddle="selectWaddle($event)"
           @toggle-dms="ui.sidebarMode.value = 'dms'"
           @browse-public-waddles="openBrowsePublicWaddles"
@@ -809,7 +807,6 @@ onUnmounted(() => {
         @send="sendActiveMessage"
         @typing="notifyActiveComposing"
         @select-gif="sendGif"
-        @file-upload="sendActiveFileMessage"
         @edit-message="editActiveMessage"
         @retract-message="retractActiveMessage"
         @react-message="reactActiveMessage"

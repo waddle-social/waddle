@@ -13,6 +13,8 @@
 //!   sets via `<set>` elements with max, after, before, index, first, last, count.
 //! - **XEP-0085**: Chat State Notifications - Typing indicators and
 //!   conversational state (active, composing, paused, inactive, gone).
+//! - **XEP-0092**: Software Version - Name, version string (including
+//!   commit SHA), and host OS reported via `jabber:iq:version`.
 //! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
 //!   message delivery with `<request/>` and `<received/>` elements.
 //! - **XEP-0106**: JID Escaping - Escape/unescape special characters
@@ -133,6 +135,7 @@ pub mod xep0059;
 pub mod xep0077;
 pub mod xep0084;
 pub mod xep0085;
+pub mod xep0092;
 pub mod xep0106;
 pub mod xep0115;
 pub mod xep0153;
@@ -268,6 +271,11 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0092::{
+    build_version_element, build_version_response, is_version_query, parse_version_response,
+    SoftwareVersion, NS_VERSION,
+};
 
 pub use xep0106::{escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping};
 

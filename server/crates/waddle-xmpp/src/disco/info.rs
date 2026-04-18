@@ -172,6 +172,11 @@ impl Feature {
         Self::new("urn:xmpp:time")
     }
 
+    /// XEP-0092 Software Version feature
+    pub fn software_version() -> Self {
+        Self::new("jabber:iq:version")
+    }
+
     /// XEP-0047 In-Band Bytestreams feature
     pub fn ibb() -> Self {
         Self::new("http://jabber.org/protocol/ibb")
@@ -456,6 +461,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::last_activity(),
         Feature::ping(),
         Feature::entity_time(),
+        Feature::software_version(),
         Feature::server_info(),
         Feature::csi(),
         Feature::pubsub(),

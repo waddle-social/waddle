@@ -81,6 +81,7 @@ use crate::xep::xep0054::{
     build_empty_vcard_response, build_vcard_success, is_vcard_get, is_vcard_set,
 };
 use crate::xep::xep0077::RegistrationError;
+use crate::xep::xep0092::{build_version_response, is_version_query, SoftwareVersion};
 use crate::xep::xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
     build_unblock_push, is_blocking_query, parse_blocking_request, BlockingRequest,
@@ -3726,6 +3727,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_ping(iq).await;
         }
 
+        // Check if this is a software version query (XEP-0092)
+        if is_version_query(&iq) {
+            return self.handle_version_query(iq).await;
+        }
+
         // Check if this is a last activity query (XEP-0012)
         if is_last_activity_query(&iq) {
             return self.handle_last_activity(iq).await;
@@ -4477,6 +4483,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Default ping response (server or component)
         let response = build_ping_result(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+        Ok(())
+    }
+
+    /// Handle XEP-0092 Software Version query.
+    ///
+    /// Reports the server's name, version (package version + short git SHA),
+    /// and host OS so operators can verify what revision is deployed.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_version_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let info = SoftwareVersion {
+            name: "Waddle".to_string(),
+            version: format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("WADDLE_GIT_SHA")),
+            os: Some(std::env::consts::OS.to_string()),
+        };
+        let response = build_version_response(&iq, &info);
         self.stream.write_stanza(&Stanza::Iq(response)).await?;
         Ok(())
     }

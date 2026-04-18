@@ -66,7 +66,7 @@ const urlField: FieldDefinition<string> = {
 
 const definitions: DefinitionOptions[] = [
   {
-    aliases: [{ path: "message.fileSharing", multiple: false }],
+    aliases: [{ path: "message.fileSharing", multiple: true }],
     element: "file-sharing",
     fields: {
       disposition: attribute("disposition"),

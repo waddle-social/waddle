@@ -34,8 +34,8 @@ export interface TimelineMessage {
   hats?: { title: string; uri: string }[];
   /** XEP-0449: Is this a sticker message? */
   isSticker?: boolean;
-  /** XEP-0446/0447: Shared file. */
-  sharedFile?: { name?: string; mediaType?: string; size?: number; width?: number; height?: number; desc?: string; url: string; disposition: "inline" | "attachment" };
+  /** XEP-0446/0447: Shared files (zero or more attachments). */
+  sharedFiles?: { name?: string; mediaType?: string; size?: number; width?: number; height?: number; desc?: string; url: string; disposition: "inline" | "attachment" }[];
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */
