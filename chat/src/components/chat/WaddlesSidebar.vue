@@ -3,6 +3,8 @@ import { computed } from "vue";
 import { Plus, Lock, Compass, MessageCircle } from "lucide-vue-next";
 import type { WaddleSummary } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
+import type { ServerVersion } from "@/composables/useVersion";
+import { extractServerSha } from "@/composables/useVersion";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 
 const props = defineProps<{
@@ -14,7 +16,16 @@ const props = defineProps<{
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
   horizontal?: boolean;
+  webCommitSha?: string;
+  serverVersion?: ServerVersion | null;
 }>();
+
+const webShortSha = computed(() => (props.webCommitSha ?? "unknown").slice(0, 7));
+const serverShortSha = computed(() => {
+  const sha = extractServerSha(props.serverVersion ?? null);
+  if (sha) return sha.slice(0, 7);
+  return props.serverVersion?.version ?? "…";
+});
 
 const emit = defineEmits<{
   selectWaddle: [id: string];
@@ -183,5 +194,25 @@ function waddleColor(waddle: WaddleSummary): string {
       @request-notifications="emit('request-notifications')"
       @toggle-notifications="emit('toggle-notifications')"
     />
+
+    <!-- Version / credits footer -->
+    <div
+      v-if="!horizontal"
+      class="flex flex-col items-center gap-0.5 text-[9px] leading-tight text-muted-foreground/60 select-text"
+      :title="`web ${webCommitSha ?? 'unknown'}\nserver ${serverVersion?.version ?? 'unknown'}`"
+    >
+      <span class="font-mono">w {{ webShortSha }}</span>
+      <span class="font-mono">s {{ serverShortSha }}</span>
+      <span aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+    </div>
+    <div
+      v-else
+      class="ml-auto flex items-center gap-2 text-[10px] text-muted-foreground/70 select-text"
+      :title="`web ${webCommitSha ?? 'unknown'}\nserver ${serverVersion?.version ?? 'unknown'}`"
+    >
+      <span class="font-mono">web {{ webShortSha }}</span>
+      <span class="font-mono">srv {{ serverShortSha }}</span>
+      <span aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+    </div>
   </div>
 </template>

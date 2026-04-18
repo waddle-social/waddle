@@ -560,6 +560,26 @@ export class BrowserXmppClient {
       ? discovery.discoverWaddles(this.xmpp, this.session.jid)
       : [];
   }
+
+  /**
+   * XEP-0092 Software Version — ask the user's home server what it is running.
+   * Returns null if the query fails (e.g. federation, timeout, feature not
+   * supported by a third-party server).
+   */
+  async getServerVersion(): Promise<{ name?: string; version?: string; os?: string } | null> {
+    await this.connect();
+    if (!this.xmpp) return null;
+    const domain = this.session.jid.split("@")[1];
+    if (!domain) return null;
+    try {
+      return await this.xmpp.getSoftwareVersion(domain);
+    } catch (err) {
+      if (!isOptionalXmppFeatureError(err)) {
+        console.warn("Failed to query XEP-0092 software version", err);
+      }
+      return null;
+    }
+  }
   async discoverChannels(waddleId: string): Promise<DiscoveredChannel[]> {
     await this.connect();
     return this.xmpp
