@@ -63,7 +63,8 @@ async fn xep0115_caps_are_advertised_in_presence_not_bind_features() {
         .expect("post-tls features");
     sender.clear();
 
-    let auth_data = encode_sasl_plain("sender@localhost", "token123");
+    let sender_token = format!("test-token-{}", uuid::Uuid::new_v4());
+    let auth_data = encode_sasl_plain("sender@localhost", &sender_token);
     sender
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
