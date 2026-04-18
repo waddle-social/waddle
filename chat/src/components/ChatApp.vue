@@ -928,7 +928,6 @@ onUnmounted(() => {
       <ThreadPanel
         v-if="ui.sidebarMode.value === 'channels'"
         :thread-stack="activeThreadStack"
-        :messages="activeMessages"
         :thread-index="threads.index.value"
         :current-user="connectionStore.session?.username"
         :avatar-url-by-author="avatarUrlByAuthor"

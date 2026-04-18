@@ -57,4 +57,26 @@ describe("parseRoute / buildPath threadStack", () => {
     const route = parseRoute(pathname, search ? `?${search}` : "");
     expect(route.threadStack).toEqual(stack);
   });
+
+  test("round-trips ids containing a literal comma", () => {
+    // Commas are the stack separator, so buildPath must percent-encode them
+    // (%2C) and parseRoute must decode back to the original comma without
+    // splitting on it.
+    const stack = ["before,after", "plain"];
+    const path = buildPath(waddle, channel, stack);
+    expect(path).toContain("%2C");
+    const [pathname, search] = path.split("?");
+    const route = parseRoute(pathname, search ? `?${search}` : "");
+    expect(route.threadStack).toEqual(stack);
+  });
+
+  test("round-trips ids containing a literal percent sign", () => {
+    // `%` must be encoded to `%25` and decoded exactly once — a naive
+    // double-decode would turn `%2520` back into a space instead of `%20`.
+    const stack = ["100%", "a%20b"];
+    const path = buildPath(waddle, channel, stack);
+    const [pathname, search] = path.split("?");
+    const route = parseRoute(pathname, search ? `?${search}` : "");
+    expect(route.threadStack).toEqual(stack);
+  });
 });

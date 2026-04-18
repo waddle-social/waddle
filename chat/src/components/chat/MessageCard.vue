@@ -115,30 +115,25 @@ const replyAuthorName = computed(() => {
 const replyChipExpanded = ref(false);
 
 function onReplyChipClick() {
-  if (!props.message.replyTo) return;
-  // If this message lives inside a thread, route the reply chip into the
-  // thread panel instead of scrolling the main feed — thread children are
-  // hidden from the feed, so scrollToMessage would land on nothing.
-  if (props.message.threadId) {
-    emit("openThread", props.message.threadId);
-    return;
-  }
-  if (props.message.replyTo.preview) {
+  const replyTo = props.message.replyTo;
+  if (!replyTo) return;
+  if (replyTo.preview) {
     replyChipExpanded.value = !replyChipExpanded.value;
   }
-  emit("scrollToMessage", props.message.replyTo.id);
+  // If this message lives inside a thread, also open the thread panel so the
+  // parent is reachable even though thread children are hidden from the feed.
+  if (props.message.threadId) {
+    emit("openThread", props.message.threadId);
+  }
+  emit("scrollToMessage", replyTo.id);
 }
 
-const isThreadRoot = computed(
-  () => !!props.message.threadId && props.message.id === props.message.threadId,
-);
 const showThreadChip = computed(
-  () => !props.hideThreadChip && isThreadRoot.value && (props.threadReplyCount ?? 0) > 0,
+  () => !props.hideThreadChip && (props.threadReplyCount ?? 0) > 0,
 );
 
 function openThreadFromChip() {
-  if (!props.message.threadId) return;
-  emit("openThread", props.message.threadId);
+  emit("openThread", props.message.id);
 }
 
 function startReplyInThreadFromMenu() {

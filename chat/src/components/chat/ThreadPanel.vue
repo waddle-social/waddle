@@ -10,7 +10,6 @@ import type { ThreadIndex } from "@/composables/useThreads";
 
 const props = defineProps<{
   threadStack: string[];
-  messages: TimelineMessage[];
   threadIndex: ThreadIndex;
   currentUser?: string;
   avatarUrlByAuthor: Record<string, string | null>;
@@ -179,7 +178,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           <div
             v-for="child in activeEntry.directChildren"
             :key="child.id"
-            class="relative"
+            class="relative group/thread-child"
           >
             <MessageCard
               :message="child"
@@ -210,7 +209,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               <button
                 v-else
                 type="button"
-                class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors opacity-0 group-hover/panel:opacity-100 focus-visible:opacity-100"
+                class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
                 title="Start sub-thread"
                 @click="startSubThread(child)"
               >

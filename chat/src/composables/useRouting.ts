@@ -17,12 +17,23 @@ function slugify(name: string): string {
 
 function parseThreadStack(search: string | null | undefined): string[] {
   if (!search) return [];
-  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const raw = params.get("thread");
+  // Match the raw `thread` value directly: `URLSearchParams.get()` already
+  // decodes percent-encoding, and we'd then decode again — so ids with `%`
+  // or `,` (which we encode as `%2C` to survive splitting) get mangled.
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  const match = /(?:^|&)thread=([^&]*)/.exec(query);
+  const raw = match?.[1];
   if (!raw) return [];
   return raw
     .split(",")
-    .map((s) => decodeURIComponent(s.trim()))
+    .map((s) => {
+      const trimmed = s.trim();
+      try {
+        return decodeURIComponent(trimmed);
+      } catch {
+        return trimmed;
+      }
+    })
     .filter((s) => s.length > 0);
 }
 

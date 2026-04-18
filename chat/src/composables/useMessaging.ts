@@ -554,10 +554,12 @@ export function useMessaging(
   }
 
   /**
-   * Backfill a thread via XEP-0313 MAM filtered by thread id. Used when a
-   * deep-linked `?thread=...` URL points at a thread whose root predates the
-   * loaded channel window. New messages merge into the flat array; existing
-   * ones are skipped.
+   * Backfill a thread via XEP-0313 MAM filtered by thread id. Fetches every
+   * archived message whose `<thread>` element matches `threadId`. Because
+   * waddle's root messages are composed without a `<thread>` child (threads
+   * are only tagged on replies), the thread root itself is never returned —
+   * this call populates the replies, and the panel's "root not loaded"
+   * notice is shown until the default channel window catches up.
    */
   async function backfillThread(threadId: string): Promise<void> {
     const client = xmppClient.value;

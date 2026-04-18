@@ -22,9 +22,11 @@ describe("useThreads", () => {
     expect(index.value.size).toBe(0);
   });
 
-  test("resolves the root when id === threadId and rolls up direct children", () => {
+  test("resolves the root by matching threadId against a loaded message id", () => {
+    // Waddle's root messages don't carry <thread>; replies set threadId to
+    // the root's id. We resolve root via an id lookup, not id===threadId.
     const messages = ref<TimelineMessage[]>([
-      makeMessage({ id: "root", threadId: "root", createdAt: "2026-01-01T00:00:00Z", body: "root msg" }),
+      makeMessage({ id: "root", createdAt: "2026-01-01T00:00:00Z", body: "root msg" }),
       makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "first reply" }),
       makeMessage({ id: "c2", threadId: "root", createdAt: "2026-01-01T00:02:00Z", body: "second reply" }),
     ]);
@@ -52,12 +54,11 @@ describe("useThreads", () => {
   });
 
   test("rolls nested sub-thread descendants into ancestor counts", () => {
-    // Outer thread rooted at `root`; `c1` is a direct reply. A user then
-    // starts a sub-thread off `c1`, so the new messages carry
-    // threadId=c1 / parentThreadId=root. The sub-thread has no loaded root
-    // (c1 itself lives in the outer thread's byThread group).
+    // Outer thread rooted at `root`; `c1` is a direct reply whose id is
+    // reused as the sub-thread id. Messages inside the sub-thread carry
+    // threadId=c1 / parentThreadId=root.
     const messages = ref<TimelineMessage[]>([
-      makeMessage({ id: "root", threadId: "root", createdAt: "2026-01-01T00:00:00Z", body: "root" }),
+      makeMessage({ id: "root", createdAt: "2026-01-01T00:00:00Z", body: "root" }),
       makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "reply" }),
       makeMessage({ id: "sub1", threadId: "c1", parentThreadId: "root", createdAt: "2026-01-01T00:02:00Z", body: "nested" }),
       makeMessage({ id: "sub2", threadId: "c1", parentThreadId: "root", createdAt: "2026-01-01T00:03:00Z", body: "nested 2" }),
@@ -66,10 +67,12 @@ describe("useThreads", () => {
     const rootEntry = index.value.get("root");
     const subEntry = index.value.get("c1");
     expect(subEntry).toBeTruthy();
-    expect(subEntry!.root).toBeNull();
+    // c1 itself belongs to the outer thread's group, so the sub-thread's
+    // root is resolved via byId (c1 is loaded) rather than being an orphan.
+    expect(subEntry!.root?.id).toBe("c1");
     expect(subEntry!.count).toBe(2);
-    // Ancestor count includes its own direct child + nested descendants.
     expect(rootEntry).toBeTruthy();
+    // Ancestor count includes its own direct child + nested descendants.
     expect(rootEntry!.count).toBe(3);
     expect(rootEntry!.lastTs).toBe("2026-01-01T00:03:00Z");
   });

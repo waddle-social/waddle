@@ -111,6 +111,7 @@ export async function queryMamByThread(
         : new Date().toISOString();
       const archivedMsg = withArchivedMessageId(mamResult.id, innerMsg as ReceivedMessage);
       let parsedMessage: LiveRoomMessage | null = null;
+      let reactionUpdate: { targetId: string; emojis: string[]; nick: string } | null = null;
 
       dispatchGroupchat(archivedMsg, {
         currentRoom: roomJid,
@@ -118,13 +119,36 @@ export async function queryMamByThread(
         onMessage: (msg) => {
           parsedMessage = { ...msg, createdAt: timestamp };
         },
-        onReaction: null,
+        onReaction: (event) => {
+          reactionUpdate = {
+            targetId: event.messageId,
+            emojis: event.emojis,
+            nick: event.nick,
+          };
+        },
         onChatState: null,
         onDisplayed: null,
         onActivity: null,
       });
 
-      if (parsedMessage) collected.push(parsedMessage);
+      if (parsedMessage) {
+        collected.push(parsedMessage);
+        continue;
+      }
+
+      if (reactionUpdate) {
+        const { nick, targetId, emojis } = reactionUpdate;
+        collected.push({
+          id: archivedMsg.id ?? crypto.randomUUID(),
+          roomJid,
+          nick,
+          body: "",
+          createdAt: timestamp,
+          type: "subject",
+          _reactionTarget: targetId,
+          _reactionEmojis: emojis,
+        });
+      }
     }
   }
   return collected;
