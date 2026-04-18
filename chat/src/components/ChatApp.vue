@@ -231,6 +231,21 @@ watch(xmppClient, (client) => {
   client.setMemberJidHandler((nick, bareJid) => {
     memberJidByNick.value = { ...memberJidByNick.value, [nick]: bareJid };
   });
+  // XEP-0198 fan-out: the same message ID only ever appears in one timeline
+  // (rooms vs DMs), so calling both is idempotent — whichever owns the id
+  // updates it, the other no-ops.
+  client.setMessageAckHandler((id) => {
+    messaging.onMessageAck(id);
+    dmMessaging.onMessageAck(id);
+  });
+  client.setMessageDeliveryFailureHandler((id) => {
+    messaging.onMessageDeliveryFailure(id);
+    dmMessaging.onMessageDeliveryFailure(id);
+  });
+  client.setSessionLifecycleHandler((event) => {
+    messaging.onSessionLifecycle(event);
+    dmMessaging.onSessionLifecycle(event);
+  });
 });
 
 const publicBrowseQuery = ref("");

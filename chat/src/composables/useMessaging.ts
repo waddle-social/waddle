@@ -6,6 +6,7 @@ import {
   roomBareJidFor,
   type LiveRoomMessage,
   type RoomActivityEvent,
+  type SessionLifecycleEvent,
   type XmppStatusSnapshot,
   type ChatStateType,
   type RoomHats,
@@ -89,6 +90,12 @@ export function useMessaging(
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Client-assigned stanza ids still awaiting MUC-echo reconciliation. A self
+  // echo with a server-rewritten id falls back to body matching, but only
+  // against messages in this set — otherwise sending the same text twice
+  // would cause the second echo to rewrite the first (already reconciled)
+  // message's id.
+  const pendingEchoClientIds = new Set<string>();
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeWaddleId.value || !activeChannelId.value) return null;
@@ -334,25 +341,96 @@ export function useMessaging(
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {
-    // Check if this is a self-echo confirming delivery of an optimistic message.
-    // Match by ID first, then fall back to matching by body + author for cases
-    // where the MUC server assigns a different stanza ID on reflection.
+    // Check if this is a self-echo reconciling an optimistically-inserted
+    // message. Match by ID first; otherwise, for our own sends, fall back
+    // to body matching — but only against messages still awaiting echo
+    // reconciliation (tracked via pendingEchoClientIds). Without that
+    // constraint, sending the same text twice would let the second echo
+    // re-target the already-reconciled first message.
     const existing = messages.value.find(
       (m) =>
         m.id === msg.id ||
-        (m.deliveryStatus === "sending" && m.isSelf && msg.isSelf && m.body === msg.body),
+        (pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body),
     );
     if (existing) {
-      if (existing.deliveryStatus === "sending") {
-        // Self-echo received: upgrade from "sending" to "delivered"
+      const wasPending = existing.id !== msg.id;
+      if (wasPending || existing.deliveryStatus === "sending") {
+        // Reconcile the ID to the server-assigned one and mark delivered.
+        // A self-echo is authoritative evidence that the server accepted
+        // the stanza, so it supersedes any prior "sending" or "failed"
+        // optimistic state.
         messages.value = messages.value.map((m) =>
-          m.id === existing.id ? { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus } : m,
+          m.id !== existing.id
+            ? m
+            : { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus },
         );
       }
+      if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
     messages.value = [...messages.value, msg];
     void scrollToBottom();
+  }
+
+  /**
+   * XEP-0198: server acked our outbound stanza. The id here is the
+   * client-assigned stanza ID. Promote the matching optimistic entry to
+   * "delivered" even if the MUC self-echo hasn't arrived yet (the echo
+   * will later reconcile the ID through mergeLiveMessage).
+   */
+  function onMessageAck(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus === "sending"
+        ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /**
+   * XEP-0198: stanza.js gave up on the stanza (resume failed or no
+   * resumable transport). Mark the message as failed so the UI can
+   * surface a retry affordance. Kept in place so the user can see what
+   * did not go through.
+   */
+  function onMessageDeliveryFailure(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
+        ? { ...m, deliveryStatus: "failed" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /**
+   * On a fresh XMPP session (resume failed or first connect after a drop),
+   * refetch MAM to close any message gap for the current channel. Local
+   * optimistic sends (sending/failed) are preserved across the reload so
+   * the UI doesn't drop unsent entries the user can still retry.
+   * Resumed sessions never call this — the server replays everything.
+   */
+  function onSessionLifecycle(event: SessionLifecycleEvent) {
+    if (event.type !== "fresh") return;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!waddleId || !channelId) return;
+    // Only catch up if we had already loaded this channel; otherwise the
+    // standard loadMessages call on channel-select handles it.
+    if (messages.value.length === 0) return;
+    const preserved = messages.value.filter(
+      (m) =>
+        m.isSelf && (m.deliveryStatus === "sending" || m.deliveryStatus === "failed"),
+    );
+    void (async () => {
+      await loadMessages(waddleId, channelId);
+      if (
+        preserved.length === 0 ||
+        activeWaddleId.value !== waddleId ||
+        activeChannelId.value !== channelId
+      )
+        return;
+      const existingIds = new Set(messages.value.map((m) => m.id));
+      const toAppend = preserved.filter((m) => !existingIds.has(m.id));
+      if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
+    })();
   }
 
   async function loadMessages(waddleId: string, channelId: string) {
@@ -525,6 +603,7 @@ export function useMessaging(
             disposition: "inline" as const,
           }));
         }
+        pendingEchoClientIds.add(msgId);
         messages.value = [...messages.value, optimistic];
         void scrollToBottom();
       }
@@ -735,5 +814,8 @@ export function useMessaging(
     clearChannelActivity,
     scrollToBottom,
     lastMentionActivity,
+    onMessageAck,
+    onMessageDeliveryFailure,
+    onSessionLifecycle,
   };
 }

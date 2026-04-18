@@ -5,6 +5,14 @@ export interface XmppStatusSnapshot {
   detail: string;
 }
 
+/**
+ * XEP-0198 Stream Management session lifecycle:
+ * - "resumed": the prior stream was resumed server-side, no gap.
+ * - "fresh": a new session was bound (either first connect, or resume failed).
+ *   Consumers may re-fetch MAM to close any gap.
+ */
+export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
+
 export interface LiveRoomMessage {
   id: string;
   roomJid: string;
