@@ -8,19 +8,83 @@ use common::{
     disco_info_query, establish_bound_session, init_test_env, ping_query, RawXmppClient,
     TestServer, DEFAULT_TIMEOUT,
 };
+use minidom::Element;
+
+fn xml_string(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize xml");
+    String::from_utf8(buf).expect("utf8 xml")
+}
+
+fn block_iq(id: &str, jid: &str) -> String {
+    xml_string(
+        Element::builder("iq", "jabber:client")
+            .attr("type", "set")
+            .attr("id", id)
+            .append(
+                Element::builder("block", "urn:xmpp:blocking").append(
+                    Element::builder("item", "urn:xmpp:blocking")
+                        .attr("jid", jid)
+                        .build(),
+                ),
+            )
+            .build(),
+    )
+}
+
+fn blocking_get(id: &str) -> String {
+    xml_string(
+        Element::builder("iq", "jabber:client")
+            .attr("type", "get")
+            .attr("id", id)
+            .append(Element::builder("blocklist", "urn:xmpp:blocking").build())
+            .build(),
+    )
+}
+
+fn unblock_iq(id: &str, jid: &str) -> String {
+    xml_string(
+        Element::builder("iq", "jabber:client")
+            .attr("type", "set")
+            .attr("id", id)
+            .append(
+                Element::builder("unblock", "urn:xmpp:blocking").append(
+                    Element::builder("item", "urn:xmpp:blocking")
+                        .attr("jid", jid)
+                        .build(),
+                ),
+            )
+            .build(),
+    )
+}
+
+fn subscribe_presence(to: &str, status: &str) -> String {
+    xml_string(
+        Element::builder("presence", "jabber:client")
+            .attr("type", "subscribe")
+            .attr("to", to)
+            .append(
+                Element::builder("status", "jabber:client")
+                    .append(status)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
+fn ping_iq(id: &str, to: &str) -> String {
+    xml_string(
+        Element::builder("iq", "jabber:client")
+            .attr("type", "get")
+            .attr("id", id)
+            .attr("to", to)
+            .append(Element::builder("ping", "urn:xmpp:ping").build())
+            .build(),
+    )
+}
 
 async fn block_jid(client: &mut RawXmppClient, jid: &str, id: &str) {
-    client
-        .send(&format!(
-            "<iq type='set' id='{}' xmlns='jabber:client'>\
-                <block xmlns='urn:xmpp:blocking'>\
-                    <item jid='{}'/>\
-                </block>\
-            </iq>",
-            id, jid
-        ))
-        .await
-        .expect("send block");
+    client.send(&block_iq(id, jid)).await.expect("send block");
     let response = client
         .read_until("</iq>", DEFAULT_TIMEOUT)
         .await
@@ -63,11 +127,7 @@ async fn xep0191_get_blocklist_returns_empty() {
         .expect("bind");
 
     client
-        .send(
-            "<iq type='get' id='blocklist-1' xmlns='jabber:client'>\
-                <blocklist xmlns='urn:xmpp:blocking'/>\
-            </iq>",
-        )
+        .send(&blocking_get("blocklist-1"))
         .await
         .expect("send");
     let response = client
@@ -97,13 +157,7 @@ async fn xep0191_block_jid_returns_success() {
         .expect("bind");
 
     client
-        .send(
-            "<iq type='set' id='block-1' xmlns='jabber:client'>\
-                <block xmlns='urn:xmpp:blocking'>\
-                    <item jid='spammer@example.com'/>\
-                </block>\
-            </iq>",
-        )
+        .send(&block_iq("block-1", "spammer@example.com"))
         .await
         .expect("send");
     let response = client
@@ -128,13 +182,7 @@ async fn xep0191_unblock_jid_returns_success() {
         .expect("bind");
 
     client
-        .send(
-            "<iq type='set' id='unblock-1' xmlns='jabber:client'>\
-                <unblock xmlns='urn:xmpp:blocking'>\
-                    <item jid='friend@example.com'/>\
-                </unblock>\
-            </iq>",
-        )
+        .send(&unblock_iq("unblock-1", "friend@example.com"))
         .await
         .expect("send");
     let response = client
@@ -166,13 +214,9 @@ async fn xep0191_blocked_subscription_presence_is_dropped() {
 
     block_jid(&mut alice, "bob@localhost", "block-bob-subscribe").await;
 
-    bob.send(
-        "<presence type='subscribe' to='alice@localhost' xmlns='jabber:client'>\
-            <status>please add me</status>\
-        </presence>",
-    )
-    .await
-    .expect("send subscribe");
+    bob.send(&subscribe_presence("alice@localhost", "please add me"))
+        .await
+        .expect("send subscribe");
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -203,14 +247,9 @@ async fn xep0191_blocked_full_jid_iq_returns_error() {
 
     block_jid(&mut alice, "bob@localhost", "block-bob-full-iq").await;
 
-    bob.send(&format!(
-        "<iq type='get' id='blocked-full-iq-1' to='{}' xmlns='jabber:client'>\
-            <ping xmlns='urn:xmpp:ping'/>\
-        </iq>",
-        alice_jid
-    ))
-    .await
-    .expect("send iq");
+    bob.send(&ping_iq("blocked-full-iq-1", &alice_jid))
+        .await
+        .expect("send iq");
     let response = bob
         .read_until("</iq>", DEFAULT_TIMEOUT)
         .await

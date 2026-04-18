@@ -8,6 +8,13 @@ use common::{
     disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer,
     DEFAULT_TIMEOUT,
 };
+use minidom::Element;
+
+fn xml_string(element: Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize xml");
+    String::from_utf8(buf).expect("utf8 xml")
+}
 
 fn response_seconds(response: &str) -> Option<u64> {
     response
@@ -18,18 +25,50 @@ fn response_seconds(response: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+fn last_activity_iq(id: &str, to: Option<&str>) -> String {
+    let mut iq = Element::builder("iq", "jabber:client")
+        .attr("type", "get")
+        .attr("id", id);
+    if let Some(to) = to {
+        iq = iq.attr("to", to);
+    }
+    xml_string(
+        iq.append(Element::builder("query", "jabber:iq:last").build())
+            .build(),
+    )
+}
+
+fn block_iq(id: &str, jid: &str) -> String {
+    xml_string(
+        Element::builder("iq", "jabber:client")
+            .attr("type", "set")
+            .attr("id", id)
+            .append(
+                Element::builder("block", "urn:xmpp:blocking").append(
+                    Element::builder("item", "urn:xmpp:blocking")
+                        .attr("jid", jid)
+                        .build(),
+                ),
+            )
+            .build(),
+    )
+}
+
+fn unavailable_presence(status: &str) -> String {
+    xml_string(
+        Element::builder("presence", "jabber:client")
+            .attr("type", "unavailable")
+            .append(
+                Element::builder("status", "jabber:client")
+                    .append(status)
+                    .build(),
+            )
+            .build(),
+    )
+}
+
 async fn block_jid(client: &mut RawXmppClient, jid: &str, id: &str) {
-    client
-        .send(&format!(
-            "<iq type='set' id='{}' xmlns='jabber:client'>\
-                <block xmlns='urn:xmpp:blocking'>\
-                    <item jid='{}'/>\
-                </block>\
-            </iq>",
-            id, jid
-        ))
-        .await
-        .expect("send block");
+    client.send(&block_iq(id, jid)).await.expect("send block");
     let response = client
         .read_until("</iq>", DEFAULT_TIMEOUT)
         .await
@@ -72,11 +111,7 @@ async fn xep0012_server_uptime_query_returns_result() {
         .expect("bind");
 
     client
-        .send(
-            "<iq type='get' id='last-1' to='localhost' xmlns='jabber:client'>\
-                <query xmlns='jabber:iq:last'/>\
-            </iq>",
-        )
+        .send(&last_activity_iq("last-1", Some("localhost")))
         .await
         .expect("send");
     let response = client
@@ -113,11 +148,7 @@ async fn xep0012_server_uptime_query_reports_real_uptime() {
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     client
-        .send(
-            "<iq type='get' id='last-uptime-real' to='localhost' xmlns='jabber:client'>\
-                <query xmlns='jabber:iq:last'/>\
-            </iq>",
-        )
+        .send(&last_activity_iq("last-uptime-real", Some("localhost")))
         .await
         .expect("send");
     let response = client
@@ -143,11 +174,7 @@ async fn xep0012_query_to_unknown_user_returns_error() {
         .expect("bind");
 
     client
-        .send(
-            "<iq type='get' id='last-2' to='nobody@localhost' xmlns='jabber:client'>\
-                <query xmlns='jabber:iq:last'/>\
-            </iq>",
-        )
+        .send(&last_activity_iq("last-2", Some("nobody@localhost")))
         .await
         .expect("send");
     let response = client
@@ -181,22 +208,14 @@ async fn xep0012_offline_user_query_returns_last_activity_and_status() {
         .await
         .expect("bind bob");
 
-    bob.send(
-        "<presence type='unavailable' xmlns='jabber:client'>\
-            <status>Out to lunch</status>\
-        </presence>",
-    )
-    .await
-    .expect("send unavailable presence");
+    bob.send(&unavailable_presence("Out to lunch"))
+        .await
+        .expect("send unavailable presence");
 
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     alice
-        .send(
-            "<iq type='get' id='last-offline-1' to='bob@localhost' xmlns='jabber:client'>\
-                <query xmlns='jabber:iq:last'/>\
-            </iq>",
-        )
+        .send(&last_activity_iq("last-offline-1", Some("bob@localhost")))
         .await
         .expect("send query");
     let response = alice
@@ -235,11 +254,7 @@ async fn xep0012_query_to_user_who_blocked_requester_returns_error() {
     block_jid(&mut bob, "alice@localhost", "block-alice-last").await;
 
     alice
-        .send(
-            "<iq type='get' id='last-blocked-1' to='bob@localhost' xmlns='jabber:client'>\
-                <query xmlns='jabber:iq:last'/>\
-            </iq>",
-        )
+        .send(&last_activity_iq("last-blocked-1", Some("bob@localhost")))
         .await
         .expect("send query");
     let response = alice
