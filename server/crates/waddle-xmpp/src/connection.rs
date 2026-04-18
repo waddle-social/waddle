@@ -969,9 +969,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 Ok(())
             }
             ParsedStanza::Message(element) => {
-                let msg = element
-                    .try_into()
-                    .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
+                let msg = crate::stream::element_to_message(element)?;
                 // Increment inbound count for SM
                 if self.sm_state.enabled {
                     self.sm_state.increment_inbound();
@@ -7337,7 +7335,7 @@ fn build_archived_message(
     let reply_ref = parse_reply_from_message(&normalized);
     let thread_id = thread_id_from_message(&normalized);
     let origin_id = extract_origin_id(&normalized);
-    let stanza_xml = match crate::parser::stanza_to_string(normalized.clone()) {
+    let stanza_xml = match crate::parser::message_to_string(&normalized) {
         Ok(xml) => Some(xml),
         Err(error) => {
             warn!(from = %from, to = %to, error = %error, "Failed to serialize archived stanza");
@@ -7367,7 +7365,7 @@ fn replay_archived_message(
 ) -> xmpp_parsers::message::Message {
     if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
         match stanza_xml.parse::<minidom::Element>() {
-            Ok(element) => match xmpp_parsers::message::Message::try_from(element) {
+            Ok(element) => match crate::stream::element_to_message(element) {
                 Ok(message) => return message,
                 Err(error) => {
                     warn!(archive_id = %archived.id, error = %error, "Failed to parse archived stanza as message");

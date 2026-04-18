@@ -11,6 +11,43 @@ export interface WaddleMarkupSpan {
   uri?: string;
 }
 
+type MarkupSpanWithOffsets = {
+  start: number;
+  end: number;
+};
+
+function hasValidOffsets(span: MarkupSpanWithOffsets): boolean {
+  return Number.isFinite(span.start) && Number.isFinite(span.end) && span.start >= 0 && span.end > span.start;
+}
+
+export function shiftMarkupSpans<T extends MarkupSpanWithOffsets>(spans: readonly T[], offset: number): T[] {
+  if (!Number.isFinite(offset)) return [];
+  return spans.flatMap((span) => {
+    if (!hasValidOffsets(span)) return [];
+    const shifted = { ...span, start: span.start + offset, end: span.end + offset };
+    return hasValidOffsets(shifted) ? [shifted] : [];
+  });
+}
+
+function rebaseOffsetAfterRemoval(offset: number, start: number, end: number): number {
+  if (offset <= start) return offset;
+  if (offset >= end) return offset - (end - start);
+  return start;
+}
+
+export function stripMarkupRange<T extends MarkupSpanWithOffsets>(spans: readonly T[], start: number, end: number): T[] {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+  return spans.flatMap((span) => {
+    if (!hasValidOffsets(span)) return [];
+    const rebased = {
+      ...span,
+      start: rebaseOffsetAfterRemoval(span.start, start, end),
+      end: rebaseOffsetAfterRemoval(span.end, start, end),
+    };
+    return hasValidOffsets(rebased) ? [rebased] : [];
+  });
+}
+
 const VALID_TYPES = new Set(["b", "i", "s", "code", "code-block", "blockquote", "link"]);
 
 /** Custom field: reads/writes child span elements inside <markup>. */

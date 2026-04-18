@@ -1,5 +1,6 @@
 /** Inbound message parsing — extracts XEP extension data from stanza messages. */
 import type { ReceivedMessage } from "stanza/protocol";
+import { stripMarkupRange } from "./extensions/markup";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
@@ -7,12 +8,27 @@ import type {
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
-  "body" | "mentions" | "broadcastMention" | "sharedFiles" | "isSticker" | "replacesId" | "markup"
+  | "body"
+  | "mentions"
+  | "broadcastMention"
+  | "sharedFiles"
+  | "isSticker"
+  | "replacesId"
+  | "markup"
+  | "replyTo"
+  | "threadId"
+  | "parentThreadId"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
 export function ext(msg: unknown): Record<string, unknown> {
   return msg as Record<string, unknown>;
+}
+
+const encoder = new TextEncoder();
+
+function byteLen(text: string): number {
+  return encoder.encode(text).byteLength;
 }
 
 /** Populate a LiveRoomMessage with data from XEP extensions on the stanza. */
@@ -28,10 +44,60 @@ export function extractMessageExtensions(
   extractExplicitMentions(msg, base);
   extractFileSharing(msg, base);
   extractMarkup(msg, base);
+  extractReplyAndThread(msg, base);
+  stripReplyFallback(msg, base);
 
   if (ext(msg).sticker) {
     base.isSticker = true;
   }
+}
+
+/** XEP-0461 reply pointer + RFC 6121 / XEP-0201 thread id + parent. */
+function extractReplyAndThread(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const reply = ext(msg).reply as { to?: string; id?: string } | undefined;
+  if (reply?.id) {
+    base.replyTo = { id: reply.id, ...(reply.to ? { author: reply.to } : {}) };
+  }
+  const threadId = ext(msg).thread as string | undefined;
+  if (threadId) base.threadId = threadId;
+  const parentThread = ext(msg).parentThread as string | undefined;
+  if (parentThread) base.parentThreadId = parentThread;
+}
+
+interface FallbackPayload {
+  for?: string;
+  body?: { start?: number; end?: number };
+}
+
+/**
+ * XEP-0428: strip any `urn:xmpp:reply:0` fallback range from the displayed
+ * body so the `> quoted` prefix doesn't double-render on top of the reply chip.
+ */
+function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const fallbacks = ext(msg).fallbacks as FallbackPayload[] | undefined;
+  if (!fallbacks?.length || !base.body) return;
+  const range = fallbacks.find((f) => f.for === "urn:xmpp:reply:0")?.body;
+  if (!range) return;
+  const rawStart = range.start ?? 0;
+  const rawEnd = range.end ?? rawStart;
+  if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawStart < 0 || rawEnd < 0) {
+    return;
+  }
+  const start = Math.max(0, Math.min(rawStart, base.body.length));
+  const end = Math.max(start, Math.min(rawEnd, base.body.length));
+  if (end <= start) return;
+  const prefixText = base.body.slice(0, start);
+  const strippedText = base.body.slice(start, end);
+  const markupRangeStart = byteLen(prefixText);
+  const markupRangeEnd = markupRangeStart + byteLen(strippedText);
+  base.body = base.body.slice(0, start) + base.body.slice(end);
+  if (!base.markup?.length) return;
+  const rebasedMarkup = stripMarkupRange(base.markup, markupRangeStart, markupRangeEnd);
+  if (rebasedMarkup.length > 0) {
+    base.markup = rebasedMarkup;
+    return;
+  }
+  delete base.markup;
 }
 
 function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget): void {

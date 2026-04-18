@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Hash, MessageCircle, Settings, Search, X, Upload } from "lucide-vue-next";
+import { findMessageElementById } from "@/lib/message-targeting";
+import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
@@ -40,7 +42,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
+  send: [
+    body: string,
+    markup: MarkupSpan[],
+    files?: Array<File | Blob>,
+    replyTo?: { id: string; author: string; body?: string },
+  ];
   typing: [];
   selectGif: [url: string];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
@@ -52,6 +59,67 @@ const emit = defineEmits<{
   clearSearch: [];
   openDm: [peerJid: string];
 }>();
+
+const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
+
+function beginReply(message: TimelineMessage) {
+  const author = message.author;
+  replyingTo.value = {
+    id: message.id,
+    author,
+    ...(message.body ? { body: message.body, preview: message.body } : {}),
+  };
+}
+
+function cancelReply() {
+  replyingTo.value = null;
+}
+
+const replyJumpNotice = ref("");
+let replyJumpNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function clearReplyJumpNotice() {
+  if (replyJumpNoticeTimeout) {
+    clearTimeout(replyJumpNoticeTimeout);
+    replyJumpNoticeTimeout = null;
+  }
+  replyJumpNotice.value = "";
+}
+
+function showReplyJumpNotice(message: string) {
+  clearReplyJumpNotice();
+  replyJumpNotice.value = message;
+  replyJumpNoticeTimeout = setTimeout(() => {
+    replyJumpNotice.value = "";
+    replyJumpNoticeTimeout = null;
+  }, 2800);
+}
+
+function scrollToMessage(messageId: string) {
+  const el = findMessageElementById(messagesContainer.value, messageId);
+  const notice = getReplyJumpNotice(el instanceof HTMLElement);
+  if (!notice && el instanceof HTMLElement) {
+    clearReplyJumpNotice();
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ring-2", "ring-primary/40");
+    setTimeout(() => el.classList.remove("ring-2", "ring-primary/40"), 1400);
+    return;
+  }
+
+  showReplyJumpNotice(notice);
+}
+
+function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) {
+  const pending = replyingTo.value;
+  emit(
+    "send",
+    body,
+    markup,
+    files,
+    pending ? { id: pending.id, author: pending.author, ...(pending.body ? { body: pending.body } : {}) } : undefined,
+  );
+  replyingTo.value = null;
+}
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
@@ -65,6 +133,12 @@ const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
+const conversationScope = computed(() => [
+  props.sidebarMode ?? "channels",
+  props.waddle?.id ?? "",
+  props.channel?.id ?? "",
+  props.dmPeer?.peerJid ?? "",
+].join(":"));
 
 defineExpose({ messagesContainer });
 
@@ -141,6 +215,17 @@ watch(
   },
   { deep: true },
 );
+
+watch(conversationScope, () => {
+  cancelReply();
+  clearReplyJumpNotice();
+});
+
+onBeforeUnmount(() => {
+  if (replyJumpNoticeTimeout) {
+    clearTimeout(replyJumpNoticeTimeout);
+  }
+});
 </script>
 
 <template>
@@ -251,6 +336,15 @@ watch(
     >
       <div>{{ actionError }}</div>
     </div>
+    <div
+      v-if="replyJumpNotice"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      class="px-6 py-2 text-[12px] text-muted-foreground bg-muted/35 border-b border-border animate-fade-in"
+    >
+      {{ replyJumpNotice }}
+    </div>
 
     <!-- Messages -->
     <div :ref="setMessagesContainer" class="flex-1 min-h-0 overflow-auto px-6 py-4">
@@ -296,6 +390,8 @@ watch(
           @edit="(id, body, m) => emit('editMessage', id, body, m)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
+          @reply="beginReply"
+          @scroll-to-message="scrollToMessage"
           @avatar-click="onAvatarClick"
         />
       </div>
@@ -328,7 +424,9 @@ watch(
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
-      @send="(body, markup, files) => emit('send', body, markup, files)"
+      :replying-to="replyingTo"
+      @send="onSend"
+      @cancel-reply="cancelReply"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
     />

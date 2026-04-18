@@ -120,22 +120,21 @@ function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   }
 }
 
-/** Text-only messages buffered while the transport is unavailable. */
+/** Outbound messages buffered while the transport is unavailable. */
 type QueuedRoomMessage = {
   kind: "room";
   waddleId: string;
   channelId: string;
   roomJid: string;
   body: string;
-  markup?: import("@/lib/chat-ui").MarkupSpan[];
-  files?: messaging.OutboundFileAttachment[];
+  opts: messaging.SendGroupMessageOptions;
   msgId: string;
 };
 type QueuedDmMessage = {
   kind: "dm";
   peerJid: string;
   body: string;
-  files?: messaging.OutboundFileAttachment[];
+  opts: dmMessaging.SendDirectMessageOptions;
   msgId: string;
 };
 type QueuedOutboundMessage = QueuedRoomMessage | QueuedDmMessage;
@@ -445,9 +444,9 @@ export class BrowserXmppClient {
     w: string,
     c: string,
     body: string,
-    markup?: import("@/lib/chat-ui").MarkupSpan[],
-    files?: messaging.OutboundFileAttachment[],
+    opts: messaging.SendGroupMessageOptions = {},
   ): Promise<string | null> {
+    const { files } = opts;
     const text = body.trim();
     const hasFiles = !!files && files.length > 0;
     if (!text && !hasFiles) return null;
@@ -456,7 +455,15 @@ export class BrowserXmppClient {
     const roomJid = roomBareJidFor(this.session, w, c);
     // Queue immediately so the composable gets the ID back without waiting for
     // connect/room-join.  The queue flushes once the transport is ready.
-    this.outboundQueue.push({ kind: "room", waddleId: w, channelId: c, roomJid, body, markup, files, msgId });
+    this.outboundQueue.push({
+      kind: "room",
+      waddleId: w,
+      channelId: c,
+      roomJid,
+      body,
+      opts: { ...opts, id: msgId },
+      msgId,
+    });
     if (this.connected) void this.flushOutboundQueue();
     return msgId;
   }
@@ -506,14 +513,21 @@ export class BrowserXmppClient {
   async sendDirectMessage(
     peerJid: string,
     body: string,
-    files?: messaging.OutboundFileAttachment[],
+    opts: dmMessaging.SendDirectMessageOptions = {},
   ): Promise<string | null> {
+    const { files } = opts;
     const text = body.trim();
     const hasFiles = !!files && files.length > 0;
     if (!text && !hasFiles) return null;
 
     const msgId = crypto.randomUUID();
-    this.outboundQueue.push({ kind: "dm", peerJid: barePeerJid(peerJid), body, files, msgId });
+    this.outboundQueue.push({
+      kind: "dm",
+      peerJid: barePeerJid(peerJid),
+      body,
+      opts: { ...opts, id: msgId },
+      msgId,
+    });
     if (this.connected) void this.flushOutboundQueue();
     return msgId;
   }
@@ -668,13 +682,13 @@ export class BrowserXmppClient {
               await this.switchRoom(item.waddleId, item.channelId);
             }
             if (this.xmpp && !this.destroying) {
-              messaging.sendGroupMessage(this.xmpp, item.roomJid, item.body, item.markup, item.files, item.msgId);
+              messaging.sendGroupMessage(this.xmpp, item.roomJid, item.body, item.opts);
             } else {
               this.messageDeliveryFailureHandler?.(item.msgId);
             }
           } else {
             if (this.xmpp && !this.destroying) {
-              dmMessaging.sendDirectMessage(this.xmpp, item.peerJid, item.body, item.files, item.msgId);
+              dmMessaging.sendDirectMessage(this.xmpp, item.peerJid, item.body, item.opts);
             } else {
               this.messageDeliveryFailureHandler?.(item.msgId);
             }

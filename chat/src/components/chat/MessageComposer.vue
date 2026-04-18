@@ -5,6 +5,7 @@ import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { MarkupSpan } from "@/lib/chat-ui";
 
@@ -25,13 +26,21 @@ const props = defineProps<{
   memberNames: string[];
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
+  replyingTo?: { id: string; author: string; preview?: string } | null;
 }>();
 
 const emit = defineEmits<{
   send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
   typing: [];
   selectGif: [url: string];
+  cancelReply: [];
 }>();
+
+const replyAuthorName = computed(() => {
+  const author = props.replyingTo?.author;
+  if (!author) return "";
+  return author.includes("/") ? author.split("/").pop()! : author.split("@")[0] ?? author;
+});
 
 const showGifPicker = ref(false);
 const showMentions = ref(false);
@@ -220,9 +229,21 @@ function onSend(doc: Record<string, unknown>) {
 defineExpose({ addAttachments });
 
 function onEditorCancel() {
-  if (showMentions.value || showEmoji.value) {
+  const action = getComposerEscapeAction({
+    showMentions: showMentions.value,
+    showEmoji: showEmoji.value,
+    isReplyingTo: !!props.replyingTo,
+  });
+
+  if (action === "dismiss-autocomplete") {
     showMentions.value = false;
     showEmoji.value = false;
+    triggerRange.value = null;
+    return;
+  }
+
+  if (action === "cancel-reply") {
+    emit("cancelReply");
   }
 }
 
@@ -280,6 +301,25 @@ watch(
 
 <template>
   <div class="relative px-4 py-3 flex-shrink-0" @keydown="onKeydown" @paste="onPaste">
+    <!-- Reply context chip -->
+    <div
+      v-if="replyingTo"
+      class="flex items-center gap-2 px-3 py-1.5 mb-2 rounded-xl bg-muted/70 border border-border text-[12px] animate-fade-in"
+    >
+      <span class="text-muted-foreground">Replying to</span>
+      <span class="font-medium text-primary/90">@{{ replyAuthorName }}</span>
+      <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
+      <button
+        type="button"
+        class="ml-auto h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        title="Cancel reply"
+        aria-label="Cancel reply"
+        @click="emit('cancelReply')"
+      >
+        <X class="w-3 h-3" />
+      </button>
+    </div>
+
     <!-- Pending attachment previews -->
     <div
       v-if="pendingAttachments.length > 0"
@@ -371,11 +411,12 @@ watch(
     <button
       class="h-10 w-10 flex items-center justify-center rounded-xl transition-all duration-200 flex-shrink-0"
       :class="showGifPicker ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-primary'"
-      title="GIF"
+      title="Open GIF picker"
+      aria-label="Open GIF picker"
       :disabled="disabled"
       @click="showGifPicker = !showGifPicker"
     >
-      <Image class="w-4 h-4" />
+      <Image class="w-4 h-4" aria-hidden="true" />
     </button>
     <ChatEditor
       :ref="setEditorRef"
@@ -388,10 +429,11 @@ watch(
     <button
       class="h-10 w-10 flex items-center justify-center bg-primary text-primary-foreground rounded-xl hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 flex-shrink-0"
       :disabled="isSending || disabled || isEmpty || slowModeCooldown > 0"
+      aria-label="Send message"
       @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
     >
       <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
-      <Send v-else class="w-4 h-4" />
+      <Send v-else class="w-4 h-4" aria-hidden="true" />
     </button>
     </div>
   </div>

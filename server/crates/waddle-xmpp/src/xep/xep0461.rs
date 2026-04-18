@@ -84,8 +84,20 @@ pub fn set_reply_payload(msg: &mut Message, reply: &ReplyReference) {
 }
 
 /// Read RFC 6121 `<thread/>` identifier from a message.
+///
+/// Checks both the typed `Message::thread` field and any raw `<thread/>`
+/// payload element — the latter is used to preserve the XEP-0201 `parent`
+/// attribute since `xmpp_parsers 0.21`'s typed `Thread(String)` drops it.
 pub fn thread_id_from_message(msg: &Message) -> Option<String> {
-    msg.thread.as_ref().map(|thread| thread.0.clone())
+    if let Some(thread) = msg.thread.as_ref() {
+        return Some(thread.0.clone());
+    }
+    msg.payloads
+        .iter()
+        .find(|elem| elem.name() == "thread")
+        .map(|elem| elem.text())
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
 }
 
 /// Set RFC 6121 `<thread/>` identifier on a message.

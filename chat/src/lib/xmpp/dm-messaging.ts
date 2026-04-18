@@ -1,6 +1,12 @@
 import type { Agent } from "stanza";
 import type { ChatStateType } from "./types";
-import { fileSharingElement, type OutboundFileAttachment } from "./messaging";
+import {
+  buildReplyFallbackPrefix,
+  fileSharingElement,
+  type OutboundFileAttachment,
+  type ReplyTarget,
+} from "./messaging";
+import type { WaddleFallback } from "./extensions/fallback";
 
 export function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state, processingHints: { noStore: true } });
@@ -44,9 +50,17 @@ export function sendDmCorrection(xmpp: Agent, peerJid: string, body: string, rep
   return msgId;
 }
 
+export interface SendDirectMessageOptions {
+  files?: OutboundFileAttachment[];
+  replyTo?: ReplyTarget;
+  threadId?: string;
+  parentThreadId?: string;
+  id?: string;
+}
+
 /**
- * Send a direct (type="chat") message. Optionally includes XEP-0447 file-sharing
- * attachments alongside the user's text body in a single stanza.
+ * Send a direct (type="chat") message. Supports XEP-0447 attachments, XEP-0461
+ * replies with XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
  * Pass a pre-generated `id` when the caller already created an optimistic
  * timeline entry so the stanza ID matches.
  */
@@ -54,15 +68,23 @@ export function sendDirectMessage(
   xmpp: Agent,
   peerJid: string,
   body: string,
-  files?: OutboundFileAttachment[],
-  id?: string,
+  opts: SendDirectMessageOptions = {},
 ): string | null {
+  const { files, replyTo, threadId, parentThreadId, id } = opts;
   const text = body.trim();
   const hasFiles = !!files && files.length > 0;
   if (!text && !hasFiles) return null;
 
   const msgId = id ?? crypto.randomUUID();
-  const effectiveBody = text || (hasFiles ? files![0].url : "");
+  const { prefix, length: prefixLength } = replyTo
+    ? buildReplyFallbackPrefix(replyTo.body)
+    : { prefix: "", length: 0 };
+  const bodyText = text || (hasFiles ? files![0].url : "");
+  const effectiveBody = prefix + bodyText;
+  const fallbacks: WaddleFallback[] = [];
+  if (replyTo && prefixLength > 0) {
+    fallbacks.push({ for: "urn:xmpp:reply:0", body: { start: 0, end: prefixLength } });
+  }
 
   const msgData: Record<string, unknown> = {
     id: msgId,
@@ -73,13 +95,21 @@ export function sendDirectMessage(
     marker: { type: "markable" },
     processingHints: { store: true },
   };
+  if (replyTo) {
+    msgData.reply = { to: replyTo.author, id: replyTo.id };
+  }
+  if (threadId) {
+    msgData.thread = threadId;
+    if (parentThreadId) msgData.parentThread = parentThreadId;
+  }
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);
     msgData.links = files!.map((f) => ({ url: f.url }));
     if (!text) {
-      msgData.fallback = { for: "urn:xmpp:sfs:0", body: true };
+      fallbacks.push({ for: "urn:xmpp:sfs:0" });
     }
   }
+  if (fallbacks.length > 0) msgData.fallbacks = fallbacks;
 
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;

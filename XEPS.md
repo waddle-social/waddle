@@ -43,6 +43,7 @@ These are foundational XEPs required for a functioning XMPP implementation.
 | 0182 | Application-Specific Error Conditions | Active |
 | **0198** | **Stream Management** | Draft |
 | **0199** | **XMPP Ping** | Final |
+| **0201** | **Best Practices for Message Threads** | Active | Thread grouping for replies | Implemented | Chat ✓ |
 | **0202** | **Entity Time** | Final | Implemented | Chat N/A |
 | **0203** | **Delayed Delivery** | Final | Implemented | Chat N/A |
 | 0206 | XMPP Over BOSH | Draft |
@@ -92,9 +93,9 @@ XEPs for rich messaging features expected in a modern community app.
 | 0394 | Message Markup | Experimental | Structured text markup |
 | **0424** | **Message Retraction** | Proposed | Delete messages | Implemented | Chat ✓ |
 | **0425** | **Moderated Message Retraction** | Experimental | Mod-delete messages | Implemented | Chat ✓ |
-| 0428 | Fallback Indication | Experimental | Graceful degradation |
+| **0428** | **Fallback Indication** | Experimental | Graceful degradation | Implemented | Chat ✓ |
 | **0444** | **Message Reactions** | Experimental | Emoji reactions | Implemented | Chat ✓ |
-| **0461** | **Message Replies** | Experimental | Threaded replies |
+| **0461** | **Message Replies** | Experimental | Threaded replies | Implemented | Chat ✓ |
 | **0490** | **Message Displayed Synchronization** | Draft | Cross-device read state | Implemented | Chat N/A |
 | **0513** | **Explicit Mentions** | Experimental | @user / @role mentions | Implemented | Chat ✓ |
 | 0511 | Link Metadata | Experimental | Link previews / unfurling |

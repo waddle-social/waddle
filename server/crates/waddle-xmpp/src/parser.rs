@@ -786,6 +786,25 @@ pub fn stanza_to_string<T: Into<Element>>(stanza: T) -> Result<String, XmppError
     element_to_string(&element)
 }
 
+/// Convert a `Message` to an XML string, preserving the RFC 6121 `<thread/>`
+/// element which `xmpp_parsers 0.21`'s `From<Message> for Element`
+/// incorrectly drops.
+pub fn message_to_string(msg: &xmpp_parsers::message::Message) -> Result<String, XmppError> {
+    let thread_id = msg.thread.as_ref().map(|t| t.0.clone());
+    let mut element: Element = msg.clone().into();
+
+    if let Some(id) = thread_id {
+        if !id.trim().is_empty() && !element.children().any(|child| child.name() == "thread") {
+            let thread_elem = Element::builder("thread", element.ns())
+                .append(id.as_str())
+                .build();
+            element.append_child(thread_elem);
+        }
+    }
+
+    element_to_string(&element)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
