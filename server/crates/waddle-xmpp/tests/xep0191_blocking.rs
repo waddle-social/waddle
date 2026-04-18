@@ -218,16 +218,18 @@ async fn xep0191_blocked_subscription_presence_is_dropped() {
         .await
         .expect("send subscribe");
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let blocked_subscribe = alice
+        .read_until("please add me", std::time::Duration::from_millis(500))
+        .await;
+    assert!(
+        blocked_subscribe.is_err(),
+        "Blocked subscribe presence should not be delivered, got: {}",
+        blocked_subscribe.unwrap()
+    );
 
-    let response = ping_query(&mut alice, "localhost", "after-blocked-subscribe")
+    ping_query(&mut alice, "localhost", "after-blocked-subscribe")
         .await
         .expect("ping");
-    assert!(
-        !response.contains("please add me"),
-        "Blocked subscribe presence should not be delivered, got: {}",
-        response
-    );
 }
 
 #[tokio::test]

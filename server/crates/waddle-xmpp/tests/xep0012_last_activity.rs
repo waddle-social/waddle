@@ -18,10 +18,13 @@ fn xml_string(element: Element) -> String {
 
 fn response_seconds(response: &str) -> Option<u64> {
     response
-        .split("seconds=")
-        .nth(1)
-        .and_then(|rest| rest.chars().next().map(|quote| (quote, &rest[1..])))
-        .and_then(|(quote, rest)| rest.split(quote).next())
+        .parse::<Element>()
+        .ok()
+        .and_then(|iq| {
+            iq.get_child("query", "jabber:iq:last")
+                .and_then(|query| query.attr("seconds"))
+                .map(str::to_owned)
+        })
         .and_then(|value| value.parse().ok())
 }
 
@@ -182,13 +185,14 @@ async fn xep0012_query_to_unknown_user_returns_error() {
         .await
         .expect("response");
 
-    // Should return either a result (seconds=0 for unknown) or service-unavailable
     assert!(
-        response.contains("type='result'")
-            || response.contains("type=\"result\"")
-            || response.contains("type='error'")
-            || response.contains("type=\"error\""),
-        "Expected result or error IQ, got: {}",
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable error, got: {}",
         response
     );
 }

@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Cursor};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::prelude::*;
@@ -23,7 +22,7 @@ use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
 use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore, ServerConfig},
@@ -143,10 +142,7 @@ impl AppState for MockAppState {
         let jid = jid.clone();
         if accept {
             if let Some(node) = jid.node() {
-                self.known_users
-                    .lock()
-                    .expect("known users lock")
-                    .insert(node.to_string());
+                self.known_users.lock().await.insert(node.to_string());
             }
             Ok(Session {
                 user_id: format!(
@@ -177,10 +173,7 @@ impl AppState for MockAppState {
         let token = token.to_string();
         if accept {
             let username = format!("user_{}", &token[..token.len().min(8)]);
-            self.known_users
-                .lock()
-                .expect("known users lock")
-                .insert(username.clone());
+            self.known_users.lock().await.insert(username.clone());
             // Mock: derive a JID from the token
             let mock_jid = format!("{}@{}", username, domain);
             Ok(Session {
@@ -240,19 +233,12 @@ impl AppState for MockAppState {
         _email: Option<&str>,
     ) -> Result<(), XmppError> {
         // Mock registration always succeeds
-        self.known_users
-            .lock()
-            .expect("known users lock")
-            .insert(username.to_string());
+        self.known_users.lock().await.insert(username.to_string());
         Ok(())
     }
 
     async fn native_user_exists(&self, username: &str) -> Result<bool, XmppError> {
-        Ok(self
-            .known_users
-            .lock()
-            .expect("known users lock")
-            .contains(username))
+        Ok(self.known_users.lock().await.contains(username))
     }
 
     async fn get_vcard(&self, _jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
@@ -387,7 +373,7 @@ impl AppState for MockAppState {
         Ok(self
             .blocked_jids
             .lock()
-            .expect("blocked jids lock")
+            .await
             .get(&user_jid.to_string())
             .map(|entries| {
                 let mut blocked: Vec<_> = entries.iter().cloned().collect();
@@ -405,7 +391,7 @@ impl AppState for MockAppState {
         Ok(self
             .blocked_jids
             .lock()
-            .expect("blocked jids lock")
+            .await
             .get(&user_jid.to_string())
             .is_some_and(|entries| entries.contains(&blocked_jid.to_string())))
     }
@@ -415,7 +401,7 @@ impl AppState for MockAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        let mut store = self.blocked_jids.lock().expect("blocked jids lock");
+        let mut store = self.blocked_jids.lock().await;
         let entry = store.entry(user_jid.to_string()).or_default();
         let mut added = 0;
         for blocked_jid in blocked_jids {
@@ -431,7 +417,7 @@ impl AppState for MockAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        let mut store = self.blocked_jids.lock().expect("blocked jids lock");
+        let mut store = self.blocked_jids.lock().await;
         let Some(entry) = store.get_mut(&user_jid.to_string()) else {
             return Ok(0);
         };
@@ -448,7 +434,7 @@ impl AppState for MockAppState {
         Ok(self
             .blocked_jids
             .lock()
-            .expect("blocked jids lock")
+            .await
             .remove(&user_jid.to_string())
             .map(|entries| entries.len())
             .unwrap_or(0))
