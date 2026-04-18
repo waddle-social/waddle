@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { Hash, MessageCircle, Settings, Search, X, Upload } from "lucide-vue-next";
-import { extractImageFromEvent } from "@/lib/xmpp/file-upload";
+import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
@@ -40,10 +40,9 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[]];
+  send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
   typing: [];
   selectGif: [url: string];
-  fileUpload: [file: File | Blob];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
@@ -57,6 +56,10 @@ const emit = defineEmits<{
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
   messagesContainer.value = el;
+};
+const composerRef = ref<{ addAttachments: (files: Array<File | Blob>) => void } | null>(null);
+const setComposerRef = (instance: { addAttachments: (files: Array<File | Blob>) => void } | null) => {
+  composerRef.value = instance;
 };
 const showSearch = ref(false);
 const searchInput = ref("");
@@ -123,8 +126,8 @@ function onDragLeave() {
 function onDrop(e: DragEvent) {
   e.preventDefault();
   isDragging.value = false;
-  const file = extractImageFromEvent(e);
-  if (file) emit("fileUpload", file);
+  const files = extractImagesFromEvent(e);
+  if (files.length > 0) composerRef.value?.addAttachments(files);
 }
 
 // XEP-0333: Send displayed marker for the latest non-self message
@@ -316,6 +319,7 @@ watch(
     <!-- Composer -->
     <MessageComposer
       v-if="channel || dmPeer"
+      :ref="setComposerRef"
       v-model:draft="draft"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
       :is-sending="isSending"
@@ -324,10 +328,9 @@ watch(
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
-      @send="(body, markup) => emit('send', body, markup)"
+      @send="(body, markup, files) => emit('send', body, markup, files)"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
-      @file-upload="(file) => emit('fileUpload', file)"
     />
     <UserPopover
       :open="!!popoverAuthor"

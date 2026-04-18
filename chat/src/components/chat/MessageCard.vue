@@ -3,6 +3,7 @@ import { ref, computed, nextTick, watch } from "vue";
 import { Pencil, SmilePlus, Trash2, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
 import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
@@ -45,16 +46,45 @@ const emit = defineEmits<{
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
-const styledHtml = computed(() => renderStyledBody(props.message.body, props.message.markup));
+const styledHtml = computed(() => renderStyledBody(displayBody.value, props.message.markup));
 const styledBodyRef = ref<HTMLDivElement | null>(null);
 const setStyledBodyRef = (el: HTMLDivElement | null) => {
   styledBodyRef.value = el;
 };
-const isGif = computed(() => isImageUrl(props.message.body));
-const isSharedImage = computed(() => {
-  const f = props.message.sharedFile;
-  return f && f.disposition === "inline" && f.mediaType?.startsWith("image/");
+const sharedFiles = computed(() => props.message.sharedFiles ?? []);
+const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
+
+const imageAttachments = computed(() =>
+  sharedFiles.value.filter((f) => f.disposition === "inline" && f.mediaType?.startsWith("image/")),
+);
+const nonImageAttachments = computed(() =>
+  sharedFiles.value.filter((f) => !(f.disposition === "inline" && f.mediaType?.startsWith("image/"))),
+);
+/** Display the user's text body when present; hide body when it's just the fallback URL for a single image. */
+const displayBody = computed(() => {
+  const body = props.message.body;
+  if (!body) return "";
+  if (sharedFiles.value.length === 0) return body;
+  const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
+  return matchesAttachment ? "" : body;
 });
+
+const lightboxOpen = ref(false);
+const lightboxIndex = ref(0);
+const lightboxImages = computed(() =>
+  imageAttachments.value.map((f) => {
+    const img: { url: string; name?: string; width?: number; height?: number } = { url: f.url };
+    if (f.name) img.name = f.name;
+    if (f.width) img.width = f.width;
+    if (f.height) img.height = f.height;
+    return img;
+  }),
+);
+
+function openLightbox(index: number) {
+  lightboxIndex.value = index;
+  lightboxOpen.value = true;
+}
 
 async function highlightMessageCodeBlocks() {
   const el = styledBodyRef.value;
@@ -197,62 +227,80 @@ watch(
     </div>
 
     <!-- Sticker -->
-    <div v-else-if="message.isSticker && message.sharedFile" class="mt-1">
+    <div v-else-if="message.isSticker && imageAttachments.length > 0" class="mt-1">
       <img
-        :src="message.sharedFile.url"
-        :alt="message.sharedFile.desc ?? message.body ?? 'Sticker'"
+        :src="imageAttachments[0].url"
+        :alt="imageAttachments[0].desc ?? message.body ?? 'Sticker'"
         class="max-w-28 max-h-28 object-contain"
         loading="lazy"
       />
     </div>
 
-    <!-- Shared file (image inline) -->
-    <div v-else-if="isSharedImage && message.sharedFile" class="mt-2">
-      <a :href="message.sharedFile.url" target="_blank" rel="noopener noreferrer">
+    <template v-else>
+      <!-- User text body (shown alongside attachments) -->
+      <div
+        v-if="displayBody"
+        :ref="setStyledBodyRef"
+        class="text-[13px] leading-relaxed break-words styled-body"
+        v-html="styledHtml"
+      />
+
+      <!-- Inline GIF -->
+      <div v-else-if="isGif" class="mt-2">
         <img
-          :src="message.sharedFile.url"
-          :alt="message.sharedFile.name ?? 'Shared image'"
+          :src="message.body.trim()"
+          alt="GIF"
           class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
           loading="lazy"
         />
-      </a>
-      <div v-if="message.sharedFile.name" class="text-[11px] text-muted-foreground/60 mt-1">
-        {{ message.sharedFile.name }}
-        <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
       </div>
-    </div>
 
-    <!-- Shared file (non-image) -->
-    <div v-else-if="message.sharedFile" class="mt-2">
-      <a
-        :href="message.sharedFile.url"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200"
-      >
-        <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-        <div class="flex-1 min-w-0">
-          <div class="text-[13px] font-medium truncate">{{ message.sharedFile.name ?? "File" }}</div>
-          <div class="text-[11px] text-muted-foreground">
-            {{ message.sharedFile.mediaType ?? "file" }}
-            <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
+      <!-- Image attachments gallery -->
+      <div v-if="imageAttachments.length > 0" class="mt-2 flex flex-wrap gap-2">
+        <button
+          v-for="(img, idx) in imageAttachments"
+          :key="img.url"
+          type="button"
+          class="rounded-xl border border-border overflow-hidden hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-primary"
+          :title="img.name ?? 'Image'"
+          @click="openLightbox(idx)"
+        >
+          <img
+            :src="img.url"
+            :alt="img.name ?? 'Shared image'"
+            class="max-w-xs max-h-56 object-cover"
+            loading="lazy"
+          />
+        </button>
+      </div>
+
+      <!-- Non-image attachments -->
+      <div v-if="nonImageAttachments.length > 0" class="mt-2 flex flex-col gap-1.5">
+        <a
+          v-for="file in nonImageAttachments"
+          :key="file.url"
+          :href="file.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200 max-w-md"
+        >
+          <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+          <div class="flex-1 min-w-0">
+            <div class="text-[13px] font-medium truncate">{{ file.name ?? "File" }}</div>
+            <div class="text-[11px] text-muted-foreground">
+              {{ file.mediaType ?? "file" }}
+              <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
+            </div>
           </div>
-        </div>
-      </a>
-    </div>
+        </a>
+      </div>
+    </template>
 
-    <!-- Inline GIF -->
-    <div v-else-if="isGif" class="mt-2">
-      <img
-        :src="message.body.trim()"
-        alt="GIF"
-        class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
-        loading="lazy"
-      />
-    </div>
-
-    <!-- Normal display -->
-    <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
+    <ImageLightbox
+      v-model:open="lightboxOpen"
+      v-model:index="lightboxIndex"
+      :images="lightboxImages"
+    />
 
     <!-- Existing reactions (inline, always visible when present) -->
     <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-1.5">

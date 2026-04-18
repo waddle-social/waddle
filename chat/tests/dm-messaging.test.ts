@@ -1,6 +1,6 @@
 import { describe, test, expect, mock } from "bun:test";
 import type { Agent } from "stanza";
-import { sendDirectFileMessage, sendDirectMessage } from "../src/lib/xmpp/dm-messaging";
+import { sendDirectMessage } from "../src/lib/xmpp/dm-messaging";
 
 function makeAgent() {
   return {
@@ -11,35 +11,78 @@ function makeAgent() {
 }
 
 describe("dm messaging", () => {
-  test("sends XEP-0447 file-sharing stanza with fallback and OOB", () => {
+  test("sends XEP-0447 file-only stanza with fallback and OOB", () => {
     const xmpp = makeAgent();
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
-    const messageId = sendDirectFileMessage(xmpp, "bob@waddle.social", fileUrl, {
-      name: "photo.jpg",
-      mediaType: "image/jpeg",
-      size: 12345,
-    });
+    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "", [
+      { url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 },
+    ]);
 
     expect(typeof messageId).toBe("string");
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
-    expect(xmpp.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: messageId,
-        to: "bob@waddle.social",
-        type: "chat",
-        body: fileUrl,
-        links: [{ url: fileUrl }],
-        fallback: { for: "urn:xmpp:sfs:0", body: true },
-        processingHints: { store: true },
-        fileSharing: expect.objectContaining({
-          disposition: "inline",
-          name: "photo.jpg",
-          mediaType: "image/jpeg",
-          size: "12345",
-          url: fileUrl,
-        }),
-      }),
-    );
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call).toMatchObject({
+      id: messageId,
+      to: "bob@waddle.social",
+      type: "chat",
+      body: fileUrl,
+      links: [{ url: fileUrl }],
+      fallback: { for: "urn:xmpp:sfs:0", body: true },
+      processingHints: { store: true },
+    });
+    expect(Array.isArray(call.fileSharing)).toBe(true);
+    expect((call.fileSharing as Array<Record<string, unknown>>)[0]).toMatchObject({
+      disposition: "inline",
+      name: "photo.jpg",
+      mediaType: "image/jpeg",
+      size: "12345",
+      url: fileUrl,
+    });
+  });
+
+  test("combines user text and attachments in a single stanza without SFS fallback", () => {
+    const xmpp = makeAgent();
+    const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
+
+    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "check this out", [
+      { url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 },
+    ]);
+
+    expect(typeof messageId).toBe("string");
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.body).toBe("check this out");
+    expect(call.fallback).toBeUndefined();
+    expect(call.links).toEqual([{ url: fileUrl }]);
+    expect(Array.isArray(call.fileSharing)).toBe(true);
+    expect((call.fileSharing as unknown[]).length).toBe(1);
+  });
+
+  test("sends one stanza with multiple file-sharing attachments", () => {
+    const xmpp = makeAgent();
+    const urls = [
+      "https://xmpp.waddle.social/upload/a/1.jpg",
+      "https://xmpp.waddle.social/upload/a/2.jpg",
+    ];
+
+    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "gallery", [
+      { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1 },
+      { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2 },
+    ]);
+
+    expect(typeof messageId).toBe("string");
+    expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.links).toEqual([{ url: urls[0] }, { url: urls[1] }]);
+    const fs = call.fileSharing as Array<Record<string, unknown>>;
+    expect(fs).toHaveLength(2);
+    expect(fs[0]).toMatchObject({ url: urls[0] });
+    expect(fs[1]).toMatchObject({ url: urls[1] });
+  });
+
+  test("refuses to send with empty body and no attachments", () => {
+    const xmpp = makeAgent();
+    expect(sendDirectMessage(xmpp, "bob@waddle.social", "")).toBeNull();
+    expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
   });
 });

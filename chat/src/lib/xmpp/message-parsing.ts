@@ -7,7 +7,7 @@ import type {
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
-  "body" | "mentions" | "broadcastMention" | "sharedFile" | "isSticker" | "replacesId" | "markup"
+  "body" | "mentions" | "broadcastMention" | "sharedFiles" | "isSticker" | "replacesId" | "markup"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -126,22 +126,28 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
 }
 
 function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const fs = ext(msg).fileSharing as
+  const raw = ext(msg).fileSharing as
+    | Array<{ disposition?: string; name?: string; mediaType?: string; size?: string; width?: string; height?: string; desc?: string; url?: string }>
     | { disposition?: string; name?: string; mediaType?: string; size?: string; width?: string; height?: string; desc?: string; url?: string }
     | undefined;
-  if (!fs?.url) return;
-
-  const info: SharedFileInfo = {
-    url: fs.url,
-    disposition: fs.disposition === "attachment" ? "attachment" : "inline",
-  };
-  if (fs.name) info.name = fs.name;
-  if (fs.mediaType) info.mediaType = fs.mediaType;
-  if (fs.size) info.size = parseInt(fs.size, 10);
-  if (fs.width) info.width = parseInt(fs.width, 10);
-  if (fs.height) info.height = parseInt(fs.height, 10);
-  if (fs.desc) info.desc = fs.desc;
-  base.sharedFile = info;
+  if (!raw) return;
+  const entries = Array.isArray(raw) ? raw : [raw];
+  const out: SharedFileInfo[] = [];
+  for (const fs of entries) {
+    if (!fs?.url) continue;
+    const info: SharedFileInfo = {
+      url: fs.url,
+      disposition: fs.disposition === "attachment" ? "attachment" : "inline",
+    };
+    if (fs.name) info.name = fs.name;
+    if (fs.mediaType) info.mediaType = fs.mediaType;
+    if (fs.size) info.size = parseInt(fs.size, 10);
+    if (fs.width) info.width = parseInt(fs.width, 10);
+    if (fs.height) info.height = parseInt(fs.height, 10);
+    if (fs.desc) info.desc = fs.desc;
+    out.push(info);
+  }
+  if (out.length > 0) base.sharedFiles = out;
 }
 
 /** XEP-0394: Extract Message Markup annotations. */
