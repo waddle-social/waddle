@@ -134,6 +134,42 @@ enum XMPPXML {
         return payload
     }
 
+    static func groupchatReplyMessage(
+        to roomJID: String,
+        body: String,
+        replyToID: String,
+        replyToSender: String?,
+        replyToBody: String?,
+        thread: String? = nil
+    ) -> String {
+        let fallbackPrefix = buildReplyFallbackPrefix(replyToBody)
+        let fullBody = fallbackPrefix + body
+        var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
+        payload += "<body>\(escape(fullBody))</body>"
+        var replyAttrs = "id='\(escape(replyToID))'"
+        if let replyToSender, !replyToSender.isEmpty {
+            replyAttrs += " to='\(escape(replyToSender))'"
+        }
+        payload += "<reply xmlns='urn:xmpp:reply:0' \(replyAttrs)/>"
+        if !fallbackPrefix.isEmpty {
+            payload += "<fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>"
+            payload += "<body start='0' end='\(fallbackPrefix.utf16.count)'/>"
+            payload += "</fallback>"
+        }
+        if let thread, !thread.isEmpty {
+            payload += "<thread>\(escape(thread))</thread>"
+        }
+        payload += "</message>"
+        return payload
+    }
+
+    static func buildReplyFallbackPrefix(_ parentBody: String?) -> String {
+        guard let parentBody, !parentBody.isEmpty else { return "" }
+        let lines = parentBody.split(separator: "\n", omittingEmptySubsequences: false)
+        let quoted = lines.map { "> \($0)" }.joined(separator: "\n")
+        return "\(quoted)\n\n"
+    }
+
     static func mamRoomHistoryQuery(id: String, to roomJID: String, max: Int, before: String? = "") -> String {
         var query = "<query xmlns='urn:xmpp:mam:2' queryid='\(escape(id))'>"
         query += "<x xmlns='jabber:x:data' type='submit'>"
@@ -229,13 +265,16 @@ enum XMPPXML {
         let moderatedRetraction = applyTo?
             .firstChild(named: "moderated")?
             .firstChild(named: "retract") != nil
+        let replyElement = element.firstChild(named: "reply")
+        let rawBody = element.firstChild(named: "body")?.text
+        let strippedBody = stripReplyFallbackBody(rawBody, from: element)
         return XMPPMessageEvent(
             from: element.attribute("from"),
             to: element.attribute("to"),
             type: element.attribute("type"),
             id: element.attribute("id"),
             stanzaID: stanzaID,
-            body: element.firstChild(named: "body")?.text,
+            body: strippedBody,
             subject: element.firstChild(named: "subject")?.text,
             thread: element.firstChild(named: "thread")?.text,
             timestamp: timestamp ?? parseDelayStamp(from: element),
@@ -243,8 +282,25 @@ enum XMPPXML {
             retractsID: element.firstChild(named: "retract")?.attribute("id")
                 ?? (moderatedRetraction ? applyTo?.attribute("id") : nil),
             reactionTargetID: reactionElement?.attribute("id"),
-            reactionEmojis: reactionElement?.children(named: "reaction").map(\.text).filter { !$0.isEmpty } ?? []
+            reactionEmojis: reactionElement?.children(named: "reaction").map(\.text).filter { !$0.isEmpty } ?? [],
+            replyToID: replyElement?.attribute("id"),
+            replyToSender: replyElement?.attribute("to")
         )
+    }
+
+    private static func stripReplyFallbackBody(_ body: String?, from element: XMPPElement) -> String? {
+        guard let body, !body.isEmpty else { return body }
+        for fallback in element.children(named: "fallback") {
+            guard fallback.attribute("for") == "urn:xmpp:reply:0" else { continue }
+            guard let bodyRange = fallback.firstChild(named: "body") else { continue }
+            let start = Int(bodyRange.attribute("start") ?? "0") ?? 0
+            let end = Int(bodyRange.attribute("end") ?? "0") ?? 0
+            guard start >= 0, end > start, end <= body.utf16.count else { continue }
+            let utf16 = body.utf16
+            let endIndex = utf16.index(utf16.startIndex, offsetBy: end)
+            return String(body[endIndex...])
+        }
+        return body
     }
 
     static func parseMamResult(from element: XMPPElement) -> XMPPArchiveMessage? {

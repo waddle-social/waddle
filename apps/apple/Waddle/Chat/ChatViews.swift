@@ -175,6 +175,7 @@ struct ChatTimelineView: View {
     let messages: [ChatTimelineMessage]
     var historyState: ChatRoomHistoryState = .init()
     var onLoadOlderMessages: (() -> Void)? = nil
+    var onReply: ((ChatTimelineMessage) -> Void)? = nil
     var emptyState: AnyView? = nil
     var usesOperationalDensity: Bool = false
     var usesCompactConversationStyle: Bool = false
@@ -260,7 +261,8 @@ struct ChatTimelineView: View {
                             message: message,
                             previousMessage: previousMessage,
                             nextMessage: nextMessage,
-                            usesCompactConversationStyle: usesCompactConversationStyle
+                            usesCompactConversationStyle: usesCompactConversationStyle,
+                            onReply: onReply
                         )
                         .id(message.id)
                     }
@@ -328,6 +330,7 @@ struct ChatMessageRowView: View {
     var previousMessage: ChatTimelineMessage? = nil
     var nextMessage: ChatTimelineMessage? = nil
     var usesCompactConversationStyle: Bool = false
+    var onReply: ((ChatTimelineMessage) -> Void)? = nil
 
     var body: some View {
         if usesOperationalLayout {
@@ -466,6 +469,10 @@ struct ChatMessageRowView: View {
                 }
             }
 
+            if let replyToID = message.replyToID, !replyToID.isEmpty {
+                replyIndicator
+            }
+
             if message.isRetracted {
                 Text("Message removed")
                     .font(.body)
@@ -511,10 +518,47 @@ struct ChatMessageRowView: View {
                     .fill(message.isOutgoing ? Color.accentColor.opacity(0.11) : Color.secondary.opacity(0.08))
             }
         }
+        .contextMenu {
+            if !message.isAction, !message.isRetracted, onReply != nil {
+                Button {
+                    onReply?(message)
+                } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var replyIndicator: some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.accentColor.opacity(0.5))
+                .frame(width: 3)
+
+            VStack(alignment: .leading, spacing: 2) {
+                if let senderName = message.replyToSenderName, !senderName.isEmpty {
+                    Text(senderName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                Text(message.replyToBody ?? "Original message")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var compactMessageCard: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let replyToID = message.replyToID, !replyToID.isEmpty {
+                replyIndicator
+            }
+
             if message.isRetracted {
                 Text("Message removed")
                     .font(.subheadline)
@@ -562,6 +606,15 @@ struct ChatMessageRowView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(compactCardStroke, lineWidth: 1)
+        }
+        .contextMenu {
+            if !message.isAction, !message.isRetracted, onReply != nil {
+                Button {
+                    onReply?(message)
+                } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+                }
+            }
         }
     }
 
@@ -629,6 +682,8 @@ struct ChatComposerView: View {
     var isSending: Bool = false
     var canSend: Bool = true
     var channelName: String? = nil
+    var replyingToMessage: ChatTimelineMessage? = nil
+    var onCancelReply: (() -> Void)? = nil
     var usesOperationalChrome: Bool = false
     var usesCompactConversationChrome: Bool = false
     var onSend: () -> Void
@@ -661,6 +716,8 @@ struct ChatComposerView: View {
                 }
             }
 
+            composerReplyPreview
+
             HStack(alignment: .bottom, spacing: 12) {
                 editor(minHeight: usesOperationalChrome ? 56 : 44, maxHeight: 140)
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -692,6 +749,8 @@ struct ChatComposerView: View {
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.tertiary)
             }
+
+            composerReplyPreview
 
             HStack(alignment: .bottom, spacing: 10) {
                 editor(minHeight: 52, maxHeight: 120)
@@ -726,6 +785,42 @@ struct ChatComposerView: View {
                 .frame(minHeight: minHeight, maxHeight: maxHeight)
                 .padding(.horizontal, usesCompactConversationChrome ? 8 : 10)
                 .padding(.vertical, usesCompactConversationChrome ? 6 : 8)
+        }
+    }
+
+    @ViewBuilder
+    private var composerReplyPreview: some View {
+        if let reply = replyingToMessage {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Replying to \(reply.senderDisplayName)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+
+                    Text(reply.body)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    onCancelReply?()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 

@@ -93,6 +93,8 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let retractsID: String?
     let reactionTargetID: String?
     let reactionEmojis: [String]
+    let replyToID: String?
+    let replyToSender: String?
 }
 
 struct XMPPPresenceEvent: Sendable, Equatable {

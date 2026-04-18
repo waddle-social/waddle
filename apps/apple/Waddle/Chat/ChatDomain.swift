@@ -82,6 +82,9 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var senderInitials: String?
     var reactions: [String: [String]]?
     var isRetracted: Bool
+    var replyToID: String?
+    var replyToSenderName: String?
+    var replyToBody: String?
 }
 
 struct ChatRoomHistoryState: Hashable {
@@ -243,7 +246,10 @@ extension ChatTimelineMessage {
             isAction: isAction || other.isAction,
             senderInitials: other.senderInitials ?? senderInitials,
             reactions: mergedReactions(existing: reactions, incoming: other.reactions),
-            isRetracted: isRetracted
+            isRetracted: isRetracted,
+            replyToID: other.replyToID ?? replyToID,
+            replyToSenderName: other.replyToSenderName ?? replyToSenderName,
+            replyToBody: other.replyToBody ?? replyToBody
         )
     }
 

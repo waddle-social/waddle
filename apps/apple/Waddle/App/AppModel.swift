@@ -79,9 +79,9 @@ final class AppModel: ObservableObject {
         serverURLText = persistedServerURL.absoluteString
         client = WaddleAPIClient(serverURL: persistedServerURL)
         chatStore = ChatSurfaceStore()
-        chatStore.setSendHandler { [weak self] text, room in
+        chatStore.setSendHandler { [weak self] text, room, replyTo in
             guard let self else { return }
-            try await self.sendMessage(text, room: room)
+            try await self.sendMessage(text, room: room, replyTo: replyTo)
         }
         chatStore.setRoomHistoryLoadHandler { [weak self] room, before in
             guard let self else {
@@ -622,7 +622,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func sendMessage(_ text: String, room: ChatRoomSelection?) async throws {
+    private func sendMessage(_ text: String, room: ChatRoomSelection?, replyTo: ChatTimelineMessage? = nil) async throws {
         guard let session else {
             throw ChatSendError.noSession
         }
@@ -640,7 +640,18 @@ final class AppModel: ObservableObject {
         }
 
         let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
-        try await xmppService.sendGroupchatMessage(roomJID: roomJID, body: text)
+
+        if let replyTo {
+            try await xmppService.sendGroupchatReplyMessage(
+                roomJID: roomJID,
+                body: text,
+                replyToID: replyTo.id,
+                replyToSender: replyTo.senderID,
+                replyToBody: replyTo.body
+            )
+        } else {
+            try await xmppService.sendGroupchatMessage(roomJID: roomJID, body: text)
+        }
     }
 
     private func loadRoomHistory(for room: ChatRoomSelection, before: Date?) async throws -> ChatRoomHistoryPage {
@@ -838,6 +849,18 @@ final class AppModel: ObservableObject {
 
         let senderName = XMPPJID(string: event.from ?? "")?.resource ?? "Unknown"
         let messageID = event.id ?? event.stanzaID ?? fallbackID ?? UUID().uuidString
+
+        var replyToSenderName: String?
+        var replyToBody: String?
+        if let replyToID = event.replyToID {
+            if let parentMessage = messagesByRoomJID[roomJID]?.first(where: { $0.id == replyToID }) {
+                replyToSenderName = parentMessage.senderDisplayName
+                replyToBody = parentMessage.body
+            } else if let sender = event.replyToSender {
+                replyToSenderName = XMPPJID(string: sender)?.resource ?? sender
+            }
+        }
+
         return ChatTimelineMessage(
             id: messageID,
             roomID: roomJID,
@@ -851,7 +874,10 @@ final class AppModel: ObservableObject {
             isAction: event.type == "subject" || (event.body == nil && event.subject != nil),
             senderInitials: initials(from: senderName),
             reactions: nil,
-            isRetracted: false
+            isRetracted: false,
+            replyToID: event.replyToID,
+            replyToSenderName: replyToSenderName,
+            replyToBody: replyToBody
         )
     }
 

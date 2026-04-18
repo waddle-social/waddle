@@ -122,6 +122,27 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.groupchatMessage(to: roomJID, body: body, thread: thread))
     }
 
+    func sendGroupchatReplyMessage(
+        roomJID: String,
+        body: String,
+        replyToID: String,
+        replyToSender: String?,
+        replyToBody: String?,
+        thread: String? = nil
+    ) async throws {
+        try ensureReady()
+        try await transport.send(
+            XMPPXML.groupchatReplyMessage(
+                to: roomJID,
+                body: body,
+                replyToID: replyToID,
+                replyToSender: replyToSender,
+                replyToBody: replyToBody,
+                thread: thread
+            )
+        )
+    }
+
     func fetchRoomHistory(roomJID: String, max: Int = 50, before: String? = "") async throws -> XMPPArchivePage {
         try ensureReady()
         guard pendingArchiveQuery == nil else {

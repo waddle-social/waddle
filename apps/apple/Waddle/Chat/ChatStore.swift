@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-typealias ChatMessageSendHandler = @Sendable (_ text: String, _ room: ChatRoomSelection?) async throws -> Void
+typealias ChatMessageSendHandler = @Sendable (_ text: String, _ room: ChatRoomSelection?, _ replyTo: ChatTimelineMessage?) async throws -> Void
 typealias ChatRoomHistoryLoadHandler = @Sendable (_ room: ChatRoomSelection, _ before: Date?) async throws -> ChatRoomHistoryPage
 
 enum ChatSurfaceState: Equatable {
@@ -22,6 +22,7 @@ final class ChatSurfaceStore: ObservableObject {
     @Published var surfaceState: ChatSurfaceState
     @Published var isSendingMessage: Bool
     @Published var roomHistoryState: ChatRoomHistoryState
+    @Published var replyingToMessage: ChatTimelineMessage?
 
     private var sendHandler: ChatMessageSendHandler?
     private var roomHistoryLoadHandler: ChatRoomHistoryLoadHandler?
@@ -193,18 +194,24 @@ final class ChatSurfaceStore: ObservableObject {
         composerText = ""
     }
 
+    func setReplyingTo(_ message: ChatTimelineMessage?) {
+        replyingToMessage = message
+    }
+
     func sendComposerMessage() async {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let sendHandler else {
             return
         }
 
+        let replyTo = replyingToMessage
         isSendingMessage = true
         defer { isSendingMessage = false }
 
         do {
-            try await sendHandler(text, selectedRoom)
+            try await sendHandler(text, selectedRoom, replyTo)
             composerText = ""
+            replyingToMessage = nil
         } catch {
             surfaceState = .error(title: "Message not sent", message: error.localizedDescription)
         }

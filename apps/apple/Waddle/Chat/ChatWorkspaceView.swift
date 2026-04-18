@@ -450,6 +450,7 @@ struct WaddleChatWorkspaceView: View {
                     onLoadOlderMessages: store.roomHistoryState.canLoadOlderMessages ? {
                         Task { await store.loadOlderMessages() }
                     } : nil,
+                    onReply: { message in store.setReplyingTo(message) },
                     usesOperationalDensity: true
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -462,6 +463,8 @@ struct WaddleChatWorkspaceView: View {
                     placeholder: model.selectedChannel == nil ? "Select a channel" : "Message #\(model.selectedChannel?.name ?? "channel")",
                     isSending: store.isSendingMessage,
                     canSend: model.selectedChannel != nil,
+                    replyingToMessage: store.replyingToMessage,
+                    onCancelReply: { store.setReplyingTo(nil) },
                     usesOperationalChrome: true
                 ) {
                     Task { await store.sendComposerMessage() }
@@ -499,6 +502,7 @@ struct WaddleChatWorkspaceView: View {
                         onLoadOlderMessages: store.roomHistoryState.canLoadOlderMessages ? {
                             Task { await store.loadOlderMessages() }
                         } : nil,
+                        onReply: { message in store.setReplyingTo(message) },
                         usesCompactConversationStyle: compactStyle
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -511,6 +515,8 @@ struct WaddleChatWorkspaceView: View {
                         isSending: store.isSendingMessage,
                         canSend: model.selectedChannel != nil,
                         channelName: model.selectedChannel?.name,
+                        replyingToMessage: store.replyingToMessage,
+                        onCancelReply: { store.setReplyingTo(nil) },
                         usesCompactConversationChrome: compactStyle
                     ) {
                         Task { await store.sendComposerMessage() }
