@@ -203,16 +203,22 @@ function waddleColor(waddle: WaddleSummary): string {
     >
       <span class="font-mono">w {{ webShortSha }}</span>
       <span class="font-mono">s {{ serverShortSha }}</span>
-      <span role="img" aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      <span class="text-center leading-tight">
+        Made proudly in<br />
+        <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      </span>
     </div>
     <div
       v-else
-      class="ml-auto flex items-center gap-2 text-[10px] text-muted-foreground/70 select-text"
+      class="ml-auto flex items-center gap-2 shrink-0 whitespace-nowrap text-[10px] text-muted-foreground/70 select-text"
       :title="`web ${webCommitSha ?? 'unknown'}\nserver ${serverVersion?.version ?? 'unknown'}`"
     >
       <span class="font-mono">web {{ webShortSha }}</span>
       <span class="font-mono">srv {{ serverShortSha }}</span>
-      <span role="img" aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      <span class="flex items-center gap-1">
+        <span>Made proudly in</span>
+        <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      </span>
     </div>
   </div>
 </template>
