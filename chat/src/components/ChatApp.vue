@@ -641,7 +641,7 @@ onUnmounted(() => {
   />
 
   <!-- Ready -->
-  <div v-else class="h-screen flex flex-col bg-background">
+  <div v-else class="h-dvh flex flex-col bg-background">
     <!-- Mobile header -->
     <MobileHeader
       :waddle="waddles.currentWaddle.value"
