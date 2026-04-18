@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount, watchEffect } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 import type { Editor } from "@tiptap/vue-3";
 import { BubbleMenuPlugin } from "@tiptap/extension-bubble-menu";
 import { Bold, Italic, Strikethrough, Code, Link } from "lucide-vue-next";
@@ -9,7 +9,6 @@ const props = defineProps<{
 }>();
 
 const menuRef = ref<HTMLDivElement | null>(null);
-const isVisible = ref(false);
 
 const items = computed(() => [
   {
@@ -67,16 +66,19 @@ onMounted(() => {
     pluginKey: "waddleBubbleMenu",
     editor: props.editor,
     element: menuRef.value,
+    appendTo: () => document.body,
     updateDelay: 150,
+    options: {
+      strategy: "fixed",
+      placement: "top",
+      offset: 8,
+      flip: true,
+      shift: { padding: 8 },
+    },
     shouldShow: ({ editor, state }) => {
       const { selection } = state;
       const { empty } = selection;
-      if (empty) {
-        isVisible.value = false;
-        return false;
-      }
-      isVisible.value = true;
-      return true;
+      return !empty && editor.isEditable;
     },
   });
 
@@ -93,7 +95,8 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="menuRef"
-    :style="{ visibility: isVisible ? 'visible' : 'hidden' }"
+    class="fixed left-0 top-0 z-50 w-max"
+    style="visibility: hidden"
   >
     <div
       class="flex items-center gap-0.5 px-1.5 py-1 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"

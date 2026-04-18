@@ -415,7 +415,6 @@ watch(
       <span class="tabular-nums font-mono">{{ Math.round(uploadProgress.progress * 100) }}%</span>
     </div>
 
-    <div class="flex items-center gap-2.5">
     <GifPicker
       v-if="showGifPicker"
       :api-key="tenorApiKey"
@@ -427,7 +426,7 @@ watch(
     <!-- @mention autocomplete -->
     <div
       v-if="showMentions && mentionResults.length > 0"
-      class="absolute left-4 glass-panel border border-border rounded-xl max-h-48 overflow-auto z-50 min-w-48 shadow-xl animate-fade-in"
+      class="absolute left-[4.125rem] right-[4.125rem] glass-panel border border-border rounded-lg max-h-48 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in"
       :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
       <div class="py-1">
@@ -447,7 +446,7 @@ watch(
     <!-- :emoji autocomplete -->
     <div
       v-if="showEmoji && emojiResults.length > 0"
-      class="absolute left-4 glass-panel border border-border rounded-xl max-h-48 overflow-auto z-50 min-w-48 shadow-xl animate-fade-in"
+      class="absolute left-[4.125rem] right-[4.125rem] glass-panel border border-border rounded-lg max-h-48 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in"
       :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
       <div class="py-1">
@@ -464,33 +463,37 @@ watch(
       </div>
     </div>
 
-    <button
-      class="h-10 w-10 flex items-center justify-center rounded-xl transition-all duration-200 flex-shrink-0"
-      :class="showGifPicker ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-primary'"
-      title="Open GIF picker"
-      aria-label="Open GIF picker"
-      :disabled="disabled"
-      @click="showGifPicker = !showGifPicker"
-    >
-      <Image class="w-4 h-4" aria-hidden="true" />
-    </button>
-    <ChatEditor
-      :ref="setEditorRef"
-      :placeholder="editorPlaceholder"
-      :disabled="disabled || slowModeCooldown > 0"
-      @send="onSend"
-      @update="onEditorUpdate"
-      @cancel="onEditorCancel"
-    />
-    <button
-      class="h-10 w-10 flex items-center justify-center bg-primary text-primary-foreground rounded-xl hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 flex-shrink-0"
-      :disabled="!canSend"
-      aria-label="Send message"
-      @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
-    >
-      <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
-      <Send v-else class="w-4 h-4" aria-hidden="true" />
-    </button>
+    <div class="flex min-w-0 flex-nowrap items-end gap-2.5">
+      <button
+        type="button"
+        class="h-10 w-10 shrink-0 flex items-center justify-center rounded-lg transition-all duration-200"
+        :class="showGifPicker ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-primary'"
+        title="Open GIF picker"
+        aria-label="Open GIF picker"
+        :disabled="disabled"
+        @click="showGifPicker = !showGifPicker"
+      >
+        <Image class="w-4 h-4" aria-hidden="true" />
+      </button>
+      <ChatEditor
+        :ref="setEditorRef"
+        class="min-w-0"
+        :placeholder="editorPlaceholder"
+        :disabled="disabled || slowModeCooldown > 0"
+        @send="onSend"
+        @update="onEditorUpdate"
+        @cancel="onEditorCancel"
+      />
+      <button
+        type="button"
+        class="h-10 w-10 shrink-0 flex items-center justify-center bg-primary text-primary-foreground rounded-lg hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20"
+        :disabled="!canSend"
+        aria-label="Send message"
+        @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
+      >
+        <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
+        <Send v-else class="w-4 h-4" aria-hidden="true" />
+      </button>
     </div>
     <EditorBubbleToolbar v-if="tiptapEditor" :editor="tiptapEditor" />
   </div>

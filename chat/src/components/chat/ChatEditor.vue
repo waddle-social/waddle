@@ -124,7 +124,7 @@ defineExpose({
 
 <template>
   <div
-    class="chat-editor flex items-center rounded-xl bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
+    class="chat-editor flex min-w-0 items-center rounded-lg bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
     :class="[
       compact ? 'min-h-9 py-1' : 'min-h-10 py-1.5',
       compact ? '' : 'flex-1',
@@ -135,7 +135,7 @@ defineExpose({
     <EditorContent
       v-if="editor"
       :editor="editor"
-      class="w-full"
+      class="w-full min-w-0"
     />
   </div>
 </template>
@@ -147,10 +147,12 @@ defineExpose({
 <style>
 .chat-editor .ProseMirror {
   outline: none;
+  min-width: 0;
   width: 100%;
   min-height: 1.25rem;
   max-height: 10rem;
   overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 .chat-editor .ProseMirror p {
