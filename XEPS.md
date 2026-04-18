@@ -144,7 +144,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0012** | **Last Activity** | Final | "Last seen" | Implemented | Chat N/A |
 | **0054** | **vcard-temp** | Active | User profiles (legacy) |
 | **0084** | **User Avatar** | Draft | Profile pictures |
-| 0092 | Software Version | Draft | Client identification |
+| **0092** | **Software Version** | Draft | Client identification | Implemented | Chat ✓ |
 | 0107 | User Mood | Draft | Status moods |
 | 0108 | User Activity | Draft | Custom activity status |
 | **0153** | **vCard-Based Avatars** | Active | Avatar via vCard |

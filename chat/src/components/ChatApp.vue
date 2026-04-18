@@ -7,6 +7,7 @@ import { useDmMessaging } from "@/composables/useDmMessaging";
 import { useMessaging } from "@/composables/useMessaging";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
+import { useVersion } from "@/composables/useVersion";
 import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import { barePeerJid } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
@@ -147,6 +148,7 @@ const activeDmPeer = computed(() => {
 });
 
 const notifications = useNotifications();
+const version = useVersion(xmppClient);
 const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
   const avatars: Record<string, string | null> = {};
 
@@ -648,6 +650,8 @@ onUnmounted(() => {
             :active-sidebar-mode="ui.sidebarMode.value"
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
+            :web-commit-sha="version.webCommitSha.value"
+            :server-version="version.serverVersion.value"
             horizontal
             @select-waddle="selectWaddle($event)"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
@@ -734,6 +738,8 @@ onUnmounted(() => {
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
+          :web-commit-sha="version.webCommitSha.value"
+          :server-version="version.serverVersion.value"
           @select-waddle="selectWaddle($event)"
           @toggle-dms="ui.sidebarMode.value = 'dms'"
           @browse-public-waddles="openBrowsePublicWaddles"
