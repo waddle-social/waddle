@@ -4,6 +4,8 @@ export interface RouteState {
   waddleSlug: string | null;
   channelSlug: string | null;
   dmUsername: string | null;
+  /** XEP-0201 thread stack from `?thread=rootId,childId,...`. Empty = panel closed. */
+  threadStack: string[];
 }
 
 function slugify(name: string): string {
@@ -13,20 +15,52 @@ function slugify(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
-// Parses /{waddleSlug}/{channelSlug} from pathname segments
-export function parseRoute(pathname: string): RouteState {
+function parseThreadStack(search: string | null | undefined): string[] {
+  if (!search) return [];
+  // Match the raw `thread` value directly: `URLSearchParams.get()` already
+  // decodes percent-encoding, and we'd then decode again — so ids with `%`
+  // or `,` (which we encode as `%2C` to survive splitting) get mangled.
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  const match = /(?:^|&)thread=([^&]*)/.exec(query);
+  const raw = match?.[1];
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => {
+      const trimmed = s.trim();
+      try {
+        return decodeURIComponent(trimmed);
+      } catch {
+        return trimmed;
+      }
+    })
+    .filter((s) => s.length > 0);
+}
+
+function buildSearch(threadStack: string[] | undefined): string {
+  if (!threadStack || threadStack.length === 0) return "";
+  const encoded = threadStack.map((id) => encodeURIComponent(id)).join(",");
+  return `?thread=${encoded}`;
+}
+
+// Parses /{waddleSlug}/{channelSlug}[?thread=a,b,c] from URL.
+export function parseRoute(pathname: string, search?: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
+  const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
+  const threadStack = parseThreadStack(resolvedSearch);
   if (segments[0] === "dm") {
     return {
       waddleSlug: null,
       channelSlug: null,
       dmUsername: segments[1] ? decodeURIComponent(segments[1]) : null,
+      threadStack,
     };
   }
   return {
     waddleSlug: segments[0] ? decodeURIComponent(segments[0]) : null,
     channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
     dmUsername: null,
+    threadStack,
   };
 }
 
@@ -51,25 +85,34 @@ export function resolveChannel(slug: string, channels: ChannelSummary[]): Channe
 export function buildPath(
   waddle: WaddleSummary | null,
   channel: ChannelSummary | null,
+  threadStack?: string[],
 ): string {
-  if (!waddle) return "/";
+  const search = buildSearch(threadStack);
+  if (!waddle) return `/${search}`;
   const wSlug = encodeURIComponent(slugify(waddle.name));
   if (channel) {
-    return `/${wSlug}/${encodeURIComponent(slugify(channel.name))}`;
+    return `/${wSlug}/${encodeURIComponent(slugify(channel.name))}${search}`;
   }
-  return `/${wSlug}`;
+  return `/${wSlug}${search}`;
 }
 
-export function pushRoute(waddle: WaddleSummary | null, channel: ChannelSummary | null) {
-  const path = buildPath(waddle, channel);
-  if (window.location.pathname !== path) {
+export function pushRoute(
+  waddle: WaddleSummary | null,
+  channel: ChannelSummary | null,
+  threadStack?: string[],
+) {
+  const path = buildPath(waddle, channel, threadStack);
+  const current = window.location.pathname + window.location.search;
+  if (current !== path) {
     window.history.pushState(null, "", path);
   }
 }
 
-export function pushDmRoute(username: string | null) {
-  const path = username ? `/dm/${encodeURIComponent(slugify(username))}` : "/";
-  if (window.location.pathname !== path) {
+export function pushDmRoute(username: string | null, threadStack?: string[]) {
+  const search = buildSearch(threadStack);
+  const path = username ? `/dm/${encodeURIComponent(slugify(username))}${search}` : `/${search}`;
+  const current = window.location.pathname + window.location.search;
+  if (current !== path) {
     window.history.pushState(null, "", path);
   }
 }
