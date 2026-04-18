@@ -50,6 +50,7 @@ watch(
     if (open) window.addEventListener("keydown", onKeydown);
     else window.removeEventListener("keydown", onKeydown);
   },
+  { immediate: true },
 );
 
 onBeforeUnmount(() => {
@@ -70,7 +71,7 @@ onBeforeUnmount(() => {
       <div class="absolute top-3 right-3 z-10 flex items-center gap-1">
         <a
           :href="current.url"
-          :download="current.name ?? true"
+          :download="current.name ?? ''"
           target="_blank"
           rel="noopener noreferrer"
           class="h-9 w-9 flex items-center justify-center rounded-full bg-card/80 backdrop-blur border border-border text-foreground hover:bg-card transition-colors"

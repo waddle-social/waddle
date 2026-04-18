@@ -51,9 +51,9 @@ const styledBodyRef = ref<HTMLDivElement | null>(null);
 const setStyledBodyRef = (el: HTMLDivElement | null) => {
   styledBodyRef.value = el;
 };
-const isGif = computed(() => isImageUrl(props.message.body));
-
 const sharedFiles = computed(() => props.message.sharedFiles ?? []);
+const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
+
 const imageAttachments = computed(() =>
   sharedFiles.value.filter((f) => f.disposition === "inline" && f.mediaType?.startsWith("image/")),
 );
