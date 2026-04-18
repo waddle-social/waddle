@@ -89,6 +89,12 @@ export function useMessaging(
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Client-assigned stanza ids still awaiting MUC-echo reconciliation. A self
+  // echo with a server-rewritten id falls back to body matching, but only
+  // against messages in this set — otherwise sending the same text twice
+  // would cause the second echo to rewrite the first (already reconciled)
+  // message's id.
+  const pendingEchoClientIds = new Set<string>();
 
   const currentRoomJid = computed(() => {
     if (!session.value || !activeWaddleId.value || !activeChannelId.value) return null;
@@ -335,28 +341,30 @@ export function useMessaging(
 
   function mergeLiveMessage(msg: TimelineMessage) {
     // Check if this is a self-echo reconciling an optimistically-inserted
-    // message. Match by ID first; otherwise, for our own sends, match by
-    // body because MUC assigns a different stanza ID on reflection. The
-    // fallback covers messages in any outbound delivery state (sending,
-    // delivered, or even failed if the server later reflects it) so that
-    // ID reconciliation does not double-insert.
+    // message. Match by ID first; otherwise, for our own sends, fall back
+    // to body matching — but only against messages still awaiting echo
+    // reconciliation (tracked via pendingEchoClientIds). Without that
+    // constraint, sending the same text twice would let the second echo
+    // re-target the already-reconciled first message.
     const existing = messages.value.find(
       (m) =>
         m.id === msg.id ||
-        (m.deliveryStatus != null && m.isSelf && msg.isSelf && m.body === msg.body),
+        (pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body),
     );
     if (existing) {
-      if (existing.id !== msg.id || existing.deliveryStatus === "sending") {
-        // Reconcile the ID to the server-assigned one; only promote to
-        // "delivered" if we haven't already been told about stricter states
-        // (ack/failure) via XEP-0198 events.
-        messages.value = messages.value.map((m) => {
-          if (m.id !== existing.id) return m;
-          const nextStatus: DeliveryStatus =
-            m.deliveryStatus === "sending" ? "delivered" : (m.deliveryStatus ?? "delivered");
-          return { ...m, id: msg.id, deliveryStatus: nextStatus };
-        });
+      const wasPending = existing.id !== msg.id;
+      if (wasPending || existing.deliveryStatus === "sending") {
+        // Reconcile the ID to the server-assigned one and mark delivered.
+        // A self-echo is authoritative evidence that the server accepted
+        // the stanza, so it supersedes any prior "sending" or "failed"
+        // optimistic state.
+        messages.value = messages.value.map((m) =>
+          m.id !== existing.id
+            ? m
+            : { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus },
+        );
       }
+      if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
     messages.value = [...messages.value, msg];
@@ -393,7 +401,9 @@ export function useMessaging(
 
   /**
    * On a fresh XMPP session (resume failed or first connect after a drop),
-   * refetch MAM to close any message gap for the current channel.
+   * refetch MAM to close any message gap for the current channel. Local
+   * optimistic sends (sending/failed) are preserved across the reload so
+   * the UI doesn't drop unsent entries the user can still retry.
    * Resumed sessions never call this — the server replays everything.
    */
   function onSessionLifecycle(event: SessionLifecycleEvent) {
@@ -404,7 +414,22 @@ export function useMessaging(
     // Only catch up if we had already loaded this channel; otherwise the
     // standard loadMessages call on channel-select handles it.
     if (messages.value.length === 0) return;
-    void loadMessages(waddleId, channelId);
+    const preserved = messages.value.filter(
+      (m) =>
+        m.isSelf && (m.deliveryStatus === "sending" || m.deliveryStatus === "failed"),
+    );
+    void (async () => {
+      await loadMessages(waddleId, channelId);
+      if (
+        preserved.length === 0 ||
+        activeWaddleId.value !== waddleId ||
+        activeChannelId.value !== channelId
+      )
+        return;
+      const existingIds = new Set(messages.value.map((m) => m.id));
+      const toAppend = preserved.filter((m) => !existingIds.has(m.id));
+      if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
+    })();
   }
 
   async function loadMessages(waddleId: string, channelId: string) {
@@ -548,6 +573,7 @@ export function useMessaging(
           deliveryStatus: "sending",
           markup,
         };
+        pendingEchoClientIds.add(msgId);
         messages.value = [...messages.value, optimistic];
         void scrollToBottom();
       }

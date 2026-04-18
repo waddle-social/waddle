@@ -206,11 +206,11 @@ export class BrowserXmppClient {
         const cleanup = () => {
           clearTimeout(timeout);
           xmpp.off("session:started", onReady);
-          xmpp.off("stream:management:resumed" as never, onReady);
+          xmpp.off("stream:management:resumed", onReady);
         };
         const onReady = () => { cleanup(); this.connectPromise = null; resolve(); };
         xmpp.on("session:started", onReady);
-        xmpp.on("stream:management:resumed" as never, onReady);
+        xmpp.on("stream:management:resumed", onReady);
       });
       return this.connectPromise;
     }
@@ -254,7 +254,7 @@ export class BrowserXmppClient {
     const promise = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
         xmpp.off("session:started", onReady);
-        xmpp.off("stream:management:resumed" as never, onReady);
+        xmpp.off("stream:management:resumed", onReady);
         xmpp.off("disconnected", onFail);
       };
       const onReady = () => { cleanup(); this.connected = true; this.connectPromise = null; resolve(); };
@@ -268,7 +268,7 @@ export class BrowserXmppClient {
         reject(err ?? new Error("XMPP connection failed"));
       };
       xmpp.on("session:started", onReady);
-      xmpp.on("stream:management:resumed" as never, onReady);
+      xmpp.on("stream:management:resumed", onReady);
       xmpp.on("disconnected", onFail);
     });
     this.connectPromise = promise;
@@ -710,7 +710,7 @@ export class BrowserXmppClient {
         }
       }
     });
-    xmpp.on("stream:management:resumed" as never, () => {
+    xmpp.on("stream:management:resumed", () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.startKeepAlive();
