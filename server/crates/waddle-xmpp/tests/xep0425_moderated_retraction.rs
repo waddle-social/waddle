@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0425_muc_room_advertises_moderate_feature() {
+async fn xep0425_muc_room_does_not_advertise_message_moderation() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -26,21 +26,20 @@ async fn xep0425_muc_room_advertises_moderate_feature() {
         .await
         .expect("disco response");
 
-    // Room disco should return a valid result (feature may or may not be advertised)
     assert!(
         response.contains("type='result'") || response.contains("type=\"result\""),
         "Expected result IQ for room disco, got: {}",
         response
     );
     assert!(
-        response.contains("http://jabber.org/protocol/muc"),
-        "Expected MUC feature in room disco, got: {}",
+        !response.contains("urn:xmpp:message-moderate:1"),
+        "Room disco should not advertise XEP-0425 before runtime support exists, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0425_moderation_request_broadcast_in_muc() {
+async fn xep0425_iq_moderation_request_returns_service_unavailable() {
     init_test_env();
     let server = TestServer::start().await;
 
@@ -93,13 +92,14 @@ async fn xep0425_moderation_request_broadcast_in_muc() {
         .await
         .expect("moderation response");
 
-    // Should get result or error (depends on moderator status)
     assert!(
-        response.contains("type='result'")
-            || response.contains("type=\"result\"")
-            || response.contains("type='error'")
-            || response.contains("type=\"error\""),
-        "Expected result or error for moderation, got: {}",
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error for unsupported IQ moderation, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable for unsupported IQ moderation, got: {}",
         response
     );
 }

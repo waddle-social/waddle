@@ -29,6 +29,8 @@ async fn xep0249_direct_invite_delivered_to_recipient() {
         .expect("presence");
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    alice.clear();
+    bob.clear();
 
     // Alice sends direct invite to Bob
     alice
@@ -40,20 +42,19 @@ async fn xep0249_direct_invite_delivered_to_recipient() {
         .await
         .expect("send invite");
 
-    // Bob should receive the invite
-    let bob_response = bob.read(DEFAULT_TIMEOUT).await;
-    match bob_response {
-        Ok(data) => {
-            if data.contains("jabber:x:conference") {
-                assert!(
-                    data.contains("testroom@muc.localhost"),
-                    "Invite should contain room JID, got: {}",
-                    data
-                );
-            }
-        }
-        Err(_) => {
-            // Message routing may not deliver if no roster subscription
-        }
-    }
+    let bob_response = bob
+        .read_until("jabber:x:conference", DEFAULT_TIMEOUT)
+        .await
+        .expect("bob receives invite");
+
+    assert!(
+        bob_response.contains("testroom@muc.localhost"),
+        "Invite should contain room JID, got: {}",
+        bob_response
+    );
+    assert!(
+        bob_response.contains("reason='Join us!'") || bob_response.contains("reason=\"Join us!\""),
+        "Invite should preserve the reason, got: {}",
+        bob_response
+    );
 }

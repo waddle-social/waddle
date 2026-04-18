@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0452_mention_notification_broadcast_in_muc() {
+async fn xep0452_room_mentions_do_not_synthesize_notification_stanzas() {
     init_test_env();
     let server = TestServer::start().await;
 
@@ -30,12 +30,17 @@ async fn xep0452_mention_notification_broadcast_in_muc() {
         .await
         .expect("bob join");
 
-    // Alice sends message with mention notification
+    alice.clear();
+    bob.clear();
+
+    // XEP-0452 notifications are server-generated from mention semantics such as
+    // XEP-0372 references. This server currently relays the room message but
+    // does not synthesize a separate MMN stanza.
     alice
         .send(
             "<message type='groupchat' to='mmn@muc.localhost' id='mmn-1' xmlns='jabber:client'>\
                 <body>Hey @Bob urgent!</body>\
-                <mention-notification xmlns='urn:xmpp:mmn:0' jid='bob@localhost'/>\
+                <reference xmlns='urn:xmpp:reference:0' type='mention' begin='4' end='8' uri='xmpp:bob@localhost'/>\
             </message>",
         )
         .await
@@ -48,6 +53,19 @@ async fn xep0452_mention_notification_broadcast_in_muc() {
 
     assert!(
         bob_response.contains("Hey @Bob urgent!"),
-        "Bob should receive message with mention"
+        "Bob should receive the room message with the mention"
+    );
+    assert!(
+        !bob_response.contains("urn:xmpp:mmn:0"),
+        "Room broadcast should not masquerade as an XEP-0452 notification, got: {}",
+        bob_response
+    );
+
+    bob.clear();
+    assert!(
+        bob.read_until("urn:xmpp:mmn:0", std::time::Duration::from_millis(250))
+            .await
+            .is_err(),
+        "Server should not generate an extra XEP-0452 notification stanza without runtime support"
     );
 }

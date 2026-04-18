@@ -36,7 +36,7 @@ async fn xep0513_explicit_mention_broadcast_in_muc() {
             "<message type='groupchat' to='mentions@muc.localhost' id='emn-1' xmlns='jabber:client'>\
                 <body>Hey Bob!</body>\
                 <mentions xmlns='urn:xmpp:emn:0'>\
-                    <mention jid='bob@localhost'/>\
+                    <mention type='jid' value='bob@localhost'/>\
                 </mentions>\
             </message>",
         )
@@ -51,6 +51,18 @@ async fn xep0513_explicit_mention_broadcast_in_muc() {
     assert!(
         bob_response.contains("Hey Bob!"),
         "Bob should receive the message"
+    );
+    assert!(
+        bob_response.contains("urn:xmpp:emn:0"),
+        "Explicit mentions namespace should be preserved, got: {}",
+        bob_response
+    );
+    assert!(
+        (bob_response.contains("type='jid'") || bob_response.contains("type=\"jid\""))
+            && (bob_response.contains("value='bob@localhost'")
+                || bob_response.contains("value=\"bob@localhost\"")),
+        "Explicit JID mention should be preserved, got: {}",
+        bob_response
     );
 }
 
@@ -96,5 +108,12 @@ async fn xep0513_everyone_mention_broadcast() {
     assert!(
         bob_response.contains("Attention @everyone!"),
         "Bob should receive the @everyone message"
+    );
+    assert!(
+        bob_response.contains("urn:xmpp:emn:0")
+            && (bob_response.contains("type='everyone'")
+                || bob_response.contains("type=\"everyone\"")),
+        "@everyone mention should be preserved, got: {}",
+        bob_response
     );
 }

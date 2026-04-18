@@ -167,6 +167,11 @@ impl Feature {
         Self::new("urn:xmpp:ping")
     }
 
+    /// XEP-0202 Entity Time feature
+    pub fn entity_time() -> Self {
+        Self::new("urn:xmpp:time")
+    }
+
     /// XEP-0092 Software Version feature
     pub fn software_version() -> Self {
         Self::new("jabber:iq:version")
@@ -455,9 +460,9 @@ pub fn server_features() -> Vec<Feature> {
         Feature::blocking(),
         Feature::last_activity(),
         Feature::ping(),
+        Feature::entity_time(),
         Feature::software_version(),
         Feature::server_info(),
-        Feature::commands(),
         Feature::csi(),
         Feature::pubsub(),
         Feature::pep(),
