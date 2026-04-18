@@ -33,6 +33,9 @@ async fn xep0452_room_mentions_do_not_synthesize_notification_stanzas() {
     alice.clear();
     bob.clear();
 
+    // XEP-0452 notifications are server-generated from mention semantics such as
+    // XEP-0372 references. This server currently relays the room message but
+    // does not synthesize a separate MMN stanza.
     alice
         .send(
             "<message type='groupchat' to='mmn@muc.localhost' id='mmn-1' xmlns='jabber:client'>\
