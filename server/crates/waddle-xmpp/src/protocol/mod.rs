@@ -32,7 +32,7 @@ pub mod phase;
 pub mod traits;
 
 pub use dispatch::StanzaDispatcher;
-pub use event::{CallbackId, InboundEvent, IqContext, OutboundEvent, TimerId};
+pub use event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext, TimerId};
 pub use frame::InboundFrame;
 pub use machine::XmppStateMachine;
 pub use phase::ConnectionPhase;

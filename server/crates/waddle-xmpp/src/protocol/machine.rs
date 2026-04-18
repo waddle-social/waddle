@@ -9,7 +9,7 @@
 //! the interpreter using the events emitted from here.
 
 use super::dispatch::StanzaDispatcher;
-use super::event::{CallbackId, InboundEvent, IqContext, OutboundEvent};
+use super::event::{CallbackId, InboundEvent, OutboundEvent, StanzaContext};
 use super::frame::InboundFrame;
 use super::phase::ConnectionPhase;
 use crate::connection::Stanza;
@@ -230,7 +230,7 @@ impl XmppStateMachine {
             }
         };
 
-        let ctx = IqContext {
+        let ctx = StanzaContext {
             domain: &self.domain,
             full_jid,
         };

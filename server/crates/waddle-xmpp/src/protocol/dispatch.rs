@@ -11,7 +11,7 @@
 //! arrives with no registered handler the dispatcher emits a `WARN` log
 //! event, which surfaces in tests.
 
-use super::event::{IqContext, OutboundEvent};
+use super::event::{OutboundEvent, StanzaContext};
 use super::traits::{IqHandler, MessageHandler, PresenceHandler};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl StanzaDispatcher {
     /// IQ `result` and `error` payloads arriving at the server are treated
     /// as client acknowledgements and silently consumed — they are not
     /// routed to a handler.
-    pub fn dispatch_iq(&self, iq: &Iq, ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
+    pub fn dispatch_iq(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         let element = match &iq.payload {
             IqType::Get(e) | IqType::Set(e) => e,
             IqType::Result(_) | IqType::Error(_) => return Vec::new(),
@@ -85,7 +85,11 @@ impl StanzaDispatcher {
 
     /// Run every registered message handler against this stanza in
     /// registration order; concatenate their emitted events.
-    pub fn dispatch_message(&self, message: &Message, ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
+    pub fn dispatch_message(
+        &self,
+        message: &Message,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
         self.message_handlers
             .iter()
             .flat_map(|h| h.handle(message, ctx))
@@ -97,7 +101,7 @@ impl StanzaDispatcher {
     pub fn dispatch_presence(
         &self,
         presence: &Presence,
-        ctx: &IqContext<'_>,
+        ctx: &StanzaContext<'_>,
     ) -> Vec<OutboundEvent> {
         self.presence_handlers
             .iter()

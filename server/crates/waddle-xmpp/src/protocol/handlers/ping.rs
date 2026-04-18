@@ -4,7 +4,7 @@
 //! corresponding IQ-result with swapped `to`/`from` addresses.
 
 use crate::connection::Stanza;
-use crate::protocol::event::{IqContext, OutboundEvent};
+use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0199;
 use xmpp_parsers::iq::Iq;
@@ -18,7 +18,7 @@ impl IqHandler for PingHandler {
         xep0199::NS_PING
     }
 
-    fn handle(&self, iq: &Iq, _ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
+    fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         let result = xep0199::build_ping_result(iq);
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result)))]
     }
@@ -49,7 +49,7 @@ mod tests {
             payload: IqType::Get(ping_elem),
         };
         let jid = test_ctx_jid();
-        let ctx = IqContext {
+        let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
         };

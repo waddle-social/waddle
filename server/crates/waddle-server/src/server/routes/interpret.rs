@@ -61,37 +61,121 @@ pub async fn interpret(events: Vec<OutboundEvent>) -> InterpretOutcome {
             }
             OutboundEvent::Log { level, message } => {
                 // Route the log back through tracing so it ends up in the
-                // application's log pipeline. Using a runtime level is
-                // slightly noisier than a static one, but it keeps the
-                // test-time assertion-on-events capability intact (tests
-                // inspect the Vec<OutboundEvent> before interpretation).
+                // application's log pipeline. We format the state-machine
+                // message into the event text (via `%message`) rather than
+                // as a structured field so it renders the same as the rest
+                // of the codebase's logs.
                 match level {
-                    tracing::Level::ERROR => error!(message),
-                    tracing::Level::WARN => warn!(message),
-                    tracing::Level::INFO => info!(message),
-                    tracing::Level::DEBUG | tracing::Level::TRACE => debug!(message),
+                    tracing::Level::ERROR => error!(%message, "protocol"),
+                    tracing::Level::WARN => warn!(%message, "protocol"),
+                    tracing::Level::INFO => info!(%message, "protocol"),
+                    tracing::Level::DEBUG | tracing::Level::TRACE => {
+                        debug!(%message, "protocol")
+                    }
                 }
             }
 
             // -------------------------------------------------------
-            // Variants defined for future migration steps. Logged so the
-            // test that emits them can see them appear in traces without
-            // accidentally being silently dropped.
+            // Variants defined for future migration steps. We log only the
+            // variant discriminant (and, where cheap, typed identifiers
+            // like JIDs or stanza ids) — never the typed payload. Some of
+            // these variants carry `Message` / `Iq` structs containing
+            // user content, and their `Debug` impls would leak that
+            // content into logs.
             // -------------------------------------------------------
-            OutboundEvent::SendDirect { .. }
-            | OutboundEvent::BroadcastToRoom { .. }
-            | OutboundEvent::RegisterConnection(_)
-            | OutboundEvent::UnregisterConnection(_)
-            | OutboundEvent::ArchiveGroupchat { .. }
-            | OutboundEvent::ArchiveDirect { .. }
-            | OutboundEvent::RequestEnrichment { .. }
-            | OutboundEvent::AskSfu { .. }
-            | OutboundEvent::QueryMam { .. }
-            | OutboundEvent::LoadScramCredentials { .. }
-            | OutboundEvent::ValidateOAuthBearer { .. }
-            | OutboundEvent::SetTimer { .. }
-            | OutboundEvent::CancelTimer(_) => {
-                warn!(event = ?event, "OutboundEvent variant not yet wired in interpreter");
+            OutboundEvent::SendDirect { jid, .. } => {
+                warn!(
+                    variant = "SendDirect",
+                    jid = %jid,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::BroadcastToRoom { room, .. } => {
+                warn!(
+                    variant = "BroadcastToRoom",
+                    room = %room,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::RegisterConnection(jid) => {
+                warn!(
+                    variant = "RegisterConnection",
+                    jid = %jid,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::UnregisterConnection(jid) => {
+                warn!(
+                    variant = "UnregisterConnection",
+                    jid = %jid,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::ArchiveGroupchat { room, sender, .. } => {
+                warn!(
+                    variant = "ArchiveGroupchat",
+                    room = %room,
+                    sender = %sender,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::ArchiveDirect { from, to, .. } => {
+                warn!(
+                    variant = "ArchiveDirect",
+                    from = %from,
+                    to = %to,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::RequestEnrichment { id, .. } => {
+                warn!(
+                    variant = "RequestEnrichment",
+                    callback_id = id.0,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::AskSfu { id, .. } => {
+                warn!(
+                    variant = "AskSfu",
+                    callback_id = id.0,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::QueryMam { id, .. } => {
+                warn!(
+                    variant = "QueryMam",
+                    callback_id = id.0,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::LoadScramCredentials { id, .. } => {
+                warn!(
+                    variant = "LoadScramCredentials",
+                    callback_id = id.0,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::ValidateOAuthBearer { id, .. } => {
+                warn!(
+                    variant = "ValidateOAuthBearer",
+                    callback_id = id.0,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::SetTimer { id, duration_ms } => {
+                warn!(
+                    variant = "SetTimer",
+                    timer_id = id.0,
+                    duration_ms,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
+            }
+            OutboundEvent::CancelTimer(id) => {
+                warn!(
+                    variant = "CancelTimer",
+                    timer_id = id.0,
+                    "OutboundEvent variant not yet wired in interpreter"
+                );
             }
         }
     }

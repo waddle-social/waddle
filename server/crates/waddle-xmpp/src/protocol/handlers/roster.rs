@@ -10,7 +10,7 @@
 //! `routes::websocket::handle_iq` did for `jabber:iq:roster`.
 
 use crate::connection::Stanza;
-use crate::protocol::event::{IqContext, OutboundEvent};
+use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use crate::roster::ROSTER_NS;
 use minidom::Element;
@@ -25,7 +25,7 @@ impl IqHandler for RosterHandler {
         ROSTER_NS
     }
 
-    fn handle(&self, iq: &Iq, _ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
+    fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         // The result must echo an empty <query> element back, not be
         // a bare empty result; some clients reject the latter.
         let empty_query = Element::builder("query", ROSTER_NS).build();
@@ -63,7 +63,7 @@ mod tests {
             payload: IqType::Get(query),
         };
         let jid = test_jid();
-        let ctx = IqContext {
+        let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
         };

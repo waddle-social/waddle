@@ -61,9 +61,9 @@ pub enum ParseError {
     /// The payload was not well-formed XML.
     #[error("invalid XML: {0}")]
     InvalidXml(String),
-    /// The payload's root element is not one of the five frames we know
-    /// how to handle (`open`, `close`, `auth`, `response`, `iq`, `message`,
-    /// `presence`).
+    /// The payload's root element is not one of the seven frame roots we
+    /// know how to handle (`open`, `close`, `auth`, `response`, `iq`,
+    /// `message`, `presence`).
     #[error("unknown root element: <{0}>")]
     UnknownRoot(String),
     /// A SASL frame was recognised but was missing a required attribute or

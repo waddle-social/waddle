@@ -232,13 +232,16 @@ pub enum OutboundEvent {
     Log { level: Level, message: String },
 }
 
-/// Read-only context supplied to [`super::traits::IqHandler::handle`] and
-/// the analogous message/presence handlers.
+/// Read-only context supplied to every stanza handler
+/// ([`super::traits::IqHandler`], [`super::traits::MessageHandler`], and
+/// [`super::traits::PresenceHandler`]).
 ///
-/// Deliberately does **not** hold registries, storage, or actor handles.
-/// Handlers are pure — they emit events and the interpreter resolves them.
+/// The context carries only authenticated session data (server domain and the
+/// full JID of the connection owner) — it deliberately does **not** hold
+/// registries, storage, or actor handles. Handlers are pure: they emit events
+/// and the interpreter resolves them.
 #[derive(Debug, Clone, Copy)]
-pub struct IqContext<'a> {
+pub struct StanzaContext<'a> {
     /// The server's own domain (e.g. `"waddle.social"`).
     ///
     /// Borrowed from `AppState`'s static configuration; not a dynamic

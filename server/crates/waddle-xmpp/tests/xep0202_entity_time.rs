@@ -4,7 +4,10 @@
 
 mod common;
 
-use common::{establish_bound_session, init_test_env, RawXmppClient, TestServer, DEFAULT_TIMEOUT};
+use common::{
+    disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer,
+    DEFAULT_TIMEOUT,
+};
 
 #[tokio::test]
 async fn xep0202_time_query_to_server_returns_response() {

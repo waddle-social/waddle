@@ -9,7 +9,7 @@
 use super::empty_iq_result;
 use crate::connection::Stanza;
 use crate::parser::ns;
-use crate::protocol::event::{IqContext, OutboundEvent};
+use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
 use xmpp_parsers::iq::Iq;
 
@@ -22,7 +22,7 @@ impl IqHandler for SessionHandler {
         ns::SESSION
     }
 
-    fn handle(&self, iq: &Iq, _ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
+    fn handle(&self, iq: &Iq, _ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
             empty_iq_result(iq),
         )))]
@@ -54,7 +54,7 @@ mod tests {
             payload: IqType::Set(session_elem),
         };
         let jid = test_jid();
-        let ctx = IqContext {
+        let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
         };

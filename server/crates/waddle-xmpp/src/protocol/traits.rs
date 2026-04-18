@@ -8,7 +8,7 @@
 //! [`super::event::CallbackId`], the interpreter performs the work, and a
 //! response arrives as a follow-up [`super::event::InboundEvent`].
 
-use super::event::{IqContext, OutboundEvent};
+use super::event::{OutboundEvent, StanzaContext};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
@@ -33,7 +33,7 @@ pub trait IqHandler: Send + Sync {
     ///
     /// Implementations must be pure: no I/O, no blocking, no actor sends.
     /// Returning an empty `Vec` is valid and means "silently consumed".
-    fn handle(&self, iq: &Iq, ctx: &IqContext<'_>) -> Vec<OutboundEvent>;
+    fn handle(&self, iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent>;
 }
 
 /// Handles message stanzas.
@@ -58,7 +58,7 @@ pub trait MessageHandler: Send + Sync {
     ///
     /// Returning an empty `Vec` is valid and means "this handler had
     /// nothing to add for this message".
-    fn handle(&self, message: &Message, ctx: &IqContext<'_>) -> Vec<OutboundEvent>;
+    fn handle(&self, message: &Message, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent>;
 }
 
 /// Handles presence stanzas.
@@ -77,5 +77,5 @@ pub trait PresenceHandler: Send + Sync {
     /// only relevant for a specific subset of stanzas (e.g. the MUC-join
     /// handler only reacts when the stanza carries an
     /// `http://jabber.org/protocol/muc` child element).
-    fn handle(&self, presence: &Presence, ctx: &IqContext<'_>) -> Vec<OutboundEvent>;
+    fn handle(&self, presence: &Presence, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent>;
 }

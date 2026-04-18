@@ -33,7 +33,7 @@ use waddle_xmpp::{
         parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
-    protocol::{IqContext as ProtocolIqContext, StanzaDispatcher},
+    protocol::{StanzaContext as ProtocolStanzaContext, StanzaDispatcher},
     registry::{ConnectionRegistry, OutboundStanza},
     xep::{
         build_command_items, build_command_result, build_spaces_metadata_form,
@@ -1187,10 +1187,10 @@ async fn handle_iq(
     // the protocol dispatcher, route through it and translate the emitted
     // OutboundEvents into outbound XML frames via `interpret()`.
     //
-    // Handlers that need async I/O (MAM, roster, Jingle, disco) are not
-    // registered yet — they continue to fall through to the legacy
-    // string-matching branches below until the two-phase async callback
-    // machinery lands.
+    // Handlers that still need async I/O (for example MAM, Jingle, disco,
+    // and any other namespaces not yet registered with the dispatcher)
+    // continue to fall through to the legacy string-matching branches
+    // below until the two-phase async callback machinery lands.
     if let (Some(iq), Some(full_jid)) = (parsed_iq.as_ref(), session_jid.as_ref()) {
         let payload_ns = match &iq.payload {
             xmpp_parsers::iq::IqType::Get(e) | xmpp_parsers::iq::IqType::Set(e) => {
@@ -1200,7 +1200,7 @@ async fn handle_iq(
         };
         if let Some(ns) = payload_ns {
             if state.dispatcher.has_iq_handler(&ns) {
-                let ctx = ProtocolIqContext { domain, full_jid };
+                let ctx = ProtocolStanzaContext { domain, full_jid };
                 let events = state.dispatcher.dispatch_iq(iq, &ctx);
                 let outcome = super::interpret::interpret(events).await;
                 if outcome.close {
