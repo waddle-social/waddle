@@ -655,7 +655,7 @@ watch(
             @click="startReplyInThreadFromMenu"
           >
             <MessageSquare class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
-            <span>{{ message.threadId ? "Open thread" : "Reply in thread" }}</span>
+            <span>{{ (threadReplyCount ?? 0) > 0 ? "Open thread" : "Reply in thread" }}</span>
           </button>
           <template v-if="message.isSelf">
             <button

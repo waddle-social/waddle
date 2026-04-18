@@ -157,7 +157,10 @@ describe("reply addressing", () => {
     expect(options.replyTo).toBeUndefined();
     expect(options.threadId).toBeUndefined();
     expect(messaging.messages.value.at(-1)?.replyTo).toBeUndefined();
-    expect(messaging.messages.value.at(-1)?.threadId).toBeUndefined();
+    // XEP-0201: even when stale reply context is dropped, the new message
+    // becomes its own thread root, so threadId === id.
+    const sent = messaging.messages.value.at(-1);
+    expect(sent?.threadId).toBe(sent?.id);
   });
 
   test("DM sends drop stale reply context when the parent is not in the active timeline", async () => {

@@ -61,6 +61,11 @@ export interface SendDirectMessageOptions {
 /**
  * Send a direct (type="chat") message. Supports XEP-0447 attachments, XEP-0461
  * replies with XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
+ *
+ * Every message carries a `<thread>` child: replies inherit their parent's
+ * thread id, originals self-identify with `threadId === msgId` so the root
+ * can be discovered by MAM-by-thread and thread-aware UI.
+ *
  * Pass a pre-generated `id` when the caller already created an optimistic
  * timeline entry so the stanza ID matches.
  */
@@ -98,10 +103,9 @@ export function sendDirectMessage(
   if (replyTo) {
     msgData.reply = { to: replyTo.author, id: replyTo.id };
   }
-  if (threadId) {
-    msgData.thread = threadId;
-    if (parentThreadId) msgData.parentThread = parentThreadId;
-  }
+  // XEP-0201: always emit `<thread>`; originals use their own msgId.
+  msgData.thread = threadId ?? msgId;
+  if (parentThreadId) msgData.parentThread = parentThreadId;
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);
     msgData.links = files!.map((f) => ({ url: f.url }));

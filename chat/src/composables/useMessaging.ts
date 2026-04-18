@@ -555,11 +555,9 @@ export function useMessaging(
 
   /**
    * Backfill a thread via XEP-0313 MAM filtered by thread id. Fetches every
-   * archived message whose `<thread>` element matches `threadId`. Because
-   * waddle's root messages are composed without a `<thread>` child (threads
-   * are only tagged on replies), the thread root itself is never returned —
-   * this call populates the replies, and the panel's "root not loaded"
-   * notice is shown until the default channel window catches up.
+   * archived message whose `<thread>` element matches `threadId`, including
+   * the root itself (waddle now tags every groupchat message with `<thread>`
+   * per XEP-0201, so a thread-filtered MAM query returns the full conversation).
    */
   async function backfillThread(threadId: string): Promise<void> {
     const client = xmppClient.value;
@@ -682,7 +680,10 @@ export function useMessaging(
             ...(replyTo.body ? { preview: replyTo.body } : {}),
           };
         }
-        if (threadId) optimistic.threadId = threadId;
+        // XEP-0201: the wire always carries `<thread>`; root-of-thread falls
+        // back to the message's own id so the optimistic timeline matches the
+        // echo we'll receive back.
+        optimistic.threadId = threadId ?? msgId;
         if (parentThreadId) optimistic.parentThreadId = parentThreadId;
         if (attachments && attachments.length > 0) {
           optimistic.sharedFiles = attachments.map((a) => ({
