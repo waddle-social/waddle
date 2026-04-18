@@ -21,6 +21,7 @@ const props = defineProps<{
   dmPeer?: { peerJid: string; peerUsername: string; presenceShow?: string } | null;
   sidebarMode?: "channels" | "dms";
   messages: TimelineMessage[];
+  firstUnseenId: string | null;
   xmppStatus: XmppStatusSnapshot;
   actionError: string;
   isLoadingMessages: boolean;
@@ -420,25 +421,36 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else class="max-w-none">
-        <MessageCard
-          v-for="msg in feedMessages"
-          :key="msg.id"
-          :message="msg"
-          :current-user="props.currentUser"
-          :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
-          :hats="roomHats[msg.author] ?? []"
-          :presence="roomPresence[msg.author] ?? 'offline'"
-          :last-seen="roomLastSeen[msg.author]"
-          :author-jid="authorJidByNick?.[msg.author]"
-          :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
-          @edit="(id, body, m) => emit('editMessage', id, body, m)"
-          @retract="(id) => emit('retractMessage', id)"
-          @react="(id, emoji) => emit('reactMessage', id, emoji)"
-          @reply="beginReply"
-          @scroll-to-message="scrollToMessage"
-          @avatar-click="onAvatarClick"
-          @open-thread="(tid: string) => emit('openThread', tid)"
-        />
+        <template v-for="msg in feedMessages" :key="msg.id">
+          <div
+            v-if="msg.id === firstUnseenId"
+            class="flex items-center gap-3 py-2 text-[11px] font-medium uppercase tracking-wide text-destructive"
+            data-new-messages-divider
+            role="separator"
+            aria-label="New messages"
+          >
+            <div class="flex-1 h-px bg-destructive/40" />
+            <span>New messages</span>
+            <div class="flex-1 h-px bg-destructive/40" />
+          </div>
+          <MessageCard
+            :message="msg"
+            :current-user="props.currentUser"
+            :avatar-url="avatarUrlByAuthor[msg.author] ?? null"
+            :hats="roomHats[msg.author] ?? []"
+            :presence="roomPresence[msg.author] ?? 'offline'"
+            :last-seen="roomLastSeen[msg.author]"
+            :author-jid="authorJidByNick?.[msg.author]"
+            :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
+            @edit="(id, body, m) => emit('editMessage', id, body, m)"
+            @retract="(id) => emit('retractMessage', id)"
+            @react="(id, emoji) => emit('reactMessage', id, emoji)"
+            @reply="beginReply"
+            @scroll-to-message="scrollToMessage"
+            @avatar-click="onAvatarClick"
+            @open-thread="(tid: string) => emit('openThread', tid)"
+          />
+        </template>
       </div>
     </div>
 
