@@ -46,6 +46,7 @@ use xmpp_parsers::minidom::Element;
 use waddle_xmpp_xep_github::{message_has_github_embed, MessageEnricher};
 
 use super::auth::AuthState;
+use super::interpret::EffectInterpreter;
 use crate::auth::{localpart_to_jid, NativeUserStore, Session};
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
@@ -1276,8 +1277,16 @@ async fn handle_iq_with_conn_state(
                     let ctx = ProtocolIqContext { domain, full_jid };
                     state.dispatcher.dispatch_iq(iq, &ctx)
                 };
-                let interpreter = super::interpret::EffectInterpreter::from_websocket_state(&state);
-                let outcome = super::interpret::interpret(&interpreter, events).await;
+                let interpreter = EffectInterpreter::new(
+                    Arc::clone(&state.app_state),
+                    Arc::clone(&state.auth_state),
+                    Arc::clone(&state.connection_registry),
+                    Arc::clone(&state.muc_registry),
+                    Arc::clone(&state.mam_storage),
+                    Arc::clone(&state.github_enricher),
+                    state.sfu_service.clone(),
+                );
+                let outcome = interpreter.interpret(events).await;
                 if outcome.close {
                     warn!(
                         ns = %ns,
@@ -2558,13 +2567,16 @@ mod tests {
         let mut dispatcher = StanzaDispatcher::new();
         waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
 
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        let muc_registry = Arc::new(MucRoomRegistry::new("muc.example.com".to_string()));
+        let github_enricher = Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None))));
         Arc::new(WebSocketState {
             app_state,
             auth_state,
-            connection_registry: Arc::new(ConnectionRegistry::new()),
-            muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
+            connection_registry,
+            muc_registry,
             mam_storage,
-            github_enricher: Arc::new(MessageEnricher::new(Arc::new(GitHubClient::new(None)))),
+            github_enricher,
             sfu_service,
             dispatcher: Arc::new(dispatcher),
         })

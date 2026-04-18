@@ -18,6 +18,7 @@ use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
 use routes::uploads::UploadState;
 use routes::waddles::WaddleState;
+use routes::interpret::EffectInterpreter;
 use routes::websocket::WebSocketState;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls_acme::caches::DirCache;
@@ -958,6 +959,16 @@ fn create_router_with_sfu(
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
+    let interpreter = Arc::new(EffectInterpreter {
+        app_state: Some(Arc::clone(&state)),
+        auth_state: Some(Arc::clone(&auth_state)),
+        connection_registry: Some(Arc::clone(&connection_registry)),
+        muc_registry: Some(Arc::clone(&muc_registry)),
+        mam_storage: Some(Arc::clone(&mam_storage)),
+        github_enricher: Some(Arc::clone(&github_enricher)),
+        sfu_service: Some(sfu_service.clone()),
+        callback_tx: None,
+    });
     let websocket_state = Arc::new(WebSocketState {
         app_state: state.clone(),
         auth_state: auth_state.clone(),
@@ -967,6 +978,7 @@ fn create_router_with_sfu(
         github_enricher,
         sfu_service,
         dispatcher: stanza_dispatcher,
+        interpreter,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 
