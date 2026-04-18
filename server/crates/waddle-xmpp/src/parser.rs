@@ -795,7 +795,9 @@ pub fn message_to_string(msg: &xmpp_parsers::message::Message) -> Result<String,
 
     if let Some(id) = thread_id {
         if !id.trim().is_empty() && !element.children().any(|child| child.name() == "thread") {
-            let thread_elem = Element::builder("thread", "").append(id.as_str()).build();
+            let thread_elem = Element::builder("thread", element.ns())
+                .append(id.as_str())
+                .build();
             element.append_child(thread_elem);
         }
     }

@@ -71,8 +71,13 @@ function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget)
   if (!fallbacks?.length || !base.body) return;
   const range = fallbacks.find((f) => f.for === "urn:xmpp:reply:0")?.body;
   if (!range) return;
-  const start = Math.max(0, Math.min(range.start ?? 0, base.body.length));
-  const end = Math.max(start, Math.min(range.end ?? start, base.body.length));
+  const rawStart = range.start ?? 0;
+  const rawEnd = range.end ?? rawStart;
+  if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawStart < 0 || rawEnd < 0) {
+    return;
+  }
+  const start = Math.max(0, Math.min(rawStart, base.body.length));
+  const end = Math.max(start, Math.min(rawEnd, base.body.length));
   base.body = base.body.slice(0, start) + base.body.slice(end);
 }
 

@@ -25,15 +25,22 @@ export interface WaddleFallback {
   body?: WaddleFallbackBodyRange;
 }
 
+function parseUtf16Offset(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return parsed;
+}
+
 const bodyField: FieldDefinition<WaddleFallbackBodyRange> = {
   importer(xml: XMLElement): WaddleFallbackBodyRange | undefined {
     const child = xml.getChild("body");
     if (!child) return undefined;
-    const start = child.getAttribute("start");
-    const end = child.getAttribute("end");
+    const start = parseUtf16Offset(child.getAttribute("start"));
+    const end = parseUtf16Offset(child.getAttribute("end"));
     const out: WaddleFallbackBodyRange = {};
-    if (start !== undefined && start !== "") out.start = Number(start);
-    if (end !== undefined && end !== "") out.end = Number(end);
+    if (start !== undefined) out.start = start;
+    if (end !== undefined) out.end = end;
     return out;
   },
   exporter(xml: XMLElement, value: WaddleFallbackBodyRange | undefined): void {

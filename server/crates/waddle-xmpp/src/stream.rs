@@ -1289,14 +1289,21 @@ pub(crate) fn element_to_message(element: Element) -> Result<Message, XmppError>
     let thread_parent = element
         .children()
         .find(|child| child.name() == "thread")
-        .and_then(|child| child.attr("parent").map(str::to_owned));
+        .and_then(|child| {
+            child
+                .attr("parent")
+                .map(str::trim)
+                .filter(|parent| !parent.is_empty())
+                .map(str::to_owned)
+        });
+    let stanza_ns = element.ns();
 
     let mut msg = Message::try_from(element)
         .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
 
     if let Some(parent) = thread_parent {
         if let Some(thread) = msg.thread.take() {
-            let thread_elem = Element::builder("thread", "")
+            let thread_elem = Element::builder("thread", stanza_ns)
                 .attr("parent", parent)
                 .append(thread.0.as_str())
                 .build();
@@ -1330,7 +1337,9 @@ fn stanza_to_xml(stanza: &Stanza) -> Result<String, XmppError> {
                 if id.trim().is_empty() {
                     // skip empty thread
                 } else if !element.children().any(|child| child.name() == "thread") {
-                    let thread_elem = Element::builder("thread", "").append(id.as_str()).build();
+                    let thread_elem = Element::builder("thread", element.ns())
+                        .append(id.as_str())
+                        .build();
                     element.append_child(thread_elem);
                 }
             }

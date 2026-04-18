@@ -94,9 +94,14 @@ pub fn thread_parent_from_message(msg: &Message) -> Option<String> {
     parse_thread_info(&xml).and_then(|info| info.parent)
 }
 
-/// Build a `<thread/>` element with optional `parent` attribute.
-pub fn build_thread_element(info: &ThreadInfo) -> Element {
-    let mut builder = Element::builder(THREAD_ELEMENT, "");
+/// Build a `<thread/>` element with optional `parent` attribute in the given
+/// stanza namespace.
+///
+/// RFC 6121 scopes `<thread/>` to the enclosing message's namespace. Pass the
+/// parent message's namespace (typically `jabber:client` or `jabber:server`)
+/// so the serializer does not emit a spurious `xmlns=""`.
+pub fn build_thread_element(info: &ThreadInfo, ns: impl AsRef<str>) -> Element {
+    let mut builder = Element::builder(THREAD_ELEMENT, ns.as_ref());
     if let Some(parent) = info.parent.as_deref() {
         builder = builder.attr("parent", parent);
     }
@@ -104,10 +109,9 @@ pub fn build_thread_element(info: &ThreadInfo) -> Element {
 }
 
 /// Replace any `<thread/>` children on a raw message element with one built
-/// from `info`. Namespace-agnostic because RFC 6121 `<thread/>` may be emitted
-/// in `jabber:client`, `jabber:server`, or the empty namespace depending on
-/// the serializer.
+/// from `info`, inheriting the message's namespace.
 pub fn install_thread_element(msg_xml: &mut Element, info: &ThreadInfo) {
+    let stanza_ns = msg_xml.ns();
     let to_remove: Vec<(String, String)> = msg_xml
         .children()
         .filter(|c| c.name() == THREAD_ELEMENT)
@@ -116,7 +120,7 @@ pub fn install_thread_element(msg_xml: &mut Element, info: &ThreadInfo) {
     for (name, ns) in to_remove {
         msg_xml.remove_child(&name, ns.as_str());
     }
-    msg_xml.append_child(build_thread_element(info));
+    msg_xml.append_child(build_thread_element(info, stanza_ns));
 }
 
 #[cfg(test)]
@@ -163,8 +167,9 @@ mod tests {
     #[test]
     fn build_element_with_parent() {
         let info = ThreadInfo::child("child-a", "root-a");
-        let elem = build_thread_element(&info);
+        let elem = build_thread_element(&info, "jabber:client");
         assert_eq!(elem.name(), THREAD_ELEMENT);
+        assert_eq!(elem.ns(), "jabber:client");
         assert_eq!(elem.attr("parent"), Some("root-a"));
         assert_eq!(elem.text(), "child-a");
     }
@@ -172,9 +177,22 @@ mod tests {
     #[test]
     fn build_element_without_parent() {
         let info = ThreadInfo::root("root-a");
-        let elem = build_thread_element(&info);
+        let elem = build_thread_element(&info, "jabber:client");
         assert_eq!(elem.attr("parent"), None);
         assert_eq!(elem.text(), "root-a");
+    }
+
+    #[test]
+    fn install_thread_element_inherits_message_ns() {
+        let mut xml = "<message xmlns='jabber:client'/>"
+            .parse::<Element>()
+            .expect("valid xml");
+        install_thread_element(&mut xml, &ThreadInfo::child("c", "r"));
+        let thread = xml
+            .children()
+            .find(|c| c.name() == THREAD_ELEMENT)
+            .expect("thread child");
+        assert_eq!(thread.ns(), "jabber:client");
     }
 
     #[test]

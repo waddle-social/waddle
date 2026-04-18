@@ -116,15 +116,17 @@ pub fn set_fallback_payloads(msg: &mut Message, fallbacks: &[FallbackIndication]
     }
 }
 
-/// Strip every fallback range matching `for_ns` from a body string, returning
-/// the caller-visible text. Ranges are applied in descending-start order so
-/// earlier offsets stay valid.
+/// Strip every fallback range from a body string, returning the caller-visible
+/// text. Offsets are treated as UTF-16 code units per XEP-0428 §2, which
+/// matches how JavaScript/browser clients slice strings; the body is
+/// round-tripped through UTF-16 so emoji and other non-BMP characters are
+/// stripped correctly.
 pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
     if ranges.is_empty() {
         return body.to_string();
     }
-    let chars: Vec<char> = body.chars().collect();
-    let total = chars.len();
+    let units: Vec<u16> = body.encode_utf16().collect();
+    let total = units.len();
     let mut keep = vec![true; total];
     for range in ranges {
         let start = range.start.min(total);
@@ -133,12 +135,12 @@ pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
             *flag = false;
         }
     }
-    chars
+    let kept: Vec<u16> = units
         .iter()
         .zip(keep.iter())
-        .filter(|(_, k)| **k)
-        .map(|(c, _)| *c)
-        .collect()
+        .filter_map(|(u, k)| if *k { Some(*u) } else { None })
+        .collect();
+    String::from_utf16_lossy(&kept)
 }
 
 #[cfg(test)]
@@ -264,6 +266,22 @@ mod tests {
             ],
         );
         assert_eq!(stripped, "cdg");
+    }
+
+    #[test]
+    fn test_strip_fallback_ranges_utf16_emoji_prefix() {
+        // "👋 hi\n\n" as a quoted prefix: 👋 is a surrogate pair (2 UTF-16 units),
+        // space is 1, 'h' is 1, 'i' is 1, '\n' is 1, '\n' is 1 — total 7 units.
+        let body = "👋 hi\n\nreply";
+        let prefix_units = "👋 hi\n\n".encode_utf16().count();
+        let stripped = strip_fallback_ranges(
+            body,
+            &[FallbackRange {
+                start: 0,
+                end: prefix_units,
+            }],
+        );
+        assert_eq!(stripped, "reply");
     }
 
     #[test]
