@@ -1,5 +1,12 @@
 export { BrowserXmppClient } from "./client";
-export { barePeerJid, roomBareJidFor } from "./jid";
+export {
+  barePeerJid,
+  jidDomain,
+  parseManagedRoomBareJid,
+  parseManagedRoomNode,
+  roomBareJidFor,
+  roomBareJidForAccountJid,
+} from "./jid";
 export type { OutboundFileAttachment } from "./messaging";
 export type {
   ChatStateEvent,

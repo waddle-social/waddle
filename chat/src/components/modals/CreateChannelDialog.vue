@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { X } from "lucide-vue-next";
+import { Hash, MessagesSquare, X } from "lucide-vue-next";
 import AppDialog from "@/components/ui/AppDialog.vue";
 import type { ChannelCreateFormData } from "@/lib/chat-ui";
 
@@ -48,6 +48,46 @@ const emit = defineEmits<{
           placeholder="What is this channel for?"
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
+      </div>
+
+      <div>
+        <label class="block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">
+          Channel type
+        </label>
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            class="rounded-xl border px-3 py-3 text-left transition-all duration-200"
+            :class="form.channel_type === 'text'
+              ? 'border-primary/30 bg-primary/8 shadow-[0_0_12px_var(--glow)]'
+              : 'border-border bg-muted/40 hover:bg-muted'"
+            @click="$emit('update:form', { ...form, channel_type: 'text' })"
+          >
+            <div class="flex items-center gap-2 text-[13px] font-medium">
+              <Hash class="w-4 h-4 text-primary/80" />
+              Text
+            </div>
+            <p class="mt-1 text-[11px] text-muted-foreground">
+              Fast back-and-forth conversation.
+            </p>
+          </button>
+          <button
+            type="button"
+            class="rounded-xl border px-3 py-3 text-left transition-all duration-200"
+            :class="form.channel_type === 'forum'
+              ? 'border-primary/30 bg-primary/8 shadow-[0_0_12px_var(--glow)]'
+              : 'border-border bg-muted/40 hover:bg-muted'"
+            @click="$emit('update:form', { ...form, channel_type: 'forum' })"
+          >
+            <div class="flex items-center gap-2 text-[13px] font-medium">
+              <MessagesSquare class="w-4 h-4 text-primary/80" />
+              Forum
+            </div>
+            <p class="mt-1 text-[11px] text-muted-foreground">
+              Title-first topics with threaded replies.
+            </p>
+          </button>
+        </div>
       </div>
     </div>
 

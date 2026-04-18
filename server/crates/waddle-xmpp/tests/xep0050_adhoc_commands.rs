@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0050_server_disco_does_not_advertise_commands() {
+async fn xep0050_server_disco_advertises_commands() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -23,14 +23,14 @@ async fn xep0050_server_disco_does_not_advertise_commands() {
         .expect("disco response");
 
     assert!(
-        !response.contains("http://jabber.org/protocol/commands"),
-        "Server should not advertise commands without runtime support, got: {}",
+        response.contains("http://jabber.org/protocol/commands"),
+        "Server should advertise commands support, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0050_commands_disco_items_returns_service_unavailable() {
+async fn xep0050_commands_disco_items_lists_available_commands() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -52,14 +52,10 @@ async fn xep0050_commands_disco_items_returns_service_unavailable() {
         .await
         .expect("response");
 
+    // Should return result with available commands (even if the list is empty)
     assert!(
-        response.contains("type='error'") || response.contains("type=\"error\""),
-        "Expected error IQ, got: {}",
-        response
-    );
-    assert!(
-        response.contains("service-unavailable"),
-        "Expected service-unavailable for unsupported commands node, got: {}",
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Expected result IQ for commands disco#items, got: {}",
         response
     );
 }
@@ -95,6 +91,81 @@ async fn xep0050_execute_unknown_command_returns_service_unavailable() {
     assert!(
         response.contains("service-unavailable"),
         "Expected service-unavailable, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0050_create_channel_command_prevents_managed_jid_instant_room() {
+    init_test_env();
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .expect("bind");
+
+    // Try to join a managed channel JID (waddle_channel pattern) that doesn't exist
+    // This should be blocked to prevent bypassing the create-channel command
+    client
+        .send(
+            "<presence to='test-waddle_test-channel@muc.localhost/alice' xmlns='jabber:client'>\
+                <x xmlns='http://jabber.org/protocol/muc'/>\
+            </presence>",
+        )
+        .await
+        .expect("send");
+
+    // Try to read a response - might get error presence or stream might close
+    match client.read_until("</presence>", DEFAULT_TIMEOUT).await {
+        Ok(response) => {
+            // If we get a response, verify it's not a successful join
+            assert!(
+                !response.contains("<status code='110'/>")
+                    && !response.contains("<status code=\"110\"/>"),
+                "Should not successfully join managed JID without creating channel first, got: {}",
+                response
+            );
+        }
+        Err(_) => {
+            // Timeout or closed stream is acceptable - connection might be terminated on error
+        }
+    }
+}
+
+#[tokio::test]
+async fn xep0050_managed_jid_owner_query_blocked() {
+    init_test_env();
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .expect("bind");
+
+    // Try to configure a managed channel JID via owner query
+    // This should be blocked
+    client
+        .send(
+            "<iq type='get' id='owner-1' to='test-waddle_test-channel@muc.localhost' xmlns='jabber:client'>\
+                <query xmlns='http://jabber.org/protocol/muc#owner'/>\
+            </iq>",
+        )
+        .await
+        .expect("send");
+
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("response");
+
+    // Should receive an error with not-allowed
+    assert!(
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error IQ for managed JID owner query, got: {}",
+        response
+    );
+    assert!(
+        response.contains("not-allowed"),
+        "Expected not-allowed for managed JID configuration, got: {}",
         response
     );
 }

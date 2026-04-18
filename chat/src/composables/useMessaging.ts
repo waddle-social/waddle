@@ -1,5 +1,7 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
 import type { WaddleApi } from "@/lib/waddle-api";
+import type { ChannelSummary } from "@/lib/waddle-api";
+import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
@@ -56,7 +58,49 @@ export function fromLiveMessage(
   }
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
+  if (msg.forumPostKind) tm.forumPostKind = msg.forumPostKind;
+  if (msg.forumTitle) tm.forumTitle = msg.forumTitle;
+  if (msg.forumThreadTitle) tm.forumThreadTitle = msg.forumThreadTitle;
   return tm;
+}
+
+function applyForumContext(list: TimelineMessage[]): TimelineMessage[] {
+  const threadTitles = new Map<string, string>();
+
+  for (const message of list) {
+    if (message.forumPostKind === "topic" && message.forumTitle) {
+      threadTitles.set(message.threadId ?? message.id, message.forumTitle);
+    }
+  }
+
+  return list.map((message) => {
+    const threadId = message.threadId ?? (message.forumPostKind === "topic" ? message.id : undefined);
+    const threadTitle = threadId ? threadTitles.get(threadId) : undefined;
+    const next: TimelineMessage = { ...message };
+    let changed = false;
+
+    if (message.forumPostKind === "topic") {
+      if (threadId && message.threadId !== threadId) {
+        next.threadId = threadId;
+        changed = true;
+      }
+      if (message.forumTitle && message.forumThreadTitle !== message.forumTitle) {
+        next.forumThreadTitle = message.forumTitle;
+        changed = true;
+      }
+    } else if (threadId && threadTitle) {
+      if (!message.forumPostKind && message.id !== threadId) {
+        next.forumPostKind = "reply";
+        changed = true;
+      }
+      if (message.forumThreadTitle !== threadTitle) {
+        next.forumThreadTitle = threadTitle;
+        changed = true;
+      }
+    }
+
+    return changed ? next : message;
+  });
 }
 
 export function formatStamp(value: string) {
@@ -74,6 +118,7 @@ export function useMessaging(
   xmppClient: Ref<BrowserXmppClient | null>,
   activeWaddleId: Ref<string | null>,
   activeChannelId: Ref<string | null>,
+  currentChannel: Ref<ChannelSummary | null>,
   normalizeError: (v: unknown) => string,
   actionError: Ref<string>,
   clearActionError: () => void,
@@ -85,6 +130,7 @@ export function useMessaging(
 
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
+  const forumPostTitle = ref("");
   const isLoadingMessages = ref(false);
   const isSending = ref(false);
   const timelineEl: Ref<HTMLDivElement | null> = ref(null);
@@ -119,6 +165,7 @@ export function useMessaging(
     if (!session.value || !activeWaddleId.value || !activeChannelId.value) return null;
     return roomBareJidFor(session.value, activeWaddleId.value, activeChannelId.value);
   });
+  const channelIsForum = computed(() => isForumChannel(currentChannel.value));
 
   watch(xmppClient, (client) => {
     if (client) {
@@ -424,13 +471,14 @@ export function useMessaging(
             ? m
             : { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus },
         );
+        messages.value = applyForumContext(messages.value);
       }
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
-    messages.value = [...messages.value, msg];
+    messages.value = applyForumContext([...messages.value, msg]);
     // mergeLiveMessage always snaps to bottom, so last-seen should advance
     // in lockstep regardless of the user's prior scroll position — if we're
     // scrolling them to the message, by definition they can see it.
@@ -602,7 +650,7 @@ export function useMessaging(
         }
       }
 
-      messages.value = timeline;
+      messages.value = applyForumContext(timeline);
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
       }
@@ -685,18 +733,30 @@ export function useMessaging(
     markup?: MarkupSpan[],
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
-    threadOverride?: { threadId: string; parentThreadId?: string },
+    forumTitleOrThreadOverride?: string | { threadId: string; parentThreadId?: string },
   ) {
     const bodyText = body ?? draft.value;
     // markup !== undefined means this came from the rich editor (composer send)
     // undefined means it came from a programmatic send (GIF, etc.)
     const fromComposer = markup !== undefined;
+    const threadOverride = typeof forumTitleOrThreadOverride === "string"
+      ? undefined
+      : forumTitleOrThreadOverride;
+    const forumTitle = typeof forumTitleOrThreadOverride === "string"
+      ? forumTitleOrThreadOverride
+      : undefined;
     const client = xmppClient.value;
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
     const hasFiles = !!files && files.length > 0;
+    const isForumPost = channelIsForum.value && !replyTo;
+    const resolvedForumTitle = (forumTitle ?? forumPostTitle.value).trim();
     if (!client || !waddleId || !channelId) return;
     if (!bodyText.trim() && !hasFiles) return;
+    if (isForumPost && !resolvedForumTitle) {
+      actionError.value = "Add a title before posting to this forum.";
+      return;
+    }
 
     if (hasFiles) {
       for (const f of files!) {
@@ -732,17 +792,23 @@ export function useMessaging(
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
         : undefined;
-      // Thread membership is explicit: only set when the caller passed an
-      // override (i.e. the thread panel composer). Bare `<reply>` from the
-      // channel composer stays inline as a quote — not a thread join.
-      const threadId = threadOverride?.threadId;
+      // Thread membership is explicit via threadOverride, except forum replies,
+      // which derive their thread from the replied-to topic/message.
+      const threadId = threadOverride?.threadId
+        ?? (channelIsForum.value && parent ? (parent.threadId ?? replyTo?.id) : undefined);
       const parentThreadId = threadOverride?.parentThreadId;
+      const threadCreate = isForumPost ? { title: resolvedForumTitle } : undefined;
+      const threadReply = channelIsForum.value && replyTo && threadId
+        ? { threadId }
+        : undefined;
       const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, {
         markup,
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
         ...(parentThreadId ? { parentThreadId } : {}),
+        ...(threadCreate ? { threadCreate } : {}),
+        ...(threadReply ? { threadReply } : {}),
       });
       const isStillCurrentChannel =
         xmppClient.value === client &&
@@ -770,6 +836,16 @@ export function useMessaging(
         }
         if (threadId) optimistic.threadId = threadId;
         if (parentThreadId) optimistic.parentThreadId = parentThreadId;
+        if (threadCreate) {
+          optimistic.threadId = msgId;
+          optimistic.forumPostKind = "topic";
+          optimistic.forumTitle = threadCreate.title;
+          optimistic.forumThreadTitle = threadCreate.title;
+        } else if (threadReply) {
+          optimistic.forumPostKind = "reply";
+          const threadTitle = parent?.forumTitle ?? parent?.forumThreadTitle;
+          if (threadTitle) optimistic.forumThreadTitle = threadTitle;
+        }
         if (attachments && attachments.length > 0) {
           optimistic.sharedFiles = attachments.map((a) => ({
             url: a.url,
@@ -782,13 +858,14 @@ export function useMessaging(
           }));
         }
         pendingEchoClientIds.add(msgId);
-        messages.value = [...messages.value, optimistic];
+        messages.value = applyForumContext([...messages.value, optimistic]);
         void scrollToBottom();
       }
 
       // Clear draft on successful send (triggers ChatEditor clear via watcher)
       if (fromComposer && isStillCurrentChannel) {
         draft.value = "";
+        if (threadCreate) forumPostTitle.value = "";
       }
       // Send "active" state after sending a message (stops composing indicator)
       if (isStillCurrentChannel) {
@@ -964,6 +1041,7 @@ export function useMessaging(
     messages,
     firstUnseenId,
     draft,
+    forumPostTitle,
     isLoadingMessages,
     isSending,
     timelineEl,

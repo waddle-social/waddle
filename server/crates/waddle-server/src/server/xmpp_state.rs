@@ -13,7 +13,10 @@ use crate::auth::{
 };
 use crate::db::actor::DbActor;
 use crate::db::{Database, DatabasePool, MigrationRunner};
-use crate::permissions::{Object, PermissionService, Subject};
+use crate::permissions::{
+    Object, ObjectType, PermissionService, Relation, Subject, SubjectType, Tuple,
+};
+use crate::server::routes::channels::get_channel_from_db;
 use crate::server::routes::channels::list_channels_from_db as list_channels_for_waddle_from_db;
 use crate::server::routes::waddles::list_user_waddles as list_user_waddles_from_db;
 use crate::vcard::VCardStore;
@@ -1061,6 +1064,58 @@ impl waddle_xmpp::AppState for XmppAppState {
         Ok(result)
     }
 
+    /// Look up a channel-backed room by channel ID.
+    async fn get_channel_room_info(
+        &self,
+        waddle_id: &str,
+        channel_id: &str,
+    ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
+        debug!(
+            waddle_id = %waddle_id,
+            channel_id = %channel_id,
+            "Looking up channel-backed room metadata"
+        );
+
+        let Some(db_pool) = self.db_pool.as_ref() else {
+            debug!("Database pool not configured for channel room lookup");
+            return Ok(None);
+        };
+
+        let waddle_db = match db_pool.get_waddle_db(waddle_id).await {
+            Ok(db) => db,
+            Err(e) => {
+                warn!(waddle_id = %waddle_id, error = %e, "Failed to open waddle database");
+                return Ok(None);
+            }
+        };
+
+        let runner = MigrationRunner::waddle();
+        if let Err(e) = runner.run(&waddle_db).await {
+            warn!(waddle_id = %waddle_id, error = %e, "Failed to run waddle DB migrations");
+        }
+
+        match get_channel_from_db(&waddle_db, waddle_id, channel_id).await {
+            Ok(Some(channel)) => Ok(Some(waddle_xmpp::ChannelRoomInfo {
+                waddle_id: waddle_id.to_string(),
+                channel: waddle_xmpp::ChannelInfo {
+                    id: channel.id,
+                    name: channel.name,
+                    channel_type: channel.channel_type,
+                },
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                warn!(
+                    waddle_id = %waddle_id,
+                    channel_id = %channel_id,
+                    error = %e,
+                    "Failed to read channel from waddle database"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     // =========================================================================
     // XEP-0503: Spaces Service (Waddle Details)
     // =========================================================================
@@ -1209,6 +1264,107 @@ fn roster_item_to_row(item: &waddle_xmpp::roster::RosterItem) -> crate::db::rost
         subscription: item.subscription.as_str().to_string(),
         ask: item.ask.map(|a| a.as_str().to_string()),
         groups: item.groups.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CreateChannelDeps implementation
+// ---------------------------------------------------------------------------
+
+impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
+    async fn create_channel(
+        &self,
+        user_id: &str,
+        waddle_id: &str,
+        metadata: waddle_xmpp::commands::ChannelMetadata,
+    ) -> Result<waddle_xmpp::commands::CreateChannelResult, String> {
+        use tracing::error;
+
+        // Check permission
+        let subject = Subject::user(user_id);
+        let waddle_object = Object::new(ObjectType::Waddle, waddle_id);
+
+        let can_create = self
+            .permission_service
+            .check(&subject, "create_channel", &waddle_object)
+            .await
+            .map(|r| r.allowed)
+            .unwrap_or(false);
+
+        if !can_create {
+            return Err("You do not have permission to create channels in this waddle".to_string());
+        }
+
+        // Get waddle database
+        let db_pool = match &self.db_pool {
+            Some(pool) => pool,
+            None => return Err("Database pool not available".to_string()),
+        };
+
+        let waddle_db = db_pool
+            .get_waddle_db(waddle_id)
+            .await
+            .map_err(|e| format!("Failed to access waddle database: {}", e))?;
+
+        // Generate channel ID
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Insert channel into database
+        let conn = waddle_db.guard().await.map_err(|e| e.to_string())?;
+        conn.execute(
+            r#"
+                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            libsql::params![
+                channel_id.as_str(),
+                metadata.name.as_str(),
+                metadata.description.as_deref(),
+                metadata.channel_type.as_str(),
+                metadata.position,
+                0_i32, // not default
+                now.as_str(),
+                now.as_str()
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to insert channel: {}", e))?;
+        drop(conn);
+
+        // Create permission tuple: channel#parent@waddle
+        let parent_tuple = Tuple::new(
+            Object::new(ObjectType::Channel, &channel_id),
+            Relation::new("parent"),
+            Subject {
+                subject_type: SubjectType::Waddle,
+                id: waddle_id.to_string(),
+                relation: None,
+            },
+        );
+
+        if let Err(err) = self.permission_service.write_tuple(parent_tuple).await {
+            error!("Failed to write parent permission tuple: {}", err);
+            // Clean up: delete the channel
+            if let Ok(conn) = waddle_db.guard().await {
+                let _ = conn
+                    .execute(
+                        "DELETE FROM channels WHERE id = ?",
+                        libsql::params![channel_id.as_str()],
+                    )
+                    .await;
+            }
+            return Err(format!("Failed to create permission tuple: {}", err));
+        }
+
+        // Build channel JID: {waddleId}_{channelId}@muc.{domain}
+        let channel_jid = format!("{}_{}", waddle_id, channel_id);
+        let channel_jid = format!("{}@muc.{}", channel_jid, self.domain);
+
+        Ok(waddle_xmpp::commands::CreateChannelResult {
+            channel_id,
+            channel_jid,
+        })
     }
 }
 

@@ -166,21 +166,20 @@ MUC Rooms:
 
 ### Channel Creation
 
-```json
-POST /waddles/:wid/channels
-{
-  "name": "random",
-  "type": "text"
-}
+```xml
+<iq type='set' to='waddle.social'>
+  <command xmlns='http://jabber.org/protocol/commands'
+           node='waddle:create-channel'
+           action='execute'/>
+</iq>
 ```
 
 Backend:
 
 1. Creates channel record in per-Waddle database
-2. Spawns MUC room actor via Kameo
-3. Configures room settings (persistent, members-only)
-4. Updates Zanzibar permissions
-5. Returns channel metadata
+2. Writes the channel parent permission tuple
+3. Returns channel metadata to the command caller
+4. Materializes the managed MUC room lazily on first join
 
 ### Member Management
 

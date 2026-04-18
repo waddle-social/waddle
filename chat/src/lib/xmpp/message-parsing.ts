@@ -18,6 +18,9 @@ type MessageExtensionsTarget = Pick<
   | "replyTo"
   | "threadId"
   | "parentThreadId"
+  | "forumPostKind"
+  | "forumTitle"
+  | "forumThreadTitle"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -62,6 +65,18 @@ function extractReplyAndThread(msg: ReceivedMessage, base: MessageExtensionsTarg
   if (threadId) base.threadId = threadId;
   const parentThread = ext(msg).parentThread as string | undefined;
   if (parentThread) base.parentThreadId = parentThread;
+  const threadCreate = ext(msg).threadCreate as { title?: string } | undefined;
+  if (threadCreate?.title?.trim()) {
+    base.forumPostKind = "topic";
+    base.forumTitle = threadCreate.title.trim();
+    base.forumThreadTitle = threadCreate.title.trim();
+    if (!base.threadId && msg.id) base.threadId = msg.id;
+  }
+  const threadReply = ext(msg).threadReply as { threadId?: string } | undefined;
+  if (threadReply?.threadId) {
+    base.forumPostKind = "reply";
+    if (!base.threadId) base.threadId = threadReply.threadId;
+  }
 }
 
 interface FallbackPayload {

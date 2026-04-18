@@ -152,6 +152,13 @@ const isMentioned = computed(() => {
     (m) => m === props.currentUser || m.split("@")[0] === props.currentUser,
   );
 });
+const isForumTopic = computed(() => props.message.forumPostKind === "topic" && !!props.message.forumTitle);
+const isForumReply = computed(() => props.message.forumPostKind === "reply");
+const forumThreadLabel = computed(() =>
+  props.message.forumPostKind === "topic"
+    ? props.message.forumTitle
+    : props.message.forumThreadTitle,
+);
 
 const isEditing = ref(false);
 const editInitialContent = ref<Record<string, unknown> | undefined>(undefined);
@@ -329,9 +336,11 @@ watch(
     :class="[
       isMentioned
         ? 'bg-warning/5 border-l-2 border-warning/30'
-        : message.threadId
-          ? 'border-l-2 border-primary/20 hover:bg-muted/40'
-          : 'hover:bg-muted/40',
+        : isForumTopic
+          ? 'border border-border/70 bg-card/55 shadow-sm hover:bg-card/75'
+          : message.threadId
+            ? 'border-l-2 border-primary/20 hover:bg-muted/40'
+            : 'hover:bg-muted/40',
       message.deliveryStatus === 'sending' ? 'opacity-50' : '',
       longPress.isPressing.value ? 'no-callout' : '',
     ]"
@@ -371,6 +380,24 @@ watch(
       </span>
     </div>
 
+    <div
+      v-if="isForumTopic && forumThreadLabel"
+      class="mb-2 rounded-xl border border-primary/10 bg-primary/6 px-3 py-2"
+    >
+      <div class="text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/75">
+        Topic
+      </div>
+      <h3 class="mt-1 text-[15px] font-display font-bold tracking-tight text-foreground">
+        {{ forumThreadLabel }}
+      </h3>
+    </div>
+    <div
+      v-else-if="isForumReply && forumThreadLabel"
+      class="mb-1 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-[11px] text-muted-foreground"
+    >
+      <CornerDownRight class="w-3 h-3 flex-shrink-0 text-primary/70" />
+      <span class="truncate">In {{ forumThreadLabel }}</span>
+    </div>
     <!-- Reply preview chip. Clicking scrolls to the parent message; if the
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or

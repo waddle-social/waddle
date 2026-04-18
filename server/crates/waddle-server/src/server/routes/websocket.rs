@@ -1383,12 +1383,19 @@ async fn handle_iq(
                                     match list_channels_from_db(&waddle_db, node, 200, 0).await {
                                         Ok(channels) => channels
                                             .into_iter()
-                                            .map(|channel| {
-                                                let room_jid = format!(
-                                                    "{}_{}@{}",
-                                                    node, channel.id, muc_domain
-                                                );
-                                                DiscoItem::muc_room(&room_jid, &channel.name)
+                                            .filter_map(|channel| {
+                                                waddle_xmpp::managed_room_jid(
+                                                    node,
+                                                    &channel.id,
+                                                    muc_domain,
+                                                )
+                                                .ok()
+                                                .map(|room_jid| {
+                                                    DiscoItem::muc_room(
+                                                        &room_jid.to_string(),
+                                                        &channel.name,
+                                                    )
+                                                })
                                             })
                                             .collect(),
                                         Err(err) => {
@@ -2285,15 +2292,8 @@ fn add_default_namespace_if_missing(xml: &str, default_ns: &str) -> String {
 /// Convention: node is "waddleId_channelId" (first underscore separates).
 /// Falls back to ("default", "default") if the node can't be parsed.
 fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
-    if let Some(node) = room_jid.node() {
-        let node_str = node.as_str();
-        if let Some(idx) = node_str.find('_') {
-            let waddle = &node_str[..idx];
-            let channel = &node_str[idx + 1..];
-            if !waddle.is_empty() && !channel.is_empty() {
-                return (waddle.to_string(), channel.to_string());
-            }
-        }
+    if let Some((waddle_id, channel_id)) = waddle_xmpp::parse_managed_room_jid(room_jid) {
+        return (waddle_id, channel_id);
     }
     ("default".to_string(), "default".to_string())
 }

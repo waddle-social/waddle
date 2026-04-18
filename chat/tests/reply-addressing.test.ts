@@ -25,6 +25,7 @@ describe("reply addressing", () => {
       ref({ sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
       String,
       actionError,
       () => {
@@ -128,6 +129,7 @@ describe("reply addressing", () => {
       ref({ sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c2"),
+      ref({ id: "c2", name: "general", channel_type: "text" }),
       String,
       actionError,
       () => {

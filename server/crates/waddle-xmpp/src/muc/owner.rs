@@ -17,6 +17,7 @@ use xmpp_parsers::presence::Presence;
 
 use super::{MucRoom, RoomConfig, NS_MUC_OWNER};
 use crate::xep::xep0004::{self, DataForm, Field, FormType, FromElement, IntoElement};
+use crate::xep::FIELD_FORUM_MODE;
 use crate::XmppError;
 
 /// Namespace for XEP-0004 Data Forms (re-exported for backward compatibility).
@@ -66,6 +67,8 @@ pub struct ConfigFormData {
     pub max_occupants: Option<u32>,
     /// Whether to enable logging (muc#roomconfig_enablelogging)
     pub enable_logging: Option<bool>,
+    /// Whether forum mode is enabled (muc#roomconfig_forum)
+    pub forum: Option<bool>,
 }
 
 /// Room destruction request.
@@ -100,6 +103,18 @@ pub fn parse_owner_query(iq: &Iq, muc_domain: &str) -> Result<OwnerQuery, XmppEr
             "IQ to {} is not a MUC room",
             room_jid
         ))));
+    }
+
+    // Block instant room creation/configuration for managed channel JIDs
+    // Managed channels must be created via XEP-0050 ad-hoc commands (waddle:create-channel)
+    // Pattern: {waddle_id}_{channel_id}@muc.{domain}
+    if let Some(localpart) = room_jid.node() {
+        if crate::parse_managed_room_localpart(localpart.as_str()).is_some() {
+            // This is a managed channel JID - block direct room creation/config
+            return Err(XmppError::not_allowed(Some(
+                "Cannot create or configure managed channel rooms directly. Use the waddle:create-channel ad-hoc command instead.".into(),
+            )));
+        }
     }
 
     // Get the sender's JID
@@ -220,6 +235,9 @@ fn parse_config_form(form_elem: &Element) -> Result<ConfigFormData, XmppError> {
             "muc#roomconfig_enablelogging" => {
                 config.enable_logging = field.value_as_bool();
             }
+            FIELD_FORUM_MODE => {
+                config.forum = field.value_as_bool();
+            }
             "FORM_TYPE" => {
                 // Ignore the FORM_TYPE field
             }
@@ -272,6 +290,7 @@ pub fn build_config_form(room: &MucRoom) -> Element {
             Field::boolean("muc#roomconfig_enablelogging", room.config.enable_logging)
                 .with_label("Enable Room Logging"),
         )
+        .add_field(Field::boolean(FIELD_FORUM_MODE, room.config.forum).with_label("Forum Mode"))
         .into_element()
 }
 
@@ -431,6 +450,9 @@ pub fn apply_config_form(config: &mut RoomConfig, form_data: &ConfigFormData) {
     if let Some(enable_logging) = form_data.enable_logging {
         config.enable_logging = enable_logging;
     }
+    if let Some(forum) = form_data.forum {
+        config.forum = forum;
+    }
 }
 
 #[cfg(test)]
@@ -521,6 +543,7 @@ mod tests {
                 "Logging",
                 true,
             ))
+            .append(build_field_boolean(FIELD_FORUM_MODE, "Forum Mode", true))
             .build()
     }
 
@@ -550,6 +573,7 @@ mod tests {
                 assert_eq!(config.moderated, Some(true));
                 assert_eq!(config.max_occupants, Some(50));
                 assert_eq!(config.enable_logging, Some(true));
+                assert_eq!(config.forum, Some(true));
             }
             _ => panic!("Expected SetConfig action"),
         }
@@ -606,6 +630,7 @@ mod tests {
             moderated: Some(true),
             max_occupants: Some(100),
             enable_logging: Some(false),
+            forum: Some(true),
         };
 
         apply_config_form(&mut config, &form_data);
@@ -617,6 +642,7 @@ mod tests {
         assert!(config.moderated);
         assert_eq!(config.max_occupants, 100);
         assert!(!config.enable_logging);
+        assert!(config.forum);
     }
 
     #[test]
@@ -633,6 +659,7 @@ mod tests {
                 moderated: false,
                 max_occupants: 25,
                 enable_logging: true,
+                forum: true,
                 ..Default::default()
             },
         );
@@ -649,6 +676,15 @@ mod tests {
             .find(|c| c.attr("var") == Some("FORM_TYPE"))
             .expect("FORM_TYPE field should exist");
         assert_eq!(form_type.attr("type"), Some("hidden"));
+
+        let forum_field = form
+            .children()
+            .find(|c| c.attr("var") == Some(FIELD_FORUM_MODE))
+            .expect("forum field should exist");
+        let forum_value = forum_field
+            .get_child("value", DATA_FORMS_NS)
+            .expect("forum field should contain a value");
+        assert_eq!(forum_value.text(), "1");
     }
 
     #[test]

@@ -91,7 +91,7 @@ impl WebPushSender for HttpWebPushSender {
 
 fn room_jid_to_path(room_jid: &str) -> String {
     let localpart = room_jid.split('@').next().unwrap_or_default();
-    if let Some((waddle_id, channel_id)) = localpart.split_once('_') {
+    if let Some((waddle_id, channel_id)) = crate::parse_managed_room_localpart(localpart) {
         return format!("/{}/{}", waddle_id, channel_id);
     }
     "/".to_string()

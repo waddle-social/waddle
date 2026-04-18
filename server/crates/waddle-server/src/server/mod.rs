@@ -630,9 +630,29 @@ async fn start_xmpp_server(
         "Starting XMPP server"
     );
 
-    let server = waddle_xmpp::start(config, app_state, c2s_listener, s2s_listener, stop_token)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
+    let server = waddle_xmpp::start(
+        config,
+        Arc::clone(&app_state),
+        c2s_listener,
+        s2s_listener,
+        stop_token,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
+
+    // Register ad-hoc commands
+    {
+        use waddle_xmpp::commands::{handle_create_channel, NODE_CREATE_CHANNEL};
+        let registry = server.command_registry();
+        let app_state_for_command = Arc::clone(&app_state);
+        registry
+            .register(NODE_CREATE_CHANNEL, "Create Channel", move |ctx| {
+                let deps = Arc::clone(&app_state_for_command);
+                handle_create_channel(deps, ctx)
+            })
+            .await;
+        info!("Registered create-channel command");
+    }
 
     server
         .run()

@@ -13,6 +13,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, warn, Instrument};
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 
+use crate::commands::CommandRegistry;
 use crate::connection::ConnectionActor;
 use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
@@ -141,6 +142,8 @@ pub struct XmppServer<S: AppState> {
     push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
     push_sender: Arc<dyn WebPushSender + Send + Sync>,
+    /// XEP-0050 Ad-Hoc Commands registry
+    command_registry: Arc<CommandRegistry>,
     /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
     c2s_listener: TcpListener,
     /// S2S listener — passed in if S2S federation is enabled.
@@ -200,6 +203,10 @@ impl<S: AppState> XmppServer<S> {
                 .map_err(|e| XmppError::config(format!("Failed to initialize extensions: {e}")))?,
         );
 
+        // Create ad-hoc command registry (XEP-0050)
+        let command_registry = Arc::new(CommandRegistry::new());
+        info!("Command registry initialized");
+
         Ok(Self {
             config,
             app_state,
@@ -213,6 +220,7 @@ impl<S: AppState> XmppServer<S> {
             extension_manager,
             push_store,
             push_sender,
+            command_registry,
             c2s_listener,
             s2s_listener,
             shutdown_token,
@@ -387,6 +395,7 @@ impl<S: AppState> XmppServer<S> {
             let registration_enabled = self.config.registration_enabled;
             let single_tenant = self.config.single_tenant;
             let extension_manager = self.extension_manager;
+            let command_registry = self.command_registry;
 
             tokio::spawn(async move {
                 loop {
@@ -418,6 +427,7 @@ impl<S: AppState> XmppServer<S> {
                     let push_store = Arc::clone(&push_store);
                     let push_sender = Arc::clone(&push_sender);
                     let extension_manager = extension_manager.clone();
+                    let command_registry = Arc::clone(&command_registry);
 
                     tokio::spawn(
                         async move {
@@ -438,6 +448,7 @@ impl<S: AppState> XmppServer<S> {
                                 single_tenant,
                                 push_store,
                                 push_sender,
+                                command_registry,
                             )
                             .await
                             {
@@ -499,5 +510,10 @@ impl<S: AppState> XmppServer<S> {
     /// Get the MAM storage.
     pub fn mam_storage(&self) -> &Arc<LibSqlMamStorage> {
         &self.mam_storage
+    }
+
+    /// Get the ad-hoc command registry.
+    pub fn command_registry(&self) -> &Arc<CommandRegistry> {
+        &self.command_registry
     }
 }

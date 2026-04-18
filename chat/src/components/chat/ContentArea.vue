@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Hash, MessageCircle, Settings, Search, X, Upload } from "lucide-vue-next";
+import { Hash, MessageCircle, MessagesSquare, Settings, Search, X, Upload } from "lucide-vue-next";
+import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
@@ -14,6 +15,7 @@ import MessageComposer from "@/components/chat/MessageComposer.vue";
 import UserPopover from "@/components/chat/UserPopover.vue";
 
 const draft = defineModel<string>("draft", { required: true });
+const forumTitle = defineModel<string>("forumTitle", { default: "" });
 
 const props = defineProps<{
   waddle: WaddleSummary | null;
@@ -50,9 +52,9 @@ const emit = defineEmits<{
     markup: MarkupSpan[],
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
+    forumTitle?: string,
   ];
   typing: [];
-  selectGif: [url: string];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
@@ -161,8 +163,13 @@ function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) 
     markup,
     files,
     pending ? { id: pending.id, author: pending.author, ...(pending.body ? { body: pending.body } : {}) } : undefined,
+    !pending && detectForumChannel(props.channel) ? forumTitle.value : undefined,
   );
-  replyingTo.value = null;
+  // Don't clear replyingTo here — wait for send to complete (success or failure)
+}
+
+function onSelectGif(url: string) {
+  onSend(url, []);
 }
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
@@ -176,6 +183,7 @@ const setComposerRef = (instance: { addAttachments: (files: Array<File | Blob>) 
 const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
+const isForumChannel = computed(() => detectForumChannel(props.channel));
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
 const conversationScope = computed(() => [
   props.sidebarMode ?? "channels",
@@ -263,6 +271,18 @@ watch(
 watch(conversationScope, () => {
   cancelReply();
   clearReplyJumpNotice();
+  forumTitle.value = "";
+});
+
+// Clear reply context only on successful send; preserve on failure so user can retry
+watch(() => props.isSending, (sending, prevSending) => {
+  if (prevSending && !sending && replyingTo.value) {
+    // Send completed: clear reply context only if no error occurred
+    if (!props.actionError) {
+      replyingTo.value = null;
+    }
+    // On error, keep reply context so user can retry without re-selecting
+  }
 });
 
 onBeforeUnmount(() => {
@@ -293,10 +313,16 @@ onBeforeUnmount(() => {
     <div class="h-14 border-b border-border px-6 flex items-center justify-between flex-shrink-0 glass-surface">
       <div class="flex items-center gap-3">
         <div class="flex items-center gap-2">
-          <component :is="dmPeer ? MessageCircle : Hash" class="w-4 h-4 text-primary/70" />
+          <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
           <h1 class="text-[15px] font-display font-bold tracking-tight">
             {{ dmPeer ? dmPeer.peerUsername : channel?.name ?? "..." }}
           </h1>
+          <span
+            v-if="isForumChannel"
+            class="rounded-full border border-primary/15 bg-primary/8 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/80"
+          >
+            Forum
+          </span>
           <span v-if="dmPeer" class="text-[11px] text-muted-foreground">· {{ presenceText(dmPeer.presenceShow) }}</span>
         </div>
         <div
@@ -403,21 +429,29 @@ onBeforeUnmount(() => {
 
       <div v-else-if="!channel && !dmPeer" class="flex flex-col items-center justify-center py-20">
         <div class="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mb-4">
-          <component :is="sidebarMode === 'dms' ? MessageCircle : Hash" class="w-5 h-5 text-primary/50" />
+          <component :is="sidebarMode === 'dms' ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-5 h-5 text-primary/50" />
         </div>
         <p class="text-[14px] text-muted-foreground font-display">
-          {{ sidebarMode === "dms" ? "Select a conversation" : "Select a channel to start chatting" }}
+          {{ sidebarMode === "dms"
+            ? "Select a conversation"
+            : isForumChannel
+              ? "Select a forum to browse topics"
+              : "Select a channel to start chatting" }}
         </p>
       </div>
 
       <div v-else-if="feedMessages.length === 0" class="flex flex-col items-center justify-center py-20">
         <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
-          <component :is="dmPeer ? MessageCircle : Hash" class="w-5 h-5 text-primary" />
+          <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-5 h-5 text-primary" />
         </div>
         <p class="text-[16px] font-display font-bold mb-1">
           {{ dmPeer ? `Conversation with @${dmPeer.peerUsername}` : `Welcome to #${channel?.name}` }}
         </p>
-        <p class="text-[13px] text-muted-foreground">This is the start of the conversation.</p>
+        <p class="text-[13px] text-muted-foreground">
+          {{ isForumChannel
+            ? "Start the first topic with a clear title so people can follow the thread."
+            : "This is the start of the conversation." }}
+        </p>
       </div>
 
       <div v-else class="max-w-none">
@@ -474,7 +508,9 @@ onBeforeUnmount(() => {
       v-if="channel || dmPeer"
       :ref="setComposerRef"
       v-model:draft="draft"
+      v-model:forum-title="forumTitle"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
+      :is-forum-channel="isForumChannel"
       :is-sending="isSending"
       :disabled="!channel && !dmPeer"
       :tenor-api-key="tenorApiKey"
@@ -485,7 +521,7 @@ onBeforeUnmount(() => {
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
-      @select-gif="(url) => emit('selectGif', url)"
+      @select-gif="onSelectGif"
     />
     <UserPopover
       :open="!!popoverAuthor"

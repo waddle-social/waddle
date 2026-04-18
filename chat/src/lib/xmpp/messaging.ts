@@ -2,6 +2,7 @@
 import type { Agent } from "stanza";
 import type { MarkupSpan } from "@/lib/chat-ui";
 import type { WaddleFallback } from "./extensions/fallback";
+import type { WaddleThreadCreate, WaddleThreadReply } from "./extensions/forums";
 import { shiftMarkupSpans, type WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
 
@@ -132,6 +133,8 @@ export interface SendGroupMessageOptions {
   threadId?: string;
   parentThreadId?: string;
   id?: string;
+  threadCreate?: WaddleThreadCreate;
+  threadReply?: WaddleThreadReply;
 }
 
 /**
@@ -152,7 +155,7 @@ export function sendGroupMessage(
   body: string,
   opts: SendGroupMessageOptions = {},
 ): string | null {
-  const { markup, files, replyTo, threadId, parentThreadId, id } = opts;
+  const { markup, files, replyTo, threadId, parentThreadId, id, threadCreate, threadReply } = opts;
   const text = body.trim();
   const hasFiles = !!files && files.length > 0;
   if (!text && !hasFiles) return null;
@@ -208,6 +211,12 @@ export function sendGroupMessage(
   if (threadId) {
     msgData.thread = threadId;
     if (parentThreadId) msgData.parentThread = parentThreadId;
+  }
+  if (threadCreate) {
+    msgData.threadCreate = threadCreate;
+  }
+  if (threadReply) {
+    msgData.threadReply = threadReply;
   }
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);

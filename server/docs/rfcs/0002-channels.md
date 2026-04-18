@@ -145,17 +145,19 @@ Threads use XEP-0461 (Message Replies):
 
 ## API Endpoints
 
-The Waddle backend exposes REST endpoints for channel management (provisioning MUC rooms):
+The Waddle backend exposes REST endpoints for channel updates and deletion. Channel
+creation is XMPP-native via the `waddle:create-channel` XEP-0050 ad-hoc command.
 
 ```
-POST   /waddles/:wid/channels           Create channel (provisions MUC)
+XMPP   waddle:create-channel            Create channel metadata + permissions
 GET    /waddles/:wid/channels           List channels
 GET    /channels/:id                    Get channel metadata
 PATCH  /channels/:id                    Update channel (syncs to MUC config)
 DELETE /channels/:id                    Delete channel (destroys MUC room)
 ```
 
-Message operations happen directly over XMPP, not through REST.
+Managed MUC rooms are materialized lazily on first join rather than at channel
+creation time. Message operations happen directly over XMPP, not through REST.
 
 ## XMPP Events
 
