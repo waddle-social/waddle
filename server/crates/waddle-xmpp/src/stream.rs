@@ -1270,29 +1270,14 @@ fn pre_bind_target_is_unauthorized(
 /// attribute would be lost otherwise. The thread is re-inserted as a raw
 /// payload so the attribute survives the round-trip.
 pub(crate) fn element_to_message(element: Element) -> Result<Message, XmppError> {
-    let thread_parent = element
-        .children()
-        .find(|child| child.name() == "thread")
-        .and_then(|child| {
-            child
-                .attr("parent")
-                .map(str::trim)
-                .filter(|parent| !parent.is_empty())
-                .map(str::to_owned)
-        });
-    let stanza_ns = element.ns();
+    let thread_parent = crate::parser_utils::extract_thread_parent(&element);
+    let stanza_ns = element.ns().to_string();
 
     let mut msg = Message::try_from(element)
         .map_err(|e| XmppError::xml_parse(format!("Invalid message: {:?}", e)))?;
 
     if let Some(parent) = thread_parent {
-        if let Some(thread) = msg.thread.take() {
-            let thread_elem = Element::builder("thread", stanza_ns)
-                .attr("parent", parent)
-                .append(thread.0.as_str())
-                .build();
-            msg.payloads.push(thread_elem);
-        }
+        crate::parser_utils::reattach_thread_parent(&mut msg, parent, &stanza_ns);
     }
 
     Ok(msg)
@@ -1313,20 +1298,11 @@ fn element_to_iq(element: Element) -> Result<Iq, XmppError> {
 fn stanza_to_xml(stanza: &Stanza) -> Result<String, XmppError> {
     match stanza {
         Stanza::Message(msg) => {
-            let thread_id = msg.thread.as_ref().map(|t| t.0.clone());
+            let thread_id = msg.thread.as_ref().map(|t| t.0.as_str());
             let mut element: Element = msg.clone().into();
             // xmpp_parsers 0.21 drops <thread/> when serializing Message back
             // to Element. Re-attach it so RFC 6121 / XEP-0201 metadata survives.
-            if let Some(id) = thread_id {
-                if id.trim().is_empty() {
-                    // skip empty thread
-                } else if !element.children().any(|child| child.name() == "thread") {
-                    let thread_elem = Element::builder("thread", element.ns())
-                        .append(id.as_str())
-                        .build();
-                    element.append_child(thread_elem);
-                }
-            }
+            crate::parser_utils::ensure_thread_element(&mut element, thread_id);
             element_to_string(&element)
         }
         Stanza::Presence(pres) => {

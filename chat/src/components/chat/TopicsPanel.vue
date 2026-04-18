@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Hash, Plus, Settings, Users, ChevronDown } from "lucide-vue-next";
+import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown } from "lucide-vue-next";
+import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 
 const props = defineProps<{
@@ -21,6 +22,10 @@ function hasActivity(channelId: string): boolean {
     }
   }
   return false;
+}
+
+function channelIcon(channel: ChannelSummary) {
+  return detectForumChannel(channel) ? MessagesSquare : Hash;
 }
 
 const emit = defineEmits<{
@@ -89,7 +94,8 @@ const emit = defineEmits<{
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
           @click="emit('selectChannel', channel.id)"
         >
-          <Hash
+          <component
+            :is="channelIcon(channel)"
             class="w-3.5 h-3.5 flex-shrink-0 transition-colors duration-200"
             :class="activeChannelId === channel.id ? 'text-primary' : 'opacity-40 group-hover:opacity-70'"
           />
@@ -100,6 +106,12 @@ const emit = defineEmits<{
               hasActivity(channel.id) && activeChannelId !== channel.id ? 'font-semibold text-sidebar-foreground' : '',
             ]"
           >{{ channel.name }}</span>
+          <span
+            v-if="detectForumChannel(channel)"
+            class="rounded-full border border-primary/12 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-primary/70"
+          >
+            Forum
+          </span>
           <span
             v-if="hasActivity(channel.id) && activeChannelId !== channel.id"
             class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"

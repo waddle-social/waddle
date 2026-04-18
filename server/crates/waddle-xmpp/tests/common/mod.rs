@@ -482,6 +482,26 @@ impl AppState for MockAppState {
             .unwrap_or_default())
     }
 
+    async fn get_channel_room_info(
+        &self,
+        waddle_id: &str,
+        channel_id: &str,
+    ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
+        Ok(self
+            .waddle_channels
+            .get(waddle_id)
+            .and_then(|channels| {
+                channels
+                    .iter()
+                    .find(|channel| channel.id == channel_id)
+                    .cloned()
+            })
+            .map(|channel| waddle_xmpp::ChannelRoomInfo {
+                waddle_id: waddle_id.to_string(),
+                channel,
+            }))
+    }
+
     async fn get_waddle_details(
         &self,
         waddle_id: &str,

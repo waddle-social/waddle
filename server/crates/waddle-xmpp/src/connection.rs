@@ -20,6 +20,7 @@ use crate::carbons::{
     build_carbons_result, build_received_carbon, build_sent_carbon, is_carbons_disable,
     is_carbons_enable, should_copy_message,
 };
+use crate::commands::CommandRegistry;
 use crate::disco::{
     build_disco_info_response_with_extensions, build_disco_items_response,
     build_server_info_abuse_form, is_disco_info_query, is_disco_items_query, muc_room_features,
@@ -99,7 +100,7 @@ use crate::xep::xep0363::{
 };
 use crate::xep::xep0398::AvatarConversion;
 use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
-use crate::{AppState, Session, XmppError};
+use crate::{managed_room_jid, parse_managed_room_jid, AppState, ChannelType, Session, XmppError};
 use waddle_extensions::{message_has_embed_for_namespaces, ExtensionManager};
 
 /// Size of the outbound message channel buffer.
@@ -134,6 +135,37 @@ fn default_presence_status(
         .cloned()
 }
 
+fn room_config_for_channel(
+    channel: &crate::ChannelInfo,
+    channel_type: ChannelType,
+) -> crate::muc::RoomConfig {
+    crate::muc::RoomConfig {
+        name: channel.name.clone(),
+        forum: channel_type.is_forum(),
+        ..Default::default()
+    }
+}
+
+fn reconcile_channel_backed_room(
+    room: &mut crate::muc::MucRoom,
+    room_jid: &jid::BareJid,
+    room_info: &crate::ChannelRoomInfo,
+    channel_type: ChannelType,
+) {
+    let instant_name = room_jid.node().map(|node| node.to_string());
+    let mut desired_config = room_config_for_channel(&room_info.channel, channel_type);
+
+    desired_config.description = room.config.description.clone();
+    desired_config.subject = room.config.subject.clone();
+
+    if !room.config.name.is_empty() && instant_name.as_deref() != Some(room.config.name.as_str()) {
+        desired_config.name = room.config.name.clone();
+    }
+
+    room.waddle_id = room_info.waddle_id.clone();
+    room.channel_id = room_info.channel.id.clone();
+    room.config = desired_config;
+}
 /// Receiver for outbound stanzas to be sent to this connection.
 type OutboundReceiver = mpsc::Receiver<OutboundStanza>;
 
@@ -199,13 +231,15 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
     /// XEP-0357 Push notification sender
     push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
+    /// XEP-0050 Ad-Hoc Commands registry
+    command_registry: Arc<CommandRegistry>,
 }
 
 impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, extension_manager, push_store, push_sender),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, extension_manager, push_store, push_sender, command_registry),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -226,6 +260,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         single_tenant: bool,
         push_store: Arc<dyn crate::push::PushSubscriptionStore + Send + Sync>,
         push_sender: Arc<dyn crate::push::WebPushSender + Send + Sync>,
+        command_registry: Arc<CommandRegistry>,
     ) -> Result<(), XmppError> {
         info!("New connection from {}", peer_addr);
 
@@ -257,6 +292,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             single_tenant,            // XEP-0503: single-tenant mode for spaces
             push_store,               // XEP-0357: push subscription store
             push_sender,              // XEP-0357: push notification sender
+            command_registry,         // XEP-0050: ad-hoc commands
         };
 
         actor.run(tls_acceptor, registration_enabled).await
@@ -2241,6 +2277,69 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
     }
 
+    async fn ensure_channel_backed_room(
+        &self,
+        room_jid: &jid::BareJid,
+        room_info: &crate::ChannelRoomInfo,
+    ) -> Result<Arc<tokio::sync::RwLock<crate::muc::MucRoom>>, XmppError> {
+        let channel_type =
+            ChannelType::parse(&room_info.channel.channel_type).ok_or_else(|| {
+                XmppError::service_unavailable(Some(format!(
+                    "Unsupported channel type '{}'",
+                    room_info.channel.channel_type
+                )))
+            })?;
+        self.room_registry.get_or_create_room(
+            room_jid.clone(),
+            room_info.waddle_id.clone(),
+            room_info.channel.id.clone(),
+            room_config_for_channel(&room_info.channel, channel_type),
+        )?;
+
+        let room_data = self.room_registry.get_room_data(room_jid).ok_or_else(|| {
+            XmppError::internal("Failed to get room data after channel materialization".to_string())
+        })?;
+
+        {
+            let mut room = room_data.write().await;
+            reconcile_channel_backed_room(&mut room, room_jid, room_info, channel_type);
+        }
+
+        Ok(room_data)
+    }
+
+    async fn materialize_room_from_channel_metadata(
+        &self,
+        room_jid: &jid::BareJid,
+    ) -> Result<Option<Arc<tokio::sync::RwLock<crate::muc::MucRoom>>>, XmppError> {
+        let Some((waddle_id, channel_id)) = parse_managed_room_jid(room_jid) else {
+            return Ok(None);
+        };
+
+        let room_info = self
+            .app_state
+            .get_channel_room_info(&waddle_id, &channel_id)
+            .await?
+            .ok_or_else(|| {
+                XmppError::item_not_found(Some(format!(
+                    "Managed channel room {} not found",
+                    room_jid
+                )))
+            })?;
+
+        debug!(
+            room = %room_jid,
+            channel_id = %room_info.channel.id,
+            waddle_id = %room_info.waddle_id,
+            channel_type = %room_info.channel.channel_type,
+            "Materializing room from channel metadata"
+        );
+
+        self.ensure_channel_backed_room(room_jid, &room_info)
+            .await
+            .map(Some)
+    }
+
     /// Handle a MUC join request.
     ///
     /// Per XEP-0045:
@@ -2269,32 +2368,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             ))));
         }
 
-        // Get the room data, or create an instant room if it doesn't exist
-        // Per XEP-0045 Section 10.1.2, rooms can be created dynamically when a user joins
-        let (room_data, room_created) = match self.room_registry.get_room_data(&join_req.room_jid) {
-            Some(data) => (data, false),
-            None => {
-                // Create instant room (XEP-0045 Section 10.1.2)
-                debug!(
-                    room = %join_req.room_jid,
-                    creator = %join_req.sender_jid,
-                    "Creating instant room on first join"
-                );
-                self.room_registry
-                    .create_instant_room(join_req.room_jid.clone())?;
-                (
-                    self.room_registry
-                        .get_room_data(&join_req.room_jid)
-                        .ok_or_else(|| {
-                            XmppError::internal(
-                                "Failed to get room data after creation".to_string(),
-                            )
-                        })?,
-                    true,
-                )
-            }
-        };
-
         // Get the user identifier from the session for permission checking.
         let user_id = self
             .session
@@ -2304,6 +2377,39 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 // Fallback to bare JID in edge-case test flows where no session is attached.
                 join_req.sender_jid.to_bare().to_string()
             });
+
+        // Get the room data, materialize it from stored channel metadata, or create an instant
+        // room if nothing backs this JID.
+        let (room_data, room_created) = match self.room_registry.get_room_data(&join_req.room_jid) {
+            Some(data) => (data, false),
+            None => {
+                if let Some(data) = self
+                    .materialize_room_from_channel_metadata(&join_req.room_jid)
+                    .await?
+                {
+                    (data, false)
+                } else {
+                    // Create instant room (XEP-0045 Section 10.1.2)
+                    debug!(
+                        room = %join_req.room_jid,
+                        creator = %join_req.sender_jid,
+                        "Creating instant room on first join"
+                    );
+                    self.room_registry
+                        .create_instant_room(join_req.room_jid.clone())?;
+                    (
+                        self.room_registry
+                            .get_room_data(&join_req.room_jid)
+                            .ok_or_else(|| {
+                                XmppError::internal(
+                                    "Failed to get room data after creation".to_string(),
+                                )
+                            })?,
+                        true,
+                    )
+                }
+            }
+        };
 
         // Lock the room for modification
         let mut room = room_data.write().await;
@@ -2684,13 +2790,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
 
             for (waddle_id, channel) in batch {
-                // Derive room JID: channel_id@muc.domain
-                // Using channel ID (UUID) as the room local part for uniqueness
-                let room_jid_str = format!("{}@{}", channel.id, muc_domain);
-                let room_jid: jid::BareJid = match room_jid_str.parse() {
+                let Some(channel_type) = ChannelType::parse(&channel.channel_type) else {
+                    warn!(
+                        waddle_id = %waddle_id,
+                        channel_id = %channel.id,
+                        channel_type = %channel.channel_type,
+                        "Skipping auto-join for unsupported channel type"
+                    );
+                    continue;
+                };
+
+                let room_jid = match managed_room_jid(waddle_id, &channel.id, &muc_domain) {
                     Ok(jid) => jid,
                     Err(e) => {
                         warn!(
+                            waddle_id = %waddle_id,
                             channel_id = %channel.id,
                             error = ?e,
                             "Invalid room JID, skipping"
@@ -2699,26 +2813,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     }
                 };
 
-                // Ensure the room exists in the registry with proper waddle/channel metadata
-                if self.room_registry.get_room_data(&room_jid).is_none() {
-                    let config = crate::muc::RoomConfig {
-                        name: channel.name.clone(),
-                        ..Default::default()
-                    };
-                    if let Err(e) = self.room_registry.get_or_create_room(
-                        room_jid.clone(),
-                        waddle_id.clone(),
-                        channel.id.clone(),
-                        config,
-                    ) {
-                        warn!(
-                            room = %room_jid,
-                            error = %e,
-                            "Failed to create room for auto-join, skipping"
-                        );
-                        continue;
-                    }
+                let room_info = crate::ChannelRoomInfo {
+                    waddle_id: waddle_id.clone(),
+                    channel: channel.clone(),
+                };
+                if let Err(e) = self.ensure_channel_backed_room(&room_jid, &room_info).await {
+                    warn!(
+                        room = %room_jid,
+                        error = %e,
+                        "Failed to create room for auto-join, skipping"
+                    );
+                    continue;
                 }
+
+                debug!(
+                    room = %room_jid,
+                    forum = channel_type.is_forum(),
+                    "Prepared managed room for auto-join"
+                );
 
                 // Build a MUC join request
                 // Use nick with suffix if there's a conflict
@@ -4121,28 +4233,36 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .parse()
                     .map_err(|e| XmppError::bad_request(Some(format!("Invalid JID: {}", e))))?;
 
-                if let Some(room_data) = self.room_registry.get_room_data(&room_jid) {
-                    let room = room_data.read().await;
-                    debug!(room = %room_jid, "disco#info query to MUC room");
-                    (
-                        vec![Identity::muc_room(Some(&room.config.name))],
-                        merge_extension_features(
-                            muc_room_features(
-                                room.config.persistent,
-                                room.config.members_only,
-                                room.config.moderated,
-                            ),
-                            &extension_features,
+                let room_data = match self.room_registry.get_room_data(&room_jid) {
+                    Some(data) => data,
+                    None => match self
+                        .materialize_room_from_channel_metadata(&room_jid)
+                        .await?
+                    {
+                        Some(data) => data,
+                        None => {
+                            return Err(XmppError::item_not_found(Some(format!(
+                                "Room {} not found",
+                                room_jid
+                            ))));
+                        }
+                    },
+                };
+                let room = room_data.read().await;
+                debug!(room = %room_jid, "disco#info query to MUC room");
+                (
+                    vec![Identity::muc_room(Some(&room.config.name))],
+                    merge_extension_features(
+                        muc_room_features(
+                            room.config.persistent,
+                            room.config.members_only,
+                            room.config.moderated,
+                            room.config.forum,
                         ),
-                        vec![],
-                    )
-                } else {
-                    // Room doesn't exist
-                    return Err(XmppError::item_not_found(Some(format!(
-                        "Room {} not found",
-                        room_jid
-                    ))));
-                }
+                        &extension_features,
+                    ),
+                    vec![],
+                )
             }
             // Query to a bare JID (user@domain) - PEP service (XEP-0163)
             Some(target) if target.contains('@') && !target.contains('/') => {
@@ -5146,9 +5266,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 Ok(channels
                     .iter()
-                    .map(|c| {
-                        let room_jid = format!("{}_{}@{}", node, c.id, muc_domain);
-                        DiscoItem::muc_room(&room_jid, &c.name)
+                    .filter_map(|c| {
+                        if ChannelType::parse(&c.channel_type).is_none() {
+                            warn!(
+                                waddle_id = %node,
+                                channel_id = %c.id,
+                                channel_type = %c.channel_type,
+                                "Skipping unsupported channel type in spaces disco#items"
+                            );
+                            return None;
+                        }
+
+                        managed_room_jid(node, &c.id, muc_domain)
+                            .ok()
+                            .map(|room_jid| DiscoItem::muc_room(&room_jid.to_string(), &c.name))
                     })
                     .collect())
             }
@@ -5212,7 +5343,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
                 let mut items: Vec<PubSubItem> = channels
                     .iter()
-                    .filter_map(|c| crate::xep::xep0503::build_channel_item(c, muc_domain).ok())
+                    .filter_map(|c| {
+                        crate::xep::xep0503::build_channel_item(&node, c, muc_domain).ok()
+                    })
                     .collect();
 
                 // Apply item_ids filter if specified
@@ -6350,18 +6483,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Get the room
         let room_data = match self.room_registry.get_room_data(&query.room_jid) {
             Some(data) => data,
-            None => {
-                let error = crate::generate_iq_error(
-                    &iq.id,
-                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
-                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
-                    crate::StanzaErrorCondition::ItemNotFound,
-                    crate::StanzaErrorType::Cancel,
-                    Some(&format!("Room {} not found", query.room_jid)),
-                );
-                self.stream.write_raw(&error).await?;
-                return Ok(());
-            }
+            None => match self
+                .materialize_room_from_channel_metadata(&query.room_jid)
+                .await?
+            {
+                Some(data) => data,
+                None => {
+                    let error = crate::generate_iq_error(
+                        &iq.id,
+                        iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                        iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                        crate::StanzaErrorCondition::ItemNotFound,
+                        crate::StanzaErrorType::Cancel,
+                        Some(&format!("Room {} not found", query.room_jid)),
+                    );
+                    self.stream.write_raw(&error).await?;
+                    return Ok(());
+                }
+            },
         };
 
         if query.is_get {
@@ -7720,8 +7859,92 @@ impl Stanza {
 
 #[cfg(test)]
 mod tests {
+    use super::reconcile_channel_backed_room;
     use super::resolves_to_disallowed_ip;
     use super::validate_push_endpoint;
+    use crate::muc::{MucRoom, RoomConfig};
+    use crate::{ChannelInfo, ChannelRoomInfo, ChannelType};
+
+    #[test]
+    fn reconcile_channel_backed_room_resets_instant_room_to_managed_defaults() {
+        let room_jid: jid::BareJid = "waddle-forums_forum-channel@muc.localhost"
+            .parse()
+            .expect("valid room jid");
+        let mut room = MucRoom::new(
+            room_jid.clone(),
+            "instant:waddle-forums_forum-channel".to_string(),
+            "waddle-forums_forum-channel".to_string(),
+            RoomConfig {
+                name: "waddle-forums_forum-channel".to_string(),
+                persistent: false,
+                members_only: false,
+                enable_logging: false,
+                ..RoomConfig::default()
+            },
+        );
+        room.config.description = Some("Preserved description".to_string());
+        room.config.subject = Some("Preserved subject".to_string());
+
+        let room_info = ChannelRoomInfo {
+            waddle_id: "waddle-forums".to_string(),
+            channel: ChannelInfo {
+                id: "forum-channel".to_string(),
+                name: "Announcements".to_string(),
+                channel_type: "forum".to_string(),
+            },
+        };
+
+        reconcile_channel_backed_room(&mut room, &room_jid, &room_info, ChannelType::Forum);
+
+        assert_eq!(room.waddle_id, "waddle-forums");
+        assert_eq!(room.channel_id, "forum-channel");
+        assert_eq!(room.config.name, "Announcements");
+        assert_eq!(
+            room.config.description.as_deref(),
+            Some("Preserved description")
+        );
+        assert_eq!(room.config.subject.as_deref(), Some("Preserved subject"));
+        assert!(room.config.persistent);
+        assert!(room.config.members_only);
+        assert!(!room.config.moderated);
+        assert_eq!(room.config.max_occupants, 0);
+        assert!(room.config.enable_logging);
+        assert!(room.config.forum);
+    }
+
+    #[test]
+    fn reconcile_channel_backed_room_preserves_non_placeholder_name() {
+        let room_jid: jid::BareJid = "waddle-forums_forum-channel@muc.localhost"
+            .parse()
+            .expect("valid room jid");
+        let mut room = MucRoom::new(
+            room_jid.clone(),
+            "legacy".to_string(),
+            "legacy".to_string(),
+            RoomConfig {
+                name: "Custom room name".to_string(),
+                persistent: false,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+
+        let room_info = ChannelRoomInfo {
+            waddle_id: "waddle-forums".to_string(),
+            channel: ChannelInfo {
+                id: "forum-channel".to_string(),
+                name: "Announcements".to_string(),
+                channel_type: "forum".to_string(),
+            },
+        };
+
+        reconcile_channel_backed_room(&mut room, &room_jid, &room_info, ChannelType::Forum);
+
+        assert_eq!(room.config.name, "Custom room name");
+        assert!(room.config.persistent);
+        assert!(room.config.members_only);
+        assert!(room.config.forum);
+    }
 
     #[test]
     fn accepts_public_https_endpoint() {

@@ -10,7 +10,7 @@ import type {
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, SessionLifecycleEvent, XmppStatusSnapshot,
 } from "./types";
-import { barePeerJid, roomBareJidFor } from "./jid";
+import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
 import { dispatchGroupchat, ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
@@ -497,7 +497,7 @@ export class BrowserXmppClient {
     if (this.uploadServiceJid) return this.uploadServiceJid;
     await this.connect();
     if (!this.xmpp) throw new Error("XMPP not connected");
-    const domain = this.session.jid.split("@")[1] ?? "localhost";
+    const domain = jidDomain(this.session.jid);
     const jid = await discoverUploadService(this.xmpp, domain);
     if (!jid) throw new Error(`File upload service not available (domain: ${domain})`);
     this.uploadServiceJid = jid;
@@ -672,7 +672,7 @@ export class BrowserXmppClient {
   async getServerVersion(): Promise<{ name?: string; version?: string; os?: string } | null> {
     await this.connect();
     if (!this.xmpp) return null;
-    const domain = this.session.jid.split("@")[1];
+    const domain = jidDomain(this.session.jid);
     if (!domain) return null;
     try {
       return await this.xmpp.getSoftwareVersion(domain);
@@ -688,6 +688,14 @@ export class BrowserXmppClient {
     return this.xmpp
       ? discovery.discoverChannels(this.xmpp, this.session.jid, waddleId)
       : [];
+  }
+
+  /**
+   * Get the underlying XMPP agent for advanced operations like ad-hoc commands.
+   * Returns null if not connected.
+   */
+  get agent(): Agent | null {
+    return this.xmpp;
   }
 
   // -- Private --
@@ -806,7 +814,7 @@ export class BrowserXmppClient {
   private async pingServer() {
     const xmpp = this.xmpp;
     if (!xmpp || !this.connected || this.destroying) return;
-    const domain = this.session.jid.split("@")[1];
+    const domain = jidDomain(this.session.jid);
     if (!domain) return;
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {

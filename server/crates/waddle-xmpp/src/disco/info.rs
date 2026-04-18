@@ -336,6 +336,11 @@ impl Feature {
     pub fn spaces() -> Self {
         Self::new("urn:xmpp:spaces:0")
     }
+
+    /// XEP-0508 Forums feature.
+    pub fn forums() -> Self {
+        Self::new(crate::xep::NS_FORUMS)
+    }
 }
 
 /// Check if an IQ is a disco#info query.
@@ -548,7 +553,12 @@ pub fn muc_service_features() -> Vec<Feature> {
 }
 
 /// Get features for a MUC room based on configuration.
-pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) -> Vec<Feature> {
+pub fn muc_room_features(
+    persistent: bool,
+    members_only: bool,
+    moderated: bool,
+    forum: bool,
+) -> Vec<Feature> {
     let mut features = vec![
         Feature::disco_info(),
         Feature::muc(),
@@ -560,6 +570,10 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::occupant_id(),
         Feature::muc_semianonymous(),
     ];
+
+    if forum {
+        features.push(Feature::forums());
+    }
 
     if persistent {
         features.push(Feature::muc_persistent());
@@ -669,12 +683,13 @@ mod tests {
 
     #[test]
     fn test_muc_room_features() {
-        let features = muc_room_features(true, true, false);
+        let features = muc_room_features(true, true, false, true);
         assert!(features.contains(&Feature::muc()));
         assert!(features.contains(&Feature::muc_persistent()));
         assert!(features.contains(&Feature::muc_membersonly()));
         assert!(features.contains(&Feature::muc_unmoderated()));
         assert!(features.contains(&Feature::replies()));
+        assert!(features.contains(&Feature::forums()));
     }
 
     #[test]

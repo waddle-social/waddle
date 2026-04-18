@@ -106,6 +106,9 @@ pub struct RoomConfig {
     pub max_occupants: u32,
     /// Whether to log messages (for MAM)
     pub enable_logging: bool,
+    /// Whether the room is in forum mode (XEP-0508)
+    #[serde(default)]
+    pub forum: bool,
     /// Federation permission policy for this room.
     ///
     /// Controls which users from remote servers can join this room.
@@ -129,6 +132,7 @@ impl Default for RoomConfig {
             moderated: false,
             max_occupants: 0,
             enable_logging: true,
+            forum: false,
             federation_policy: FederatedPermissionPolicy::default(),
             federated_affiliation_config: FederatedAffiliationConfig::open_member(),
         }

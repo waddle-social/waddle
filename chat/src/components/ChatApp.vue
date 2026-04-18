@@ -10,7 +10,7 @@ import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { useVersion } from "@/composables/useVersion";
 import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
-import { barePeerJid } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
@@ -72,6 +72,7 @@ const messaging = useMessaging(
   xmppClient,
   waddles.activeWaddleId,
   waddles.activeChannelId,
+  waddles.currentChannel,
   ui.normalizeError,
   ui.actionError,
   ui.clearActionError,
@@ -128,6 +129,14 @@ const activeDraft = computed({
     else messaging.draft.value = value;
   },
 });
+const activeForumTitle = computed({
+  get: () => (ui.sidebarMode.value === "dms" ? "" : messaging.forumPostTitle.value),
+  set: (value: string) => {
+    if (ui.sidebarMode.value !== "dms") {
+      messaging.forumPostTitle.value = value;
+    }
+  },
+});
 const activeTypingUsers = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.typingUsers.value : messaging.typingUsers.value,
 );
@@ -144,7 +153,7 @@ const activeIsSearching = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.isSearching.value : messaging.isSearching.value,
 );
 
-const selfDomain = computed(() => session.value?.jid.split("@")[1] ?? "");
+const selfDomain = computed(() => (session.value ? jidDomain(session.value.jid) : ""));
 const memberJidByNick = ref<Record<string, string>>({});
 const activeDmPeer = computed(() => {
   const active = dmConversations.activePeerJid.value;
@@ -177,12 +186,9 @@ const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
 });
 
 function resolveChannelNameFromJid(roomJid: string): string | null {
-  const localpart = roomJid.split("@")[0] ?? "";
-  const waddleId = waddles.activeWaddleId.value;
-  const channelId = waddleId && localpart.startsWith(`${waddleId}_`)
-    ? localpart.slice(waddleId.length + 1)
-    : localpart;
-  return waddles.channels.value.find((c) => c.id === channelId)?.name ?? null;
+  const managedRoom = parseManagedRoomBareJid(roomJid);
+  if (!managedRoom || managedRoom.waddleId !== waddles.activeWaddleId.value) return null;
+  return waddles.channels.value.find((c) => c.id === managedRoom.channelId)?.name ?? null;
 }
 
 watch(() => messaging.lastMentionActivity.value, (event) => {
@@ -202,12 +208,9 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
       roomJid: event.roomJid,
       isBroadcast,
       onNavigate: (roomJid) => {
-        const localpart = roomJid.split("@")[0] ?? "";
-        const waddleId = waddles.activeWaddleId.value;
-        const channelId = waddleId && localpart.startsWith(`${waddleId}_`)
-          ? localpart.slice(waddleId.length + 1)
-          : localpart;
-        void selectChannel(channelId);
+        const managedRoom = parseManagedRoomBareJid(roomJid);
+        if (!managedRoom) return;
+        void selectWaddle(managedRoom.waddleId, managedRoom.channelId);
       },
     });
   }
@@ -287,10 +290,6 @@ const activeTarget = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging : messaging,
 );
 
-async function sendGif(url: string) {
-  await activeTarget.value.sendMessage(url);
-}
-
 const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
 );
@@ -300,12 +299,13 @@ async function sendActiveMessage(
   markup?: MarkupSpan[],
   files?: Array<File | Blob>,
   replyTo?: { id: string; author: string; body?: string },
+  forumTitle?: string,
 ) {
   if (ui.sidebarMode.value === "dms") {
     await dmMessaging.sendMessage(body, markup, files, replyTo);
     return;
   }
-  await messaging.sendMessage(body, markup, files, replyTo);
+  await messaging.sendMessage(body, markup, files, replyTo, forumTitle);
 }
 
 async function sendThreadMessage(
@@ -436,7 +436,7 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
   if (route.dmUsername) {
     const username = route.dmUsername.replace(/^@/, "").trim();
     if (username) {
-      const domain = session.value?.jid.split("@")[1];
+      const domain = session.value ? jidDomain(session.value.jid) : "";
       if (!domain) return;
       await handleOpenDm(`${username}@${domain}`);
     }
@@ -550,8 +550,7 @@ async function selectChannel(channelId: string) {
   messaging.clearMessages();
   // XEP-0502: Clear activity indicator for this channel
   if (waddles.activeWaddleId.value && connectionStore.session) {
-    const domain = connectionStore.session.jid.split("@")[1] ?? "";
-    const roomJid = `${channelId}@conference.${domain}`;
+    const roomJid = roomBareJidFor(connectionStore.session, waddles.activeWaddleId.value, channelId);
     messaging.clearChannelActivity(roomJid);
   }
   if (waddles.activeWaddleId.value) {
@@ -889,6 +888,7 @@ onUnmounted(() => {
       <ContentArea
         :ref="setContentAreaRef"
         v-model:draft="activeDraft"
+        v-model:forum-title="activeForumTitle"
         :waddle="waddles.currentWaddle.value"
         :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
         :dm-peer="activeDmPeer"
@@ -917,7 +917,6 @@ onUnmounted(() => {
         :thread-index="threads.index.value"
         @send="sendActiveMessage"
         @typing="notifyActiveComposing"
-        @select-gif="sendGif"
         @edit-message="editActiveMessage"
         @retract-message="retractActiveMessage"
         @react-message="reactActiveMessage"

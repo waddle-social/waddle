@@ -189,21 +189,6 @@ export class WaddleApi {
     );
   }
 
-  async createChannel(
-    waddleId: string,
-    input: {
-      name: string;
-      description?: string;
-      channel_type?: string;
-      position?: number;
-    },
-  ) {
-    return this.json<ChannelSummary>(`/v1/waddles/${waddleId}/channels`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
   async updateChannel(
     waddleId: string,
     channelId: string,

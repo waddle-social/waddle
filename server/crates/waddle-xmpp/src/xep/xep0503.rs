@@ -26,7 +26,7 @@ use minidom::Element;
 use super::xep0004::{DataForm, Field, FormType, IntoElement};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::xep::xep0402;
-use crate::{ChannelInfo, WaddleDetails, XmppError};
+use crate::{managed_room_jid, ChannelInfo, ChannelType, WaddleDetails, XmppError};
 
 /// XEP-0503 Spaces namespace.
 pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
@@ -34,22 +34,31 @@ pub const NS_SPACES: &str = "urn:xmpp:spaces:0";
 /// Build a pubsub `<item>` for a channel inside a space.
 ///
 /// Each channel is represented as an XEP-0402 `<conference>` bookmark element
-/// with the channel's MUC room JID and name. The item ID is the channel ID.
+/// with the channel's canonical MUC room JID and name. The item ID is the room JID.
 pub fn build_channel_item(
+    waddle_id: &str,
     channel: &ChannelInfo,
     muc_domain: &str,
 ) -> Result<PubSubItem, XmppError> {
-    let room_jid_str = format!("{}@{}", channel.id, muc_domain);
-    let room_jid: jid::BareJid = room_jid_str
-        .parse()
-        .map_err(|e| XmppError::internal(format!("Invalid room JID '{}': {}", room_jid_str, e)))?;
+    let Some(_channel_type) = ChannelType::parse(&channel.channel_type) else {
+        return Err(XmppError::bad_request(Some(format!(
+            "Unsupported channel type '{}'",
+            channel.channel_type
+        ))));
+    };
+    let room_jid = managed_room_jid(waddle_id, &channel.id, muc_domain).map_err(|e| {
+        XmppError::internal(format!(
+            "Invalid room JID for managed channel '{}:{}': {}",
+            waddle_id, channel.id, e
+        ))
+    })?;
     let bookmark = xep0402::Bookmark::new(room_jid)
         .with_name(&channel.name)
         .with_autojoin(true);
     let payload = xep0402::build_bookmark_element(&bookmark);
 
     Ok(PubSubItem {
-        id: Some(channel.id.clone()),
+        id: Some(bookmark.jid.to_string()),
         payload: Some(payload),
     })
 }
@@ -128,9 +137,12 @@ mod tests {
             channel_type: "text".to_string(),
         };
 
-        let item = build_channel_item(&channel, "muc.example.com").unwrap();
+        let item = build_channel_item("waddle-1", &channel, "muc.example.com").unwrap();
 
-        assert_eq!(item.id, Some("general".to_string()));
+        assert_eq!(
+            item.id,
+            Some("waddle-1_general@muc.example.com".to_string())
+        );
         assert!(item.payload.is_some());
 
         let payload = item.payload.unwrap();
@@ -148,9 +160,12 @@ mod tests {
             channel_type: "text".to_string(),
         };
 
-        let item = build_channel_item(&channel, "muc.waddle.social").unwrap();
+        let item = build_channel_item("engineering", &channel, "muc.waddle.social").unwrap();
 
-        assert_eq!(item.id, Some("dev-chat".to_string()));
+        assert_eq!(
+            item.id,
+            Some("engineering_dev-chat@muc.waddle.social".to_string())
+        );
 
         let payload = item.payload.unwrap();
         assert_eq!(payload.attr("autojoin"), Some("true"));
@@ -165,11 +180,22 @@ mod tests {
             channel_type: "text".to_string(),
         };
 
-        let item = build_channel_item(&channel, "muc.example.com").unwrap();
+        let item = build_channel_item("waddle", &channel, "muc.example.com").unwrap();
         let payload = item.payload.unwrap();
 
         // Name should be preserved as-is (XML escaping handled by minidom)
         assert_eq!(payload.attr("name"), Some("Hello & World <Test>"));
+    }
+
+    #[test]
+    fn test_build_channel_item_rejects_unknown_channel_type() {
+        let channel = ChannelInfo {
+            id: "voice".to_string(),
+            name: "Voice".to_string(),
+            channel_type: "voice".to_string(),
+        };
+
+        assert!(build_channel_item("waddle", &channel, "muc.example.com").is_err());
     }
 
     #[test]

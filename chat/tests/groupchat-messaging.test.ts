@@ -184,4 +184,38 @@ describe("groupchat messaging", () => {
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
   });
 
+  test("sends XEP-0508 thread-create metadata for forum topics", () => {
+    const xmpp = makeAgent();
+
+    sendGroupMessage(xmpp, "roadmap@muc.waddle.social", "Kickoff post", {
+      threadCreate: { title: "Roadmap kickoff" },
+    });
+
+    expect(xmpp.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "groupchat",
+        body: "Kickoff post",
+        threadCreate: { title: "Roadmap kickoff" },
+      }),
+    );
+  });
+
+  test("sends XEP-0508 thread-reply metadata for forum replies", () => {
+    const xmpp = makeAgent();
+
+    sendGroupMessage(xmpp, "roadmap@muc.waddle.social", "Count me in", {
+      threadId: "topic-1",
+      threadReply: { threadId: "topic-1" },
+    });
+
+    expect(xmpp.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "groupchat",
+        body: "Count me in",
+        thread: "topic-1",
+        threadReply: { threadId: "topic-1" },
+      }),
+    );
+  });
+
 });

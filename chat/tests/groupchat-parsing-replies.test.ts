@@ -99,6 +99,40 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages[0].parentThreadId).toBe("thread-root");
   });
 
+  test("extracts forum topic metadata from thread-create", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "topic-1",
+        body: "Welcome aboard",
+        threadCreate: { title: "Getting started" },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].forumPostKind).toBe("topic");
+    expect(h.messages[0].forumTitle).toBe("Getting started");
+    expect(h.messages[0].forumThreadTitle).toBe("Getting started");
+    expect(h.messages[0].threadId).toBe("topic-1");
+  });
+
+  test("extracts forum reply metadata from thread-reply", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "reply-1",
+        body: "Sounds good",
+        threadReply: { threadId: "topic-1" },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].forumPostKind).toBe("reply");
+    expect(h.messages[0].threadId).toBe("topic-1");
+  });
+
   test("leaves replyTo undefined when no reply element is present", () => {
     const h = makeHandlers();
     dispatchGroupchat(makeMsg({ id: "msg-4", body: "plain" }), h);

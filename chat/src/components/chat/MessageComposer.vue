@@ -17,9 +17,11 @@ interface PendingAttachment {
 }
 
 const draft = defineModel<string>("draft", { required: true });
+const forumTitle = defineModel<string>("forumTitle", { default: "" });
 
 const props = defineProps<{
   channelName: string;
+  isForumChannel: boolean;
   isSending: boolean;
   disabled: boolean;
   tenorApiKey: string;
@@ -106,6 +108,7 @@ const mentionResults = computed(() => {
 });
 
 const emojiResults = computed(() => searchEmoji(emojiQuery.value));
+const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
 
 const activeResults = computed(() => {
   if (showMentions.value) return mentionResults.value;
@@ -115,6 +118,25 @@ const activeResults = computed(() => {
 
 /** Whether the composer has nothing sendable (no text and no pending attachments). */
 const isEmpty = computed(() => !draft.value.trim() && pendingAttachments.value.length === 0);
+const canSend = computed(() =>
+  !props.isSending &&
+  !props.disabled &&
+  props.slowModeCooldown <= 0 &&
+  !isEmpty.value &&
+  (!showForumTitleInput.value || !!forumTitle.value.trim()),
+);
+const editorPlaceholder = computed(() => {
+  if (props.slowModeCooldown > 0) {
+    return `Slow mode — wait ${props.slowModeCooldown}s`;
+  }
+  if (showForumTitleInput.value) {
+    return "Write the opening post";
+  }
+  if (props.isForumChannel) {
+    return "Reply in this topic";
+  }
+  return `Message #${props.channelName}`;
+});
 
 function onEditorUpdate(doc: Record<string, unknown>) {
   // Keep draft in sync as a plain text representation
@@ -213,6 +235,7 @@ function onSend(doc: Record<string, unknown>) {
   const text = serialized.body.trim();
   const attachments = pendingAttachments.value;
 
+  if (showForumTitleInput.value && !forumTitle.value.trim()) return;
   if (!text && attachments.length === 0) return;
 
   // Detach attachments before emitting so re-entry (e.g. Enter burst) cannot
@@ -320,6 +343,25 @@ watch(
       </button>
     </div>
 
+    <div
+      v-if="showForumTitleInput"
+      class="mb-2 rounded-xl border border-border bg-card/60 px-3 py-2.5 animate-fade-in"
+    >
+      <div class="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+        New topic
+      </div>
+      <input
+        v-model="forumTitle"
+        type="text"
+        class="w-full bg-transparent text-[14px] font-medium placeholder:text-muted-foreground/45 focus:outline-none"
+        :disabled="disabled || isSending"
+        placeholder="Add a clear title"
+      />
+      <p class="mt-1 text-[11px] text-muted-foreground">
+        Top-level forum posts need a title.
+      </p>
+    </div>
+
     <!-- Pending attachment previews -->
     <div
       v-if="pendingAttachments.length > 0"
@@ -420,7 +462,7 @@ watch(
     </button>
     <ChatEditor
       :ref="setEditorRef"
-      :placeholder="slowModeCooldown > 0 ? `Slow mode — wait ${slowModeCooldown}s` : `Message #${channelName}`"
+      :placeholder="editorPlaceholder"
       :disabled="disabled || slowModeCooldown > 0"
       @send="onSend"
       @update="onEditorUpdate"
@@ -428,7 +470,7 @@ watch(
     />
     <button
       class="h-10 w-10 flex items-center justify-center bg-primary text-primary-foreground rounded-xl hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 flex-shrink-0"
-      :disabled="isSending || disabled || isEmpty || slowModeCooldown > 0"
+      :disabled="!canSend"
       aria-label="Send message"
       @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
     >

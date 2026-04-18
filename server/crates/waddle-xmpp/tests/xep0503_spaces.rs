@@ -319,14 +319,56 @@ async fn xep0503_pubsub_items_returns_bookmarks() {
         response
     );
     assert!(
+        response.contains("waddle-1_general@muc.localhost"),
+        "Expected canonical general room JID, got: {}",
+        response
+    );
+    assert!(
         response.contains("random"),
         "Expected random channel item, got: {}",
+        response
+    );
+    assert!(
+        response.contains("waddle-1_random@muc.localhost"),
+        "Expected canonical random room JID, got: {}",
         response
     );
     // Items should contain conference elements (XEP-0402 bookmarks)
     assert!(
         response.contains("conference"),
         "Expected conference bookmark element, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0503_space_node_disco_items_use_canonical_room_jids() {
+    init_test_env();
+    let state =
+        Arc::new(MockAppState::new("localhost").with_waddle(test_waddle(), test_channels()));
+    let server = TestServer::start_with_state(state).await;
+    let mut client = RawXmppClient::connect(server.addr).await.unwrap();
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .unwrap();
+
+    let response = disco_items_query(
+        &mut client,
+        "spaces.localhost",
+        "spaces-node-items-1",
+        Some("waddle-1"),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        response.contains("waddle-1_general@muc.localhost"),
+        "Expected canonical general room JID, got: {}",
+        response
+    );
+    assert!(
+        response.contains("waddle-1_random@muc.localhost"),
+        "Expected canonical random room JID, got: {}",
         response
     );
 }

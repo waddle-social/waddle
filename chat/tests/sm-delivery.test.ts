@@ -23,6 +23,7 @@ function makeRoomMessaging(xmppClient: ReturnType<typeof makeRoomClient>) {
     xmppClient,
     ref("w1"),
     ref("c1"),
+    ref({ id: "c1", name: "general", channel_type: "text" }),
     String,
     actionError,
     () => {

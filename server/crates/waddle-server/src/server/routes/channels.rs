@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
+use waddle_xmpp::ChannelType;
 
 /// Extended application state for channel routes
 pub struct ChannelState {
@@ -82,7 +83,18 @@ pub struct CreateChannelRequest {
 }
 
 fn default_channel_type() -> String {
-    "text".to_string()
+    ChannelType::Text.as_str().to_string()
+}
+
+fn normalize_channel_type(channel_type: &str) -> Result<String, ChannelError> {
+    ChannelType::parse(channel_type)
+        .map(|kind| kind.as_str().to_string())
+        .ok_or_else(|| {
+            ChannelError::InvalidInput(format!(
+                "Unsupported channel_type '{}'. Expected one of: text, forum",
+                channel_type
+            ))
+        })
 }
 
 /// Request body for updating a channel
@@ -107,7 +119,7 @@ pub struct ChannelResponse {
     pub name: String,
     /// Channel description
     pub description: Option<String>,
-    /// Channel type (text, voice, etc.)
+    /// Channel type (text, forum)
     pub channel_type: String,
     /// Position in channel list
     pub position: i32,
@@ -284,6 +296,10 @@ pub async fn create_channel_handler(
     // Generate channel ID
     let channel_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    let channel_type = match normalize_channel_type(&request.channel_type) {
+        Ok(channel_type) => channel_type,
+        Err(err) => return channel_error_to_response(err).into_response(),
+    };
 
     // Insert channel into database
     if let Err(err) = insert_channel(
@@ -291,7 +307,7 @@ pub async fn create_channel_handler(
         &channel_id,
         &request.name,
         request.description.as_deref(),
-        &request.channel_type,
+        &channel_type,
         request.position,
         false, // not default
         &now,
@@ -333,7 +349,7 @@ pub async fn create_channel_handler(
             waddle_id,
             name: request.name,
             description: request.description,
-            channel_type: request.channel_type,
+            channel_type,
             position: request.position,
             is_default: false,
             created_at: now.clone(),
@@ -932,6 +948,64 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "invalid_input");
+    }
+
+    #[tokio::test]
+    async fn test_create_forum_channel() {
+        let channel_state = create_test_channel_state().await;
+        let session = create_test_session(&channel_state).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
+        let app = router(channel_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/waddles/{}/channels?session_id={}",
+                        waddle_id, session.id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"name": "announcements", "channel_type": "forum"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["channel_type"], "forum");
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_rejects_unknown_type() {
+        let channel_state = create_test_channel_state().await;
+        let session = create_test_session(&channel_state).await;
+        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
+        let app = router(channel_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/waddles/{}/channels?session_id={}",
+                        waddle_id, session.id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"name": "mystery", "channel_type": "voice"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

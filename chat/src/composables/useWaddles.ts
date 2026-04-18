@@ -8,6 +8,8 @@ import type {
 import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, ChannelCreateFormData, ChannelEditFormData } from "@/lib/chat-ui";
+import { executeCreateChannelCommand } from "@/lib/xmpp/commands";
+import { jidDomain } from "@/lib/xmpp/jid";
 
 interface LoadWaddlesOptions {
   loadStructure?: boolean;
@@ -168,6 +170,8 @@ export function useWaddles(
       const channelList: ChannelSummary[] = discoveredChannels.map((c) => ({
         id: c.id,
         name: c.name,
+        channel_type: c.channelType,
+        position: c.position,
       }));
 
       channels.value = channelList;
@@ -337,27 +341,56 @@ export function useWaddles(
 
   async function createChannel() {
     const waddleId = activeWaddleId.value;
-    if (!api.value || !waddleId || !createChannelForm.value.name.trim()) return undefined;
+    if (!xmppClient.value || !session.value || !waddleId || !createChannelForm.value.name.trim()) return undefined;
 
     isSubmitting.value = true;
     clearActionError();
 
     try {
       const desc = createChannelForm.value.description.trim();
-      const created = await api.value.createChannel(waddleId, {
+      const serverJid = jidDomain(session.value.jid);
+      
+      const xmppAgent = xmppClient.value.agent;
+      if (!xmppAgent) {
+        actionError.value = "XMPP connection not available";
+        return undefined;
+      }
+      
+      const result = await executeCreateChannelCommand(
+        xmppAgent,
+        serverJid,
+        {
+          waddleId,
+          name: createChannelForm.value.name.trim(),
+          description: desc || undefined,
+          channelType: createChannelForm.value.channel_type as "text" | "forum",
+          position: createChannelForm.value.position,
+        },
+      );
+
+      if (!result.success) {
+        actionError.value = result.error ?? "Failed to create channel";
+        return undefined;
+      }
+
+      // Capture created channel data before resetting the form
+      const createdChannel = {
+        id: result.channelId!,
         name: createChannelForm.value.name.trim(),
-        ...(desc ? { description: desc } : {}),
         channel_type: createChannelForm.value.channel_type,
-        position: createChannelForm.value.position,
-      });
+      };
+
       createChannelForm.value = {
         name: "",
         description: "",
         channel_type: "text",
         position: channels.value.length + 1,
       };
-      await loadStructure(waddleId, created.id);
-      return created;
+
+      // Refresh channel discovery to show the new channel
+      await loadStructure(waddleId, result.channelId ?? null);
+      
+      return createdChannel;
     } catch (e) {
       actionError.value = normalizeError(e);
       return undefined;

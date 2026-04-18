@@ -1,3 +1,5 @@
+import type { WaddleChannelType } from "@/lib/channel-types";
+
 /** Shared types for the XMPP client layer. */
 
 export interface XmppStatusSnapshot {
@@ -48,6 +50,10 @@ export interface LiveRoomMessage {
   /** RFC 6121 / XEP-0201 */
   threadId?: string;
   parentThreadId?: string;
+  /** XEP-0508 */
+  forumPostKind?: "topic" | "reply";
+  forumTitle?: string;
+  forumThreadTitle?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }
@@ -73,6 +79,10 @@ export interface LiveDmMessage {
   /** RFC 6121 / XEP-0201 */
   threadId?: string;
   parentThreadId?: string;
+  /** XEP-0508 */
+  forumPostKind?: "topic" | "reply";
+  forumTitle?: string;
+  forumThreadTitle?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }
@@ -160,6 +170,8 @@ export interface DiscoveredWaddle {
 export interface DiscoveredChannel {
   id: string;
   name: string;
+  channelType: WaddleChannelType;
+  position: number;
 }
 
 /** Cross-room activity event with optional mention data for notifications. */

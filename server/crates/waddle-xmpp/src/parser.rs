@@ -790,17 +790,10 @@ pub fn stanza_to_string<T: Into<Element>>(stanza: T) -> Result<String, XmppError
 /// element which `xmpp_parsers 0.21`'s `From<Message> for Element`
 /// incorrectly drops.
 pub fn message_to_string(msg: &xmpp_parsers::message::Message) -> Result<String, XmppError> {
-    let thread_id = msg.thread.as_ref().map(|t| t.0.clone());
+    let thread_id = msg.thread.as_ref().map(|t| t.0.as_str());
     let mut element: Element = msg.clone().into();
 
-    if let Some(id) = thread_id {
-        if !id.trim().is_empty() && !element.children().any(|child| child.name() == "thread") {
-            let thread_elem = Element::builder("thread", element.ns())
-                .append(id.as_str())
-                .build();
-            element.append_child(thread_elem);
-        }
-    }
+    crate::parser_utils::ensure_thread_element(&mut element, thread_id);
 
     element_to_string(&element)
 }
