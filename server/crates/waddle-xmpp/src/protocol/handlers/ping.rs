@@ -3,11 +3,10 @@
 //! The simplest possible handler: takes a `<ping>` IQ-get, emits the
 //! corresponding IQ-result with swapped `to`/`from` addresses.
 
-use crate::parser::stanza_to_string;
+use crate::connection::Stanza;
 use crate::protocol::event::{IqContext, OutboundEvent};
 use crate::protocol::traits::IqHandler;
 use crate::xep::xep0199;
-use tracing::Level;
 use xmpp_parsers::iq::Iq;
 
 /// Handler for `urn:xmpp:ping` (XEP-0199).
@@ -21,13 +20,7 @@ impl IqHandler for PingHandler {
 
     fn handle(&self, iq: &Iq, _ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
         let result = xep0199::build_ping_result(iq);
-        match stanza_to_string(result) {
-            Ok(xml) => vec![OutboundEvent::SendFrame(xml)],
-            Err(err) => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!("Failed to serialize ping result: {err}"),
-            }],
-        }
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result)))]
     }
 }
 
@@ -47,7 +40,7 @@ mod tests {
     }
 
     #[test]
-    fn ping_get_produces_result_frame() {
+    fn ping_get_produces_result_stanza() {
         let ping_elem = Element::builder("ping", xep0199::NS_PING).build();
         let iq = Iq {
             from: Some("alice@waddle.social/web".parse().expect("valid jid")),
@@ -65,11 +58,22 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         match &events[0] {
-            OutboundEvent::SendFrame(xml) => {
-                assert!(xml.contains("type=\"result\""));
-                assert!(xml.contains("id=\"p1\""));
-            }
-            other => panic!("expected SendFrame, got {other:?}"),
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    assert_eq!(reply.id, "p1");
+                    assert!(matches!(reply.payload, IqType::Result(_)));
+                    assert_eq!(
+                        reply.from.as_ref().map(|j| j.to_string()),
+                        Some("waddle.social".to_string())
+                    );
+                    assert_eq!(
+                        reply.to.as_ref().map(|j| j.to_string()),
+                        Some("alice@waddle.social/web".to_string())
+                    );
+                }
+                other => panic!("expected Iq stanza, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
         }
     }
 }

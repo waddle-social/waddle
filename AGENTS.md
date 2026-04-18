@@ -37,6 +37,14 @@ TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
   - Never construct XML with `format!`, string concatenation, or `println!`.
   - Always build XMPP/XML payloads using Rust structs/builders (`xmpp_parsers`, `minidom::Element`, etc.) and serialize them.
 
+- Typed-payloads hard rule:
+  - Protocol data MUST be modelled with typed Rust values — never `String`, `&str`, or `Vec<u8>` blobs — at every boundary: event enums, handler traits, actor messages, dispatcher entries, callback envelopes, storage writes, routing effects, and public return types.
+  - Stanzas use `crate::connection::Stanza` / `xmpp_parsers::{Iq, Message, Presence}`; arbitrary XML uses `minidom::Element`; JIDs use `jid::{Jid, BareJid, FullJid}`; namespaces and XEP identifiers use dedicated enums or `&'static str` constants from the `xep::*` modules — never ad-hoc string literals at call sites.
+  - Serialization to `String` / `Vec<u8>` happens only at the I/O boundary (the transport adapter writing bytes to a socket). Any event that is not the literal write-to-wire effect carries typed values.
+  - Parsing untyped input (raw frames from the transport, rows from storage) into typed values happens exactly once, as early as possible, and the untyped form is dropped immediately — typed values flow through the rest of the system.
+  - Error results are typed (`thiserror` enums or typed stanza-error structs), never stringly-typed diagnostics masquerading as payloads. `String` is acceptable only for human-facing log messages emitted via the `Log` outbound event.
+  - A PR that introduces a new `String`/`&str` field on an event, message, trait method, or public struct to carry structured data MUST be rejected; convert to a typed value or add a typed enum variant instead.
+
 - XEP custom test-suite hard rule:
   - Every implemented XEP (including advertised compatibility/profile support) MUST have a dedicated Rust custom test suite.
   - Any PR that adds or expands XEP behavior MUST add or update that XEP’s dedicated Rust tests in the same PR.

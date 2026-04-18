@@ -15,10 +15,9 @@
 
 use super::empty_iq_result;
 use crate::carbons::CARBONS_NS;
-use crate::parser::stanza_to_string;
+use crate::connection::Stanza;
 use crate::protocol::event::{IqContext, OutboundEvent};
 use crate::protocol::traits::IqHandler;
-use tracing::Level;
 use xmpp_parsers::iq::Iq;
 
 /// Handler for `urn:xmpp:carbons:2` IQ set.
@@ -31,13 +30,9 @@ impl IqHandler for CarbonsHandler {
     }
 
     fn handle(&self, iq: &Iq, _ctx: &IqContext<'_>) -> Vec<OutboundEvent> {
-        match stanza_to_string(empty_iq_result(iq)) {
-            Ok(xml) => vec![OutboundEvent::SendFrame(xml)],
-            Err(err) => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!("Failed to serialize carbons result: {err}"),
-            }],
-        }
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(
+            empty_iq_result(iq),
+        )))]
     }
 }
 
@@ -73,11 +68,14 @@ mod tests {
         let events = CarbonsHandler.handle(&iq, &ctx);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            OutboundEvent::SendFrame(xml) => {
-                assert!(xml.contains("type=\"result\""), "xml={xml}");
-                assert!(xml.contains("id=\"c1\""), "xml={xml}");
-            }
-            other => panic!("expected SendFrame, got {other:?}"),
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    assert_eq!(reply.id, "c1");
+                    assert!(matches!(reply.payload, IqType::Result(None)));
+                }
+                other => panic!("expected Iq, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
         }
     }
 }

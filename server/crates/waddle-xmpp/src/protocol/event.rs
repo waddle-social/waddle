@@ -3,11 +3,24 @@
 //! The state machine consumes [`InboundEvent`] and emits
 //! [`OutboundEvent`]. Side effects are performed by a transport-specific
 //! interpreter, never inside the state machine itself.
+//!
+//! # Typed payloads
+//!
+//! Per the *Typed-payloads hard rule* in `CLAUDE.md`, protocol data on
+//! every event variant is a typed Rust value — [`Stanza`],
+//! [`xmpp_parsers::iq::Iq`], [`xmpp_parsers::message::Message`], [`FullJid`],
+//! etc. — never a `String` carrying serialized XML. Serialization to the
+//! wire format happens exactly once, in the transport interpreter, at the
+//! I/O boundary. Parsing from the wire format happens exactly once, in
+//! [`super::frame::parse_frame`], before any event enters the state
+//! machine.
 
 use super::frame::InboundFrame;
 use crate::connection::Stanza;
 use jid::{BareJid, FullJid};
 use tracing::Level;
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::Message;
 
 /// Opaque identifier tying an async request to its eventual response.
 ///
@@ -26,14 +39,7 @@ pub struct TimerId(pub u64);
 
 /// Everything the state machine can react to.
 ///
-/// New variants are added in later migration steps as more of the protocol
-/// moves into the state machine:
-/// - `Tick(Instant)` — for SCRAM/SM timeouts
-/// - `EnrichmentComplete { id, message }` — GitHub link enrichment
-/// - `SfuResponse { id, response }` — Jingle IQ delegation
-/// - `MamQueryComplete { id, result }` — XEP-0313 query result
-/// - `ScramCredentialsLoaded { id, result }` — SASL credential lookup
-/// - `OAuthBearerValidated { id, result }` — token validation
+/// Every variant carries typed protocol data — no raw XML strings.
 #[derive(Debug)]
 pub enum InboundEvent {
     /// A parsed frame arrived from the transport.
@@ -47,14 +53,17 @@ pub enum InboundEvent {
 
     // -------------------------------------------------------------------
     // Async callback completions (matched to a previously emitted
-    // [`OutboundEvent`] by [`CallbackId`]). Each variant carries an
-    // `xml` payload that the completion handler can either forward as
-    // a reply frame or use as raw data for further processing.
+    // [`OutboundEvent`] by [`CallbackId`]). Every completion carries a
+    // typed payload — enrichment returns the rewritten `<message>`, the
+    // SFU returns its reply `<iq>`, and so on.
     // -------------------------------------------------------------------
     /// Result of an earlier [`OutboundEvent::RequestEnrichment`] — the
     /// enricher has finished annotating the message with link previews,
-    /// OGP metadata, etc., and returns the rewritten stanza as XML.
-    EnrichmentComplete { id: CallbackId, xml: String },
+    /// OGP metadata, etc., and returns the rewritten stanza.
+    EnrichmentComplete {
+        id: CallbackId,
+        message: Box<Message>,
+    },
     /// Result of an earlier [`OutboundEvent::AskSfu`] — the SFU actor
     /// has produced a reply Jingle IQ for us to forward to the client.
     SfuResponse {
@@ -62,8 +71,8 @@ pub enum InboundEvent {
         result: CallbackResult,
     },
     /// Result of an earlier [`OutboundEvent::QueryMam`] — the archive
-    /// has finished a window-size query and returns the matching
-    /// stanzas plus a final fin IQ as XML blobs.
+    /// has finished a window-size query and returns a pre-built reply
+    /// IQ (typically an `<iq type="result">` carrying the fin element).
     MamQueryComplete {
         id: CallbackId,
         result: CallbackResult,
@@ -83,21 +92,17 @@ pub enum InboundEvent {
 /// Uniform success-or-error shape for callback completions.
 ///
 /// Every async delegation emitted by a handler returns a result using
-/// this envelope. Handlers don't care what the concrete error type was;
-/// they only need to know whether to render a stanza-error response or
-/// continue the happy path. Richer typed payloads (e.g., a parsed MAM
-/// result set) can be carried as `xml` and re-parsed in the completion
-/// handler, or — in a later iteration — swapped for a typed payload
-/// enum without breaking the shape.
+/// this envelope with a *typed* stanza payload — never raw XML. The
+/// completion handler either forwards the stanza verbatim or extracts
+/// typed values from it directly.
 #[derive(Debug, Clone)]
 pub enum CallbackResult {
-    /// Successful completion. The `xml` is an outbound stanza ready to
-    /// be forwarded, or empty when the result is acknowledgement-only.
-    Ok { xml: String },
-    /// The async operation failed. The `xml` is a pre-built stanza
-    /// error response if the caller emitted one, otherwise a free-form
-    /// diagnostic message.
-    Err { xml: String },
+    /// Successful completion. `stanza` is the reply to forward to the
+    /// peer, or `None` when the result is acknowledgement-only.
+    Ok { stanza: Option<Box<Stanza>> },
+    /// The async operation failed. `stanza` is the pre-built stanza-error
+    /// reply to forward to the peer.
+    Err { stanza: Box<Stanza> },
 }
 
 /// Every effect the state machine can cause.
@@ -107,15 +112,17 @@ pub enum CallbackResult {
 /// etc.).
 ///
 /// Each variant is a **typed** expression of intent — no `format!()` XML,
-/// no string-keyed actor calls. The decoupling means new XEPs add new
-/// variants rather than growing a single monolithic handler.
+/// no string-keyed actor calls, no `xml: String` payloads. The decoupling
+/// means new XEPs add new variants rather than growing a single monolithic
+/// handler.
 #[derive(Debug, Clone)]
 pub enum OutboundEvent {
     // -------------------------------------------------------------------
     // Framing
     // -------------------------------------------------------------------
-    /// Write a serialized stanza (XML text) to the transport.
-    SendFrame(String),
+    /// Write a typed stanza to the transport. The interpreter serializes
+    /// the stanza to its XML wire form at the I/O boundary.
+    SendStanza(Box<Stanza>),
     /// Close the transport gracefully.
     CloseTransport,
 
@@ -126,19 +133,19 @@ pub enum OutboundEvent {
     /// JID.
     ///
     /// The interpreter resolves `jid` against `ConnectionRegistry` and
-    /// writes the XML to that connection's outbound channel. If the
+    /// writes the stanza to that connection's outbound channel. If the
     /// target is offline the event is typically logged and dropped
     /// (standard XMPP offline-delivery semantics are archive-based, not
     /// routing-based).
-    SendDirect { jid: FullJid, xml: String },
-    /// Deliver a stanza to every occupant of a MUC room.
+    SendDirect { jid: FullJid, stanza: Box<Stanza> },
+    /// Deliver a message to every occupant of a MUC room.
     ///
     /// The interpreter resolves occupancy via `MucRoomRegistry`. The
     /// `exclude` field suppresses delivery to a specific JID (typically
     /// the sender, to avoid duplicate echoes).
     BroadcastToRoom {
         room: BareJid,
-        xml: String,
+        message: Box<Message>,
         exclude: Option<FullJid>,
     },
 
@@ -160,18 +167,17 @@ pub enum OutboundEvent {
     // -------------------------------------------------------------------
     /// Persist a groupchat message to the MAM archive.
     ///
-    /// The payload is a pre-serialized `<message/>` XML string; the
-    /// interpreter's MAM storage layer owns ID generation and indexing.
+    /// The interpreter's MAM storage layer owns ID generation and indexing.
     ArchiveGroupchat {
         room: BareJid,
         sender: FullJid,
-        xml: String,
+        message: Box<Message>,
     },
     /// Persist a one-to-one direct message to the MAM archive.
     ArchiveDirect {
         from: BareJid,
         to: BareJid,
-        xml: String,
+        message: Box<Message>,
     },
 
     // -------------------------------------------------------------------
@@ -180,17 +186,28 @@ pub enum OutboundEvent {
     // -------------------------------------------------------------------
     /// Ask the enrichment service to annotate a message with link
     /// previews. Result arrives as a future `InboundEvent`.
-    RequestEnrichment { id: CallbackId, xml: String },
+    RequestEnrichment {
+        id: CallbackId,
+        message: Box<Message>,
+    },
     /// Send a Jingle IQ to the SFU actor. Result arrives as a future
     /// `InboundEvent`.
-    AskSfu { id: CallbackId, xml: String },
+    AskSfu { id: CallbackId, iq: Box<Iq> },
     /// Run a MAM query against the archive. Result arrives as a future
     /// `InboundEvent`.
-    QueryMam { id: CallbackId, xml: String },
+    QueryMam { id: CallbackId, iq: Box<Iq> },
     /// Load SCRAM credentials for `username` from `AppState`. Result
     /// arrives as a future `InboundEvent`.
+    ///
+    /// `username` is an opaque authentication identifier supplied by the
+    /// SASL client — not yet a JID, so it is carried as a `String`. The
+    /// interpreter's credential store resolves it to a typed identity
+    /// before the completion callback fires.
     LoadScramCredentials { id: CallbackId, username: String },
     /// Validate an OAUTHBEARER token via `AppState::validate_session_token`.
+    ///
+    /// `token` is an opaque bearer credential (per RFC 6750 §2.1) and has
+    /// no internal structure to model; it stays a `String` by design.
     ValidateOAuthBearer { id: CallbackId, token: String },
 
     // -------------------------------------------------------------------
@@ -210,6 +227,8 @@ pub enum OutboundEvent {
     /// Logging is modelled as an event (rather than calling `tracing::info!`
     /// directly from the state machine) so that tests can assert on it and
     /// the interpreter can route it through the application's log pipeline.
+    /// `message` is free-form human-facing diagnostic text — the sole
+    /// legitimate `String` payload under the typed-payloads rule.
     Log { level: Level, message: String },
 }
 
@@ -221,7 +240,10 @@ pub enum OutboundEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct IqContext<'a> {
     /// The server's own domain (e.g. `"waddle.social"`).
+    ///
+    /// Borrowed from `AppState`'s static configuration; not a dynamic
+    /// protocol value, hence `&str` rather than a parsed JID component.
     pub domain: &'a str,
     /// The currently authenticated full JID of the connection owner.
-    pub full_jid: &'a jid::FullJid,
+    pub full_jid: &'a FullJid,
 }

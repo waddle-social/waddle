@@ -1,10 +1,18 @@
 //! Effect interpreter for [`waddle_xmpp::protocol::OutboundEvent`].
 //!
 //! The state machine in `waddle-xmpp::protocol` is pure and synchronous —
-//! it emits outbound events that *describe* side effects but does not
-//! perform them. This module is the async counterpart: it pattern-matches
-//! each event and runs the real operation against the transport, the
-//! connection registry, MUC rooms, MAM storage, the SFU actor, etc.
+//! it emits typed outbound events that *describe* side effects but does
+//! not perform them. This module is the async counterpart: it
+//! pattern-matches each event and runs the real operation against the
+//! transport, the connection registry, MUC rooms, MAM storage, the SFU
+//! actor, etc.
+//!
+//! # Typed payloads at the I/O boundary
+//!
+//! Per the project's typed-payloads hard rule, stanzas travel through
+//! the state machine as typed values (`Stanza`, `Iq`, `Message`).
+//! Serialization to the XML wire format happens here, exactly once,
+//! when we hand bytes off to the transport.
 //!
 //! # Current coverage
 //!
@@ -16,6 +24,7 @@
 //! migration steps pull their XEP into the sans-I/O world.
 
 use tracing::{debug, error, info, warn};
+use waddle_xmpp::parser::stanza_to_string;
 use waddle_xmpp::protocol::OutboundEvent;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
@@ -41,9 +50,12 @@ pub async fn interpret(events: Vec<OutboundEvent>) -> InterpretOutcome {
 
     for event in events {
         match event {
-            OutboundEvent::SendFrame(xml) => {
-                outcome.frames.push(xml);
-            }
+            OutboundEvent::SendStanza(stanza) => match stanza.to_element_string() {
+                Ok(xml) => outcome.frames.push(xml),
+                Err(err) => {
+                    error!(error = %err, "failed to serialize outbound stanza; dropping frame");
+                }
+            },
             OutboundEvent::CloseTransport => {
                 outcome.close = true;
             }
@@ -87,17 +99,50 @@ pub async fn interpret(events: Vec<OutboundEvent>) -> InterpretOutcome {
     outcome
 }
 
+/// Helper trait so the interpreter has a single, typed serialization
+/// entry point for any `Stanza` leaving the state machine. Keeping it
+/// private to this module prevents callers from serializing stanzas in
+/// other spots — the I/O boundary stays narrow.
+trait ToElementString {
+    fn to_element_string(&self) -> Result<String, waddle_xmpp::XmppError>;
+}
+
+impl ToElementString for waddle_xmpp::connection::Stanza {
+    fn to_element_string(&self) -> Result<String, waddle_xmpp::XmppError> {
+        use waddle_xmpp::connection::Stanza;
+        match self {
+            Stanza::Iq(iq) => stanza_to_string(iq.clone()),
+            Stanza::Message(msg) => stanza_to_string(msg.clone()),
+            Stanza::Presence(p) => stanza_to_string(p.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp::connection::Stanza;
+    use xmpp_parsers::iq::{Iq, IqType};
+    use xmpp_parsers::minidom::Element;
+
+    fn result_iq(id: &str) -> Iq {
+        Iq {
+            from: None,
+            to: None,
+            id: id.to_string(),
+            payload: IqType::Result(Some(Element::builder("query", "jabber:iq:roster").build())),
+        }
+    }
 
     #[tokio::test]
-    async fn interprets_send_frame() {
-        let events = vec![OutboundEvent::SendFrame(
-            "<iq type=\"result\"/>".to_string(),
-        )];
+    async fn interprets_send_stanza() {
+        let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq(
+            "x",
+        ))))];
         let outcome = interpret(events).await;
-        assert_eq!(outcome.frames, vec!["<iq type=\"result\"/>"]);
+        assert_eq!(outcome.frames.len(), 1);
+        assert!(outcome.frames[0].contains("type=\"result\""));
+        assert!(outcome.frames[0].contains("id=\"x\""));
         assert!(!outcome.close);
     }
 
@@ -123,14 +168,16 @@ mod tests {
     #[tokio::test]
     async fn preserves_frame_order_across_multiple_events() {
         let events = vec![
-            OutboundEvent::SendFrame("<a/>".to_string()),
+            OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq("a")))),
             OutboundEvent::Log {
                 level: tracing::Level::DEBUG,
                 message: "between".to_string(),
             },
-            OutboundEvent::SendFrame("<b/>".to_string()),
+            OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq("b")))),
         ];
         let outcome = interpret(events).await;
-        assert_eq!(outcome.frames, vec!["<a/>", "<b/>"]);
+        assert_eq!(outcome.frames.len(), 2);
+        assert!(outcome.frames[0].contains("id=\"a\""));
+        assert!(outcome.frames[1].contains("id=\"b\""));
     }
 }

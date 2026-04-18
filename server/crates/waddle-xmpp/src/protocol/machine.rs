@@ -35,9 +35,11 @@ pub enum PendingOp {
         requester: jid::FullJid,
     },
     /// Awaiting link-enrichment on an outbound groupchat or direct
-    /// message. The pre-enrichment XML is retained so fallback
+    /// message. The pre-enrichment stanza is retained so fallback
     /// behaviour can resend it if the enricher fails.
-    Enrichment { fallback_xml: String },
+    Enrichment {
+        fallback: Box<xmpp_parsers::message::Message>,
+    },
     /// Awaiting the SFU actor's Jingle IQ response.
     Sfu {
         request_id: String,
@@ -109,7 +111,9 @@ impl XmppStateMachine {
             InboundEvent::FrameReceived(frame) => self.on_frame(frame),
             InboundEvent::StanzaFromPeer(stanza) => self.on_peer_stanza(*stanza),
             InboundEvent::TransportClosed => self.on_closed(),
-            InboundEvent::EnrichmentComplete { id, xml } => self.on_enrichment_complete(id, xml),
+            InboundEvent::EnrichmentComplete { id, message } => {
+                self.on_enrichment_complete(id, *message)
+            }
             InboundEvent::SfuResponse { id, result } => self.on_sfu_response(id, result),
             InboundEvent::MamQueryComplete { id, result } => self.on_mam_complete(id, result),
             InboundEvent::ScramCredentialsLoaded { id, result } => {
@@ -128,7 +132,11 @@ impl XmppStateMachine {
     // dispatch lands alongside each async-dependent handler (MAM query, SFU
     // ask, OAUTHBEARER validation, …) in later migration steps.
 
-    fn on_enrichment_complete(&mut self, id: CallbackId, _xml: String) -> Vec<OutboundEvent> {
+    fn on_enrichment_complete(
+        &mut self,
+        id: CallbackId,
+        _message: xmpp_parsers::message::Message,
+    ) -> Vec<OutboundEvent> {
         self.log_completion(id, "EnrichmentComplete")
     }
 
@@ -311,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn ping_iq_in_ready_phase_emits_send_frame() {
+    fn ping_iq_in_ready_phase_emits_send_stanza() {
         let mut dispatcher = StanzaDispatcher::new();
         dispatcher.register_iq(Arc::new(PingHandler));
         let mut sm = test_support::ready_machine("waddle.social", test_jid(), dispatcher);
@@ -320,13 +328,16 @@ mod tests {
             Stanza::Iq(make_ping_iq("ping-42")),
         ))));
 
-        assert_eq!(events.len(), 1, "expected one SendFrame event");
+        assert_eq!(events.len(), 1, "expected one SendStanza event");
         match &events[0] {
-            OutboundEvent::SendFrame(xml) => {
-                assert!(xml.contains("type=\"result\""), "xml was: {xml}");
-                assert!(xml.contains("id=\"ping-42\""), "xml was: {xml}");
-            }
-            other => panic!("expected SendFrame, got {other:?}"),
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    assert_eq!(reply.id, "ping-42");
+                    assert!(matches!(reply.payload, IqType::Result(_)));
+                }
+                other => panic!("expected Iq, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
         }
     }
 
@@ -343,8 +354,8 @@ mod tests {
         assert!(
             events
                 .iter()
-                .all(|e| !matches!(e, OutboundEvent::SendFrame(_))),
-            "pre-auth stanzas must never produce a reply frame"
+                .all(|e| !matches!(e, OutboundEvent::SendStanza(_))),
+            "pre-auth stanzas must never produce a reply stanza"
         );
         assert!(
             events
@@ -423,7 +434,7 @@ mod tests {
 
         let events = sm.handle(InboundEvent::MamQueryComplete {
             id,
-            result: crate::protocol::event::CallbackResult::Ok { xml: String::new() },
+            result: crate::protocol::event::CallbackResult::Ok { stanza: None },
         });
 
         assert!(events.iter().any(|e| matches!(
@@ -435,7 +446,7 @@ mod tests {
         // completion diagnostic path.
         let events2 = sm.handle(InboundEvent::MamQueryComplete {
             id,
-            result: crate::protocol::event::CallbackResult::Ok { xml: String::new() },
+            result: crate::protocol::event::CallbackResult::Ok { stanza: None },
         });
         assert!(events2.iter().any(|e| matches!(
             e,

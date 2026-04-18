@@ -9,12 +9,11 @@
 //! The behaviour matches what the legacy string-matching path in
 //! `routes::websocket::handle_iq` did for `jabber:iq:roster`.
 
-use crate::parser::stanza_to_string;
+use crate::connection::Stanza;
 use crate::protocol::event::{IqContext, OutboundEvent};
 use crate::protocol::traits::IqHandler;
 use crate::roster::ROSTER_NS;
 use minidom::Element;
-use tracing::Level;
 use xmpp_parsers::iq::{Iq, IqType};
 
 /// Handler for `jabber:iq:roster` IQ get/set.
@@ -36,13 +35,7 @@ impl IqHandler for RosterHandler {
             id: iq.id.clone(),
             payload: IqType::Result(Some(empty_query)),
         };
-        match stanza_to_string(result) {
-            Ok(xml) => vec![OutboundEvent::SendFrame(xml)],
-            Err(err) => vec![OutboundEvent::Log {
-                level: Level::ERROR,
-                message: format!("Failed to serialize empty roster result: {err}"),
-            }],
-        }
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result)))]
     }
 }
 
@@ -79,14 +72,24 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         match &events[0] {
-            OutboundEvent::SendFrame(xml) => {
-                assert!(xml.contains("type=\"result\""), "xml={xml}");
-                assert!(xml.contains("id=\"r1\""), "xml={xml}");
-                assert!(xml.contains("jabber:iq:roster"), "xml={xml}");
-                assert!(xml.contains("from=\"waddle.social\""), "xml={xml}");
-                assert!(xml.contains("to=\"alice@waddle.social/web\""), "xml={xml}");
-            }
-            other => panic!("expected SendFrame, got {other:?}"),
+            OutboundEvent::SendStanza(stanza) => match stanza.as_ref() {
+                Stanza::Iq(reply) => {
+                    assert_eq!(reply.id, "r1");
+                    match &reply.payload {
+                        IqType::Result(Some(payload)) => {
+                            assert_eq!(payload.name(), "query");
+                            assert_eq!(payload.ns(), ROSTER_NS);
+                        }
+                        other => panic!("expected Result(Some(query)), got {other:?}"),
+                    }
+                    assert_eq!(
+                        reply.from.as_ref().map(|j| j.to_string()),
+                        Some("waddle.social".to_string())
+                    );
+                }
+                other => panic!("expected Iq, got {other:?}"),
+            },
+            other => panic!("expected SendStanza, got {other:?}"),
         }
     }
 }
