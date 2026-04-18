@@ -5,7 +5,6 @@ import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Image from "@tiptap/extension-image";
 import Placeholder from "@tiptap/extension-placeholder";
-import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -124,21 +123,20 @@ defineExpose({
 </script>
 
 <template>
-  <div class="relative" :class="compact ? '' : 'flex-1'" @click="editor?.commands.focus()">
-    <div
-      class="chat-editor flex items-center rounded-xl bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
-      :class="[
-        compact ? 'min-h-9 py-1' : 'min-h-10 py-1.5',
-        disabled ? 'opacity-40 pointer-events-none' : '',
-      ]"
-    >
-      <EditorContent
-        v-if="editor"
-        :editor="editor"
-        class="w-full"
-      />
-    </div>
-    <EditorBubbleToolbar v-if="editor && !compact" :editor="editor" />
+  <div
+    class="chat-editor flex items-center rounded-xl bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
+    :class="[
+      compact ? 'min-h-9 py-1' : 'min-h-10 py-1.5',
+      compact ? '' : 'flex-1',
+      disabled ? 'opacity-40 pointer-events-none' : '',
+    ]"
+    @click="editor?.commands.focus()"
+  >
+    <EditorContent
+      v-if="editor"
+      :editor="editor"
+      class="w-full"
+    />
   </div>
 </template>
 
