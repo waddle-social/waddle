@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from "vue";
-import { Check, CheckCheck, Pencil, SmilePlus, Trash2, FileDown } from "lucide-vue-next";
+import { Pencil, SmilePlus, Trash2, FileDown } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
@@ -142,6 +142,7 @@ watch(
     class="group relative flex gap-3 px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
+      message.deliveryStatus === 'sending' ? 'opacity-50' : '',
     ]"
   >
     <button
@@ -165,13 +166,6 @@ watch(
           {{ formatStamp(message.createdAt) }}
         </span>
         <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
-        <span
-          v-if="message.isSelf && message.deliveryStatus"
-          class="text-[11px] text-muted-foreground flex items-center gap-0.5"
-        >
-          <Check v-if="message.deliveryStatus === 'sending'" class="w-3 h-3" />
-          <CheckCheck v-else-if="message.deliveryStatus === 'delivered'" class="w-3 h-3 text-primary" />
-        </span>
         <span
           v-if="message.isSelf && message.readBy && message.readBy.length > 0"
           class="text-[11px] text-muted-foreground/50"

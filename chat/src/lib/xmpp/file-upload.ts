@@ -136,24 +136,32 @@ export async function uploadFile(
  * Returns null if no image is found.
  */
 export function extractImageFromEvent(event: ClipboardEvent | DragEvent): File | null {
+  const all = extractImagesFromEvent(event);
+  return all[0] ?? null;
+}
+
+/** Extract every image from a paste or drop event. */
+export function extractImagesFromEvent(event: ClipboardEvent | DragEvent): File[] {
+  const out: File[] = [];
   if (event instanceof ClipboardEvent) {
     const items = event.clipboardData?.items;
-    if (!items) return null;
+    if (!items) return out;
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.startsWith("image/")) {
-        return items[i].getAsFile();
+        const f = items[i].getAsFile();
+        if (f) out.push(f);
       }
     }
   } else if (event instanceof DragEvent) {
     const files = event.dataTransfer?.files;
-    if (!files) return null;
+    if (!files) return out;
     for (let i = 0; i < files.length; i++) {
       if (files[i].type.startsWith("image/")) {
-        return files[i];
+        out.push(files[i]);
       }
     }
   }
-  return null;
+  return out;
 }
 
 function parseSlotResponse(response: any): SlotInfo {

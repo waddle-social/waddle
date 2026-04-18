@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
-import { Send, Image } from "lucide-vue-next";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
+import { Send, Image, X } from "lucide-vue-next";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
-import { extractImageFromEvent } from "@/lib/xmpp/file-upload";
+import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { MarkupSpan } from "@/lib/chat-ui";
+
+interface PendingAttachment {
+  id: string;
+  file: File | Blob;
+  previewUrl: string;
+  name: string;
+}
 
 const draft = defineModel<string>("draft", { required: true });
 
@@ -37,6 +44,33 @@ const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editorRef.value = instance;
 };
+
+const pendingAttachments = ref<PendingAttachment[]>([]);
+
+function addAttachments(files: Array<File | Blob>) {
+  for (const file of files) {
+    const name = file instanceof File ? file.name : `image-${Date.now()}.png`;
+    pendingAttachments.value = [
+      ...pendingAttachments.value,
+      {
+        id: crypto.randomUUID(),
+        file,
+        name,
+        previewUrl: URL.createObjectURL(file),
+      },
+    ];
+  }
+}
+
+function removeAttachment(id: string) {
+  const found = pendingAttachments.value.find((a) => a.id === id);
+  if (found) URL.revokeObjectURL(found.previewUrl);
+  pendingAttachments.value = pendingAttachments.value.filter((a) => a.id !== id);
+}
+
+onBeforeUnmount(() => {
+  for (const a of pendingAttachments.value) URL.revokeObjectURL(a.previewUrl);
+});
 
 /** Get the underlying TipTap Editor instance from the ChatEditor ref. */
 function getTiptapEditor() {
@@ -72,8 +106,8 @@ const activeResults = computed(() => {
   return [];
 });
 
-/** Whether the editor content is empty (for send button disabled state). */
-const isEmpty = computed(() => !draft.value.trim());
+/** Whether the composer has nothing sendable (no text and no pending attachments). */
+const isEmpty = computed(() => !draft.value.trim() && pendingAttachments.value.length === 0);
 
 function onEditorUpdate(doc: Record<string, unknown>) {
   // Keep draft in sync as a plain text representation
@@ -169,8 +203,24 @@ function onSend(doc: Record<string, unknown>) {
   }
 
   const serialized = serializeTiptapToXep0393(doc as any);
-  if (!serialized.body.trim()) return;
-  emit("send", serialized.body, serialized.markup);
+  const text = serialized.body.trim();
+  const attachments = pendingAttachments.value;
+
+  if (!text && attachments.length === 0) return;
+
+  // Detach attachments before emitting so re-entry (e.g. Enter burst) cannot
+  // double-send them. Revoke preview URLs after the parent has consumed files.
+  if (attachments.length > 0) {
+    pendingAttachments.value = [];
+    for (const a of attachments) {
+      emit("fileUpload", a.file);
+      URL.revokeObjectURL(a.previewUrl);
+    }
+  }
+
+  if (text) {
+    emit("send", serialized.body, serialized.markup);
+  }
 }
 
 function onEditorCancel() {
@@ -214,10 +264,10 @@ function onGifSelected(url: string) {
 }
 
 function onPaste(e: ClipboardEvent) {
-  const file = extractImageFromEvent(e);
-  if (file) {
+  const files = extractImagesFromEvent(e);
+  if (files.length > 0) {
     e.preventDefault();
-    emit("fileUpload", file);
+    addAttachments(files);
   }
 }
 
@@ -234,6 +284,32 @@ watch(
 
 <template>
   <div class="relative px-4 py-3 flex-shrink-0" @keydown="onKeydown" @paste="onPaste">
+    <!-- Pending attachment previews -->
+    <div
+      v-if="pendingAttachments.length > 0"
+      class="flex flex-wrap gap-2 mb-2 animate-fade-in"
+    >
+      <div
+        v-for="att in pendingAttachments"
+        :key="att.id"
+        class="relative group/att rounded-xl border border-border bg-muted overflow-hidden"
+      >
+        <img
+          :src="att.previewUrl"
+          :alt="att.name"
+          class="h-20 w-20 object-cover"
+        />
+        <button
+          type="button"
+          class="absolute top-1 right-1 h-5 w-5 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
+          :title="`Remove ${att.name}`"
+          @click="removeAttachment(att.id)"
+        >
+          <X class="w-3 h-3" />
+        </button>
+      </div>
+    </div>
+
     <!-- Upload progress bar -->
     <div
       v-if="uploadProgress.uploading"
