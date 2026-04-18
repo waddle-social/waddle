@@ -46,6 +46,8 @@ jobs:
           target: runtime
           platforms: linux/amd64
           push: false
+          build-args: |
+            WADDLE_GIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
           cache-from: type=gha,scope=waddle-server-amd64
           cache-to: type=gha,mode=max,scope=waddle-server-amd64
 
@@ -88,6 +90,8 @@ jobs:
           target: runtime
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            WADDLE_GIT_SHA=${{ github.sha }}
           cache-from: |
             type=gha,scope=waddle-server-${{ matrix.arch }}
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}

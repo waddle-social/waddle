@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { extractServerSha, type ServerVersion } from "@/composables/useVersion";
+import { extractServerSha, extractServerShortVersion, type ServerVersion } from "@/composables/useVersion";
 
 const props = defineProps<{
   webCommitSha?: string;
@@ -14,7 +14,8 @@ const webShortSha = computed(() => (props.webCommitSha ?? "unknown").slice(0, 7)
 const serverShortSha = computed(() => {
   const sha = extractServerSha(props.serverVersion ?? null);
   if (sha) return sha.slice(0, 7);
-  return props.serverVersion?.version ?? "…";
+  if (!props.serverVersion) return "…";
+  return extractServerShortVersion(props.serverVersion) ?? "unknown";
 });
 const tooltip = computed(
   () => `web ${props.webCommitSha ?? "unknown"}\nserver ${props.serverVersion?.version ?? "unknown"}`,
