@@ -2389,6 +2389,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 {
                     (data, false)
                 } else {
+                    // Block instant room creation for managed channel JIDs
+                    // Managed channels must be created via XEP-0050 ad-hoc commands
+                    if crate::parse_managed_room_jid(&join_req.room_jid).is_some() {
+                        return Err(XmppError::not_allowed(Some(
+                            "Cannot join managed channel room that doesn't exist. Create the channel first using the waddle:create-channel ad-hoc command.".into(),
+                        )));
+                    }
+
                     // Create instant room (XEP-0045 Section 10.1.2)
                     debug!(
                         room = %join_req.room_jid,
