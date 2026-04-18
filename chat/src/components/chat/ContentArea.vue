@@ -208,6 +208,7 @@ const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
+const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
 const conversationScope = computed(() => [
   props.sidebarMode ?? "channels",
@@ -449,15 +450,18 @@ function showDividerAfter(messageId: string): boolean {
     </div>
 
     <!-- Composer (social / top-pinned mode) -->
+    <!-- Note: the composer and typing indicator appear in two spots in the DOM
+         so they can be rendered above or below the messages container depending
+         on the scroll-direction mode. -->
     <MessageComposer
-      v-if="(channel || dmPeer) && isTopPinned"
+      v-if="canShowComposer && isTopPinned"
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
-      :disabled="!channel && !dmPeer"
+      :disabled="!canShowComposer"
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
@@ -585,14 +589,14 @@ function showDividerAfter(messageId: string): boolean {
 
     <!-- Composer -->
     <MessageComposer
-      v-if="(channel || dmPeer) && !isTopPinned"
+      v-if="canShowComposer && !isTopPinned"
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
-      :disabled="!channel && !dmPeer"
+      :disabled="!canShowComposer"
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
