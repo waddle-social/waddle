@@ -14,7 +14,11 @@ import type { WaddleSession } from "@/lib/server-auth";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 
-function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): TimelineMessage {
+function fromLiveDmMessage(
+  session: WaddleSession,
+  msg: LiveDmMessage,
+  parentLookup?: (id: string) => { body?: string } | undefined,
+): TimelineMessage {
   const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
@@ -28,7 +32,12 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.replyTo) {
-    tm.replyTo = { id: msg.replyTo.id, ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}) };
+    const parent = parentLookup?.(msg.replyTo.id);
+    tm.replyTo = {
+      id: msg.replyTo.id,
+      ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}),
+      ...(parent?.body ? { preview: parent.body } : {}),
+    };
   }
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
@@ -244,7 +253,12 @@ export function useDmMessaging(
           regular.push(msg);
         }
       }
-      const timeline = regular.map((m) => fromLiveDmMessage(session.value!, m));
+      const byId = new Map<string, TimelineMessage>();
+      const timeline = regular.map((m) => {
+        const tm = fromLiveDmMessage(session.value!, m, (id) => byId.get(id));
+        byId.set(tm.id, tm);
+        return tm;
+      });
       for (const update of correctionUpdates) {
         const target = timeline.find((m) => m.id === update.targetId);
         if (!target) continue;
@@ -502,7 +516,9 @@ export function useDmMessaging(
       applyCorrection(msg.replacesId, msg.body, msg.markup);
       return;
     }
-    mergeLiveMessage(fromLiveDmMessage(session.value, msg));
+    mergeLiveMessage(
+      fromLiveDmMessage(session.value, msg, (id) => messages.value.find((m) => m.id === id)),
+    );
   }
 
   function onChatState(event: DmChatStateEvent) {

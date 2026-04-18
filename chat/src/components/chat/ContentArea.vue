@@ -101,8 +101,14 @@ function scrollToMessage(messageId: string) {
   if (!notice && el instanceof HTMLElement) {
     clearReplyJumpNotice();
     el.scrollIntoView({ behavior: "smooth", block: "center" });
-    el.classList.add("ring-2", "ring-primary/40");
-    setTimeout(() => el.classList.remove("ring-2", "ring-primary/40"), 1400);
+    // Force a reflow before re-adding so repeat clicks re-trigger the animation.
+    el.classList.remove("message-jump-flash", "message-jump-flash-fade");
+    void el.offsetWidth;
+    el.classList.add("message-jump-flash");
+    setTimeout(() => el.classList.add("message-jump-flash-fade"), 200);
+    setTimeout(() => {
+      el.classList.remove("message-jump-flash", "message-jump-flash-fade");
+    }, 2000);
     return;
   }
 

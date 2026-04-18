@@ -16,7 +16,11 @@ import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui"
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 
-function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
+export function fromLiveMessage(
+  session: WaddleSession,
+  msg: LiveRoomMessage,
+  parentLookup?: (id: string) => { body?: string } | undefined,
+): TimelineMessage {
   const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
@@ -41,7 +45,12 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
     tm.markup = msg.markup;
   }
   if (msg.replyTo) {
-    tm.replyTo = { id: msg.replyTo.id, ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}) };
+    const parent = parentLookup?.(msg.replyTo.id);
+    tm.replyTo = {
+      id: msg.replyTo.id,
+      ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}),
+      ...(parent?.body ? { preview: parent.body } : {}),
+    };
   }
   if (msg.threadId) tm.threadId = msg.threadId;
   if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
@@ -132,7 +141,9 @@ export function useMessaging(
           return;
         }
 
-        mergeLiveMessage(fromLiveMessage(session.value!, msg));
+        mergeLiveMessage(
+          fromLiveMessage(session.value!, msg, (id) => messages.value.find((m) => m.id === id)),
+        );
 
         // Trigger notification for mentions when tab is unfocused
         const isTabHidden = typeof document !== "undefined"
@@ -486,8 +497,14 @@ export function useMessaging(
         }
       }
 
-      // Convert to timeline messages
-      const timeline = regularMessages.map((m) => fromLiveMessage(session.value!, m));
+      // Convert to timeline messages; accumulate in a map so replies that land
+      // after their parent in the MAM batch can resolve a preview.
+      const byId = new Map<string, TimelineMessage>();
+      const timeline = regularMessages.map((m) => {
+        const tm = fromLiveMessage(session.value!, m, (id) => byId.get(id));
+        byId.set(tm.id, tm);
+        return tm;
+      });
 
       for (const update of correctionUpdates) {
         const target = timeline.find((m) => m.id === update.targetId);
