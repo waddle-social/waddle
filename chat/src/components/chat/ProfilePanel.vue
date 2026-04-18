@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Bell, BellOff, LogOut, Settings } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
 import type { ServerVersion } from "@/composables/useVersion";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -114,26 +115,30 @@ onUnmounted(() => {
     </button>
     <div
       v-if="detailsOpen"
-      class="animate-fade-in absolute bottom-0 left-full z-20 ml-3 w-60 rounded-2xl border border-border bg-popover/95 p-3 text-popover-foreground shadow-xl backdrop-blur-xl"
+      class="animate-fade-in absolute bottom-0 left-full z-20 ml-3 w-72 rounded-lg border border-border bg-popover/95 p-2 text-popover-foreground shadow-xl backdrop-blur-xl"
+      role="dialog"
+      :aria-label="`${session.username} account menu`"
     >
-      <div class="flex items-center gap-2.5">
+      <div class="flex items-center gap-3 rounded-lg bg-muted/30 px-2.5 py-2">
         <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
         <div class="min-w-0 flex-1">
-          <div class="truncate text-[13px] font-medium">{{ session.username }}</div>
-          <div class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">Account & build</div>
+          <div class="truncate text-[13px] font-semibold">{{ session.username }}</div>
+          <div class="text-[11px] text-muted-foreground">Signed in</div>
         </div>
       </div>
-      <button
-        class="mt-3 flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-border/70 px-3 text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
-        @click="handleOpenSettings"
-      >
-        <span class="flex items-center gap-2">
+      <div class="mt-2 rounded-lg border border-border/70 bg-background/50 px-2.5 py-2">
+        <ThemeSwitcher />
+      </div>
+      <div class="mt-2 border-t border-border pt-2">
+        <button
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
+          @click="handleOpenSettings"
+        >
           <Settings class="h-3.5 w-3.5 text-primary/70" />
-          <span>Settings</span>
-        </span>
-        <span class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">Open</span>
-      </button>
-      <div class="mt-3 border-t border-border pt-3">
+          <span class="min-w-0 flex-1">Settings</span>
+        </button>
+      </div>
+      <div class="mt-2 border-t border-border pt-2">
         <VersionFooter
           :web-commit-sha="webCommitSha"
           :server-version="serverVersion"
@@ -141,7 +146,7 @@ onUnmounted(() => {
         />
       </div>
       <button
-        class="mt-3 flex h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+        class="mt-2 flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
         @click="handleLogout"
       >
         <LogOut class="h-3.5 w-3.5" />
@@ -181,6 +186,9 @@ onUnmounted(() => {
       >
         <LogOut class="h-3.5 w-3.5" />
       </button>
+    </div>
+    <div class="rounded-lg border border-border/70 bg-muted/30 px-2.5 py-2">
+      <ThemeSwitcher />
     </div>
     <div class="border-t border-border pt-2">
       <VersionFooter

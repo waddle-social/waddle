@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ChevronLeft, Palette, ScanText, UserRound } from "lucide-vue-next";
+import { ChevronLeft, ScanText, UserRound } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
 import type { ServerVersion } from "@/composables/useVersion";
@@ -31,7 +30,7 @@ const emit = defineEmits<{
         </button>
         <div class="min-w-0">
           <h1 class="font-display text-[16px] font-bold tracking-tight">Settings</h1>
-          <p class="text-[12px] text-muted-foreground">Tune how Waddle looks and how timelines read.</p>
+          <p class="text-[12px] text-muted-foreground">Tune how timelines read and check build details.</p>
         </div>
       </div>
     </div>
@@ -46,24 +45,9 @@ const emit = defineEmits<{
               <span>Signed in</span>
             </div>
             <h2 class="mt-1 truncate text-[16px] font-semibold">{{ session.username }}</h2>
-            <p class="text-[12px] text-muted-foreground">Personal preferences follow your device theme by default.</p>
+            <p class="text-[12px] text-muted-foreground">Reading preferences and build details for this device.</p>
           </div>
         </div>
-      </section>
-
-      <section class="glass-panel rounded-2xl border border-border p-4 sm:p-5">
-        <div class="mb-4 flex items-start gap-3">
-          <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
-            <Palette class="h-4 w-4" />
-          </div>
-          <div>
-            <h2 class="text-[14px] font-semibold">Appearance</h2>
-            <p class="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-              Light, dark, or follow the system automatically.
-            </p>
-          </div>
-        </div>
-        <ThemeSwitcher />
       </section>
 
       <section class="glass-panel rounded-2xl border border-border p-4 sm:p-5">
