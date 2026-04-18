@@ -4,90 +4,55 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: light;
-  /* Aether light — crisp, luminous, spatial */
-  --background: #f4f5f7;
-  --foreground: #0f1115;
-  --card: rgba(255, 255, 255, 0.72);
-  --card-foreground: #0f1115;
-  --popover: rgba(255, 255, 255, 0.88);
-  --popover-foreground: #0f1115;
-  --primary: #00b4a0;
-  --primary-foreground: #ffffff;
-  --secondary: #eef0f3;
-  --secondary-foreground: #0f1115;
-  --muted: #e8eaef;
+  color-scheme: light dark;
+  /* Aether — light vs dark resolve via light-dark() against color-scheme. */
+  --background: light-dark(#f4f5f7, #0c0d12);
+  --foreground: light-dark(#0f1115, #e4e6ed);
+  --card: light-dark(rgba(255, 255, 255, 0.72), rgba(22, 24, 32, 0.72));
+  --card-foreground: light-dark(#0f1115, #e4e6ed);
+  --popover: light-dark(rgba(255, 255, 255, 0.88), rgba(26, 28, 38, 0.92));
+  --popover-foreground: light-dark(#0f1115, #e4e6ed);
+  --primary: light-dark(#00b4a0, #00ddc0);
+  --primary-foreground: light-dark(#ffffff, #0c0d12);
+  --secondary: light-dark(#eef0f3, #1a1c24);
+  --secondary-foreground: light-dark(#0f1115, #e4e6ed);
+  --muted: light-dark(#e8eaef, rgba(255, 255, 255, 0.06));
   --muted-foreground: #6b7080;
-  --accent: #00b4a0;
-  --accent-foreground: #ffffff;
+  --accent: light-dark(#00b4a0, #00ddc0);
+  --accent-foreground: light-dark(#ffffff, #0c0d12);
   --destructive: #ef4444;
   --destructive-foreground: #ffffff;
-  --border: rgba(0, 0, 0, 0.06);
-  --input: rgba(0, 0, 0, 0.06);
-  --ring: #00b4a0;
-  --sidebar: rgba(255, 255, 255, 0.56);
-  --sidebar-foreground: #0f1115;
-  --sidebar-primary: #00b4a0;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: rgba(0, 180, 160, 0.08);
-  --sidebar-accent-foreground: #0f1115;
-  --sidebar-border: rgba(0, 0, 0, 0.04);
-  --sidebar-muted: #8b90a0;
-  --surface: rgba(255, 255, 255, 0.48);
-  --glow: rgba(0, 180, 160, 0.12);
-  --glow-strong: rgba(0, 180, 160, 0.25);
-  --rail: rgba(15, 17, 21, 0.04);
-  --rail-foreground: #6b7080;
-  --rail-active: #0f1115;
-  --rail-hover: rgba(0, 0, 0, 0.04);
+  --border: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.06));
+  --input: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+  --ring: light-dark(#00b4a0, #00ddc0);
+  --sidebar: light-dark(rgba(255, 255, 255, 0.56), rgba(14, 16, 22, 0.72));
+  --sidebar-foreground: light-dark(#0f1115, #e4e6ed);
+  --sidebar-primary: light-dark(#00b4a0, #00ddc0);
+  --sidebar-primary-foreground: light-dark(#ffffff, #0c0d12);
+  --sidebar-accent: light-dark(rgba(0, 180, 160, 0.08), rgba(0, 221, 192, 0.08));
+  --sidebar-accent-foreground: light-dark(#0f1115, #e4e6ed);
+  --sidebar-border: light-dark(rgba(0, 0, 0, 0.04), rgba(255, 255, 255, 0.04));
+  --sidebar-muted: light-dark(#8b90a0, #4a4f5e);
+  --surface: light-dark(rgba(255, 255, 255, 0.48), rgba(22, 24, 32, 0.56));
+  --glow: light-dark(rgba(0, 180, 160, 0.12), rgba(0, 221, 192, 0.1));
+  --glow-strong: light-dark(rgba(0, 180, 160, 0.25), rgba(0, 221, 192, 0.2));
+  --rail: light-dark(rgba(15, 17, 21, 0.04), rgba(10, 11, 16, 0.8));
+  --rail-foreground: light-dark(#6b7080, #4a4f5e);
+  --rail-active: light-dark(#0f1115, #e4e6ed);
+  --rail-hover: light-dark(rgba(0, 0, 0, 0.04), rgba(255, 255, 255, 0.06));
   --success: #10b981;
   --warning: #f59e0b;
-  --ambient-1: rgba(0, 180, 160, 0.03);
-  --ambient-2: rgba(120, 80, 255, 0.02);
-  --ambient-3: rgba(0, 120, 255, 0.02);
-  @media (prefers-color-scheme: dark) {
-    color-scheme: dark;
-    /* Aether dark — deep obsidian, luminous accents */
-    --background: #0c0d12;
-    --foreground: #e4e6ed;
-    --card: rgba(22, 24, 32, 0.72);
-    --card-foreground: #e4e6ed;
-    --popover: rgba(26, 28, 38, 0.92);
-    --popover-foreground: #e4e6ed;
-    --primary: #00ddc0;
-    --primary-foreground: #0c0d12;
-    --secondary: #1a1c24;
-    --secondary-foreground: #e4e6ed;
-    --muted: rgba(255, 255, 255, 0.06);
-    --muted-foreground: #6b7080;
-    --accent: #00ddc0;
-    --accent-foreground: #0c0d12;
-    --destructive: #ef4444;
-    --destructive-foreground: #ffffff;
-    --border: rgba(255, 255, 255, 0.06);
-    --input: rgba(255, 255, 255, 0.08);
-    --ring: #00ddc0;
-    --sidebar: rgba(14, 16, 22, 0.72);
-    --sidebar-foreground: #e4e6ed;
-    --sidebar-primary: #00ddc0;
-    --sidebar-primary-foreground: #0c0d12;
-    --sidebar-accent: rgba(0, 221, 192, 0.08);
-    --sidebar-accent-foreground: #e4e6ed;
-    --sidebar-border: rgba(255, 255, 255, 0.04);
-    --sidebar-muted: #4a4f5e;
-    --surface: rgba(22, 24, 32, 0.56);
-    --glow: rgba(0, 221, 192, 0.1);
-    --glow-strong: rgba(0, 221, 192, 0.2);
-    --rail: rgba(10, 11, 16, 0.8);
-    --rail-foreground: #4a4f5e;
-    --rail-active: #e4e6ed;
-    --rail-hover: rgba(255, 255, 255, 0.06);
-    --success: #10b981;
-    --warning: #f59e0b;
-    --ambient-1: rgba(0, 221, 192, 0.04);
-    --ambient-2: rgba(120, 80, 255, 0.03);
-    --ambient-3: rgba(0, 120, 255, 0.03);
-  }
+  --ambient-1: light-dark(rgba(0, 180, 160, 0.03), rgba(0, 221, 192, 0.04));
+  --ambient-2: light-dark(rgba(120, 80, 255, 0.02), rgba(120, 80, 255, 0.03));
+  --ambient-3: light-dark(rgba(0, 120, 255, 0.02), rgba(0, 120, 255, 0.03));
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 @theme inline {
@@ -344,21 +309,11 @@
 }
 .styled-body pre.shiki,
 .styled-body pre.shiki span {
-  color: var(--shiki-light) !important;
+  color: light-dark(var(--shiki-light), var(--shiki-dark)) !important;
   background-color: transparent !important;
 }
 .styled-body pre.shiki {
-  background-color: var(--shiki-light-bg) !important;
-}
-@media (prefers-color-scheme: dark) {
-  .styled-body pre.shiki,
-  .styled-body pre.shiki span {
-    color: var(--shiki-dark) !important;
-    background-color: transparent !important;
-  }
-  .styled-body pre.shiki {
-    background-color: var(--shiki-dark-bg) !important;
-  }
+  background-color: light-dark(var(--shiki-light-bg), var(--shiki-dark-bg)) !important;
 }
 .styled-body blockquote {
   border-left: 2px solid var(--primary);
