@@ -174,14 +174,16 @@ export class BrowserXmppClient {
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
-  private visibilityListener: (() => void) | null = null;
-  private onlineListener: (() => void) | null = null;
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
   private uploadServiceJid: string | null = null;
   /** Outbound messages queued while the transport is unavailable. */
   private outboundQueue: QueuedOutboundMessage[] = [];
   private flushingQueue = false;
+  private visibilityListener: (() => void) | null = null;
+  private onlineListener: (() => void) | null = null;
+  private reconnectNudgeAt = 0;
+  private lastStanzaKickAt = 0;
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -214,10 +216,12 @@ export class BrowserXmppClient {
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
 
-    // If the Agent exists but is disconnected, Stanza's autoReconnect is
-    // handling backoff — wait for either a fresh bind (session:started) or an
-    // XEP-0198 resume (stream:management:resumed); resume does NOT emit
-    // session:started because feature negotiation is short-circuited.
+    // If the Agent exists but is disconnected, actively kick stanza's
+    // reconnect rather than relying solely on its internal backoff — in
+    // practice autoReconnect can stall indefinitely after a network blip.
+    // Wait for either a fresh bind (session:started) or an XEP-0198 resume
+    // (stream:management:resumed); resume does NOT emit session:started
+    // because feature negotiation is short-circuited.
     if (this.xmpp && !this.destroying) {
       const xmpp = this.xmpp;
       this.connectPromise = new Promise<void>((resolve, reject) => {
@@ -225,7 +229,7 @@ export class BrowserXmppClient {
           cleanup();
           this.connectPromise = null;
           reject(new Error("Reconnection timed out"));
-        }, 60_000);
+        }, 15_000);
         const cleanup = () => {
           clearTimeout(timeout);
           xmpp.off("session:started", onReady);
@@ -235,6 +239,10 @@ export class BrowserXmppClient {
         xmpp.on("session:started", onReady);
         xmpp.on("stream:management:resumed", onReady);
       });
+      if (Date.now() - this.lastStanzaKickAt > 2_000) {
+        this.lastStanzaKickAt = Date.now();
+        try { xmpp.connect(); } catch { /* stanza may be mid-handshake */ }
+      }
       return this.connectPromise;
     }
 
@@ -270,6 +278,7 @@ export class BrowserXmppClient {
     registerWaddleExtensions(xmpp);
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
+    this.startReconnectNudgeListeners();
 
     // Wait for session:started (fresh bind) or stream:management:resumed (SM
     // resume). Initial connects always take the fresh path, but subsequent
@@ -310,6 +319,7 @@ export class BrowserXmppClient {
     }
     this.stopSelfPing();
     this.stopKeepAlive();
+    this.stopReconnectNudgeListeners();
     const xmpp = this.xmpp;
     this.xmpp = null;
     this.connectPromise = null;
@@ -704,24 +714,13 @@ export class BrowserXmppClient {
 
   /**
    * Keep the websocket alive in the background by pinging the server every
-   * 30s. Also triggers an immediate ping when the tab becomes visible or the
-   * browser regains network, so users who return to a backgrounded tab aren't
-   * silently disconnected.
+   * 30s while connected.  The "tab became visible" / "network back online"
+   * nudges live on their own listeners because they must survive disconnects
+   * to drive recovery; see startReconnectNudgeListeners.
    */
   private startKeepAlive() {
     this.stopKeepAlive();
     this.keepAliveTimer = setInterval(() => { void this.pingServer(); }, 30_000);
-
-    if (typeof document !== "undefined") {
-      this.visibilityListener = () => {
-        if (document.visibilityState === "visible") void this.pingServer();
-      };
-      document.addEventListener("visibilitychange", this.visibilityListener);
-    }
-    if (typeof window !== "undefined") {
-      this.onlineListener = () => { void this.pingServer(); };
-      window.addEventListener("online", this.onlineListener);
-    }
   }
 
   private stopKeepAlive() {
@@ -729,14 +728,46 @@ export class BrowserXmppClient {
       clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = null;
     }
+  }
+
+  /**
+   * Listen for "tab became visible" / "network back online" for the lifetime
+   * of the agent.  When fired while connected, ping the server.  When fired
+   * while disconnected, actively drive reconnection — without this the client
+   * relies entirely on stanza.js's internal backoff, which in practice leaves
+   * the socket broken until the user reloads.
+   */
+  private startReconnectNudgeListeners() {
+    this.stopReconnectNudgeListeners();
+    const nudge = () => {
+      const now = Date.now();
+      if (now - this.reconnectNudgeAt < 1500) return;
+      this.reconnectNudgeAt = now;
+      if (this.destroying || !this.xmpp) return;
+      if (this.connected) void this.pingServer();
+      else void this.connect().catch(() => undefined);
+    };
+    if (typeof document !== "undefined") {
+      this.visibilityListener = () => {
+        if (document.visibilityState === "visible") nudge();
+      };
+      document.addEventListener("visibilitychange", this.visibilityListener);
+    }
+    if (typeof window !== "undefined") {
+      this.onlineListener = nudge;
+      window.addEventListener("online", this.onlineListener);
+    }
+  }
+
+  private stopReconnectNudgeListeners() {
     if (this.visibilityListener && typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.visibilityListener);
-      this.visibilityListener = null;
     }
+    this.visibilityListener = null;
     if (this.onlineListener && typeof window !== "undefined") {
       window.removeEventListener("online", this.onlineListener);
-      this.onlineListener = null;
     }
+    this.onlineListener = null;
   }
 
   private async pingServer() {
@@ -854,6 +885,7 @@ export class BrowserXmppClient {
           this.messageDeliveryFailureHandler?.(item.msgId);
         }
         this.outboundQueue = [];
+        this.stopReconnectNudgeListeners();
         this.xmpp = null;
         this.currentRoom = null;
         this.roomSwitchPromise = null;
