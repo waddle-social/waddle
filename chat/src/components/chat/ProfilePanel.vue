@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Bell, BellOff, LogOut } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
 import type { ServerVersion } from "@/composables/useVersion";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -119,6 +120,9 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="mt-3 border-t border-border pt-3">
+        <ThemeSwitcher />
+      </div>
+      <div class="mt-3 border-t border-border pt-3">
         <VersionFooter
           :web-commit-sha="webCommitSha"
           :server-version="serverVersion"
@@ -160,6 +164,9 @@ onUnmounted(() => {
       >
         <LogOut class="h-3.5 w-3.5" />
       </button>
+    </div>
+    <div class="border-t border-border pt-2">
+      <ThemeSwitcher />
     </div>
     <div class="border-t border-border pt-2">
       <VersionFooter
