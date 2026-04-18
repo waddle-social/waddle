@@ -125,6 +125,15 @@ fn merge_extension_features(
     features
 }
 
+fn default_presence_status(
+    statuses: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    statuses
+        .get("")
+        .or_else(|| statuses.values().next())
+        .cloned()
+}
+
 /// Receiver for outbound stanzas to be sent to this connection.
 type OutboundReceiver = mpsc::Receiver<OutboundStanza>;
 
@@ -364,6 +373,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Unregister this connection on disconnect
         if let Some(ref jid) = self.jid {
             self.connection_registry.unregister(jid);
+            if self
+                .connection_registry
+                .get_available_resources_for_user(&jid.to_bare())
+                .is_empty()
+            {
+                if let Some(presence) = self.last_available_presence.as_ref() {
+                    let status = default_presence_status(&presence.statuses);
+                    self.connection_registry
+                        .record_last_activity(&jid.to_bare(), status);
+                }
+            }
             debug!(jid = %jid, "Unregistered connection");
         }
 
@@ -3411,6 +3431,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Directed presence (presence with 'to') is routed to the addressed JID(s),
         // not roster subscribers.
         if let Some(target) = pres_clone.to.clone() {
+            let target_bare = target.to_bare();
+            if self
+                .target_has_blocked_sender(&target_bare, &sender_bare)
+                .await?
+            {
+                debug!(
+                    sender = %sender_bare,
+                    target = %target_bare,
+                    "Recipient has blocked sender; dropping directed presence"
+                );
+                return Ok(());
+            }
+
             if let Ok(target_full) = target.clone().try_into_full() {
                 let stanza = Stanza::Presence(pres_clone.clone());
                 match self.connection_registry.send_to(&target_full, stanza).await {
@@ -3426,7 +3459,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
 
-            let target_bare = target.to_bare();
             let available_targets = self
                 .connection_registry
                 .get_available_resources_for_user(&target_bare);
@@ -3447,6 +3479,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Store full presence state (show/status/priority) for probe responses.
         if is_available {
+            self.connection_registry.clear_last_activity(&sender_bare);
             let show_str = pres.show.as_ref().map(|s| {
                 match s {
                     xmpp_parsers::presence::Show::Away => "away",
@@ -3456,11 +3489,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
                 .to_string()
             });
-            let status_str = pres
-                .statuses
-                .get("")
-                .or_else(|| pres.statuses.values().next())
-                .cloned();
+            let status_str = default_presence_status(&pres.statuses);
             self.connection_registry.update_presence_state(
                 &sender_jid,
                 show_str,
@@ -3483,6 +3512,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             self.last_available_presence = None;
             // Clear stored presence state so probes don't return stale data.
             self.connection_registry.clear_presence_state(&sender_jid);
+            let status_str = default_presence_status(&pres.statuses);
+            if self
+                .connection_registry
+                .get_available_resources_for_user(&sender_bare)
+                .is_empty()
+            {
+                self.connection_registry
+                    .record_last_activity(&sender_bare, status_str);
+            }
             info!(sender = %sender_bare, "User sent unavailable presence");
         }
 
@@ -3561,6 +3599,62 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         )
     }
 
+    fn stanza_sender_bare(&self, stanza: &Stanza) -> Option<jid::BareJid> {
+        match stanza {
+            Stanza::Message(msg) => msg
+                .from
+                .as_ref()
+                .map(|jid| jid.to_bare())
+                .or_else(|| self.jid.as_ref().map(|jid| jid.to_bare())),
+            Stanza::Presence(pres) => pres
+                .from
+                .as_ref()
+                .map(|jid| jid.to_bare())
+                .or_else(|| self.jid.as_ref().map(|jid| jid.to_bare())),
+            Stanza::Iq(iq) => iq
+                .from
+                .as_ref()
+                .map(|jid| jid.to_bare())
+                .or_else(|| self.jid.as_ref().map(|jid| jid.to_bare())),
+        }
+    }
+
+    async fn target_has_blocked_sender(
+        &self,
+        target: &jid::BareJid,
+        sender: &jid::BareJid,
+    ) -> Result<bool, XmppError> {
+        if target.domain().as_str() != self.domain {
+            return Ok(false);
+        }
+
+        self.app_state.is_blocked(target, sender).await
+    }
+
+    async fn write_service_unavailable_iq_error(
+        &mut self,
+        iq: &xmpp_parsers::iq::Iq,
+        from: Option<String>,
+    ) -> Result<(), XmppError> {
+        let error_to = iq
+            .from
+            .as_ref()
+            .map(|j| j.to_string())
+            .or_else(|| self.jid.as_ref().map(|j| j.to_string()));
+        let error_from = from
+            .or_else(|| iq.to.as_ref().map(|j| j.to_string()))
+            .unwrap_or_else(|| self.domain.clone());
+        let error = crate::generate_iq_error(
+            &iq.id,
+            error_to.as_deref(),
+            Some(error_from.as_str()),
+            crate::StanzaErrorCondition::ServiceUnavailable,
+            crate::StanzaErrorType::Cancel,
+            None,
+        );
+        self.stream.write_raw(&error).await
+    }
+
     /// Route a stanza to a bare JID (all connected resources or queued for offline delivery).
     ///
     /// Subscription presence stanzas are queued when the target user is offline and
@@ -3570,6 +3664,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         target: &jid::BareJid,
         stanza: Stanza,
     ) -> Result<(), XmppError> {
+        if let Some(sender) = self.stanza_sender_bare(&stanza) {
+            if self.target_has_blocked_sender(target, &sender).await? {
+                debug!(
+                    sender = %sender,
+                    target = %target,
+                    "Target has blocked sender; dropping stanza routed to bare JID"
+                );
+                return Ok(());
+            }
+        }
+
         // Get all connected resources for the target.
         let resources = self.connection_registry.get_resources_for_user(target);
 
@@ -3623,6 +3728,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Enforce sender identity from the authenticated stream.
         iq.from = Some(sender_jid.clone().into());
         iq.to = Some(target_full_jid.clone().into());
+
+        if self
+            .target_has_blocked_sender(&target_full_jid.to_bare(), &sender_jid.to_bare())
+            .await?
+        {
+            debug!(
+                from = %sender_jid,
+                to = %target_full_jid,
+                iq_id = %iq.id,
+                "Recipient has blocked sender; returning service-unavailable for IQ"
+            );
+            self.write_service_unavailable_iq_error(&iq, Some(target_full_jid.to_string()))
+                .await?;
+            return Ok(());
+        }
 
         let stanza = Stanza::Iq(iq.clone());
         match self
@@ -4506,10 +4626,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handles three cases:
     /// 1. Server query (to=domain) → returns server uptime
     /// 2. Bare JID query for online user → returns seconds=0
-    /// 3. Bare JID query for offline/unknown user → returns forbidden (no offline tracking yet)
+    /// 3. Bare JID query for offline user → returns seconds since last offline transition
     #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
     async fn handle_last_activity(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
-        let _sender_jid = match &self.jid {
+        let sender_jid = match &self.jid {
             Some(jid) => jid.clone(),
             None => {
                 warn!("Last activity query received before JID bound");
@@ -4523,7 +4643,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Some(to) => to.clone(),
             None => {
                 // No target → treat as server query
-                let response = build_last_activity_response(&iq, 0, None);
+                let response = build_last_activity_response(
+                    &iq,
+                    self.connection_registry.server_uptime_seconds(),
+                    None,
+                );
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
                 return Ok(());
             }
@@ -4531,33 +4655,64 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Case 1: Server/component query (bare domain, no node)
         if target.node().is_none() && target.domain().as_str() == self.domain {
-            // We don't track server start time yet, so return 0
-            // TODO: Pass server_start_time through to connections for accurate uptime
-            let response = build_last_activity_response(&iq, 0, None);
+            let response = build_last_activity_response(
+                &iq,
+                self.connection_registry.server_uptime_seconds(),
+                None,
+            );
             self.stream.write_stanza(&Stanza::Iq(response)).await?;
             return Ok(());
         }
 
-        // Case 2 & 3: User query (bare JID)
-        if target.node().is_some() && target.domain().as_str() == self.domain {
+        // Case 2 & 3: User query (local bare JID)
+        if target.node().is_some()
+            && target.resource().is_none()
+            && target.domain().as_str() == self.domain
+        {
             let target_bare = target.to_bare();
 
-            // Check if the target user has any connected resources
-            let resources = self
-                .connection_registry
-                .get_resources_for_user(&target_bare);
+            if self
+                .target_has_blocked_sender(&target_bare, &sender_jid.to_bare())
+                .await?
+            {
+                debug!(
+                    sender = %sender_jid,
+                    target = %target_bare,
+                    "Target has blocked sender; returning service-unavailable for last activity"
+                );
+                self.write_service_unavailable_iq_error(&iq, Some(target_bare.to_string()))
+                    .await?;
+                return Ok(());
+            }
 
-            if !resources.is_empty() {
+            if !self
+                .connection_registry
+                .get_available_resources_for_user(&target_bare)
+                .is_empty()
+            {
                 // User is online → seconds=0
                 let response = build_last_activity_response(&iq, 0, None);
                 self.stream.write_stanza(&Stanza::Iq(response)).await?;
                 return Ok(());
             }
 
-            // User is offline or doesn't exist → forbidden
-            // Per XEP-0012: server MUST NOT return last activity info if
-            // the requesting entity is not authorized (no presence subscription).
-            // Since we don't track offline last-activity times yet, return forbidden.
+            if let Some(last_activity) = self.connection_registry.get_last_activity(&target_bare) {
+                let seconds = Utc::now()
+                    .signed_duration_since(last_activity.timestamp)
+                    .num_seconds()
+                    .max(0) as u64;
+                let response =
+                    build_last_activity_response(&iq, seconds, last_activity.status.as_deref());
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                return Ok(());
+            }
+
+            if !self.local_user_exists(&target_bare).await? {
+                self.write_service_unavailable_iq_error(&iq, Some(target_bare.to_string()))
+                    .await?;
+                return Ok(());
+            }
+
             let error_to = iq.from.as_ref().map(|j| j.to_string());
             let error_from = iq.to.as_ref().map(|j| j.to_string());
             let error = crate::generate_iq_error(

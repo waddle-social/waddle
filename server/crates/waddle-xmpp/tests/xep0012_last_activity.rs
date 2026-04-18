@@ -9,6 +9,39 @@ use common::{
     DEFAULT_TIMEOUT,
 };
 
+fn response_seconds(response: &str) -> Option<u64> {
+    response
+        .split("seconds=")
+        .nth(1)
+        .and_then(|rest| rest.chars().next().map(|quote| (quote, &rest[1..])))
+        .and_then(|(quote, rest)| rest.split(quote).next())
+        .and_then(|value| value.parse().ok())
+}
+
+async fn block_jid(client: &mut RawXmppClient, jid: &str, id: &str) {
+    client
+        .send(&format!(
+            "<iq type='set' id='{}' xmlns='jabber:client'>\
+                <block xmlns='urn:xmpp:blocking'>\
+                    <item jid='{}'/>\
+                </block>\
+            </iq>",
+            id, jid
+        ))
+        .await
+        .expect("send block");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("block response");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Block should succeed, got: {}",
+        response
+    );
+    client.clear();
+}
+
 #[tokio::test]
 async fn xep0012_server_disco_advertises_last_activity() {
     init_test_env();
@@ -69,6 +102,38 @@ async fn xep0012_server_uptime_query_returns_result() {
 }
 
 #[tokio::test]
+async fn xep0012_server_uptime_query_reports_real_uptime() {
+    init_test_env();
+    let server = TestServer::start().await;
+    let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut client, &server, "alice", "desktop")
+        .await
+        .expect("bind");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    client
+        .send(
+            "<iq type='get' id='last-uptime-real' to='localhost' xmlns='jabber:client'>\
+                <query xmlns='jabber:iq:last'/>\
+            </iq>",
+        )
+        .await
+        .expect("send");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("response");
+
+    let seconds = response_seconds(&response).expect("seconds attribute");
+    assert!(
+        seconds >= 1,
+        "Expected non-zero uptime, got response: {}",
+        response
+    );
+}
+
+#[tokio::test]
 async fn xep0012_query_to_unknown_user_returns_error() {
     init_test_env();
     let server = TestServer::start().await;
@@ -97,6 +162,99 @@ async fn xep0012_query_to_unknown_user_returns_error() {
             || response.contains("type='error'")
             || response.contains("type=\"error\""),
         "Expected result or error IQ, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0012_offline_user_query_returns_last_activity_and_status() {
+    init_test_env();
+    let server = TestServer::start().await;
+
+    let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut alice, &server, "alice", "desktop")
+        .await
+        .expect("bind alice");
+
+    let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut bob, &server, "bob", "mobile")
+        .await
+        .expect("bind bob");
+
+    bob.send(
+        "<presence type='unavailable' xmlns='jabber:client'>\
+            <status>Out to lunch</status>\
+        </presence>",
+    )
+    .await
+    .expect("send unavailable presence");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    alice
+        .send(
+            "<iq type='get' id='last-offline-1' to='bob@localhost' xmlns='jabber:client'>\
+                <query xmlns='jabber:iq:last'/>\
+            </iq>",
+        )
+        .await
+        .expect("send query");
+    let response = alice
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("response");
+
+    let seconds = response_seconds(&response).expect("seconds attribute");
+    assert!(
+        seconds >= 1,
+        "Expected offline last-activity seconds, got response: {}",
+        response
+    );
+    assert!(
+        response.contains("Out to lunch"),
+        "Expected unavailable presence status in response, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0012_query_to_user_who_blocked_requester_returns_error() {
+    init_test_env();
+    let server = TestServer::start().await;
+
+    let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut alice, &server, "alice", "desktop")
+        .await
+        .expect("bind alice");
+
+    let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut bob, &server, "bob", "mobile")
+        .await
+        .expect("bind bob");
+
+    block_jid(&mut bob, "alice@localhost", "block-alice-last").await;
+
+    alice
+        .send(
+            "<iq type='get' id='last-blocked-1' to='bob@localhost' xmlns='jabber:client'>\
+                <query xmlns='jabber:iq:last'/>\
+            </iq>",
+        )
+        .await
+        .expect("send query");
+    let response = alice
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("response");
+
+    assert!(
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable error, got: {}",
         response
     );
 }

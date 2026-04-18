@@ -5,9 +5,33 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer,
-    DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, ping_query, RawXmppClient,
+    TestServer, DEFAULT_TIMEOUT,
 };
+
+async fn block_jid(client: &mut RawXmppClient, jid: &str, id: &str) {
+    client
+        .send(&format!(
+            "<iq type='set' id='{}' xmlns='jabber:client'>\
+                <block xmlns='urn:xmpp:blocking'>\
+                    <item jid='{}'/>\
+                </block>\
+            </iq>",
+            id, jid
+        ))
+        .await
+        .expect("send block");
+    let response = client
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("block response");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "Block should succeed, got: {}",
+        response
+    );
+    client.clear();
+}
 
 #[tokio::test]
 async fn xep0191_server_disco_advertises_blocking() {
@@ -121,6 +145,85 @@ async fn xep0191_unblock_jid_returns_success() {
     assert!(
         response.contains("type='result'") || response.contains("type=\"result\""),
         "Expected result IQ for unblock, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0191_blocked_subscription_presence_is_dropped() {
+    init_test_env();
+    let server = TestServer::start().await;
+
+    let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut alice, &server, "alice", "desktop")
+        .await
+        .expect("bind alice");
+
+    let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut bob, &server, "bob", "mobile")
+        .await
+        .expect("bind bob");
+
+    block_jid(&mut alice, "bob@localhost", "block-bob-subscribe").await;
+
+    bob.send(
+        "<presence type='subscribe' to='alice@localhost' xmlns='jabber:client'>\
+            <status>please add me</status>\
+        </presence>",
+    )
+    .await
+    .expect("send subscribe");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let response = ping_query(&mut alice, "localhost", "after-blocked-subscribe")
+        .await
+        .expect("ping");
+    assert!(
+        !response.contains("please add me"),
+        "Blocked subscribe presence should not be delivered, got: {}",
+        response
+    );
+}
+
+#[tokio::test]
+async fn xep0191_blocked_full_jid_iq_returns_error() {
+    init_test_env();
+    let server = TestServer::start().await;
+
+    let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
+    let alice_jid = establish_bound_session(&mut alice, &server, "alice", "desktop")
+        .await
+        .expect("bind alice");
+
+    let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut bob, &server, "bob", "mobile")
+        .await
+        .expect("bind bob");
+
+    block_jid(&mut alice, "bob@localhost", "block-bob-full-iq").await;
+
+    bob.send(&format!(
+        "<iq type='get' id='blocked-full-iq-1' to='{}' xmlns='jabber:client'>\
+            <ping xmlns='urn:xmpp:ping'/>\
+        </iq>",
+        alice_jid
+    ))
+    .await
+    .expect("send iq");
+    let response = bob
+        .read_until("</iq>", DEFAULT_TIMEOUT)
+        .await
+        .expect("response");
+
+    assert!(
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable error, got: {}",
         response
     );
 }

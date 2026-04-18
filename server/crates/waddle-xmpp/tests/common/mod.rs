@@ -10,9 +10,11 @@
 
 #![allow(dead_code)]
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Cursor};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::prelude::*;
@@ -95,6 +97,8 @@ pub struct MockAppState {
     pub waddle_details: Vec<waddle_xmpp::WaddleDetails>,
     /// XEP-0503: channels per waddle (keyed by waddle ID)
     pub waddle_channels: std::collections::HashMap<String, Vec<waddle_xmpp::ChannelInfo>>,
+    blocked_jids: Mutex<HashMap<String, HashSet<String>>>,
+    known_users: Mutex<HashSet<String>>,
 }
 
 impl MockAppState {
@@ -104,6 +108,8 @@ impl MockAppState {
             accept_auth: true,
             waddle_details: Vec::new(),
             waddle_channels: std::collections::HashMap::new(),
+            blocked_jids: Mutex::new(HashMap::new()),
+            known_users: Mutex::new(HashSet::new()),
         }
     }
 
@@ -113,6 +119,8 @@ impl MockAppState {
             accept_auth: false,
             waddle_details: Vec::new(),
             waddle_channels: std::collections::HashMap::new(),
+            blocked_jids: Mutex::new(HashMap::new()),
+            known_users: Mutex::new(HashSet::new()),
         }
     }
 
@@ -134,6 +142,12 @@ impl AppState for MockAppState {
         let accept = self.accept_auth;
         let jid = jid.clone();
         if accept {
+            if let Some(node) = jid.node() {
+                self.known_users
+                    .lock()
+                    .expect("known users lock")
+                    .insert(node.to_string());
+            }
             Ok(Session {
                 user_id: format!(
                     "user-test-{}",
@@ -162,8 +176,13 @@ impl AppState for MockAppState {
         let domain = self.domain.clone();
         let token = token.to_string();
         if accept {
+            let username = format!("user_{}", &token[..token.len().min(8)]);
+            self.known_users
+                .lock()
+                .expect("known users lock")
+                .insert(username.clone());
             // Mock: derive a JID from the token
-            let mock_jid = format!("user_{}@{}", &token[..token.len().min(8)], domain);
+            let mock_jid = format!("{}@{}", username, domain);
             Ok(Session {
                 user_id: format!("user-mock-{}", &token[..token.len().min(8)]),
                 jid: mock_jid
@@ -216,17 +235,24 @@ impl AppState for MockAppState {
 
     async fn register_native_user(
         &self,
-        _username: &str,
+        username: &str,
         _password: &str,
         _email: Option<&str>,
     ) -> Result<(), XmppError> {
         // Mock registration always succeeds
+        self.known_users
+            .lock()
+            .expect("known users lock")
+            .insert(username.to_string());
         Ok(())
     }
 
-    async fn native_user_exists(&self, _username: &str) -> Result<bool, XmppError> {
-        // Mock returns false - no users exist in mock by default
-        Ok(false)
+    async fn native_user_exists(&self, username: &str) -> Result<bool, XmppError> {
+        Ok(self
+            .known_users
+            .lock()
+            .expect("known users lock")
+            .contains(username))
     }
 
     async fn get_vcard(&self, _jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
@@ -357,43 +383,75 @@ impl AppState for MockAppState {
     // XEP-0191 Blocking Command Methods (Mock implementations)
     // =========================================================================
 
-    async fn get_blocklist(&self, _user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
-        // Mock returns empty blocklist
-        Ok(vec![])
+    async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<String>, XmppError> {
+        Ok(self
+            .blocked_jids
+            .lock()
+            .expect("blocked jids lock")
+            .get(&user_jid.to_string())
+            .map(|entries| {
+                let mut blocked: Vec<_> = entries.iter().cloned().collect();
+                blocked.sort();
+                blocked
+            })
+            .unwrap_or_default())
     }
 
     async fn is_blocked(
         &self,
-        _user_jid: &jid::BareJid,
-        _blocked_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
+        blocked_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        // Mock returns false - no one is blocked in mock
-        Ok(false)
+        Ok(self
+            .blocked_jids
+            .lock()
+            .expect("blocked jids lock")
+            .get(&user_jid.to_string())
+            .is_some_and(|entries| entries.contains(&blocked_jid.to_string())))
     }
 
     async fn add_blocks(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        // Mock returns the count of JIDs (simulating all were added)
-        let count = blocked_jids.len();
-        Ok(count)
+        let mut store = self.blocked_jids.lock().expect("blocked jids lock");
+        let entry = store.entry(user_jid.to_string()).or_default();
+        let mut added = 0;
+        for blocked_jid in blocked_jids {
+            if entry.insert(blocked_jid.clone()) {
+                added += 1;
+            }
+        }
+        Ok(added)
     }
 
     async fn remove_blocks(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
         blocked_jids: &[String],
     ) -> Result<usize, XmppError> {
-        // Mock returns the count (simulating all were removed)
-        let count = blocked_jids.len();
-        Ok(count)
+        let mut store = self.blocked_jids.lock().expect("blocked jids lock");
+        let Some(entry) = store.get_mut(&user_jid.to_string()) else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for blocked_jid in blocked_jids {
+            if entry.remove(blocked_jid) {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
-    async fn remove_all_blocks(&self, _user_jid: &jid::BareJid) -> Result<usize, XmppError> {
-        // Mock returns 0 - nothing to remove in mock
-        Ok(0)
+    async fn remove_all_blocks(&self, user_jid: &jid::BareJid) -> Result<usize, XmppError> {
+        Ok(self
+            .blocked_jids
+            .lock()
+            .expect("blocked jids lock")
+            .remove(&user_jid.to_string())
+            .map(|entries| entries.len())
+            .unwrap_or(0))
     }
 
     // =========================================================================

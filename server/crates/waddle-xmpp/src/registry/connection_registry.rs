@@ -3,6 +3,9 @@
 //! Tracks active XMPP connections by their full JID for message routing.
 
 use std::fmt;
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -129,6 +132,15 @@ pub struct PresenceState {
     pub priority: i8,
 }
 
+/// Last recorded offline activity for a bare JID.
+#[derive(Debug, Clone)]
+pub struct LastActivityState {
+    /// Timestamp when the user last became offline.
+    pub timestamp: DateTime<Utc>,
+    /// Optional status text from the last unavailable presence.
+    pub status: Option<String>,
+}
+
 pub struct ConnectionRegistry {
     /// Map of full JID to connection entry (includes sender and carbons status)
     connections: DashMap<FullJid, ConnectionEntry>,
@@ -136,6 +148,10 @@ pub struct ConnectionRegistry {
     pending_subscription_stanzas: DashMap<BareJid, Vec<Stanza>>,
     /// Per-resource presence state (show/status/priority) for probe responses.
     presence_states: DashMap<FullJid, PresenceState>,
+    /// Last recorded offline activity for each bare JID.
+    last_activity: DashMap<BareJid, LastActivityState>,
+    /// Server start time used for XEP-0012 uptime responses.
+    started_at: Instant,
 }
 
 impl ConnectionRegistry {
@@ -146,6 +162,8 @@ impl ConnectionRegistry {
             connections: DashMap::new(),
             pending_subscription_stanzas: DashMap::new(),
             presence_states: DashMap::new(),
+            last_activity: DashMap::new(),
+            started_at: Instant::now(),
         }
     }
 
@@ -355,6 +373,34 @@ impl ConnectionRegistry {
     /// Clear the stored presence state for a resource (e.g. on unavailable presence).
     pub fn clear_presence_state(&self, jid: &FullJid) {
         self.presence_states.remove(jid);
+    }
+
+    /// Record last offline activity for a bare JID.
+    pub fn record_last_activity(&self, bare_jid: &BareJid, status: Option<String>) {
+        self.last_activity.insert(
+            bare_jid.clone(),
+            LastActivityState {
+                timestamp: Utc::now(),
+                status,
+            },
+        );
+    }
+
+    /// Get the last recorded offline activity for a bare JID.
+    pub fn get_last_activity(&self, bare_jid: &BareJid) -> Option<LastActivityState> {
+        self.last_activity
+            .get(bare_jid)
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Clear the last recorded offline activity for a bare JID.
+    pub fn clear_last_activity(&self, bare_jid: &BareJid) {
+        self.last_activity.remove(bare_jid);
+    }
+
+    /// Return the current server uptime in whole seconds.
+    pub fn server_uptime_seconds(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
     }
 
     /// Get all available resources for a bare JID with their priorities.
