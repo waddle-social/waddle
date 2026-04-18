@@ -179,7 +179,11 @@ impl XmppStateMachine {
         id: CallbackId,
         _result: super::event::CallbackResult,
     ) -> Vec<OutboundEvent> {
-        self.log_completion(id, "OAuthBearerValidated")
+        // Bearer-token validation is security-sensitive; until this callback
+        // has a real typed dispatch path, consume the pending op without
+        // emitting diagnostics that could become part of a token-taint flow.
+        let _ = self.take_pending_op(id);
+        Vec::new()
     }
 
     /// Shared completion stub: take the pending op, log whether a match
@@ -462,5 +466,24 @@ mod tests {
             e,
             OutboundEvent::Log { level, .. } if *level == Level::WARN
         )));
+    }
+
+    #[test]
+    fn oauth_bearer_completion_consumes_pending_op_without_logging() {
+        let mut sm = XmppStateMachine::new("waddle.social", StanzaDispatcher::new());
+        let id = sm.next_callback_id();
+        sm.register_pending_op(id, PendingOp::OAuthBearer);
+
+        let events = sm.handle(InboundEvent::OAuthBearerValidated {
+            id,
+            result: crate::protocol::event::CallbackResult::Ok { stanza: None },
+        });
+        assert!(events.is_empty());
+
+        let events2 = sm.handle(InboundEvent::OAuthBearerValidated {
+            id,
+            result: crate::protocol::event::CallbackResult::Ok { stanza: None },
+        });
+        assert!(events2.is_empty());
     }
 }
