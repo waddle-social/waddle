@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use jid::BareJid;
 
 use super::node::NodeConfig;
+use super::pep::PepHandler;
 use super::stanzas::PubSubItem;
 use crate::XmppError;
 
@@ -25,10 +26,13 @@ pub struct PubSubNode {
 impl PubSubNode {
     /// Create a new PubSub node with default PEP configuration.
     pub fn new_pep(owner: BareJid, node_name: String) -> Self {
+        let mut config = NodeConfig::pep_default();
+        config.access_model = PepHandler::default_access_model_for_node(&node_name);
+
         Self {
             node_name,
             owner,
-            config: NodeConfig::pep_default(),
+            config,
             created_at: chrono::Utc::now(),
         }
     }
@@ -398,6 +402,25 @@ mod tests {
         assert_eq!(node.node_name, "test-node");
         assert_eq!(node.owner, owner);
         assert_eq!(node.config.max_items, 1);
+    }
+
+    #[test]
+    fn test_pubsub_node_new_pep_uses_bookmark_privacy_defaults() {
+        let owner: BareJid = "user@example.com".parse().expect("valid jid");
+        let node = PubSubNode::new_pep(owner, "urn:xmpp:bookmarks:1".to_string());
+
+        assert_eq!(node.config.access_model, super::super::node::AccessModel::Whitelist);
+    }
+
+    #[test]
+    fn test_pubsub_node_new_pep_uses_omemo_open_defaults() {
+        let owner: BareJid = "user@example.com".parse().expect("valid jid");
+        let node = PubSubNode::new_pep(
+            owner,
+            "eu.siacs.conversations.axolotl.devicelist".to_string(),
+        );
+
+        assert_eq!(node.config.access_model, super::super::node::AccessModel::Open);
     }
 
     #[test]

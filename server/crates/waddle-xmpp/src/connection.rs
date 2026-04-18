@@ -58,8 +58,8 @@ use crate::presence::{
 };
 use crate::pubsub::{
     build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
-    build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem, PubSubRequest,
-    PubSubStorage,
+    build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, AccessModel, PepHandler, PubSubError,
+    PubSubItem, PubSubRequest, PubSubStorage,
 };
 use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
 use crate::roster::{
@@ -4585,6 +4585,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         match request {
             PubSubRequest::Publish { node, item } => {
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
                 // PEP auto-create: publish with auto_create=true
                 let result = self
                     .pubsub_storage
@@ -4697,6 +4703,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 max_items,
                 item_ids,
             } => {
+                if !self.can_read_pep_node(&user_jid, &target_jid, &node).await? {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    self.stream.write_stanza(&Stanza::Iq(error)).await?;
+                    return Ok(());
+                }
+
                 // Retrieve items from a node
                 let result = self
                     .pubsub_storage
@@ -4832,6 +4844,65 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         Ok(())
+    }
+
+    async fn can_read_pep_node(
+        &self,
+        requester: &jid::BareJid,
+        owner: &jid::BareJid,
+        node: &str,
+    ) -> Result<bool, XmppError> {
+        if requester == owner {
+            return Ok(true);
+        }
+
+        let access_model = self
+            .pubsub_storage
+            .get_node(owner, node)
+            .await?
+            .map(|node| node.config.access_model)
+            .unwrap_or_else(|| PepHandler::default_access_model_for_node(node));
+
+        let allowed = match access_model {
+            AccessModel::Open => true,
+            AccessModel::Presence | AccessModel::Roster => {
+                self.has_mutual_presence_subscription(requester, owner).await?
+            }
+            AccessModel::Whitelist | AccessModel::Authorize => false,
+        };
+
+        debug!(
+            requester = %requester,
+            owner = %owner,
+            node,
+            access_model = %access_model,
+            allowed,
+            "PEP read access check"
+        );
+
+        Ok(allowed)
+    }
+
+    async fn has_mutual_presence_subscription(
+        &self,
+        requester: &jid::BareJid,
+        owner: &jid::BareJid,
+    ) -> Result<bool, XmppError> {
+        let requester_receives_owner_presence = self
+            .app_state
+            .get_roster_item(requester, owner)
+            .await?
+            .map(|item| matches!(item.subscription, Subscription::To | Subscription::Both))
+            .unwrap_or(false);
+
+        let owner_grants_requester_presence = self
+            .app_state
+            .get_roster_item(owner, requester)
+            .await?
+            .map(|item| matches!(item.subscription, Subscription::From | Subscription::Both))
+            .unwrap_or(false);
+
+        Ok(requester_receives_owner_presence && owner_grants_requester_presence)
     }
 
     /// Check if the current user is a member of the given waddle.

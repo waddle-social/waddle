@@ -91,6 +91,7 @@ pub struct MockAppState {
     pub domain: String,
     /// Whether to accept all auth attempts (true) or reject them (false)
     pub accept_auth: bool,
+    roster_items: std::sync::Mutex<std::collections::HashMap<(String, String), roster::RosterItem>>,
     /// XEP-0503: waddle details for spaces service tests
     pub waddle_details: Vec<waddle_xmpp::WaddleDetails>,
     /// XEP-0503: channels per waddle (keyed by waddle ID)
@@ -102,6 +103,7 @@ impl MockAppState {
         Self {
             domain: domain.to_string(),
             accept_auth: true,
+            roster_items: std::sync::Mutex::new(std::collections::HashMap::new()),
             waddle_details: Vec::new(),
             waddle_channels: std::collections::HashMap::new(),
         }
@@ -111,9 +113,19 @@ impl MockAppState {
         Self {
             domain: domain.to_string(),
             accept_auth: false,
+            roster_items: std::sync::Mutex::new(std::collections::HashMap::new()),
             waddle_details: Vec::new(),
             waddle_channels: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn with_roster_item(self, user_jid: &str, item: roster::RosterItem) -> Self {
+        let key = (user_jid.to_string(), item.jid.to_string());
+        self.roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .insert(key, item);
+        self
     }
 
     /// Add a waddle with its channels for XEP-0503 tests.
@@ -277,38 +289,61 @@ impl AppState for MockAppState {
 
     async fn get_roster(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
     ) -> Result<Vec<roster::RosterItem>, XmppError> {
-        // Mock returns empty roster
-        Ok(vec![])
+        let user_jid = user_jid.to_string();
+        let items = self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .iter()
+            .filter(|((owner, _), _)| owner == &user_jid)
+            .map(|(_, item)| item.clone())
+            .collect();
+        Ok(items)
     }
 
     async fn get_roster_item(
         &self,
-        _user_jid: &jid::BareJid,
-        _contact_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
     ) -> Result<Option<roster::RosterItem>, XmppError> {
-        // Mock returns None - no roster items exist in mock
-        Ok(None)
+        Ok(self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .get(&(user_jid.to_string(), contact_jid.to_string()))
+            .cloned())
     }
 
     async fn set_roster_item(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
         item: &roster::RosterItem,
     ) -> Result<roster::RosterSetResult, XmppError> {
-        // Mock always reports item as added
         let item = item.clone();
-        Ok(roster::RosterSetResult::Added(item))
+        let previous = self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .insert((user_jid.to_string(), item.jid.to_string()), item.clone());
+        Ok(match previous {
+            Some(_) => roster::RosterSetResult::Updated(item),
+            None => roster::RosterSetResult::Added(item),
+        })
     }
 
     async fn remove_roster_item(
         &self,
-        _user_jid: &jid::BareJid,
-        _contact_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
+        contact_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        // Mock returns false - no items to remove in mock
-        Ok(false)
+        Ok(self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .remove(&(user_jid.to_string(), contact_jid.to_string()))
+            .is_some())
     }
 
     async fn get_roster_version(
@@ -321,36 +356,66 @@ impl AppState for MockAppState {
 
     async fn update_roster_subscription(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
         subscription: roster::Subscription,
         ask: Option<roster::AskType>,
     ) -> Result<roster::RosterItem, XmppError> {
-        // Mock returns a new roster item with the specified subscription
-        let contact_jid = contact_jid.clone();
-        Ok(roster::RosterItem {
-            jid: contact_jid,
-            name: None,
-            subscription,
-            ask,
-            groups: vec![],
-        })
+        let key = (user_jid.to_string(), contact_jid.to_string());
+        let mut roster_items = self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned");
+        let item = roster_items
+            .entry(key)
+            .or_insert_with(|| roster::RosterItem::new(contact_jid.clone()));
+        item.subscription = subscription;
+        item.ask = ask;
+        Ok(item.clone())
     }
 
     async fn get_presence_subscribers(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
     ) -> Result<Vec<jid::BareJid>, XmppError> {
-        // Mock returns empty list - no subscribers in mock
-        Ok(vec![])
+        let user_jid = user_jid.to_string();
+        let subscribers = self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .iter()
+            .filter(|((owner, _), item)| {
+                owner == &user_jid
+                    && matches!(
+                        item.subscription,
+                        roster::Subscription::From | roster::Subscription::Both
+                    )
+            })
+            .map(|(_, item)| item.jid.clone())
+            .collect();
+        Ok(subscribers)
     }
 
     async fn get_presence_subscriptions(
         &self,
-        _user_jid: &jid::BareJid,
+        user_jid: &jid::BareJid,
     ) -> Result<Vec<jid::BareJid>, XmppError> {
-        // Mock returns empty list - no subscriptions in mock
-        Ok(vec![])
+        let user_jid = user_jid.to_string();
+        let subscriptions = self
+            .roster_items
+            .lock()
+            .expect("mock roster mutex poisoned")
+            .iter()
+            .filter(|((owner, _), item)| {
+                owner == &user_jid
+                    && matches!(
+                        item.subscription,
+                        roster::Subscription::To | roster::Subscription::Both
+                    )
+            })
+            .map(|(_, item)| item.jid.clone())
+            .collect();
+        Ok(subscriptions)
     }
 
     // =========================================================================
