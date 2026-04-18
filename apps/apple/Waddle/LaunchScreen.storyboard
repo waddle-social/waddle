@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="23504" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+    <device id="retina6_12" orientation="portrait" appearance="light"/>
+    <dependencies>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="23506"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <scenes>
+        <!--View Controller-->
+        <scene sceneID="EHf-IW-A2E">
+            <objects>
+                <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <view contentMode="scaleToFill" translatesAutoresizingMaskIntoConstraints="NO" id="J9T-rN-W5g">
+                                <rect key="frame" x="148.5" y="344" width="96" height="96"/>
+                                <subviews>
+                                    <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="W" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="l9W-sg-I3Q">
+                                        <rect key="frame" x="0.0" y="18" width="96" height="60"/>
+                                        <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="48"/>
+                                        <color key="textColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                        <nil key="highlightedColor"/>
+                                    </label>
+                                </subviews>
+                                <color key="backgroundColor" red="0.2039215686" green="0.5607843137" blue="0.9568627451" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                <constraints>
+                                    <constraint firstAttribute="height" constant="96" id="Aqj-hV-u36"/>
+                                    <constraint firstAttribute="width" constant="96" id="FkE-kA-3f1"/>
+                                    <constraint firstItem="l9W-sg-I3Q" firstAttribute="leading" secondItem="J9T-rN-W5g" secondAttribute="leading" id="c9a-yV-bEu"/>
+                                    <constraint firstAttribute="trailing" secondItem="l9W-sg-I3Q" secondAttribute="trailing" id="hj9-gO-LT5"/>
+                                    <constraint firstItem="l9W-sg-I3Q" firstAttribute="top" secondItem="J9T-rN-W5g" secondAttribute="top" constant="18" id="uQz-Zm-zTa"/>
+                                    <constraint firstAttribute="bottom" secondItem="l9W-sg-I3Q" secondAttribute="bottom" constant="18" id="xGp-bf-z57"/>
+                                </constraints>
+                            </view>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="Bcu-3y-fUS"/>
+                        <color key="backgroundColor" systemColor="systemBackgroundColor"/>
+                        <constraints>
+                            <constraint firstItem="J9T-rN-W5g" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" constant="-34" id="K6h-Nj-TKh"/>
+                            <constraint firstItem="J9T-rN-W5g" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="WYa-jS-FKG"/>
+                        </constraints>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="82" y="-35"/>
+        </scene>
+    </scenes>
+    <resources>
+        <systemColor name="systemBackgroundColor">
+            <color white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+        </systemColor>
+    </resources>
+</document>

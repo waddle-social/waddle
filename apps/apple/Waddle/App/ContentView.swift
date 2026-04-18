@@ -3,45 +3,155 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var model = AppModel()
     @State private var showCreateSheet = false
+    @State private var showSettings = false
+    @AppStorage(AppConfig.themePreferenceKey) private var themePreferenceRaw = AppThemePreference.system.rawValue
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
+
+    private var themePreference: AppThemePreference {
+        AppThemePreference(rawValue: themePreferenceRaw) ?? .system
+    }
 
     var body: some View {
-        Group {
-            if model.session == nil {
-                SignInView(model: model)
-            } else {
-                NavigationSplitView {
-                    WaddleListView(model: model, showCreateSheet: $showCreateSheet)
-                } detail: {
-                    WaddleDetailView(model: model)
-                }
+        rootContent
+            .preferredColorScheme(themePreference.preferredColorScheme)
+            .sheet(isPresented: $showSettings) {
+                AppSettingsPanel()
+            }
+    }
+
+    @ViewBuilder
+    private var rootContent: some View {
+        if model.session == nil {
+            SignInView(model: model) {
+                showSettings = true
+            }
+        } else {
+            authenticatedShell
+        }
+    }
+
+    @ViewBuilder
+    private var authenticatedShell: some View {
+#if os(iOS)
+        if horizontalSizeClass == .compact {
+            MobileSlackShellView(model: model, showCreateSheet: $showCreateSheet)
                 .sheet(isPresented: $showCreateSheet) {
                     CreateWaddleSheet(model: model)
                 }
-            }
+        } else {
+            desktopAuthenticatedShell
         }
+#else
+        desktopAuthenticatedShell
+#endif
+    }
+
+    private var desktopAuthenticatedShell: some View {
+#if os(macOS)
+        DesktopAuthenticatedShell(
+            model: model,
+            showCreateSheet: $showCreateSheet
+        ) {
+            showSettings = true
+        }
+#else
+        NavigationSplitView {
+            WaddleListView(
+                model: model,
+                showCreateSheet: $showCreateSheet
+            ) {
+                showSettings = true
+            }
+        } detail: {
+            WaddleDetailView(model: model)
+        }
+        .sheet(isPresented: $showCreateSheet) {
+            CreateWaddleSheet(model: model)
+        }
+#endif
     }
 }
 
 private struct SignInView: View {
     @ObservedObject var model: AppModel
     @Environment(\.openURL) private var openURL
+    let onShowSettings: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
-            VStack(spacing: 6) {
+#if os(iOS)
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.accentColor.opacity(0.16),
+                    Color(.systemBackground),
+                    Color(.secondarySystemBackground)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            ScrollView {
+                content
+                    .padding(.horizontal, 20)
+                    .padding(.top, 24)
+                    .padding(.bottom, 40)
+                    .frame(maxWidth: 560)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+#else
+        content
+            .padding(24)
+            .frame(maxWidth: 680)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+#endif
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Spacer()
+                Button {
+                    onShowSettings()
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .buttonStyle(.bordered)
+#if os(macOS)
+                .keyboardShortcut(",", modifiers: .command)
+#endif
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
                 Text("Waddle")
-                    .font(.largeTitle.weight(.bold))
-                Text("Native SwiftUI client")
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+
+                Text("Calm, native chat that follows your system theme and keeps longer conversations easy to read.")
+                    .font(.body)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             GroupBox("Server") {
-                HStack(spacing: 8) {
-                    TextField("https://xmpp.waddle.social", text: $model.serverURLText)
 #if os(iOS)
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField("https://xmpp.waddle.social", text: $model.serverURLText)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
-#endif
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Apply server") {
+                        Task { await model.applyServerURL() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+#else
+                HStack(spacing: 8) {
+                    TextField("https://xmpp.waddle.social", text: $model.serverURLText)
                         .textFieldStyle(.roundedBorder)
 
                     Button("Apply") {
@@ -49,6 +159,7 @@ private struct SignInView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 }
+#endif
             }
 
             GroupBox("Sign in") {
@@ -60,12 +171,14 @@ private struct SignInView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         ForEach(model.providers) { provider in
                             Button("Continue with \(provider.displayName ?? provider.id)") {
                                 Task { await model.startDeviceAuthorization(provider: provider, openURL: openURL) }
                             }
                             .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,14 +187,27 @@ private struct SignInView: View {
 
             if let flow = model.deviceAuth {
                 GroupBox("Device authorization") {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         Text("Code")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(flow.userCode)
-                            .font(.title2.monospaced())
-                            .fontWeight(.semibold)
+                            .font(.system(size: 30, weight: .semibold, design: .rounded))
 
+#if os(iOS)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Button("Open verification page") {
+                                model.reopenDeviceVerification(openURL: openURL)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+
+                            Button("Cancel") {
+                                model.cancelDeviceAuthorization()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+#else
                         HStack {
                             Button("Open verification page") {
                                 model.reopenDeviceVerification(openURL: openURL)
@@ -93,6 +219,7 @@ private struct SignInView: View {
                             }
                             .buttonStyle(.bordered)
                         }
+#endif
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -105,50 +232,52 @@ private struct SignInView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(24)
-        .frame(maxWidth: 680)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }
 
 private struct WaddleListView: View {
     @ObservedObject var model: AppModel
     @Binding var showCreateSheet: Bool
+    let onShowSettings: () -> Void
 
     var body: some View {
         List(selection: $model.selectedWaddleID) {
             Section {
                 ForEach(model.publicWaddles) { waddle in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(waddle.name)
                                 .font(.body.weight(.semibold))
                             if let description = waddle.description, !description.isEmpty {
                                 Text(description)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                                    .lineLimit(2)
                             }
                         }
                         Spacer()
                         if model.isJoined(waddle.id) {
                             Text("Joined")
                                 .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.green.opacity(0.18), in: Capsule())
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.green.opacity(0.16), in: Capsule())
                         }
                     }
                     .tag(waddle.id)
                 }
             } header: {
-                Text("Public Waddles")
+                Text("Waddles")
             }
         }
         .navigationTitle("Waddles")
         .searchable(text: $model.searchQuery, placement: .sidebar, prompt: "Search public waddles")
         .onChange(of: model.searchQuery) { _, _ in
             model.schedulePublicWaddleSearch()
+        }
+        .onChange(of: model.selectedWaddleID) { _, nextID in
+            guard nextID != nil else { return }
+            Task { await model.selectWaddle(nextID) }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -165,6 +294,14 @@ private struct WaddleListView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                Button {
+                    onShowSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+#if os(macOS)
+                .keyboardShortcut(",", modifiers: .command)
+#endif
             }
             ToolbarItem(placement: .automatic) {
                 Button("Sign out") {
@@ -177,56 +314,88 @@ private struct WaddleListView: View {
                 await model.refreshPublicWaddles()
             }
         }
+#if os(iOS)
+        .listStyle(.insetGrouped)
+#endif
     }
 }
 
-private struct WaddleDetailView: View {
+private struct AppSettingsPanel: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(AppConfig.themePreferenceKey) private var themePreferenceRaw = AppThemePreference.system.rawValue
+    @AppStorage(AppConfig.scrollDirectionKey) private var scrollDirectionRaw = ChatScrollDirection.chat.rawValue
+
+    var showsDoneButton = true
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Appearance") {
+                    Picker("Theme", selection: $themePreferenceRaw) {
+                        ForEach(AppThemePreference.allCases) { preference in
+                            Text(preference.title).tag(preference.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Section("Conversation layout") {
+                    Picker("Scroll direction", selection: $scrollDirectionRaw) {
+                        ForEach(ChatScrollDirection.allCases) { direction in
+                            Text(direction.title).tag(direction.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(currentScrollDirection.description)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar {
+                if showsDoneButton {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            dismiss()
+                        }
+                    }
+                }
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 420, minHeight: 260)
+#endif
+    }
+
+    private var currentScrollDirection: ChatScrollDirection {
+        ChatScrollDirection(rawValue: scrollDirectionRaw) ?? .chat
+    }
+}
+
+struct WaddleDetailView: View {
     @ObservedObject var model: AppModel
 
     private var selectedWaddle: WaddleSummary? {
-        guard let selectedWaddleID = model.selectedWaddleID else { return nil }
-        return model.publicWaddles.first(where: { $0.id == selectedWaddleID })
+        model.selectedWaddle
     }
 
     var body: some View {
         Group {
             if let waddle = selectedWaddle {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text(waddle.name)
-                            .font(.title.bold())
-
-                        if let description = waddle.description, !description.isEmpty {
-                            Text(description)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        HStack(spacing: 10) {
-                            if model.isJoined(waddle.id) {
-                                Label("Joined", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            } else {
-                                Button("Join waddle") {
-                                    Task { await model.join(waddle) }
-                                }
-                                .buttonStyle(.borderedProminent)
-                            }
-                        }
-
-                        Divider()
-
-                        Text("This is a native SwiftUI shell for Waddle with native auth and community browsing.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                WaddleChatWorkspaceView(model: model, store: model.chatStore, waddle: waddle)
             } else {
-                ContentUnavailableView("No waddle selected", systemImage: "bubble.left.and.bubble.right")
+                ChatEmptyStateView(
+                    title: "Pick a waddle",
+                    message: "Browse waddles, pick a channel, and your chat view will open here.",
+                    systemImage: "bubble.left.and.bubble.right"
+                )
             }
         }
         .navigationTitle(selectedWaddle?.name ?? "Waddle")
+#if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+#endif
         .overlay(alignment: .bottomLeading) {
             if !model.errorMessage.isEmpty {
                 Text(model.errorMessage)
@@ -238,7 +407,7 @@ private struct WaddleDetailView: View {
     }
 }
 
-private struct CreateWaddleSheet: View {
+struct CreateWaddleSheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""

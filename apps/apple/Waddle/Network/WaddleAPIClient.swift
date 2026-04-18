@@ -39,6 +39,10 @@ private struct PublicWaddlesResponse: Decodable {
     let total: Int
 }
 
+private struct MembersResponse: Decodable {
+    let members: [MemberSummary]
+}
+
 private struct ProviderStartRequest: Encodable {
     let provider: String
 }
@@ -161,6 +165,14 @@ final class WaddleAPIClient {
             body: body
         )
         return try decoder.decode(WaddleSummary.self, from: data)
+    }
+
+    func listMembers(sessionID: String, waddleID: String) async throws -> [MemberSummary] {
+        let (data, _) = try await send(
+            path: "/v1/waddles/\(waddleID)/members",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)]
+        )
+        return try decoder.decode(MembersResponse.self, from: data).members
     }
 
     private func send(

@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
    LastUpgradeVersion = "1430"
-   version = "1.7">
+   version = "1.3">
    <BuildAction
       parallelizeBuildables = "YES"
-      buildImplicitDependencies = "YES"
-      runPostActionsOnFailure = "NO">
+      buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
@@ -16,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "559E3F574767EB98D57EF138"
-               BuildableName = "Waddle-iOS.app"
+               BuildableName = "Waddle.app"
                BlueprintName = "Waddle-iOS"
                ReferencedContainer = "container:Waddle.xcodeproj">
             </BuildableReference>
@@ -30,7 +29,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "D1537FCAB55E21CDA0F3F836"
-               BuildableName = "Waddle-macOS.app"
+               BuildableName = "Waddle.app"
                BlueprintName = "Waddle-macOS"
                ReferencedContainer = "container:Waddle.xcodeproj">
             </BuildableReference>
@@ -41,13 +40,12 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
-      onlyGenerateCoverageForSpecifiedTargets = "NO">
+      shouldUseLaunchSchemeArgsEnv = "YES">
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "559E3F574767EB98D57EF138"
-            BuildableName = "Waddle-iOS.app"
+            BuildableName = "Waddle.app"
             BlueprintName = "Waddle-iOS"
             ReferencedContainer = "container:Waddle.xcodeproj">
          </BuildableReference>
@@ -70,7 +68,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "559E3F574767EB98D57EF138"
-            BuildableName = "Waddle-iOS.app"
+            BuildableName = "Waddle.app"
             BlueprintName = "Waddle-iOS"
             ReferencedContainer = "container:Waddle.xcodeproj">
          </BuildableReference>
@@ -87,7 +85,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "559E3F574767EB98D57EF138"
-            BuildableName = "Waddle-iOS.app"
+            BuildableName = "Waddle.app"
             BlueprintName = "Waddle-iOS"
             ReferencedContainer = "container:Waddle.xcodeproj">
          </BuildableReference>

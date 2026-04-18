@@ -100,6 +100,40 @@ struct WaddleSummary: Decodable, Identifiable, Hashable {
     }
 }
 
+struct ChannelSummary: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let description: String?
+    let channelType: String?
+    let position: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case description
+        case channelType = "channel_type"
+        case position
+    }
+}
+
+struct MemberSummary: Decodable, Identifiable, Hashable {
+    let userID: String
+    let username: String
+    let avatarURL: String?
+    let role: String
+    let joinedAt: String
+
+    var id: String { userID }
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case username
+        case avatarURL = "avatar_url"
+        case role
+        case joinedAt = "joined_at"
+    }
+}
+
 struct CreateWaddleRequest: Encodable {
     let name: String
     let description: String?

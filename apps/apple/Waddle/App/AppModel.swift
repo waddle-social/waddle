@@ -1,6 +1,40 @@
 import Foundation
 import SwiftUI
 
+private enum ChatSendError: LocalizedError {
+    case noSession
+    case noWaddle
+    case noRoom
+
+    var errorDescription: String? {
+        switch self {
+        case .noSession:
+            return "Sign in again to reconnect live chat."
+        case .noWaddle:
+            return "Choose a waddle before sending a message."
+        case .noRoom:
+            return "Choose a channel before sending a message."
+        }
+    }
+}
+
+private struct TimelineEventDescriptor {
+    let event: XMPPMessageEvent
+    let fallbackID: String?
+}
+
+private struct TimelineCorrectionUpdate {
+    let targetID: String
+    let body: String
+    let timestamp: Date?
+}
+
+private struct TimelineReactionUpdate {
+    let targetID: String
+    let senderName: String
+    let emojis: [String]
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var serverURLText: String
@@ -8,25 +42,76 @@ final class AppModel: ObservableObject {
     @Published var session: WaddleSession?
     @Published var publicWaddles: [WaddleSummary] = []
     @Published var selectedWaddleID: String?
+    @Published var channels: [ChannelSummary] = []
+    @Published var selectedChannelID: String?
+    @Published var members: [MemberSummary] = []
     @Published var searchQuery = ""
     @Published var joinedWaddleIDs: Set<String> = []
     @Published var deviceAuth: DeviceStartResponse?
     @Published var errorMessage = ""
     @Published var isLoadingProviders = false
     @Published var isLoadingWaddles = false
+    @Published var isLoadingStructure = false
     @Published var isCreatingWaddle = false
+
+    let chatStore: ChatSurfaceStore
 
     private var serverURL: URL
     private var client: WaddleAPIClient
+    private var publicCatalogWaddles: [WaddleSummary] = []
+    private var accessibleWaddles: [WaddleSummary] = []
     private var devicePollTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var xmppService: XMPPService?
+    private var xmppEventsTask: Task<Void, Never>?
+    private var messagesByRoomJID: [String: [ChatTimelineMessage]] = [:]
+    private var presenceByRoomJID: [String: [String: ChatPresenceState]] = [:]
+    private var roomHistoryBeforeCursorByRoomJID: [String: String] = [:]
+    private let roomHistoryPageSize = 50
 
     init() {
         let persistedServerURL = AppConfig.persistedServerURL
-        self.serverURL = persistedServerURL
-        self.serverURLText = persistedServerURL.absoluteString
-        self.client = WaddleAPIClient(serverURL: persistedServerURL)
+        serverURL = persistedServerURL
+        serverURLText = persistedServerURL.absoluteString
+        client = WaddleAPIClient(serverURL: persistedServerURL)
+        chatStore = ChatSurfaceStore()
+        chatStore.setSendHandler { [weak self] text, room in
+            guard let self else { return }
+            try await self.sendMessage(text, room: room)
+        }
+        chatStore.setRoomHistoryLoadHandler { [weak self] room, before in
+            guard let self else {
+                return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
+            }
+            return try await self.loadRoomHistory(for: room, before: before)
+        }
+        updateChatSurfaceState()
         Task { await bootstrap() }
+    }
+
+    var selectedWaddle: WaddleSummary? {
+        guard let selectedWaddleID else { return nil }
+        return publicWaddles.first(where: { $0.id == selectedWaddleID })
+    }
+
+    var selectedChannel: ChannelSummary? {
+        guard let selectedChannelID else { return nil }
+        return channels.first(where: { $0.id == selectedChannelID })
+    }
+
+    var chatMembers: [ChatRoomMember] {
+        let presence = presenceByRoomJID[currentRoomJID ?? ""] ?? [:]
+        return members.map { member in
+            ChatRoomMember(
+                id: member.userID,
+                displayName: member.username,
+                presence: presence[member.username] ?? .offline,
+                isSelf: member.userID == session?.userID,
+                role: member.role,
+                affiliation: nil,
+                avatarInitials: initials(from: member.username)
+            )
+        }
     }
 
     func applyServerURL() async {
@@ -43,7 +128,7 @@ final class AppModel: ObservableObject {
         serverURLText = next.absoluteString
         client = WaddleAPIClient(serverURL: next)
         AppConfig.saveServerURL(next)
-        clearSessionState()
+        await clearSessionState()
         await bootstrap()
     }
 
@@ -52,18 +137,20 @@ final class AppModel: ObservableObject {
         await loadProviders()
 
         guard let storedSessionID = AppConfig.storedSessionID(for: serverURL) else {
+            updateChatSurfaceState()
             return
         }
 
         do {
             guard let loaded = try await client.session(sessionID: storedSessionID), !loaded.isExpired else {
                 AppConfig.clearSessionID(for: serverURL)
+                updateChatSurfaceState()
                 return
             }
-            session = loaded
-            await refreshPublicWaddles()
+            await applyAuthenticatedSession(loaded, persistSession: false)
         } catch {
             errorMessage = error.localizedDescription
+            updateChatSurfaceState()
         }
     }
 
@@ -109,7 +196,7 @@ final class AppModel: ObservableObject {
     func signOut() async {
         let currentSessionID = session?.sessionID
         cancelDeviceAuthorization()
-        clearSessionState()
+        await clearSessionState()
 
         if let currentSessionID {
             do {
@@ -129,13 +216,13 @@ final class AppModel: ObservableObject {
         defer { isLoadingWaddles = false }
 
         do {
-            let loaded = try await client.listPublicWaddles(
+            publicCatalogWaddles = try await client.listPublicWaddles(
                 sessionID: session.sessionID,
                 query: searchQuery
             )
-            publicWaddles = loaded
+            mergeVisibleWaddles()
             if selectedWaddleID == nil {
-                selectedWaddleID = loaded.first?.id
+                selectedWaddleID = publicWaddles.first?.id
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -151,12 +238,55 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func selectWaddle(_ waddleID: String?) async {
+        guard selectedWaddleID != waddleID || channels.isEmpty else {
+            return
+        }
+
+        selectedWaddleID = waddleID
+        channels = []
+        selectedChannelID = nil
+        members = []
+        syncChatRooms()
+        syncChatMembers()
+        syncChatMessages()
+        updateChatSurfaceState()
+
+        guard let waddleID else {
+            return
+        }
+
+        await loadStructure(for: waddleID)
+    }
+
+    func selectChannel(_ channelID: String?) async {
+        selectedChannelID = channelID
+        syncChatRooms()
+        syncChatMembers()
+        syncChatMessages()
+        updateChatSurfaceState()
+
+        guard channelID != nil else {
+            return
+        }
+
+        await joinSelectedChannel()
+        Task { await chatStore.refreshSelectedRoomHistory() }
+    }
+
+    func reloadSelectedWaddleStructure() async {
+        guard let selectedWaddleID else { return }
+        await loadStructure(for: selectedWaddleID)
+    }
+
     func join(_ waddle: WaddleSummary) async {
         guard let session else { return }
 
         do {
             try await client.joinWaddle(sessionID: session.sessionID, waddleID: waddle.id)
             joinedWaddleIDs.insert(waddle.id)
+            await refreshAccessibleWaddles()
+            await selectWaddle(waddle.id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -181,8 +311,9 @@ final class AppModel: ObservableObject {
                 isPublic: isPublic
             )
             joinedWaddleIDs.insert(created.id)
-            publicWaddles.insert(created, at: 0)
-            selectedWaddleID = created.id
+            publicCatalogWaddles.insert(created, at: 0)
+            mergeVisibleWaddles()
+            await selectWaddle(created.id)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -190,6 +321,13 @@ final class AppModel: ObservableObject {
 
     func isJoined(_ waddleID: String) -> Bool {
         joinedWaddleIDs.contains(waddleID)
+    }
+
+    private var currentRoomJID: String? {
+        guard let selectedChannelID else {
+            return nil
+        }
+        return roomJID(for: selectedChannelID)
     }
 
     private func beginPolling(for flow: DeviceStartResponse) {
@@ -201,7 +339,7 @@ final class AppModel: ObservableObject {
                     switch result {
                     case .pending:
                         break
-                    case let .complete(complete):
+                    case .complete(let complete):
                         try await finalizeSignedInState(sessionID: complete.sessionID)
                         return
                     }
@@ -256,17 +394,606 @@ final class AppModel: ObservableObject {
             throw WaddleAPIError.server(statusCode: 401, message: "Session is not available.")
         }
 
-        AppConfig.saveSessionID(loaded.sessionID, for: serverURL)
+        await applyAuthenticatedSession(loaded, persistSession: true)
+    }
+
+    private func applyAuthenticatedSession(_ loaded: WaddleSession, persistSession: Bool) async {
+        if persistSession {
+            AppConfig.saveSessionID(loaded.sessionID, for: serverURL)
+        }
+
         session = loaded
         deviceAuth = nil
         errorMessage = ""
+        updateChatSurfaceState()
+
+        await connectXMPP(using: loaded)
         await refreshPublicWaddles()
     }
 
-    private func clearSessionState() {
+    private func connectXMPP(using session: WaddleSession) async {
+        xmppEventsTask?.cancel()
+        if let xmppService {
+            await xmppService.disconnect(emitEvent: false)
+        }
+
+        let service = XMPPService()
+        xmppService = service
+        updateConnectionBanner(for: .connecting)
+
+        xmppEventsTask = Task { [weak self] in
+            for await event in service.events {
+                await self?.handleXMPPEvent(event)
+            }
+        }
+
+        do {
+            try await service.connect(session: session)
+        } catch {
+            errorMessage = error.localizedDescription
+            chatStore.setBannerState(.error(message: error.localizedDescription))
+            updateChatSurfaceState()
+        }
+    }
+
+    private func handleXMPPEvent(_ event: XMPPEvent) async {
+        switch event {
+        case .streamFeatures:
+            updateConnectionBanner(for: .negotiating)
+        case .authenticated:
+            updateConnectionBanner(for: .authenticating)
+        case .resourceBound:
+            updateConnectionBanner(for: .binding)
+        case .sessionReady:
+            updateConnectionBanner(for: .ready)
+            do {
+                try await xmppService?.sendPresence()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            await refreshAccessibleWaddles()
+            if let nextWaddleID = selectedWaddleID ?? publicWaddles.first?.id {
+                await selectWaddle(nextWaddleID)
+            } else {
+                updateChatSurfaceState()
+            }
+        case .message(let message):
+            handleIncomingMessage(message)
+        case .presence(let presence):
+            handleIncomingPresence(presence)
+        case .authenticationFailed(let detail):
+            let message = detail ?? "The server rejected the XMPP bearer token."
+            errorMessage = message
+            chatStore.setBannerState(.error(message: message))
+            updateChatSurfaceState()
+        case .streamError(let name, let text):
+            let message = text ?? name
+            errorMessage = message
+            chatStore.setBannerState(.error(message: message))
+            updateChatSurfaceState()
+        case .error(let message):
+            errorMessage = message
+            chatStore.setBannerState(.error(message: message))
+            updateChatSurfaceState()
+        case .disconnected:
+            chatStore.setBannerState(.disconnected(message: "Disconnected from live chat."))
+            updateChatSurfaceState()
+        }
+    }
+
+    private func refreshAccessibleWaddles() async {
+        guard let xmppService else { return }
+
+        do {
+            let discovered = try await xmppService.discoverWaddles()
+            accessibleWaddles = discovered.map {
+                WaddleSummary(
+                    id: $0.id,
+                    name: $0.name,
+                    description: nil,
+                    ownerUserID: nil,
+                    iconURL: nil,
+                    isPublic: $0.isPublic,
+                    role: nil,
+                    createdAt: nil,
+                    updatedAt: nil
+                )
+            }
+            joinedWaddleIDs.formUnion(discovered.map(\.id))
+            mergeVisibleWaddles()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadStructure(for waddleID: String) async {
+        guard let session else { return }
+        guard let xmppService else {
+            updateChatSurfaceState()
+            return
+        }
+
+        isLoadingStructure = true
+        updateChatSurfaceState()
+
+        do {
+            async let discoveredChannels = xmppService.discoverChannels(waddleID: waddleID)
+            async let loadedMembers = client.listMembers(sessionID: session.sessionID, waddleID: waddleID)
+
+            let (xmppChannels, loadedMembersValue) = try await (discoveredChannels, loadedMembers)
+            guard selectedWaddleID == waddleID else { return }
+
+            channels = xmppChannels
+                .map {
+                    ChannelSummary(
+                        id: $0.id,
+                        name: $0.name,
+                        description: nil,
+                        channelType: $0.channelType,
+                        position: $0.position
+                    )
+                }
+                .sorted {
+                    ($0.position ?? 0, $0.name.lowercased()) < ($1.position ?? 0, $1.name.lowercased())
+                }
+            members = loadedMembersValue.sorted { $0.username.lowercased() < $1.username.lowercased() }
+
+            if members.contains(where: { $0.userID == session.userID }) {
+                joinedWaddleIDs.insert(waddleID)
+            }
+
+            if let selectedChannelID,
+               channels.contains(where: { $0.id == selectedChannelID }) {
+                self.selectedChannelID = selectedChannelID
+            } else {
+                self.selectedChannelID = channels.first?.id
+            }
+
+            syncChatRooms()
+            syncChatMembers()
+            syncChatMessages()
+            updateChatSurfaceState()
+
+            if let selectedChannelID = self.selectedChannelID {
+                await selectChannel(selectedChannelID)
+            }
+        } catch {
+            guard selectedWaddleID == waddleID else { return }
+            errorMessage = error.localizedDescription
+            chatStore.setSurfaceState(.error(title: "Unable to load channels", message: error.localizedDescription))
+        }
+
+        isLoadingStructure = false
+        updateChatSurfaceState()
+    }
+
+    private func joinSelectedChannel() async {
+        guard let session,
+              let selectedWaddleID,
+              let selectedChannelID,
+              let xmppService else {
+            return
+        }
+
+        do {
+            let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: selectedChannelID)
+            try await xmppService.joinRoom(roomJID, nick: session.username)
+        } catch {
+            errorMessage = error.localizedDescription
+            chatStore.setSurfaceState(.error(title: "Unable to join room", message: error.localizedDescription))
+        }
+    }
+
+    private func sendMessage(_ text: String, room: ChatRoomSelection?) async throws {
+        guard let session else {
+            throw ChatSendError.noSession
+        }
+        guard let selectedWaddleID else {
+            throw ChatSendError.noWaddle
+        }
+
+        let channelID = room?.id ?? selectedChannelID
+        guard let channelID else {
+            throw ChatSendError.noRoom
+        }
+
+        guard let xmppService else {
+            throw ChatSendError.noSession
+        }
+
+        let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+        try await xmppService.sendGroupchatMessage(roomJID: roomJID, body: text)
+    }
+
+    private func loadRoomHistory(for room: ChatRoomSelection, before: Date?) async throws -> ChatRoomHistoryPage {
+        guard let session,
+              let xmppService,
+              let roomJID = roomJID(for: room.id) else {
+            return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
+        }
+
+        let requestBefore = before == nil ? "" : roomHistoryBeforeCursorByRoomJID[roomJID]
+        if before != nil, requestBefore == nil {
+            return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
+        }
+
+        let archivePage = try await xmppService.fetchRoomHistory(
+            roomJID: roomJID,
+            max: roomHistoryPageSize,
+            before: requestBefore
+        )
+
+        let deltaMessages = timelineMessages(
+            from: archivePage.messages.map { TimelineEventDescriptor(event: $0.message, fallbackID: $0.mamID ?? $0.stanzaID) },
+            roomJID: roomJID,
+            session: session
+        )
+
+        let mergedMessages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
+        messagesByRoomJID[roomJID] = mergedMessages
+
+        let nextBeforeCursor = archivePage.pageInfo.first ?? archivePage.messages.first?.mamID ?? archivePage.messages.first?.stanzaID
+        let hasMoreOlderMessages = !archivePage.pageInfo.isComplete
+            && nextBeforeCursor != nil
+            && nextBeforeCursor != requestBefore
+
+        if let nextBeforeCursor, hasMoreOlderMessages {
+            roomHistoryBeforeCursorByRoomJID[roomJID] = nextBeforeCursor
+        } else {
+            roomHistoryBeforeCursorByRoomJID.removeValue(forKey: roomJID)
+        }
+
+        syncChatRooms()
+
+        return ChatRoomHistoryPage(
+            messages: deltaMessages,
+            hasMoreOlderMessages: hasMoreOlderMessages
+        )
+    }
+
+    private func handleIncomingMessage(_ event: XMPPMessageEvent) {
+        guard let session else { return }
+        let roomJID = barePeerJID(event.from ?? event.to ?? "")
+        guard parseManagedRoomBareJID(roomJID) != nil else {
+            return
+        }
+
+        let deltaMessages = timelineMessages(
+            from: [TimelineEventDescriptor(event: event, fallbackID: nil)],
+            roomJID: roomJID,
+            session: session
+        )
+        guard !deltaMessages.isEmpty else {
+            return
+        }
+
+        let messages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
+        messagesByRoomJID[roomJID] = messages
+
+        syncChatRooms()
+        if roomJID == currentRoomJID {
+            syncChatMessages()
+            updateChatSurfaceState()
+        }
+    }
+
+    private func roomJID(for channelID: String) -> String? {
+        guard let session, let selectedWaddleID else {
+            return nil
+        }
+        return roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+    }
+
+    private func timelineMessages(
+        from descriptors: [TimelineEventDescriptor],
+        roomJID: String,
+        session: WaddleSession
+    ) -> [ChatTimelineMessage] {
+        let existingTimeline = messagesByRoomJID[roomJID] ?? []
+        var workingByID = Dictionary(uniqueKeysWithValues: existingTimeline.map { ($0.id, $0) })
+        var deltaByID: [String: ChatTimelineMessage] = [:]
+        var corrections: [TimelineCorrectionUpdate] = []
+        var retractions: [String] = []
+        var reactions: [TimelineReactionUpdate] = []
+
+        for descriptor in descriptors {
+            let event = descriptor.event
+            let senderName = XMPPJID(string: event.from ?? "")?.resource ?? "Unknown"
+
+            if let targetID = event.reactionTargetID, !event.reactionEmojis.isEmpty {
+                reactions.append(
+                    TimelineReactionUpdate(
+                        targetID: targetID,
+                        senderName: senderName,
+                        emojis: event.reactionEmojis
+                    )
+                )
+                continue
+            }
+
+            if let targetID = event.retractsID {
+                retractions.append(targetID)
+                continue
+            }
+
+            if let targetID = event.replacesID {
+                corrections.append(
+                    TimelineCorrectionUpdate(
+                        targetID: targetID,
+                        body: (event.body ?? event.subject ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                        timestamp: event.timestamp
+                    )
+                )
+                continue
+            }
+
+            guard let message = timelineMessage(from: event, fallbackID: descriptor.fallbackID, roomJID: roomJID, session: session) else {
+                continue
+            }
+
+            let merged = workingByID[message.id]?.merged(with: message) ?? message
+            workingByID[message.id] = merged
+            deltaByID[message.id] = merged
+        }
+
+        for correction in corrections {
+            guard var target = workingByID[correction.targetID] else {
+                continue
+            }
+
+            if !correction.body.isEmpty {
+                target.body = correction.body
+            }
+            target.editedAt = latestDate(target.editedAt, correction.timestamp ?? target.sentAt)
+            workingByID[target.id] = target
+            deltaByID[target.id] = target
+        }
+
+        for targetID in retractions {
+            guard var target = workingByID[targetID] else {
+                continue
+            }
+
+            target.body = ""
+            target.isRetracted = true
+            workingByID[target.id] = target
+            deltaByID[target.id] = target
+        }
+
+        for reaction in reactions {
+            guard var target = workingByID[reaction.targetID] else {
+                continue
+            }
+
+            var mergedReactions = target.reactions ?? [:]
+            for emoji in reaction.emojis {
+                var senders = mergedReactions[emoji] ?? []
+                if !senders.contains(reaction.senderName) {
+                    senders.append(reaction.senderName)
+                }
+                mergedReactions[emoji] = senders
+            }
+
+            target.reactions = mergedReactions.isEmpty ? nil : mergedReactions
+            workingByID[target.id] = target
+            deltaByID[target.id] = target
+        }
+
+        return deltaByID.values.sorted {
+            if $0.sentAt == $1.sentAt {
+                return $0.id < $1.id
+            }
+            return $0.sentAt < $1.sentAt
+        }
+    }
+
+    private func timelineMessage(
+        from event: XMPPMessageEvent,
+        fallbackID: String?,
+        roomJID: String,
+        session: WaddleSession
+    ) -> ChatTimelineMessage? {
+        let text = (event.body ?? event.subject ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return nil
+        }
+
+        let senderName = XMPPJID(string: event.from ?? "")?.resource ?? "Unknown"
+        let messageID = event.id ?? event.stanzaID ?? fallbackID ?? UUID().uuidString
+        return ChatTimelineMessage(
+            id: messageID,
+            roomID: roomJID,
+            senderID: senderName.lowercased(),
+            senderDisplayName: senderName,
+            body: text,
+            sentAt: event.timestamp ?? Date(),
+            editedAt: nil,
+            deliveryState: .delivered,
+            isOutgoing: senderName == session.username,
+            isAction: event.type == "subject" || (event.body == nil && event.subject != nil),
+            senderInitials: initials(from: senderName),
+            reactions: nil,
+            isRetracted: false
+        )
+    }
+
+    private func latestDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            return max(lhs, rhs)
+        case let (lhs?, nil):
+            return lhs
+        case let (nil, rhs?):
+            return rhs
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private func handleIncomingPresence(_ event: XMPPPresenceEvent) {
+        guard let from = event.from else { return }
+        let roomJID = barePeerJID(from)
+        guard parseManagedRoomBareJID(roomJID) != nil else {
+            return
+        }
+
+        guard let nick = XMPPJID(string: from)?.resource, !nick.isEmpty else {
+            return
+        }
+
+        var roomPresence = presenceByRoomJID[roomJID] ?? [:]
+        roomPresence[nick] = presenceState(from: event)
+        presenceByRoomJID[roomJID] = roomPresence
+
+        if roomJID == currentRoomJID {
+            syncChatMembers()
+        }
+    }
+
+    private func mergeVisibleWaddles() {
+        var byID: [String: WaddleSummary] = [:]
+        for waddle in accessibleWaddles {
+            byID[waddle.id] = waddle
+        }
+        for waddle in publicCatalogWaddles {
+            byID[waddle.id] = waddle
+        }
+
+        publicWaddles = byID.values.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        if selectedWaddleID == nil {
+            selectedWaddleID = publicWaddles.first?.id
+        }
+    }
+
+    private func syncChatRooms() {
+        let rooms = channels.map { channel in
+            let roomJID = session.flatMap {
+                roomBareJID(accountJID: $0.jid, waddleID: selectedWaddleID ?? "", channelID: channel.id)
+            }
+            let lastMessage = roomJID.flatMap { messagesByRoomJID[$0]?.last }
+            return ChatRoomSelection(
+                id: channel.id,
+                title: channel.name,
+                subtitle: channel.channelType?.capitalized,
+                unreadCount: 0,
+                isMuted: false,
+                lastActivityAt: lastMessage?.sentAt
+            )
+        }
+
+        chatStore.replaceRooms(rooms, selectedRoomID: selectedChannelID)
+    }
+
+    private func syncChatMessages() {
+        chatStore.replaceMessages(messagesByRoomJID[currentRoomJID ?? ""] ?? [])
+    }
+
+    private func syncChatMembers() {
+        chatStore.replaceMembers(chatMembers)
+    }
+
+    private func updateChatSurfaceState() {
+        syncChatRooms()
+        syncChatMembers()
+        syncChatMessages()
+
+        if session == nil {
+            chatStore.setSurfaceState(.idle)
+            return
+        }
+
+        if isLoadingStructure {
+            chatStore.setSurfaceState(.loading)
+            return
+        }
+
+        guard selectedWaddleID != nil else {
+            chatStore.setSurfaceState(.empty(title: "Select a waddle", message: "Choose a waddle to browse its live channels."))
+            return
+        }
+
+        guard xmppService != nil else {
+            chatStore.setSurfaceState(.empty(title: "Live chat unavailable", message: "Reconnect to start the XMPP session."))
+            return
+        }
+
+        guard selectedChannelID != nil else {
+            chatStore.setSurfaceState(.empty(title: "No channels yet", message: "Join the waddle or wait for room discovery to finish."))
+            return
+        }
+
+        chatStore.setSurfaceState(.idle)
+    }
+
+    private func updateConnectionBanner(for state: XMPPConnectionState) {
+        switch state {
+        case .disconnected:
+            chatStore.setBannerState(.disconnected(message: "Live chat is offline."))
+        case .connecting:
+            chatStore.setBannerState(.connecting(message: "Connecting to XMPP…"))
+        case .negotiating:
+            chatStore.setBannerState(.connecting(message: "Negotiating live session…"))
+        case .authenticating:
+            chatStore.setBannerState(.connecting(message: "Authenticating live session…"))
+        case .binding:
+            chatStore.setBannerState(.connecting(message: "Binding live resource…"))
+        case .ready:
+            chatStore.setBannerState(.connected(message: "Connected to live chat"))
+        case .disconnecting:
+            chatStore.setBannerState(.reconnecting(message: "Disconnecting live chat…"))
+        case .failed(let message):
+            chatStore.setBannerState(.error(message: message))
+        }
+    }
+
+    private func presenceState(from event: XMPPPresenceEvent) -> ChatPresenceState {
+        if event.type == "unavailable" {
+            return .offline
+        }
+
+        switch event.show?.lowercased() {
+        case "away", "xa":
+            return .away
+        case "dnd":
+            return .dnd
+        case nil, "", "chat":
+            return .available
+        case let value?:
+            return .unknown(value)
+        }
+    }
+
+    private func initials(from value: String) -> String {
+        let parts = value.split(separator: " ").prefix(2)
+        let letters = parts.compactMap { $0.first }.map(String.init)
+        return letters.isEmpty ? "?" : letters.joined().uppercased()
+    }
+
+    private func clearSessionState() async {
+        xmppEventsTask?.cancel()
+        xmppEventsTask = nil
+        if let xmppService {
+            await xmppService.disconnect(emitEvent: false)
+        }
+        xmppService = nil
+
         session = nil
+        publicCatalogWaddles = []
+        accessibleWaddles = []
         publicWaddles = []
         selectedWaddleID = nil
+        channels = []
+        selectedChannelID = nil
+        members = []
         joinedWaddleIDs.removeAll()
+        messagesByRoomJID.removeAll()
+        presenceByRoomJID.removeAll()
+        roomHistoryBeforeCursorByRoomJID.removeAll()
+        chatStore.clearComposer()
+        chatStore.replaceRooms([])
+        chatStore.replaceMembers([])
+        chatStore.replaceMessages([])
+        chatStore.setBannerState(.hidden)
+        chatStore.setSurfaceState(.empty(title: "Select a waddle", message: "Sign in to browse and join live rooms."))
     }
 }

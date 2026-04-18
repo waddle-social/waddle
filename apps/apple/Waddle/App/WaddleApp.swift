@@ -6,5 +6,8 @@ struct WaddleApp: App {
         WindowGroup {
             ContentView()
         }
+#if os(macOS)
+        .defaultSize(width: AppConfig.desktopWindowWidth, height: AppConfig.desktopWindowHeight)
+#endif
     }
 }

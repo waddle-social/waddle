@@ -7,31 +7,63 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		02EBB0FB569ECB4DDC057D24 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */; };
+		18B2CC29EA7CEDAB928B5A8B /* DesktopAuthenticatedShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */; };
 		1AD217140D76B9EA2F9293BC /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1D7F0578FED187C1011D0F /* AppConfig.swift */; };
+		1DB89CA5F7881D4DAE20233C /* XMPPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B5E718581CB061B9B139536 /* XMPPService.swift */; };
+		2FA79D5E58CB238C0844490E /* XMPPXML.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9076ACB393BE332D2BBC6631 /* XMPPXML.swift */; };
 		406DC4AC6FF7302FACDF1AF2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA49C7EBB1F4B7819123A37B /* ContentView.swift */; };
 		4230F4641D894E48468B1D19 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
+		45AC51B21194DC6C805BF2A3 /* XMPPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C171856D11E83233F15879 /* XMPPTypes.swift */; };
+		4B245E19D9151B1B0E0F03C3 /* ChatViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF071F2F5CDF86AFDE28A7D2 /* ChatViews.swift */; };
+		4F096895A60967A26D428F9C /* XMPPWebSocketTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08F4B7DA28205F06B9F8AC14 /* XMPPWebSocketTransport.swift */; };
+		50EBF674E71CCF0BC2EFF0B2 /* ChatDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FD8BBA9FE130679024113ED /* ChatDomain.swift */; };
 		56D9D4EA89E6E42D38741A6D /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B926355CB1B32289C011C9C4 /* APIModels.swift */; };
+		5B1EF019D18ACB8C36BDD1E5 /* MobileSlackShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */; };
+		5DCE4BD65CC3BF5AFA77E092 /* DesktopAuthenticatedShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */; };
 		6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
+		896FCAB14AB163D3DD9BCFE5 /* XMPPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B5E718581CB061B9B139536 /* XMPPService.swift */; };
+		8DDEBDA3F053AA8C53727C97 /* ChatViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF071F2F5CDF86AFDE28A7D2 /* ChatViews.swift */; };
+		91C3C8B4FDE545DFD743A653 /* XMPPXML.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9076ACB393BE332D2BBC6631 /* XMPPXML.swift */; };
 		952A36D97F57B0631BDEEF1D /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
 		95CE93BC36F8321BEBCF160F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
 		A9217F14ABF56184314B9FC2 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B926355CB1B32289C011C9C4 /* APIModels.swift */; };
 		AD2508D306961CE0B0556E6F /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1D7F0578FED187C1011D0F /* AppConfig.swift */; };
+		B118A694DCAA315268DB511C /* ChatDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FD8BBA9FE130679024113ED /* ChatDomain.swift */; };
 		B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
+		B54E886C56CC736830552F1F /* XMPPWebSocketTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08F4B7DA28205F06B9F8AC14 /* XMPPWebSocketTransport.swift */; };
 		B60E8C9E29FA9849CE370118 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
 		BB7C898C97CF2C3B2940D9E6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA49C7EBB1F4B7819123A37B /* ContentView.swift */; };
+		BC01A7DBB6D2A8044D0D0742 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22F6B3902108DE9EA61D159F /* ChatStore.swift */; };
+		CACEFE58E7C01719B44E423F /* ChatWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */; };
+		E847755860C0F686D15CBF73 /* ChatWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */; };
+		EE90E70CC694E196712418C8 /* MobileSlackShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */; };
+		F788531E1F749089F4FA2EA4 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22F6B3902108DE9EA61D159F /* ChatStore.swift */; };
 		FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
 		FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
+		FEDC185BF46637465D5E47AD /* XMPPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C171856D11E83233F15879 /* XMPPTypes.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		08F4B7DA28205F06B9F8AC14 /* XMPPWebSocketTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPPWebSocketTransport.swift; sourceTree = "<group>"; };
+		22F6B3902108DE9EA61D159F /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
 		3F58BCC39D30A86E52EFE92E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		46C171856D11E83233F15879 /* XMPPTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPPTypes.swift; sourceTree = "<group>"; };
+		52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatWorkspaceView.swift; sourceTree = "<group>"; };
+		5B5E718581CB061B9B139536 /* XMPPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPPService.swift; sourceTree = "<group>"; };
 		6C1D7F0578FED187C1011D0F /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopAuthenticatedShell.swift; sourceTree = "<group>"; };
+		7FD8BBA9FE130679024113ED /* ChatDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDomain.swift; sourceTree = "<group>"; };
+		9076ACB393BE332D2BBC6631 /* XMPPXML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPPXML.swift; sourceTree = "<group>"; };
+		B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSlackShellView.swift; sourceTree = "<group>"; };
 		B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		B926355CB1B32289C011C9C4 /* APIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModels.swift; sourceTree = "<group>"; };
 		BB8C551551F6E346F2CF6447 /* WaddleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleApp.swift; sourceTree = "<group>"; };
+		BF071F2F5CDF86AFDE28A7D2 /* ChatViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViews.swift; sourceTree = "<group>"; };
 		C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleAPIClient.swift; sourceTree = "<group>"; };
 		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		FA49C7EBB1F4B7819123A37B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -50,6 +82,8 @@
 				6C1D7F0578FED187C1011D0F /* AppConfig.swift */,
 				B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */,
 				FA49C7EBB1F4B7819123A37B /* ContentView.swift */,
+				759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */,
+				B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */,
 				BB8C551551F6E346F2CF6447 /* WaddleApp.swift */,
 			);
 			path = App;
@@ -72,15 +106,40 @@
 			path = Network;
 			sourceTree = "<group>";
 		};
+		7825BCE26150B6DECD94AC65 /* XMPP */ = {
+			isa = PBXGroup;
+			children = (
+				5B5E718581CB061B9B139536 /* XMPPService.swift */,
+				46C171856D11E83233F15879 /* XMPPTypes.swift */,
+				08F4B7DA28205F06B9F8AC14 /* XMPPWebSocketTransport.swift */,
+				9076ACB393BE332D2BBC6631 /* XMPPXML.swift */,
+			);
+			path = XMPP;
+			sourceTree = "<group>";
+		};
 		93D0F97B0F84D4D2BD82FEAB /* Waddle */ = {
 			isa = PBXGroup;
 			children = (
 				3F58BCC39D30A86E52EFE92E /* Assets.xcassets */,
+				F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */,
 				4DDC350C0234224B5EECE505 /* App */,
+				D644C05B53E5CF3B9A2E240C /* Chat */,
 				F1261F1BCDDD7AF6F28B5C41 /* Models */,
 				5280D8F4821B4B5C061850EB /* Network */,
+				7825BCE26150B6DECD94AC65 /* XMPP */,
 			);
 			path = Waddle;
+			sourceTree = "<group>";
+		};
+		D644C05B53E5CF3B9A2E240C /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				7FD8BBA9FE130679024113ED /* ChatDomain.swift */,
+				22F6B3902108DE9EA61D159F /* ChatStore.swift */,
+				BF071F2F5CDF86AFDE28A7D2 /* ChatViews.swift */,
+				52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */,
+			);
+			path = Chat;
 			sourceTree = "<group>";
 		};
 		F1261F1BCDDD7AF6F28B5C41 /* Models */ = {
@@ -167,6 +226,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4230F4641D894E48468B1D19 /* Assets.xcassets in Resources */,
+				02EBB0FB569ECB4DDC057D24 /* LaunchScreen.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -188,9 +248,19 @@
 				A9217F14ABF56184314B9FC2 /* APIModels.swift in Sources */,
 				AD2508D306961CE0B0556E6F /* AppConfig.swift in Sources */,
 				FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */,
+				B118A694DCAA315268DB511C /* ChatDomain.swift in Sources */,
+				F788531E1F749089F4FA2EA4 /* ChatStore.swift in Sources */,
+				8DDEBDA3F053AA8C53727C97 /* ChatViews.swift in Sources */,
+				E847755860C0F686D15CBF73 /* ChatWorkspaceView.swift in Sources */,
 				BB7C898C97CF2C3B2940D9E6 /* ContentView.swift in Sources */,
+				5DCE4BD65CC3BF5AFA77E092 /* DesktopAuthenticatedShell.swift in Sources */,
+				5B1EF019D18ACB8C36BDD1E5 /* MobileSlackShellView.swift in Sources */,
 				952A36D97F57B0631BDEEF1D /* WaddleAPIClient.swift in Sources */,
 				B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */,
+				896FCAB14AB163D3DD9BCFE5 /* XMPPService.swift in Sources */,
+				FEDC185BF46637465D5E47AD /* XMPPTypes.swift in Sources */,
+				B54E886C56CC736830552F1F /* XMPPWebSocketTransport.swift in Sources */,
+				91C3C8B4FDE545DFD743A653 /* XMPPXML.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -201,9 +271,19 @@
 				56D9D4EA89E6E42D38741A6D /* APIModels.swift in Sources */,
 				1AD217140D76B9EA2F9293BC /* AppConfig.swift in Sources */,
 				B60E8C9E29FA9849CE370118 /* AppModel.swift in Sources */,
+				50EBF674E71CCF0BC2EFF0B2 /* ChatDomain.swift in Sources */,
+				BC01A7DBB6D2A8044D0D0742 /* ChatStore.swift in Sources */,
+				4B245E19D9151B1B0E0F03C3 /* ChatViews.swift in Sources */,
+				CACEFE58E7C01719B44E423F /* ChatWorkspaceView.swift in Sources */,
 				406DC4AC6FF7302FACDF1AF2 /* ContentView.swift in Sources */,
+				18B2CC29EA7CEDAB928B5A8B /* DesktopAuthenticatedShell.swift in Sources */,
+				EE90E70CC694E196712418C8 /* MobileSlackShellView.swift in Sources */,
 				FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */,
 				6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */,
+				1DB89CA5F7881D4DAE20233C /* XMPPService.swift in Sources */,
+				45AC51B21194DC6C805BF2A3 /* XMPPTypes.swift in Sources */,
+				4F096895A60967A26D428F9C /* XMPPWebSocketTransport.swift in Sources */,
+				2FA79D5E58CB238C0844490E /* XMPPXML.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -281,6 +361,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -318,6 +399,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

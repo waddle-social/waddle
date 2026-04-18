@@ -20,6 +20,7 @@ targets:
         PRODUCT_NAME: Waddle
         PRODUCT_BUNDLE_IDENTIFIER: social.waddle.ios
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
+        INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
   Waddle-macOS:
@@ -28,6 +29,8 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: Waddle
+        excludes:
+          - LaunchScreen.storyboard
     settings:
       base:
         PRODUCT_NAME: Waddle
