@@ -69,6 +69,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
   }
 
   function swallowNextClick() {
+    if (typeof window === "undefined") return;
     const handler = (event: MouseEvent) => {
       event.stopPropagation();
       event.preventDefault();

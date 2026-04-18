@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
 import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
@@ -155,10 +155,26 @@ const mobileToolbarOpen = ref(false);
 const pickerOpen = ref(false);
 const menuOpen = ref(false);
 
+const anyOverlayOpen = computed(
+  () => mobileToolbarOpen.value || pickerOpen.value || menuOpen.value,
+);
+
 function closeAllMenus() {
   mobileToolbarOpen.value = false;
   pickerOpen.value = false;
   menuOpen.value = false;
+}
+
+function togglePicker() {
+  const next = !pickerOpen.value;
+  closeAllMenus();
+  pickerOpen.value = next;
+}
+
+function toggleMenu() {
+  const next = !menuOpen.value;
+  closeAllMenus();
+  menuOpen.value = next;
 }
 
 function react(emoji: string) {
@@ -182,12 +198,13 @@ function retractFromMenu() {
 }
 
 function openPickerFromMenu() {
-  menuOpen.value = false;
+  closeAllMenus();
   pickerOpen.value = true;
 }
 
 const longPress = useLongPress({
   onLongPress: () => {
+    closeAllMenus();
     mobileToolbarOpen.value = true;
   },
 });
@@ -206,12 +223,31 @@ function onWindowPointerDown(event: PointerEvent) {
   closeAllMenus();
 }
 
-onMounted(() => {
-  window.addEventListener("pointerdown", onWindowPointerDown, true);
-});
+function onWindowKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") closeAllMenus();
+}
 
-onUnmounted(() => {
+// Only listen globally while an overlay is actually open. Otherwise every
+// MessageCard in a long timeline would attach its own capture-phase handler
+// and run on every pointerdown anywhere on the page.
+watch(
+  anyOverlayOpen,
+  (open) => {
+    if (typeof window === "undefined") return;
+    if (open) {
+      window.addEventListener("pointerdown", onWindowPointerDown, true);
+      window.addEventListener("keydown", onWindowKeydown);
+    } else {
+      window.removeEventListener("pointerdown", onWindowPointerDown, true);
+      window.removeEventListener("keydown", onWindowKeydown);
+    }
+  },
+);
+
+onBeforeUnmount(() => {
+  if (typeof window === "undefined") return;
   window.removeEventListener("pointerdown", onWindowPointerDown, true);
+  window.removeEventListener("keydown", onWindowKeydown);
 });
 
 watch(
@@ -252,7 +288,7 @@ watch(
     v-else
     ref="bubbleEl"
     :data-message-id="message.id"
-    :data-mobile-open="mobileToolbarOpen || pickerOpen ? 'true' : 'false'"
+    :data-mobile-open="anyOverlayOpen ? 'true' : 'false'"
     class="group relative flow-root px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned
@@ -444,7 +480,7 @@ watch(
           aria-label="Add reaction"
           :aria-expanded="pickerOpen"
           aria-haspopup="dialog"
-          @click="pickerOpen = !pickerOpen; mobileToolbarOpen = false"
+          @click="togglePicker"
         >
           <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
@@ -497,14 +533,14 @@ watch(
         title="Message actions"
         aria-label="Message actions"
         :aria-expanded="menuOpen"
-        aria-haspopup="menu"
-        @click="menuOpen = !menuOpen; mobileToolbarOpen = false"
+        aria-haspopup="dialog"
+        @click="toggleMenu"
       >
         <MoreHorizontal class="w-3.5 h-3.5" aria-hidden="true" />
       </button>
       <div
         v-if="menuOpen"
-        role="menu"
+        role="dialog"
         aria-label="Message actions"
         class="absolute top-full right-0 mt-1 min-w-40 glass-panel border border-border rounded-xl shadow-2xl p-1 animate-fade-in"
         @pointerdown.stop
@@ -514,7 +550,6 @@ watch(
             v-for="e in quickEmojis"
             :key="`menu-${e}`"
             type="button"
-            role="menuitem"
             class="h-8 w-8 flex items-center justify-center text-[16px] leading-none rounded-md hover:bg-muted transition-colors"
             :aria-label="`React with ${e}`"
             @click="react(e)"
@@ -522,7 +557,6 @@ watch(
         </div>
         <button
           type="button"
-          role="menuitem"
           class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
           @click="openPickerFromMenu"
         >
@@ -531,7 +565,6 @@ watch(
         </button>
         <button
           type="button"
-          role="menuitem"
           class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
           @click="startReplyFromMenu"
         >
@@ -542,7 +575,6 @@ watch(
           <div class="my-1 h-px bg-border" />
           <button
             type="button"
-            role="menuitem"
             class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
             @click="startEditFromMenu"
           >
@@ -551,7 +583,6 @@ watch(
           </button>
           <button
             type="button"
-            role="menuitem"
             class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-destructive/10 text-destructive transition-colors text-left"
             @click="retractFromMenu"
           >

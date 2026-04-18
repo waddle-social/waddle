@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Search, X } from "lucide-vue-next";
 import { searchEmoji } from "@/lib/emoji";
 
-defineProps<{
+const props = defineProps<{
   open: boolean;
 }>();
 
@@ -84,30 +84,36 @@ function onKey(event: KeyboardEvent) {
   if (event.key === "Escape") emit("close");
 }
 
-onMounted(() => {
-  loadRecents();
+function attachWindowListeners() {
+  if (typeof window === "undefined") return;
   window.addEventListener("pointerdown", onWindowPointer, true);
   window.addEventListener("keydown", onKey);
-});
+}
 
-onUnmounted(() => {
+function detachWindowListeners() {
+  if (typeof window === "undefined") return;
   window.removeEventListener("pointerdown", onWindowPointer, true);
   window.removeEventListener("keydown", onKey);
-});
+}
 
 watch(
-  () => query.value,
-  () => {
-    // noop — computed handles results.
+  () => props.open,
+  (open) => {
+    if (open) {
+      loadRecents();
+      attachWindowListeners();
+      query.value = "";
+      void nextTick().then(() => {
+        searchInputEl.value?.focus();
+      });
+    } else {
+      detachWindowListeners();
+    }
   },
+  { immediate: true },
 );
 
-watch(
-  () => searchInputEl.value,
-  (el) => {
-    if (el) el.focus();
-  },
-);
+onBeforeUnmount(detachWindowListeners);
 </script>
 
 <template>
