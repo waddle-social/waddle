@@ -152,14 +152,15 @@
     font: inherit;
   }
   /* Prevent iOS Safari from zooming when focusing editable elements.
-     Mobile WebKit auto-zooms inputs whose computed font-size is below 16px. */
+     Mobile WebKit auto-zooms inputs whose computed font-size is below 16px.
+     Use !important to beat Tailwind utilities like text-[13px]; only target
+     the contenteditable root so nested ProseMirror typography is preserved. */
   @media (max-width: 1023px) {
-    input,
-    textarea,
-    select,
-    [contenteditable="true"],
-    [contenteditable="true"] * {
-      font-size: 16px;
+    body input,
+    body textarea,
+    body select,
+    body [contenteditable="true"] {
+      font-size: 16px !important;
     }
   }
 }
