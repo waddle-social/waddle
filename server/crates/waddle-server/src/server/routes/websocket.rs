@@ -1283,8 +1283,8 @@ async fn handle_iq_with_conn_state(frame: &str, ctx: IqHandlingContext<'_>) -> V
                 // The machine's `on_stanza` path calls the same underlying
                 // dispatcher, but the indirection lets it evolve (phase checks,
                 // pending-op tracking, etc.) without touching this shim.
-                // When no machine is provided (test-only `handle_iq` wrapper),
-                // fall back to calling the dispatcher directly.
+                // If no machine is provided, fall back to calling the
+                // dispatcher directly.
                 let events = if let Some(m) = machine {
                     m.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
                         Stanza::Iq(iq.clone()),

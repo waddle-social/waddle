@@ -96,12 +96,13 @@ pub enum ParseError {
 /// when missing so `xmpp_parsers` can convert the element into a typed
 /// stanza.
 pub fn parse_frame(frame: &str) -> Result<InboundFrame, ParseError> {
+    if frame.len() > MAX_FRAME_SIZE {
+        return Err(ParseError::TooLarge);
+    }
+
     let trimmed = frame.trim();
     if trimmed.is_empty() {
         return Err(ParseError::Empty);
-    }
-    if trimmed.len() > MAX_FRAME_SIZE {
-        return Err(ParseError::TooLarge);
     }
 
     let root = peek_root_name(trimmed)
@@ -515,6 +516,12 @@ mod tests {
     #[test]
     fn rejects_oversized_frame() {
         let huge = format!("<iq id=\"x\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+        assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
+    }
+
+    #[test]
+    fn rejects_oversized_frame_even_when_padding_would_trim_away() {
+        let huge = format!("  <iq id=\"x\">{}</iq>  ", "a".repeat(MAX_FRAME_SIZE));
         assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
     }
 }

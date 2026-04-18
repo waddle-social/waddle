@@ -130,14 +130,20 @@ impl EffectInterpreter {
                     }
                 },
 
-                unsupported => self.handle_unsupported(unsupported),
+                unsupported => {
+                    if self.handle_unsupported(unsupported) {
+                        outcome.frames.clear();
+                        outcome.close = true;
+                        break;
+                    }
+                }
             }
         }
 
         outcome
     }
 
-    fn handle_unsupported(&self, event: OutboundEvent) {
+    fn handle_unsupported(&self, event: OutboundEvent) -> bool {
         let event_name = outbound_event_name(&event);
         let message = format!("OutboundEvent::{event_name} is not wired in EffectInterpreter yet");
 
@@ -157,6 +163,7 @@ impl EffectInterpreter {
             has_callback_sender = self.callback_tx.is_some(),
             "OutboundEvent variant not yet wired in interpreter"
         );
+        true
     }
 }
 
