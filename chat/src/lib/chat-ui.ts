@@ -15,6 +15,8 @@ export interface MarkupSpan {
 export interface TimelineMessage {
   id: string;
   author: string;
+  /** Actual JID / occupant JID for the author when known. */
+  authorJid?: string;
   body: string;
   createdAt: string;
   isSelf: boolean;

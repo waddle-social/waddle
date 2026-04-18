@@ -176,6 +176,92 @@ async fn xep0201_thread_survives_mam_query() {
         "Expected archived thread id in MAM result, got: {}",
         mam_output
     );
+    assert!(
+        mam_output.contains("parent='archive-root'")
+            || mam_output.contains("parent=\"archive-root\""),
+        "Expected archived thread parent in MAM result, got: {}",
+        mam_output
+    );
+}
+
+#[tokio::test]
+async fn xep0201_thread_parent_survives_muc_history_replay() {
+    init_test_env();
+    let server = TestServer::start().await;
+
+    let mut alice = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut alice, &server, "alice", "desktop")
+        .await
+        .expect("bind alice");
+    join_muc_room(&mut alice, "thread-history@muc.localhost", "Alice")
+        .await
+        .expect("alice join");
+
+    let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut bob, &server, "bob", "mobile")
+        .await
+        .expect("bind bob");
+    join_muc_room(&mut bob, "thread-history@muc.localhost", "Bob")
+        .await
+        .expect("bob join");
+
+    bob.send(
+        "<message type='groupchat' to='thread-history@muc.localhost' id='thread-history-1' xmlns='jabber:client'>\
+            <body>Nested history reply</body>\
+            <thread parent='history-root'>history-child</thread>\
+        </message>",
+    )
+    .await
+    .expect("send nested history thread");
+    alice
+        .read_until("Nested history reply", DEFAULT_TIMEOUT)
+        .await
+        .expect("alice receives nested history thread");
+    alice.clear();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut carol = RawXmppClient::connect(server.addr).await.expect("connect");
+    establish_bound_session(&mut carol, &server, "carol", "tablet")
+        .await
+        .expect("bind carol");
+    carol
+        .send(
+            "<presence to='thread-history@muc.localhost/Carol' xmlns='jabber:client'>\
+                <x xmlns='http://jabber.org/protocol/muc'>\
+                    <history maxstanzas='10'/>\
+                </x>\
+            </presence>",
+        )
+        .await
+        .expect("carol join with history");
+
+    let history_response = carol
+        .read_until("110", DEFAULT_TIMEOUT)
+        .await
+        .expect("carol receives join response");
+
+    assert!(
+        history_response.contains("Nested history reply"),
+        "Expected archived body in MUC history, got: {}",
+        history_response
+    );
+    assert!(
+        history_response.contains("history-child"),
+        "Expected archived thread id in MUC history, got: {}",
+        history_response
+    );
+    assert!(
+        history_response.contains("parent='history-root'")
+            || history_response.contains("parent=\"history-root\""),
+        "Expected archived thread parent in MUC history, got: {}",
+        history_response
+    );
+    assert!(
+        history_response.contains("urn:xmpp:delay"),
+        "Expected replayed history message with delay stamp, got: {}",
+        history_response
+    );
 }
 
 #[tokio::test]

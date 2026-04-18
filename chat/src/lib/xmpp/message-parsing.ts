@@ -1,5 +1,6 @@
 /** Inbound message parsing — extracts XEP extension data from stanza messages. */
 import type { ReceivedMessage } from "stanza/protocol";
+import { stripMarkupRange } from "./extensions/markup";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
@@ -22,6 +23,12 @@ type MessageExtensionsTarget = Pick<
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
 export function ext(msg: unknown): Record<string, unknown> {
   return msg as Record<string, unknown>;
+}
+
+const encoder = new TextEncoder();
+
+function byteLen(text: string): number {
+  return encoder.encode(text).byteLength;
 }
 
 /** Populate a LiveRoomMessage with data from XEP extensions on the stanza. */
@@ -78,7 +85,19 @@ function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget)
   }
   const start = Math.max(0, Math.min(rawStart, base.body.length));
   const end = Math.max(start, Math.min(rawEnd, base.body.length));
+  if (end <= start) return;
+  const prefixText = base.body.slice(0, start);
+  const strippedText = base.body.slice(start, end);
+  const markupRangeStart = byteLen(prefixText);
+  const markupRangeEnd = markupRangeStart + byteLen(strippedText);
   base.body = base.body.slice(0, start) + base.body.slice(end);
+  if (!base.markup?.length) return;
+  const rebasedMarkup = stripMarkupRange(base.markup, markupRangeStart, markupRangeEnd);
+  if (rebasedMarkup.length > 0) {
+    base.markup = rebasedMarkup;
+    return;
+  }
+  delete base.markup;
 }
 
 function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget): void {

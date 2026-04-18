@@ -46,7 +46,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
     h.onMessage?.({
       id: msg.id ?? crypto.randomUUID(),
       peerJid,
-      fromJid: fromBare,
+      fromJid: msg.from ?? fromBare,
       nick,
       body: "",
       createdAt: new Date().toISOString(),
@@ -72,7 +72,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
   const liveMsg: LiveDmMessage = {
     id: msg.id ?? crypto.randomUUID(),
     peerJid,
-    fromJid: fromBare,
+    fromJid: msg.from ?? fromBare,
     nick,
     body: msg.body ?? msg.subject ?? "",
     createdAt: new Date().toISOString(),

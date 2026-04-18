@@ -7365,7 +7365,7 @@ fn replay_archived_message(
 ) -> xmpp_parsers::message::Message {
     if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
         match stanza_xml.parse::<minidom::Element>() {
-            Ok(element) => match xmpp_parsers::message::Message::try_from(element) {
+            Ok(element) => match crate::stream::element_to_message(element) {
                 Ok(message) => return message,
                 Err(error) => {
                     warn!(archive_id = %archived.id, error = %error, "Failed to parse archived stanza as message");

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Hash, MessageCircle, Settings, Search, X, Upload } from "lucide-vue-next";
+import { findMessageElementById } from "@/lib/message-targeting";
+import { getReplyJumpNotice } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
@@ -73,13 +75,38 @@ function cancelReply() {
   replyingTo.value = null;
 }
 
+const replyJumpNotice = ref("");
+let replyJumpNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function clearReplyJumpNotice() {
+  if (replyJumpNoticeTimeout) {
+    clearTimeout(replyJumpNoticeTimeout);
+    replyJumpNoticeTimeout = null;
+  }
+  replyJumpNotice.value = "";
+}
+
+function showReplyJumpNotice(message: string) {
+  clearReplyJumpNotice();
+  replyJumpNotice.value = message;
+  replyJumpNoticeTimeout = setTimeout(() => {
+    replyJumpNotice.value = "";
+    replyJumpNoticeTimeout = null;
+  }, 2800);
+}
+
 function scrollToMessage(messageId: string) {
-  const el = messagesContainer.value?.querySelector(`[data-message-id="${messageId}"]`);
-  if (el instanceof HTMLElement) {
+  const el = findMessageElementById(messagesContainer.value, messageId);
+  const notice = getReplyJumpNotice(el instanceof HTMLElement);
+  if (!notice && el instanceof HTMLElement) {
+    clearReplyJumpNotice();
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("ring-2", "ring-primary/40");
     setTimeout(() => el.classList.remove("ring-2", "ring-primary/40"), 1400);
+    return;
   }
+
+  showReplyJumpNotice(notice);
 }
 
 function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) {
@@ -106,6 +133,12 @@ const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
+const conversationScope = computed(() => [
+  props.sidebarMode ?? "channels",
+  props.waddle?.id ?? "",
+  props.channel?.id ?? "",
+  props.dmPeer?.peerJid ?? "",
+].join(":"));
 
 defineExpose({ messagesContainer });
 
@@ -182,6 +215,17 @@ watch(
   },
   { deep: true },
 );
+
+watch(conversationScope, () => {
+  cancelReply();
+  clearReplyJumpNotice();
+});
+
+onBeforeUnmount(() => {
+  if (replyJumpNoticeTimeout) {
+    clearTimeout(replyJumpNoticeTimeout);
+  }
+});
 </script>
 
 <template>
@@ -291,6 +335,15 @@ watch(
       class="px-6 py-2.5 bg-destructive/10 border-b border-destructive/20 text-[13px] text-destructive animate-fade-in"
     >
       <div>{{ actionError }}</div>
+    </div>
+    <div
+      v-if="replyJumpNotice"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      class="px-6 py-2 text-[12px] text-muted-foreground bg-muted/35 border-b border-border animate-fade-in"
+    >
+      {{ replyJumpNotice }}
     </div>
 
     <!-- Messages -->

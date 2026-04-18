@@ -355,36 +355,41 @@ watch(
         :key="e"
         class="h-6 w-6 flex items-center justify-center text-[14px] leading-none rounded-md hover:bg-muted hover:scale-110 transition-all duration-150"
         :title="`React with ${e}`"
+        :aria-label="`React to message with ${e}`"
         @click="emit('react', message.id, e)"
       >{{ e }}</button>
       <button
         class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Add reaction"
+        aria-label="Add reaction"
       >
-        <SmilePlus class="w-3.5 h-3.5" />
+        <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
       </button>
       <button
         class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Reply"
+        aria-label="Reply to message"
         @click="emit('reply', message)"
       >
-        <Reply class="w-3.5 h-3.5" />
+        <Reply class="w-3.5 h-3.5" aria-hidden="true" />
       </button>
       <template v-if="message.isSelf">
         <div class="w-px h-4 bg-border mx-0.5" />
         <button
           class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
           title="Edit message"
+          aria-label="Edit message"
           @click="startEdit"
         >
-          <Pencil class="w-3.5 h-3.5" />
+          <Pencil class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
         <button
           class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
           title="Delete message"
+          aria-label="Delete message"
           @click="emit('retract', message.id)"
         >
-          <Trash2 class="w-3.5 h-3.5" />
+          <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
       </template>
     </div>

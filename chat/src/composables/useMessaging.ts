@@ -20,6 +20,7 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
+    authorJid: `${msg.roomJid}/${msg.nick}`,
     body: msg.body,
     createdAt: msg.createdAt,
     isSelf: msg.nick === session.username,
@@ -586,11 +587,18 @@ export function useMessaging(
       }
 
       const parent = replyTo ? messages.value.find((m) => m.id === replyTo.id) : undefined;
-      const threadId = parent?.threadId ?? (replyTo ? replyTo.id : undefined);
+      const wireReplyTo = replyTo && parent
+        ? {
+            id: replyTo.id,
+            author: parent.authorJid ?? replyTo.author,
+            ...(replyTo.body ? { body: replyTo.body } : {}),
+          }
+        : undefined;
+      const threadId = parent ? (parent.threadId ?? replyTo?.id) : undefined;
       const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, {
         markup,
         files: attachments,
-        ...(replyTo ? { replyTo } : {}),
+        ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
       });
       const isStillCurrentChannel =
@@ -603,13 +611,14 @@ export function useMessaging(
         const optimistic: TimelineMessage = {
           id: msgId,
           author: session.value.username,
+          authorJid: `${currentRoomJid.value}/${session.value.username}`,
           body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
           createdAt: new Date().toISOString(),
           isSelf: true,
           deliveryStatus: "sending",
           markup,
         };
-        if (replyTo) {
+        if (replyTo && parent) {
           optimistic.replyTo = {
             id: replyTo.id,
             author: replyTo.author,

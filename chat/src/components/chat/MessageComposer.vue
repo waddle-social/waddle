@@ -5,6 +5,7 @@ import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { MarkupSpan } from "@/lib/chat-ui";
 
@@ -228,9 +229,21 @@ function onSend(doc: Record<string, unknown>) {
 defineExpose({ addAttachments });
 
 function onEditorCancel() {
-  if (showMentions.value || showEmoji.value) {
+  const action = getComposerEscapeAction({
+    showMentions: showMentions.value,
+    showEmoji: showEmoji.value,
+    isReplyingTo: !!props.replyingTo,
+  });
+
+  if (action === "dismiss-autocomplete") {
     showMentions.value = false;
     showEmoji.value = false;
+    triggerRange.value = null;
+    return;
+  }
+
+  if (action === "cancel-reply") {
+    emit("cancelReply");
   }
 }
 
@@ -398,11 +411,12 @@ watch(
     <button
       class="h-10 w-10 flex items-center justify-center rounded-xl transition-all duration-200 flex-shrink-0"
       :class="showGifPicker ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-primary'"
-      title="GIF"
+      title="Open GIF picker"
+      aria-label="Open GIF picker"
       :disabled="disabled"
       @click="showGifPicker = !showGifPicker"
     >
-      <Image class="w-4 h-4" />
+      <Image class="w-4 h-4" aria-hidden="true" />
     </button>
     <ChatEditor
       :ref="setEditorRef"
@@ -415,10 +429,11 @@ watch(
     <button
       class="h-10 w-10 flex items-center justify-center bg-primary text-primary-foreground rounded-xl hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20 flex-shrink-0"
       :disabled="isSending || disabled || isEmpty || slowModeCooldown > 0"
+      aria-label="Send message"
       @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
     >
       <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
-      <Send v-else class="w-4 h-4" />
+      <Send v-else class="w-4 h-4" aria-hidden="true" />
     </button>
     </div>
   </div>

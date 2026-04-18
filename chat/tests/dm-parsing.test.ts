@@ -3,6 +3,12 @@ import { dispatchChat, type DmHandlers } from "../src/lib/xmpp/dm-parsing";
 import type { ReceivedMessage } from "stanza/protocol";
 import type { LiveDmMessage, DmChatStateEvent, DmDisplayedEvent, DmReactionEvent } from "../src/lib/xmpp/types";
 
+const encoder = new TextEncoder();
+
+function byteLen(input: string): number {
+  return encoder.encode(input).byteLength;
+}
+
 function makeHandlers(overrides?: Partial<DmHandlers>): DmHandlers & {
   messages: LiveDmMessage[];
   chatStates: DmChatStateEvent[];
@@ -60,7 +66,7 @@ describe("dispatchChat", () => {
     );
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].peerJid).toBe("bob@example.com");
-    expect(h.messages[0].fromJid).toBe("alice@example.com");
+    expect(h.messages[0].fromJid).toBe("alice@example.com/web");
   });
 
   test("filters out MUC messages by domain", () => {
@@ -190,13 +196,42 @@ describe("dispatchChat", () => {
     expect(h.messages).toHaveLength(0);
   });
 
-  test("strips resource from JIDs", () => {
+  test("preserves the full author JID while normalizing the conversation peer", () => {
     const h = makeHandlers();
     dispatchChat(
       makeMsg({ id: "r-1", from: "bob@example.com/mobile-xyz", body: "hey" }),
       h,
     );
     expect(h.messages[0].peerJid).toBe("bob@example.com");
-    expect(h.messages[0].fromJid).toBe("bob@example.com");
+    expect(h.messages[0].fromJid).toBe("bob@example.com/mobile-xyz");
+  });
+
+  test("strips reply fallbacks and rebases incoming DM markup", () => {
+    const h = makeHandlers();
+    const body = "reply code";
+    const prefix = "> 👋 hi\n\n";
+    const prefixBytes = byteLen(prefix);
+
+    dispatchChat(
+      makeMsg({
+        id: "reply-1",
+        body: `${prefix}${body}`,
+        reply: { to: "bob@example.com", id: "dm-1" },
+        fallbacks: [{ for: "urn:xmpp:reply:0", body: { start: 0, end: prefix.length } }],
+        markup: {
+          spans: [
+            { type: "code", start: prefixBytes + byteLen("reply "), end: prefixBytes + byteLen(body) },
+          ],
+        },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe(body);
+    expect(h.messages[0].replyTo).toEqual({ id: "dm-1", author: "bob@example.com" });
+    expect(h.messages[0].markup).toEqual([
+      { type: "code", start: byteLen("reply "), end: byteLen(body) },
+    ]);
   });
 });

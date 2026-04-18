@@ -18,6 +18,7 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
   const tm: TimelineMessage = {
     id: msg.id,
     author: msg.nick,
+    authorJid: msg.fromJid,
     body: msg.body,
     createdAt: msg.createdAt,
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
@@ -322,10 +323,17 @@ export function useDmMessaging(
       }
 
       const parent = replyTo ? messages.value.find((m) => m.id === replyTo.id) : undefined;
-      const threadId = parent?.threadId ?? (replyTo ? replyTo.id : undefined);
+      const wireReplyTo = replyTo && parent
+        ? {
+            id: replyTo.id,
+            author: parent.authorJid ?? replyTo.author,
+            ...(replyTo.body ? { body: replyTo.body } : {}),
+          }
+        : undefined;
+      const threadId = parent ? (parent.threadId ?? replyTo?.id) : undefined;
       const msgId = await client.sendDirectMessage(peerJid, bodyText, {
         files: attachments,
-        ...(replyTo ? { replyTo } : {}),
+        ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
       });
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
@@ -335,12 +343,13 @@ export function useDmMessaging(
           const optimistic: TimelineMessage = {
             id: msgId,
             author: session.value.username,
+            authorJid: session.value.jid,
             body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
             createdAt: new Date().toISOString(),
             isSelf: true,
             deliveryStatus: "sending",
           };
-          if (replyTo) {
+          if (replyTo && parent) {
             optimistic.replyTo = {
               id: replyTo.id,
               author: replyTo.author,

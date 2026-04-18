@@ -2,7 +2,7 @@
 import type { Agent } from "stanza";
 import type { MarkupSpan } from "@/lib/chat-ui";
 import type { WaddleFallback } from "./extensions/fallback";
-import type { WaddleMarkupSpan } from "./extensions/markup";
+import { shiftMarkupSpans, type WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
 
 export interface OutboundFileAttachment {
@@ -23,6 +23,12 @@ export interface ReplyTarget {
   body?: string;
 }
 
+const encoder = new TextEncoder();
+
+function byteLen(text: string): number {
+  return encoder.encode(text).byteLength;
+}
+
 /** Build one XEP-0447 <file-sharing> payload for a single attachment. */
 export function fileSharingElement(file: OutboundFileAttachment): Record<string, unknown> {
   return {
@@ -39,8 +45,8 @@ export function fileSharingElement(file: OutboundFileAttachment): Record<string,
 /**
  * Build a `> quoted\n\n` fallback prefix for a reply.
  *
- * Returns the prefix string and its UTF-16 code-unit length so callers can
- * attach an XEP-0428 `<fallback/>` with a precise body range.
+ * Returns the prefix string and its string-length range so callers can attach
+ * an XEP-0428 `<fallback/>` body range alongside the outbound text.
  */
 export function buildReplyFallbackPrefix(parentBody: string | undefined): { prefix: string; length: number } {
   if (!parentBody) return { prefix: "", length: 0 };
