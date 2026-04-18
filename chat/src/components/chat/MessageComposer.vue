@@ -30,6 +30,7 @@ const props = defineProps<{
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
+  isTopPinned?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -333,7 +334,7 @@ watch(
 </script>
 
 <template>
-  <div class="relative px-4 py-3 flex-shrink-0" @keydown="onKeydown" @paste="onPaste">
+  <div class="relative px-4 py-3 flex-shrink-0" :class="isTopPinned ? 'border-b border-border' : ''" @keydown="onKeydown" @paste="onPaste">
     <!-- Reply context chip -->
     <div
       v-if="replyingTo"
@@ -418,6 +419,7 @@ watch(
     <GifPicker
       v-if="showGifPicker"
       :api-key="tenorApiKey"
+      :is-top-pinned="isTopPinned"
       @select="onGifSelected"
       @close="showGifPicker = false"
     />
@@ -425,7 +427,8 @@ watch(
     <!-- @mention autocomplete -->
     <div
       v-if="showMentions && mentionResults.length > 0"
-      class="absolute bottom-full left-4 mb-2 glass-panel border border-border rounded-xl max-h-48 overflow-auto z-50 min-w-48 shadow-xl animate-fade-in"
+      class="absolute left-4 glass-panel border border-border rounded-xl max-h-48 overflow-auto z-50 min-w-48 shadow-xl animate-fade-in"
+      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
       <div class="py-1">
         <button
@@ -444,7 +447,8 @@ watch(
     <!-- :emoji autocomplete -->
     <div
       v-if="showEmoji && emojiResults.length > 0"
-      class="absolute bottom-full left-4 mb-2 glass-panel border border-border rounded-xl max-h-48 overflow-auto z-50 min-w-48 shadow-xl animate-fade-in"
+      class="absolute left-4 glass-panel border border-border rounded-xl max-h-48 overflow-auto z-50 min-w-48 shadow-xl animate-fade-in"
+      :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
       <div class="py-1">
         <button

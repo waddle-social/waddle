@@ -76,7 +76,7 @@ const emit = defineEmits<{
 const feedMessages = computed(() =>
   props.messages.filter((m) => !m.threadId || m.id === m.threadId),
 );
-const { mode: scrollDirection } = useScrollDirection();
+const { mode: scrollDirection, isTopPinned } = useScrollDirection();
 const orderedFeedMessages = computed(() =>
   orderTimelineForScrollDirection(feedMessages.value, scrollDirection.value),
 );
@@ -208,6 +208,7 @@ const showSearch = ref(false);
 const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
+const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
 const conversationScope = computed(() => [
   props.sidebarMode ?? "channels",
@@ -448,6 +449,46 @@ function showDividerAfter(messageId: string): boolean {
       {{ replyJumpNotice }}
     </div>
 
+    <!-- Composer (social / top-pinned mode) -->
+    <!-- Note: the composer and typing indicator appear in two spots in the DOM
+         so they can be rendered above or below the messages container depending
+         on the scroll-direction mode. -->
+    <MessageComposer
+      v-if="canShowComposer && isTopPinned"
+      :ref="setComposerRef"
+      v-model:draft="draft"
+      v-model:forum-title="forumTitle"
+      :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
+      :is-forum-channel="isForumChannel"
+      :is-sending="isSending"
+      :disabled="!canShowComposer"
+      :tenor-api-key="tenorApiKey"
+      :member-names="memberNames"
+      :slow-mode-cooldown="slowModeCooldown"
+      :upload-progress="uploadProgress"
+      :replying-to="replyingTo"
+      :is-top-pinned="true"
+      @send="onSend"
+      @cancel-reply="cancelReply"
+      @typing="emit('typing')"
+      @select-gif="onSelectGif"
+    />
+
+    <!-- Typing indicator (social / top-pinned mode) -->
+    <div
+      v-if="typingUsers.length > 0 && isTopPinned"
+      class="px-6 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2 flex-shrink-0 border-b border-border"
+    >
+      <span class="flex gap-0.5">
+        <span class="typing-dot" />
+        <span class="typing-dot" />
+        <span class="typing-dot" />
+      </span>
+      <span v-if="typingUsers.length === 1">{{ typingUsers[0] }} is typing</span>
+      <span v-else-if="typingUsers.length === 2">{{ typingUsers[0] }} and {{ typingUsers[1] }} are typing</span>
+      <span v-else>{{ typingUsers[0] }} and {{ typingUsers.length - 1 }} others are typing</span>
+    </div>
+
     <!-- Messages -->
     <div :ref="setMessagesContainer" class="flex-1 min-h-0 overflow-auto px-6 py-4">
       <div v-if="isLoadingMessages" class="text-center py-16 text-[13px] text-muted-foreground">
@@ -533,7 +574,7 @@ function showDividerAfter(messageId: string): boolean {
 
     <!-- Typing indicator -->
     <div
-      v-if="typingUsers.length > 0"
+      v-if="typingUsers.length > 0 && !isTopPinned"
       class="px-6 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2 flex-shrink-0"
     >
       <span class="flex gap-0.5">
@@ -548,14 +589,14 @@ function showDividerAfter(messageId: string): boolean {
 
     <!-- Composer -->
     <MessageComposer
-      v-if="channel || dmPeer"
+      v-if="canShowComposer && !isTopPinned"
       :ref="setComposerRef"
       v-model:draft="draft"
       v-model:forum-title="forumTitle"
       :channel-name="dmPeer ? dmPeer.peerUsername : (channel?.name ?? 'conversation')"
       :is-forum-channel="isForumChannel"
       :is-sending="isSending"
-      :disabled="!channel && !dmPeer"
+      :disabled="!canShowComposer"
       :tenor-api-key="tenorApiKey"
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"

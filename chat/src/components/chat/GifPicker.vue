@@ -4,6 +4,7 @@ import { Search, X } from "lucide-vue-next";
 
 const props = defineProps<{
   apiKey: string;
+  isTopPinned?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -55,7 +56,10 @@ function selectGif(gif: GiphyGif) {
 </script>
 
 <template>
-  <div class="absolute bottom-full left-0 right-0 mb-2 glass-panel border border-border rounded-xl max-h-72 flex flex-col z-50 shadow-2xl animate-fade-in overflow-hidden">
+  <div
+    class="absolute left-0 right-0 glass-panel border border-border rounded-xl max-h-72 flex flex-col z-50 shadow-2xl animate-fade-in overflow-hidden"
+    :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
+  >
     <!-- Header -->
     <div class="flex items-center gap-2.5 px-4 py-2.5 border-b border-border">
       <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
