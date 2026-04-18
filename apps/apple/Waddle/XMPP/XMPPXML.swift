@@ -197,6 +197,51 @@ enum XMPPXML {
         return "<iq type='set' id='\(escape(id))' to='\(escape(roomJID))'>\(query)</iq>"
     }
 
+    static func adHocCommandExecute(id: String, to: String, node: String) -> String {
+        "<iq type='set' id='\(escape(id))' to='\(escape(to))'>" +
+        "<command xmlns='http://jabber.org/protocol/commands' node='\(escape(node))' action='execute'/>" +
+        "</iq>"
+    }
+
+    static func adHocCommandComplete(
+        id: String,
+        to: String,
+        node: String,
+        sessionID: String,
+        fields: [(name: String, value: String, type: String)]
+    ) -> String {
+        var form = "<x xmlns='jabber:x:data' type='submit'>"
+        for field in fields {
+            form += "<field var='\(escape(field.name))' type='\(escape(field.type))'>"
+            form += "<value>\(escape(field.value))</value>"
+            form += "</field>"
+        }
+        form += "</x>"
+        return "<iq type='set' id='\(escape(id))' to='\(escape(to))'>" +
+            "<command xmlns='http://jabber.org/protocol/commands' node='\(escape(node))' action='complete' sessionid='\(escape(sessionID))'>" +
+            form +
+            "</command>" +
+            "</iq>"
+    }
+
+    static func parseAdHocCommandResponse(from element: XMPPElement) -> (sessionID: String?, status: String?, fields: [String: String]) {
+        guard let command = element.firstChild(named: "command") else {
+            return (nil, nil, [:])
+        }
+        let sessionID = command.attribute("sessionid")
+        let status = command.attribute("status")
+        var fields: [String: String] = [:]
+        if let form = command.firstChild(named: "x") {
+            for field in form.children(named: "field") {
+                if let varName = field.attribute("var"),
+                   let value = field.firstChild(named: "value")?.text, !value.isEmpty {
+                    fields[varName] = value
+                }
+            }
+        }
+        return (sessionID, status, fields)
+    }
+
     static func discoItems(id: String, to: String, node: String? = nil) -> String {
         var query = "<query xmlns='http://jabber.org/protocol/disco#items'"
         if let node, !node.isEmpty {

@@ -687,6 +687,7 @@ struct ChatComposerView: View {
     var usesOperationalChrome: Bool = false
     var usesCompactConversationChrome: Bool = false
     var onSend: () -> Void
+    @State private var showEmojiPicker = false
 
     private var hasSendableText: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -721,6 +722,8 @@ struct ChatComposerView: View {
             HStack(alignment: .bottom, spacing: 12) {
                 editor(minHeight: usesOperationalChrome ? 56 : 44, maxHeight: 140)
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                emojiPickerButton
 
                 sendButton
                     .buttonStyle(.borderedProminent)
@@ -759,6 +762,8 @@ struct ChatComposerView: View {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .strokeBorder(Color.secondary.opacity(0.10), lineWidth: 1)
                     }
+
+                emojiPickerButton
 
                 sendButton
                     .buttonStyle(.plain)
@@ -821,6 +826,23 @@ struct ChatComposerView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private var emojiPickerButton: some View {
+        Button {
+            showEmojiPicker.toggle()
+        } label: {
+            Image(systemName: "face.smiling")
+                .font(usesCompactConversationChrome ? .title3 : .body)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showEmojiPicker) {
+            ChatEmojiPickerView { emoji in
+                text += emoji
+                showEmojiPicker = false
+            }
         }
     }
 
@@ -993,6 +1015,62 @@ struct ChatTypingIndicatorView: View {
         default:
             return "\(typingUsers[0]) and \(typingUsers.count - 1) others are typing"
         }
+    }
+}
+
+struct ChatEmojiPickerView: View {
+    var onSelect: (String) -> Void
+    @State private var searchText = ""
+
+    private static let emojiCategories: [(name: String, emojis: [String])] = [
+        ("Smileys", ["😀", "😂", "🥹", "😍", "🤩", "😎", "🤔", "😅", "😢", "😤", "🥺", "😱", "🤗", "🫡", "🤝", "🙏"]),
+        ("Reactions", ["👍", "👎", "❤️", "🔥", "🎉", "✅", "❌", "💯", "👀", "🚀", "💪", "🙌", "👏", "🤷", "💀", "😭"]),
+        ("Objects", ["💬", "📎", "📌", "🔗", "💡", "⚡", "🎯", "🏷️", "📝", "🔔", "⭐", "🌟", "💎", "🛠️", "🔒", "🔑"]),
+        ("Nature", ["🌈", "☀️", "🌙", "⭐", "🌊", "🌸", "🍀", "🌻", "🐧", "🦆", "🐝", "🦋", "🐳", "🌴", "🍄", "🌵"]),
+    ]
+
+    private var filteredEmojis: [(name: String, emojis: [String])] {
+        if searchText.isEmpty { return Self.emojiCategories }
+        return Self.emojiCategories.compactMap { category in
+            let filtered = category.emojis.filter { _ in true }
+            return filtered.isEmpty ? nil : (category.name, filtered)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("Search emoji", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(10)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(filteredEmojis, id: \.name) { category in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(category.name)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+
+                            LazyVGrid(columns: Array(repeating: GridItem(.fixed(36), spacing: 4), count: 8), spacing: 4) {
+                                ForEach(category.emojis, id: \.self) { emoji in
+                                    Button {
+                                        onSelect(emoji)
+                                    } label: {
+                                        Text(emoji)
+                                            .font(.title2)
+                                            .frame(width: 36, height: 36)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(10)
+            }
+        }
+        .frame(width: 340, height: 320)
     }
 }
 

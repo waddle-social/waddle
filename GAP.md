@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 2, items 1.2/1.5/1.6)
+> Last updated: 2026-04-19 (loop 3, items 5.1/6.1)
 
 ## Legend
 
@@ -65,14 +65,14 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 5.1 | Emoji picker UI | HIGH | [ ] | - | Web has searchable emoji picker with recent cache |
+| 5.1 | Emoji picker UI | HIGH | [x] | - | Emoji picker popover with categorized grid (smileys, reactions, objects, nature), search field, inserts into composer |
 | 5.2 | Emoji autocomplete in composer | MEDIUM | [ ] | - | Web has `:emoji_name:` autocomplete |
 
 ## 6. Channel & Waddle Management
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 6.1 | Create channel (text/forum) | HIGH | [ ] | XEP-0050 | Web uses ad-hoc commands |
+| 6.1 | Create channel (text/forum) | HIGH | [x] | XEP-0050 | Two-step ad-hoc command flow, form with name/description/type/position, create button in channel rail |
 | 6.2 | Edit channel (name, description) | MEDIUM | [ ] | - | Web has EditChannelDialog |
 | 6.3 | Waddle settings dialog | MEDIUM | [ ] | - | Web has WaddleSettingsDialog |
 | 6.4 | Delete waddle | LOW | [ ] | - | Web has delete with confirmation |

@@ -5,6 +5,10 @@ struct WaddleChatWorkspaceView: View {
     @ObservedObject var store: ChatSurfaceStore
     let waddle: WaddleSummary
     @State private var showMembersSheet = false
+    @State private var showCreateChannelSheet = false
+    @State private var newChannelName = ""
+    @State private var newChannelDescription = ""
+    @State private var newChannelType = "text"
 
     var body: some View {
         GeometryReader { proxy in
@@ -30,6 +34,56 @@ struct WaddleChatWorkspaceView: View {
             }
             .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showCreateChannelSheet) {
+            createChannelSheet
+        }
+    }
+
+    private var createChannelSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Channel Details") {
+                    TextField("Channel name", text: $newChannelName)
+                    TextField("Description (optional)", text: $newChannelDescription)
+                }
+
+                Section("Type") {
+                    Picker("Channel type", selection: $newChannelType) {
+                        Text("Text").tag("text")
+                        Text("Forum").tag("forum")
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .navigationTitle("New Channel")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showCreateChannelSheet = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") {
+                        Task {
+                            await model.createChannel(
+                                name: newChannelName,
+                                description: newChannelDescription.isEmpty ? nil : newChannelDescription,
+                                channelType: newChannelType
+                            )
+                            newChannelName = ""
+                            newChannelDescription = ""
+                            newChannelType = "text"
+                            showCreateChannelSheet = false
+                        }
+                    }
+                    .disabled(newChannelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isCreatingChannel)
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 
     private var compactLayoutView: some View {
@@ -241,6 +295,14 @@ struct WaddleChatWorkspaceView: View {
                     }
                 }
             }
+
+            Divider()
+
+            Button {
+                showCreateChannelSheet = true
+            } label: {
+                Label("New Channel", systemImage: "plus")
+            }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "number")
@@ -361,6 +423,16 @@ struct WaddleChatWorkspaceView: View {
                     Text("Channels")
                         .font(.headline)
                     Spacer()
+
+                    Button {
+                        showCreateChannelSheet = true
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+
                     Text("\(store.rooms.count)")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)

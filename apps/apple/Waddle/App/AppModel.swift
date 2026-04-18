@@ -334,6 +334,37 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published var isCreatingChannel = false
+
+    func createChannel(name: String, description: String?, channelType: String) async {
+        guard let selectedWaddleID, let xmppService else { return }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            errorMessage = "Channel name is required."
+            return
+        }
+
+        isCreatingChannel = true
+        defer { isCreatingChannel = false }
+
+        do {
+            let position = channels.count
+            let result = try await xmppService.createChannel(
+                waddleID: selectedWaddleID,
+                name: trimmedName,
+                description: description,
+                channelType: channelType,
+                position: position
+            )
+            await loadStructure(for: selectedWaddleID)
+            if let channelID = result.channelID {
+                await selectChannel(channelID)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func isJoined(_ waddleID: String) -> Bool {
         joinedWaddleIDs.contains(waddleID)
     }

@@ -153,6 +153,67 @@ final class XMPPService: ObservableObject {
         )
     }
 
+    struct CreateChannelResult: Sendable {
+        let channelID: String?
+        let channelJID: String?
+    }
+
+    func createChannel(
+        waddleID: String,
+        name: String,
+        description: String?,
+        channelType: String,
+        position: Int
+    ) async throws -> CreateChannelResult {
+        try ensureReady()
+        guard let credentials else { throw XMPPServiceError.notReady }
+
+        let serverJID = jidDomain(credentials.jid)
+
+        let executeID = nextIQID(prefix: "cmd-exec")
+        let executeResponse = try await sendIQ(
+            XMPPXML.adHocCommandExecute(id: executeID, to: serverJID, node: "waddle:create-channel"),
+            id: executeID
+        )
+
+        let (sessionID, status, _) = XMPPXML.parseAdHocCommandResponse(from: executeResponse)
+        guard let sessionID, status != "completed" else {
+            throw XMPPServiceError.iqError("Unexpected command response.")
+        }
+
+        var fields: [(name: String, value: String, type: String)] = [
+            (name: "waddle_id", value: waddleID, type: "hidden"),
+            (name: "name", value: name, type: "text-single"),
+            (name: "channel_type", value: channelType, type: "list-single"),
+            (name: "position", value: String(position), type: "text-single"),
+        ]
+        if let description, !description.isEmpty {
+            fields.append((name: "description", value: description, type: "text-multi"))
+        }
+
+        let completeID = nextIQID(prefix: "cmd-complete")
+        let completeResponse = try await sendIQ(
+            XMPPXML.adHocCommandComplete(
+                id: completeID,
+                to: serverJID,
+                node: "waddle:create-channel",
+                sessionID: sessionID,
+                fields: fields
+            ),
+            id: completeID
+        )
+
+        let (_, completeStatus, resultFields) = XMPPXML.parseAdHocCommandResponse(from: completeResponse)
+        guard completeStatus == "completed" else {
+            throw XMPPServiceError.iqError("Channel creation failed.")
+        }
+
+        return CreateChannelResult(
+            channelID: resultFields["channel_id"],
+            channelJID: resultFields["channel_jid"]
+        )
+    }
+
     func fetchRoomHistory(roomJID: String, max: Int = 50, before: String? = "") async throws -> XMPPArchivePage {
         try ensureReady()
         guard pendingArchiveQuery == nil else {
