@@ -21,6 +21,9 @@ fn main() {
 
     println!("cargo:rustc-env=WADDLE_GIT_SHA={sha}");
     println!("cargo:rerun-if-env-changed=WADDLE_GIT_SHA");
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs/heads");
+    // The workspace root is three levels up from this crate
+    // (server/crates/waddle-xmpp/build.rs -> repo root).
+    println!("cargo:rerun-if-changed=../../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../../.git/refs/heads");
+    println!("cargo:rerun-if-changed=../../../.git/packed-refs");
 }

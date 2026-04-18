@@ -22,7 +22,12 @@ export function useVersion(xmppClient: Ref<BrowserXmppClient | null>) {
   watch(
     xmppClient,
     (client) => {
-      if (!client || client === fetchedForClient) return;
+      if (!client) {
+        fetchedForClient = null;
+        serverVersion.value = null;
+        return;
+      }
+      if (client === fetchedForClient) return;
       fetchedForClient = client;
       void client.getServerVersion().then((info) => {
         if (fetchedForClient === client) {

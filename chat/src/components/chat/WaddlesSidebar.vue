@@ -203,7 +203,7 @@ function waddleColor(waddle: WaddleSummary): string {
     >
       <span class="font-mono">w {{ webShortSha }}</span>
       <span class="font-mono">s {{ serverShortSha }}</span>
-      <span aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      <span role="img" aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
     </div>
     <div
       v-else
@@ -212,7 +212,7 @@ function waddleColor(waddle: WaddleSummary): string {
     >
       <span class="font-mono">web {{ webShortSha }}</span>
       <span class="font-mono">srv {{ serverShortSha }}</span>
-      <span aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      <span role="img" aria-label="Made in Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
     </div>
   </div>
 </template>
