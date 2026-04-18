@@ -656,7 +656,7 @@ onUnmounted(() => {
             :active-sidebar-mode="ui.sidebarMode.value"
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
-            class="!w-full !border-r-0"
+            horizontal
             @select-waddle="selectWaddle($event)"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
             @browse-public-waddles="openBrowsePublicWaddles"

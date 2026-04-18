@@ -13,6 +13,7 @@ const props = defineProps<{
   session: WaddleSession | null;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
+  horizontal?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -50,21 +51,31 @@ function waddleColor(waddle: WaddleSummary): string {
 </script>
 
 <template>
-  <div class="w-[64px] bg-rail flex flex-col items-center flex-shrink-0 py-4 gap-1.5">
+  <div
+    class="bg-rail flex flex-shrink-0"
+    :class="horizontal
+      ? 'w-full flex-row items-center px-3 py-2 gap-2'
+      : 'w-[64px] flex-col items-center py-4 gap-1.5'"
+  >
     <!-- Logo -->
-    <div class="w-10 h-10 flex items-center justify-center mb-2">
+    <div class="w-10 h-10 flex items-center justify-center flex-shrink-0" :class="horizontal ? '' : 'mb-2'">
       <span class="text-xl">🐧</span>
     </div>
 
     <!-- Divider -->
-    <div class="w-7 h-px bg-border mb-1" />
+    <div class="bg-border flex-shrink-0" :class="horizontal ? 'h-7 w-px' : 'w-7 h-px mb-1'" />
 
     <!-- Waddle icons -->
-    <div class="flex-1 overflow-auto flex flex-col items-center gap-1.5 w-full px-2">
+    <div
+      class="flex-1 overflow-auto flex gap-1.5"
+      :class="horizontal
+        ? 'flex-row items-center min-w-0 py-0.5'
+        : 'flex-col items-center w-full px-2'"
+    >
       <button
         v-for="waddle in privateWaddles"
         :key="waddle.id"
-        class="relative w-10 h-10 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200 group"
+        class="relative w-10 h-10 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200 group flex-shrink-0"
         :class="activeWaddleId === waddle.id
           ? 'text-primary-foreground shadow-lg'
           : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
@@ -77,8 +88,13 @@ function waddleColor(waddle: WaddleSummary): string {
         <span class="font-display font-bold">{{ waddleInitial(waddle) }}</span>
         <!-- Active indicator -->
         <span
-          v-if="activeWaddleId === waddle.id"
+          v-if="activeWaddleId === waddle.id && !horizontal"
           class="absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full"
+          :style="{ backgroundColor: waddleColor(waddle) }"
+        />
+        <span
+          v-if="activeWaddleId === waddle.id && horizontal"
+          class="absolute -bottom-2 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <!-- Lock badge -->
@@ -86,13 +102,13 @@ function waddleColor(waddle: WaddleSummary): string {
       </button>
 
       <template v-if="publicWaddles.length > 0 && privateWaddles.length > 0">
-        <div class="w-7 h-px bg-border my-0.5" />
+        <div class="bg-border flex-shrink-0" :class="horizontal ? 'h-7 w-px mx-0.5' : 'w-7 h-px my-0.5'" />
       </template>
 
       <button
         v-for="waddle in publicWaddles"
         :key="waddle.id"
-        class="relative w-10 h-10 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200"
+        class="relative w-10 h-10 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200 flex-shrink-0"
         :class="activeWaddleId === waddle.id
           ? 'text-primary-foreground shadow-lg'
           : 'text-rail-foreground hover:text-rail-active hover:scale-105'"
@@ -104,19 +120,24 @@ function waddleColor(waddle: WaddleSummary): string {
       >
         <span class="font-display font-bold">{{ waddleInitial(waddle) }}</span>
         <span
-          v-if="activeWaddleId === waddle.id"
+          v-if="activeWaddleId === waddle.id && !horizontal"
           class="absolute -left-2 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full"
+          :style="{ backgroundColor: waddleColor(waddle) }"
+        />
+        <span
+          v-if="activeWaddleId === waddle.id && horizontal"
+          class="absolute -bottom-2 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
       </button>
 
-      <div v-if="waddles.length === 0" class="text-muted-foreground/30 text-[10px] mt-3 text-center">
+      <div v-if="waddles.length === 0" class="text-muted-foreground/30 text-[10px] text-center" :class="horizontal ? '' : 'mt-3'">
         No waddles
       </div>
     </div>
 
     <!-- Bottom actions -->
-    <div class="flex flex-col items-center gap-1.5 mt-2">
+    <div class="flex gap-1.5 flex-shrink-0" :class="horizontal ? 'flex-row items-center' : 'flex-col items-center mt-2'">
       <button
         class="relative w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200 hover:scale-105"
         :class="activeSidebarMode === 'dms'
@@ -147,9 +168,9 @@ function waddleColor(waddle: WaddleSummary): string {
       </button>
     </div>
 
-    <!-- Profile footer -->
+    <!-- Profile footer (vertical only) -->
     <ProfilePanel
-      v-if="session"
+      v-if="session && !horizontal"
       :session="session"
       :notification-permission="notificationPermission"
       :notifications-enabled="notificationsEnabled"
