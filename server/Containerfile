@@ -31,6 +31,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # ── Cook + build for target arch ────────────────────────────────────
 FROM builder AS build
 ARG TARGETARCH
+# Commit SHA baked into the binary so XEP-0092 advertises a real revision.
+# Defaults to "unknown"; CI overrides via --build-arg WADDLE_GIT_SHA=$GITHUB_SHA.
+ARG WADDLE_GIT_SHA=unknown
+ENV WADDLE_GIT_SHA=${WADDLE_GIT_SHA}
 
 COPY --from=planner /workspace/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
