@@ -11,7 +11,8 @@ import type {
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import { executeSendFileMessage } from "./sendFileMessageHelper";
+import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
+import type { OutboundFileAttachment } from "@/lib/xmpp";
 
 function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -23,7 +24,7 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
   };
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;
-  if (msg.sharedFile) tm.sharedFile = msg.sharedFile;
+  if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
   if (msg.isSticker) tm.isSticker = true;
   return tm;
 }
@@ -233,7 +234,7 @@ export function useDmMessaging(
             body: msg.body,
             markup: msg.markup,
           });
-        } else if (msg.body || msg.sharedFile || msg.isSticker) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker) {
           regular.push(msg);
         }
       }
@@ -276,30 +277,64 @@ export function useDmMessaging(
     }
   }
 
-  async function sendMessage(explicitBody?: string) {
+  async function sendMessage(explicitBody?: string, _markup?: unknown, files?: Array<File | Blob>) {
     const bodyText = explicitBody ?? draft.value;
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
-    if (!client || !peerJid || !bodyText.trim() || !session.value) return;
+    const hasFiles = !!files && files.length > 0;
+    if (!client || !peerJid || !session.value) return;
+    if (!bodyText.trim() && !hasFiles) return;
+
+    if (hasFiles) {
+      for (const f of files!) {
+        if (f.size > MAX_IMAGE_UPLOAD_BYTES) {
+          actionError.value = `File too large (${(f.size / 1024 / 1024).toFixed(1)} MB). Maximum upload size is 10 MB.`;
+          return;
+        }
+      }
+    }
+
     isSending.value = true;
     clearActionError();
     try {
-      const msgId = await client.sendDirectMessage(peerJid, bodyText);
+      let attachments: OutboundFileAttachment[] | undefined;
+      if (hasFiles) {
+        const filenames = files!.map((f) => (f instanceof File ? f.name : `image-${Date.now()}.png`));
+        uploadProgress.value = { uploading: true, progress: 0, filename: filenames[0] };
+        attachments = await client.uploadAttachments(files!, (overall, idx) => {
+          uploadProgress.value = {
+            uploading: true,
+            progress: overall.total > 0 ? overall.loaded / overall.total : 0,
+            filename: filenames[idx] ?? "",
+          };
+        });
+      }
+
+      const msgId = await client.sendDirectMessage(peerJid, bodyText, attachments);
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
       if (isStillActive) {
         if (msgId) {
           pendingEchoClientIds.add(msgId);
-          messages.value = [
-            ...messages.value,
-            {
-              id: msgId,
-              author: session.value.username,
-              body: bodyText.trim(),
-              createdAt: new Date().toISOString(),
-              isSelf: true,
-              deliveryStatus: "sending",
-            },
-          ];
+          const optimistic: TimelineMessage = {
+            id: msgId,
+            author: session.value.username,
+            body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
+            createdAt: new Date().toISOString(),
+            isSelf: true,
+            deliveryStatus: "sending",
+          };
+          if (attachments && attachments.length > 0) {
+            optimistic.sharedFiles = attachments.map((a) => ({
+              url: a.url,
+              name: a.name,
+              mediaType: a.mediaType,
+              size: a.size,
+              ...(a.width ? { width: a.width } : {}),
+              ...(a.height ? { height: a.height } : {}),
+              disposition: "inline" as const,
+            }));
+          }
+          messages.value = [...messages.value, optimistic];
           void scrollToBottom();
         }
         if (!explicitBody) draft.value = "";
@@ -314,25 +349,8 @@ export function useDmMessaging(
       actionError.value = normalizeError(e);
     } finally {
       isSending.value = false;
+      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
     }
-  }
-
-  async function sendFileMessage(file: File | Blob) {
-    const client = xmppClient.value;
-    const peerJid = activePeerJid.value;
-    if (!client || !peerJid || !session.value) return;
-
-    await executeSendFileMessage({
-      file,
-      username: session.value.username,
-      uploadProgress,
-      messages,
-      actionError,
-      clearActionError,
-      scrollToBottom,
-      normalizeError,
-      doUpload: (f, onProgress) => client.uploadAndSendDirectFile(peerJid, f, onProgress),
-    });
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
@@ -481,7 +499,6 @@ export function useDmMessaging(
     isSearching,
     loadMessages,
     sendMessage,
-    sendFileMessage,
     uploadProgress,
     editMessage,
     retractMessage,

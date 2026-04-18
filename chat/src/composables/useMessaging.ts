@@ -13,7 +13,8 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
-import { executeSendFileMessage } from "./sendFileMessageHelper";
+import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
+import type { OutboundFileAttachment } from "@/lib/xmpp";
 
 function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): TimelineMessage {
   const tm: TimelineMessage = {
@@ -26,8 +27,8 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   if (msg.mentions && msg.mentions.length > 0) {
     tm.mentions = msg.mentions;
   }
-  if (msg.sharedFile) {
-    tm.sharedFile = msg.sharedFile;
+  if (msg.sharedFiles && msg.sharedFiles.length > 0) {
+    tm.sharedFiles = msg.sharedFiles;
   }
   if (msg.isSticker) {
     tm.isSticker = true;
@@ -474,7 +475,7 @@ export function useMessaging(
             body: msg.body,
             markup: msg.markup,
           });
-        } else if (msg.body || msg.sharedFile || msg.isSticker) {
+        } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker) {
           regularMessages.push(msg);
         }
       }
@@ -536,7 +537,7 @@ export function useMessaging(
     await loadMessages(activeWaddleId.value, channelId);
   }
 
-  async function sendMessage(body?: string, markup?: MarkupSpan[]) {
+  async function sendMessage(body?: string, markup?: MarkupSpan[], files?: Array<File | Blob>) {
     const bodyText = body ?? draft.value;
     // markup !== undefined means this came from the rich editor (composer send)
     // undefined means it came from a programmatic send (GIF, etc.)
@@ -544,19 +545,37 @@ export function useMessaging(
     const client = xmppClient.value;
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
-    if (
-      !client ||
-      !waddleId ||
-      !channelId ||
-      !bodyText.trim()
-    )
-      return;
+    const hasFiles = !!files && files.length > 0;
+    if (!client || !waddleId || !channelId) return;
+    if (!bodyText.trim() && !hasFiles) return;
+
+    if (hasFiles) {
+      for (const f of files!) {
+        if (f.size > MAX_IMAGE_UPLOAD_BYTES) {
+          actionError.value = `File too large (${(f.size / 1024 / 1024).toFixed(1)} MB). Maximum upload size is 10 MB.`;
+          return;
+        }
+      }
+    }
 
     isSending.value = true;
     clearActionError();
 
     try {
-      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, markup);
+      let attachments: OutboundFileAttachment[] | undefined;
+      if (hasFiles) {
+        const filenames = files!.map((f) => (f instanceof File ? f.name : `image-${Date.now()}.png`));
+        uploadProgress.value = { uploading: true, progress: 0, filename: filenames[0] };
+        attachments = await client.uploadAttachments(files!, (overall, idx) => {
+          uploadProgress.value = {
+            uploading: true,
+            progress: overall.total > 0 ? overall.loaded / overall.total : 0,
+            filename: filenames[idx] ?? "",
+          };
+        });
+      }
+
+      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, markup, attachments);
       const isStillCurrentChannel =
         xmppClient.value === client &&
         activeWaddleId.value === waddleId &&
@@ -567,12 +586,23 @@ export function useMessaging(
         const optimistic: TimelineMessage = {
           id: msgId,
           author: session.value.username,
-          body: bodyText.trim(),
+          body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
           createdAt: new Date().toISOString(),
           isSelf: true,
           deliveryStatus: "sending",
           markup,
         };
+        if (attachments && attachments.length > 0) {
+          optimistic.sharedFiles = attachments.map((a) => ({
+            url: a.url,
+            name: a.name,
+            mediaType: a.mediaType,
+            size: a.size,
+            ...(a.width ? { width: a.width } : {}),
+            ...(a.height ? { height: a.height } : {}),
+            disposition: "inline" as const,
+          }));
+        }
         pendingEchoClientIds.add(msgId);
         messages.value = [...messages.value, optimistic];
         void scrollToBottom();
@@ -595,26 +625,8 @@ export function useMessaging(
       actionError.value = normalizeError(e);
     } finally {
       isSending.value = false;
+      uploadProgress.value = { uploading: false, progress: 0, filename: "" };
     }
-  }
-
-  async function sendFileMessage(file: File | Blob) {
-    const client = xmppClient.value;
-    const waddleId = activeWaddleId.value;
-    const channelId = activeChannelId.value;
-    if (!client || !waddleId || !channelId || !session.value) return;
-
-    await executeSendFileMessage({
-      file,
-      username: session.value.username,
-      uploadProgress,
-      messages,
-      actionError,
-      clearActionError,
-      scrollToBottom,
-      normalizeError,
-      doUpload: (f, onProgress) => client.uploadAndSendGroupFile(waddleId, channelId, f, onProgress),
-    });
   }
 
   async function toggleReaction(messageId: string, emoji: string) {
@@ -783,7 +795,6 @@ export function useMessaging(
     loadMessages,
     selectChannel,
     sendMessage,
-    sendFileMessage,
     uploadProgress,
     editMessage,
     retractMessage,

@@ -3,7 +3,9 @@ import { computed } from "vue";
 import { Plus, Lock, Compass, MessageCircle } from "lucide-vue-next";
 import type { WaddleSummary } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
+import type { ServerVersion } from "@/composables/useVersion";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
+import VersionFooter from "@/components/chat/VersionFooter.vue";
 
 const props = defineProps<{
   waddles: WaddleSummary[];
@@ -14,6 +16,8 @@ const props = defineProps<{
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
   horizontal?: boolean;
+  webCommitSha?: string;
+  serverVersion?: ServerVersion | null;
 }>();
 
 const emit = defineEmits<{
@@ -182,6 +186,13 @@ function waddleColor(waddle: WaddleSummary): string {
       @logout="emit('logout')"
       @request-notifications="emit('request-notifications')"
       @toggle-notifications="emit('toggle-notifications')"
+    />
+
+    <!-- Version / credits footer (vertical only; mobile drawer renders its own) -->
+    <VersionFooter
+      v-if="!horizontal"
+      :web-commit-sha="webCommitSha"
+      :server-version="serverVersion"
     />
   </div>
 </template>
