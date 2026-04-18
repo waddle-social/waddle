@@ -633,6 +633,12 @@ export class BrowserXmppClient {
     await this.connect(); await this.switchRoom(w, c);
     return this.xmpp ? history.queryMam(this.xmpp, roomBareJidFor(this.session, w, c), max) : [];
   }
+  async queryMamByThread(w: string, c: string, threadId: string, max = 100): Promise<LiveRoomMessage[]> {
+    await this.connect(); await this.switchRoom(w, c);
+    return this.xmpp
+      ? history.queryMamByThread(this.xmpp, roomBareJidFor(this.session, w, c), threadId, max)
+      : [];
+  }
   async searchMessages(w: string, c: string, query: string, max = 20) {
     await this.connect();
     return this.xmpp ? history.searchMessages(this.xmpp, roomBareJidFor(this.session, w, c), query, max) : [];

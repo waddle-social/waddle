@@ -2,7 +2,7 @@
 import { X } from "lucide-vue-next";
 
 const open = defineModel<boolean>("open", { required: true });
-defineProps<{ side: "left" | "right" }>();
+const props = defineProps<{ side: "left" | "right"; widthClass?: string }>();
 
 function close() {
   open.value = false;
@@ -15,8 +15,11 @@ function close() {
       <div v-if="open" class="fixed top-0 left-0 right-0 z-50 h-[100dvh]">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-md animate-fade-in" @click="close" />
         <div
-          class="absolute top-0 w-[min(88vw,22rem)] h-[100dvh] glass-panel border-border shadow-2xl flex flex-col"
-          :class="side === 'left' ? 'left-0 border-r' : 'right-0 border-l'"
+          class="absolute top-0 h-[100dvh] glass-panel border-border shadow-2xl flex flex-col"
+          :class="[
+            props.widthClass ?? 'w-[min(88vw,22rem)]',
+            side === 'left' ? 'left-0 border-r' : 'right-0 border-l',
+          ]"
           @click.stop
         >
           <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border glass-panel">

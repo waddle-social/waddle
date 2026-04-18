@@ -7,6 +7,7 @@ import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import type { ThreadIndex } from "@/composables/useThreads";
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
@@ -39,6 +40,7 @@ const props = defineProps<{
   searchResults: { id: string; nick: string; body: string; createdAt: string }[];
   isSearching: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
+  threadIndex: ThreadIndex;
 }>();
 
 const emit = defineEmits<{
@@ -58,7 +60,14 @@ const emit = defineEmits<{
   search: [query: string];
   clearSearch: [];
   openDm: [peerJid: string];
+  openThread: [threadId: string];
 }>();
+
+// Hide thread members from the main feed — they live inside the thread panel.
+// Keep thread roots (id === threadId) and any message with no threadId.
+const feedMessages = computed(() =>
+  props.messages.filter((m) => !m.threadId || m.id === m.threadId),
+);
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
 
@@ -400,7 +409,7 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <div v-else-if="messages.length === 0" class="flex flex-col items-center justify-center py-20">
+      <div v-else-if="feedMessages.length === 0" class="flex flex-col items-center justify-center py-20">
         <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
           <component :is="dmPeer ? MessageCircle : Hash" class="w-5 h-5 text-primary" />
         </div>
@@ -412,7 +421,7 @@ onBeforeUnmount(() => {
 
       <div v-else class="max-w-none">
         <MessageCard
-          v-for="msg in messages"
+          v-for="msg in feedMessages"
           :key="msg.id"
           :message="msg"
           :current-user="props.currentUser"
@@ -421,12 +430,14 @@ onBeforeUnmount(() => {
           :presence="roomPresence[msg.author] ?? 'offline'"
           :last-seen="roomLastSeen[msg.author]"
           :author-jid="authorJidByNick?.[msg.author]"
+          :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
           @edit="(id, body, m) => emit('editMessage', id, body, m)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
           @reply="beginReply"
           @scroll-to-message="scrollToMessage"
           @avatar-click="onAvatarClick"
+          @open-thread="(tid: string) => emit('openThread', tid)"
         />
       </div>
     </div>

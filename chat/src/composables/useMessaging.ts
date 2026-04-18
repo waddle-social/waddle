@@ -553,6 +553,40 @@ export function useMessaging(
     }
   }
 
+  /**
+   * Backfill a thread via XEP-0313 MAM filtered by thread id. Used when a
+   * deep-linked `?thread=...` URL points at a thread whose root predates the
+   * loaded channel window. New messages merge into the flat array; existing
+   * ones are skipped.
+   */
+  async function backfillThread(threadId: string): Promise<void> {
+    const client = xmppClient.value;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!client || !waddleId || !channelId || !threadId || !session.value) return;
+    const results = await client.queryMamByThread(waddleId, channelId, threadId, 100);
+    if (
+      xmppClient.value !== client ||
+      activeWaddleId.value !== waddleId ||
+      activeChannelId.value !== channelId
+    ) {
+      return;
+    }
+    const existingIds = new Set(messages.value.map((m) => m.id));
+    const appended: TimelineMessage[] = [];
+    const localById = new Map<string, TimelineMessage>(messages.value.map((m) => [m.id, m]));
+    for (const raw of results) {
+      if (existingIds.has(raw.id)) continue;
+      const tm = fromLiveMessage(session.value, raw, (id) => localById.get(id));
+      localById.set(tm.id, tm);
+      appended.push(tm);
+    }
+    if (appended.length === 0) return;
+    messages.value = [...messages.value, ...appended].sort((a, b) =>
+      a.createdAt.localeCompare(b.createdAt),
+    );
+  }
+
   async function selectChannel(channelId: string) {
     if (!activeWaddleId.value) return;
     messages.value = [];
@@ -565,6 +599,7 @@ export function useMessaging(
     markup?: MarkupSpan[],
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
+    threadOverride?: { threadId: string; parentThreadId?: string },
   ) {
     const bodyText = body ?? draft.value;
     // markup !== undefined means this came from the rich editor (composer send)
@@ -611,12 +646,15 @@ export function useMessaging(
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
         : undefined;
-      const threadId = parent ? (parent.threadId ?? replyTo?.id) : undefined;
+      const threadId = threadOverride?.threadId
+        ?? (parent ? (parent.threadId ?? replyTo?.id) : undefined);
+      const parentThreadId = threadOverride?.parentThreadId;
       const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, {
         markup,
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
+        ...(parentThreadId ? { parentThreadId } : {}),
       });
       const isStillCurrentChannel =
         xmppClient.value === client &&
@@ -643,6 +681,7 @@ export function useMessaging(
           };
         }
         if (threadId) optimistic.threadId = threadId;
+        if (parentThreadId) optimistic.parentThreadId = parentThreadId;
         if (attachments && attachments.length > 0) {
           optimistic.sharedFiles = attachments.map((a) => ({
             url: a.url,
@@ -844,6 +883,7 @@ export function useMessaging(
     roomLastSeen,
     slowModeCooldown,
     loadMessages,
+    backfillThread,
     selectChannel,
     sendMessage,
     uploadProgress,

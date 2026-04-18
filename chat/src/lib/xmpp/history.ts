@@ -76,6 +76,60 @@ export async function queryMam(
   return collected;
 }
 
+/**
+ * XEP-0313 + XEP-0201: MAM query filtered by thread id. Returns every archived
+ * message whose `<thread>` matches the given id, so deep-linked thread panels
+ * can backfill messages that the default channel window didn't reach.
+ */
+export async function queryMamByThread(
+  xmpp: Agent,
+  roomJid: string,
+  threadId: string,
+  max: number,
+): Promise<LiveRoomMessage[]> {
+  if (!threadId) return [];
+
+  const result = await xmpp.searchHistory(roomJid, {
+    paging: { max, before: "" },
+    form: {
+      type: "submit",
+      fields: [
+        { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
+        { name: "{urn:xmpp:mam:2}thread", value: threadId },
+      ],
+    },
+  });
+  const collected: LiveRoomMessage[] = [];
+
+  if (result.results) {
+    for (const mamResult of result.results) {
+      const innerMsg = mamResult.item?.message;
+      if (!innerMsg) continue;
+
+      const timestamp = mamResult.item.delay?.timestamp
+        ? mamResult.item.delay.timestamp.toISOString()
+        : new Date().toISOString();
+      const archivedMsg = withArchivedMessageId(mamResult.id, innerMsg as ReceivedMessage);
+      let parsedMessage: LiveRoomMessage | null = null;
+
+      dispatchGroupchat(archivedMsg, {
+        currentRoom: roomJid,
+        selfNick: "",
+        onMessage: (msg) => {
+          parsedMessage = { ...msg, createdAt: timestamp };
+        },
+        onReaction: null,
+        onChatState: null,
+        onDisplayed: null,
+        onActivity: null,
+      });
+
+      if (parsedMessage) collected.push(parsedMessage);
+    }
+  }
+  return collected;
+}
+
 /** XEP-0431: Full-text search in MAM. Throws on IQ/transport errors. */
 export async function searchMessages(
   xmpp: Agent,

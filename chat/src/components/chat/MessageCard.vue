@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
-import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight } from "lucide-vue-next";
+import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
@@ -37,6 +37,8 @@ const props = defineProps<{
   presence?: OccupantPresence;
   lastSeen?: number;
   authorJid?: string;
+  threadReplyCount?: number;
+  hideThreadChip?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -46,6 +48,7 @@ const emit = defineEmits<{
   reply: [message: TimelineMessage];
   scrollToMessage: [messageId: string];
   avatarClick: [author: string];
+  openThread: [threadId: string];
 }>();
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
@@ -113,10 +116,38 @@ const replyChipExpanded = ref(false);
 
 function onReplyChipClick() {
   if (!props.message.replyTo) return;
+  // If this message lives inside a thread, route the reply chip into the
+  // thread panel instead of scrolling the main feed — thread children are
+  // hidden from the feed, so scrollToMessage would land on nothing.
+  if (props.message.threadId) {
+    emit("openThread", props.message.threadId);
+    return;
+  }
   if (props.message.replyTo.preview) {
     replyChipExpanded.value = !replyChipExpanded.value;
   }
   emit("scrollToMessage", props.message.replyTo.id);
+}
+
+const isThreadRoot = computed(
+  () => !!props.message.threadId && props.message.id === props.message.threadId,
+);
+const showThreadChip = computed(
+  () => !props.hideThreadChip && isThreadRoot.value && (props.threadReplyCount ?? 0) > 0,
+);
+
+function openThreadFromChip() {
+  if (!props.message.threadId) return;
+  emit("openThread", props.message.threadId);
+}
+
+function startReplyInThreadFromMenu() {
+  // Open the thread first so the follow-up reply lands in the panel's
+  // composer. Panel ownership of the reply target means we just need to be
+  // sure the panel is in focus; the user can then tap "Reply" in-thread.
+  const threadId = props.message.threadId ?? props.message.id;
+  emit("openThread", threadId);
+  closeSheet();
 }
 
 const isMentioned = computed(() => {
@@ -460,6 +491,20 @@ watch(
       :images="lightboxImages"
     />
 
+    <!-- Thread replies affordance. Visible in the main channel feed on roots
+         that have replies; the thread panel hides it via hideThreadChip since
+         the panel already shows children. -->
+    <button
+      v-if="showThreadChip"
+      type="button"
+      class="inline-flex items-center gap-1.5 mt-1.5 px-2 py-1 text-[11px] font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+      :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
+      @click="openThreadFromChip"
+    >
+      <MessageSquare class="w-3 h-3" />
+      <span>{{ threadReplyCount }} {{ threadReplyCount === 1 ? "reply" : "replies" }}</span>
+    </button>
+
     <!-- Existing reactions (inline, always visible when present) -->
     <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-1.5">
       <button
@@ -608,6 +653,14 @@ watch(
           >
             <Reply class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
             <span>Reply</span>
+          </button>
+          <button
+            type="button"
+            class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] hover:bg-muted active:bg-muted transition-colors text-left"
+            @click="startReplyInThreadFromMenu"
+          >
+            <MessageSquare class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
+            <span>{{ message.threadId ? "Open thread" : "Reply in thread" }}</span>
           </button>
           <template v-if="message.isSelf">
             <button

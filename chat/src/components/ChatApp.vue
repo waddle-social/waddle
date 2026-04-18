@@ -5,6 +5,7 @@ import { useMembers } from "@/composables/useMembers";
 import { useDmConversations } from "@/composables/useDmConversations";
 import { useDmMessaging } from "@/composables/useDmMessaging";
 import { useMessaging } from "@/composables/useMessaging";
+import { useThreads } from "@/composables/useThreads";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { useVersion } from "@/composables/useVersion";
@@ -17,6 +18,7 @@ import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
+import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import MobileHeader from "@/components/chat/MobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
@@ -110,6 +112,12 @@ watchEffect(() => {
 const activeMessages = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.messages.value : messaging.messages.value,
 );
+
+// Thread panel state — stack = breadcrumb trail into nested sub-threads.
+// Empty stack = panel closed. Only meaningful for channel messages since DMs
+// don't use XEP-0201 threads yet.
+const activeThreadStack = ref<string[]>([]);
+const threads = useThreads(activeMessages);
 const activeDraft = computed({
   get: () => (ui.sidebarMode.value === "dms" ? dmMessaging.draft.value : messaging.draft.value),
   set: (value: string) => {
@@ -297,6 +305,58 @@ async function sendActiveMessage(
   await messaging.sendMessage(body, markup, files, replyTo);
 }
 
+async function sendThreadMessage(
+  body: string,
+  markup: MarkupSpan[],
+  files: Array<File | Blob> | undefined,
+  replyTo: { id: string; author: string; body?: string } | undefined,
+  threadOverride: { threadId: string; parentThreadId?: string },
+) {
+  await messaging.sendMessage(body, markup, files, replyTo, threadOverride);
+}
+
+function openThread(threadId: string) {
+  if (!threadId) return;
+  if (
+    activeThreadStack.value.length > 0 &&
+    activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
+  ) {
+    return;
+  }
+  activeThreadStack.value = [threadId];
+  const known = messaging.messages.value.some((m) => m.id === threadId);
+  if (!known) {
+    void messaging.backfillThread(threadId);
+  }
+}
+
+function pushThread(threadId: string) {
+  if (!threadId) return;
+  if (
+    activeThreadStack.value.length > 0 &&
+    activeThreadStack.value[activeThreadStack.value.length - 1] === threadId
+  ) {
+    return;
+  }
+  activeThreadStack.value = [...activeThreadStack.value, threadId];
+  const known = messaging.messages.value.some((m) => m.id === threadId);
+  if (!known) {
+    void messaging.backfillThread(threadId);
+  }
+}
+
+function popThreadTo(index: number) {
+  if (index < 0) {
+    activeThreadStack.value = [];
+    return;
+  }
+  activeThreadStack.value = activeThreadStack.value.slice(0, index + 1);
+}
+
+function closeThreadPanel() {
+  activeThreadStack.value = [];
+}
+
 function notifyActiveComposing() {
   activeTarget.value.notifyComposing();
 }
@@ -336,14 +396,28 @@ function updateUrl() {
   if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
     pushDmRoute(activeDmPeer.value.peerUsername);
   } else {
-    pushRoute(waddles.currentWaddle.value, waddles.currentChannel.value);
+    pushRoute(
+      waddles.currentWaddle.value,
+      waddles.currentChannel.value,
+      activeThreadStack.value,
+    );
   }
 }
 
-watch([waddles.activeWaddleId, waddles.activeChannelId, ui.sidebarMode, () => dmConversations.activePeerJid.value], updateUrl);
+watch(
+  [waddles.activeWaddleId, waddles.activeChannelId, ui.sidebarMode, () => dmConversations.activePeerJid.value],
+  () => {
+    // Channel / DM / mode changes close any open thread panel — the ids inside
+    // the stack belong to the channel we just left.
+    activeThreadStack.value = [];
+    updateUrl();
+  },
+);
+
+watch(activeThreadStack, updateUrl, { deep: true });
 
 function onPopState() {
-  const route = parseRoute(window.location.pathname);
+  const route = parseRoute(window.location.pathname, window.location.search);
   if (!route.waddleSlug && !route.dmUsername) return;
 
   const requestId = ++routeRequestId;
@@ -401,12 +475,24 @@ async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId:
     messaging.clearMessages();
     await messaging.loadMessages(waddles.activeWaddleId.value, waddles.activeChannelId.value);
   }
+
+  // Restore the thread panel from the URL. If the outermost thread root isn't
+  // in the freshly loaded history, MAM-backfill it so the panel has something
+  // to render.
+  activeThreadStack.value = route.threadStack;
+  const outerThreadId = route.threadStack[0];
+  if (outerThreadId) {
+    const known = messaging.messages.value.some((m) => m.id === outerThreadId);
+    if (!known) {
+      void messaging.backfillThread(outerThreadId);
+    }
+  }
 }
 
 // --- Bootstrap (watches connection store) ---
 
 async function onConnectionReady() {
-  const route = parseRoute(window.location.pathname);
+  const route = parseRoute(window.location.pathname, window.location.search);
   const requestId = ++routeRequestId;
   isApplyingRoute.value = true;
 
@@ -824,6 +910,7 @@ onUnmounted(() => {
         :search-results="activeSearchResults"
         :is-searching="activeIsSearching"
         :upload-progress="activeUploadProgress"
+        :thread-index="threads.index.value"
         @send="sendActiveMessage"
         @typing="notifyActiveComposing"
         @select-gif="sendGif"
@@ -835,6 +922,36 @@ onUnmounted(() => {
         @clear-search="clearActiveSearch"
         @edit-channel="openChannelEdit"
         @open-dm="handleOpenDm"
+        @open-thread="openThread"
+      />
+
+      <ThreadPanel
+        v-if="ui.sidebarMode.value === 'channels'"
+        :thread-stack="activeThreadStack"
+        :messages="activeMessages"
+        :thread-index="threads.index.value"
+        :current-user="connectionStore.session?.username"
+        :avatar-url-by-author="avatarUrlByAuthor"
+        :author-jid-by-nick="memberJidByNick"
+        :room-hats="messaging.roomHats.value"
+        :room-presence="messaging.roomPresence.value"
+        :room-last-seen="messaging.roomLastSeen.value"
+        :tenor-api-key="tenorApiKey"
+        :member-names="waddles.members.value.map((m) => m.username)"
+        :slow-mode-cooldown="messaging.slowModeCooldown.value"
+        :is-sending="messaging.isSending.value"
+        :upload-progress="messaging.uploadProgress.value"
+        :channel-name="waddles.currentChannel.value?.name ?? ''"
+        @close="closeThreadPanel"
+        @pop-to="popThreadTo"
+        @push-thread="pushThread"
+        @send="sendThreadMessage"
+        @edit-message="editActiveMessage"
+        @retract-message="retractActiveMessage"
+        @react-message="reactActiveMessage"
+        @displayed="markActiveDisplayed"
+        @select-gif="sendGif"
+        @typing="notifyActiveComposing"
       />
     </div>
 
