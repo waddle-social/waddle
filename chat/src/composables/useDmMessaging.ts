@@ -7,6 +7,7 @@ import type {
   DmDisplayedEvent,
   DmReactionEvent,
   LiveDmMessage,
+  SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -138,18 +139,51 @@ export function useDmMessaging(
 
   function mergeLiveMessage(msg: TimelineMessage) {
     const existing = messages.value.find((m) =>
-      m.id === msg.id || (m.deliveryStatus === "sending" && m.isSelf && msg.isSelf && m.body === msg.body),
+      m.id === msg.id ||
+      (m.deliveryStatus != null && m.isSelf && msg.isSelf && m.body === msg.body),
     );
     if (existing) {
-      if (existing.deliveryStatus === "sending") {
-        messages.value = messages.value.map((m) => (
-          m.id === existing.id ? { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus } : m
-        ));
+      if (existing.id !== msg.id || existing.deliveryStatus === "sending") {
+        messages.value = messages.value.map((m) => {
+          if (m.id !== existing.id) return m;
+          const nextStatus: DeliveryStatus =
+            m.deliveryStatus === "sending" ? "delivered" : (m.deliveryStatus ?? "delivered");
+          return { ...m, id: msg.id, deliveryStatus: nextStatus };
+        });
       }
       return;
     }
     messages.value = [...messages.value, msg];
     void scrollToBottom();
+  }
+
+  /** XEP-0198: SM ack promotes the matching self-sent message to delivered. */
+  function onMessageAck(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus === "sending"
+        ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /** XEP-0198: stanza.js gave up on the stanza — surface as failed so the
+   *  user can retry. */
+  function onMessageDeliveryFailure(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
+        ? { ...m, deliveryStatus: "failed" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
+   *  for the currently-open conversation. */
+  function onSessionLifecycle(event: SessionLifecycleEvent) {
+    if (event.type !== "fresh") return;
+    const peerJid = activePeerJid.value;
+    if (!peerJid) return;
+    if (messages.value.length === 0) return;
+    void loadMessages(peerJid);
   }
 
   async function loadMessages(peerJid: string) {
@@ -441,5 +475,8 @@ export function useDmMessaging(
     onChatState,
     onDisplayed,
     onReaction,
+    onMessageAck,
+    onMessageDeliveryFailure,
+    onSessionLifecycle,
   };
 }

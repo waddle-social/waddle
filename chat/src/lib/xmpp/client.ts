@@ -8,7 +8,7 @@ import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
   DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, LiveDmMessage, LiveRoomMessage,
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
-  RoomHats, RoomPresence, XmppStatusSnapshot,
+  RoomHats, RoomPresence, SessionLifecycleEvent, XmppStatusSnapshot,
 } from "./types";
 import { barePeerJid, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
@@ -141,6 +141,9 @@ export class BrowserXmppClient {
   private roomDisconnectHandler: (() => void) | null = null;
   private presenceHandler: ((presence: RoomPresence) => void) | null = null;
   private lastSeenHandler: ((nick: string, timestamp: number) => void) | null = null;
+  private messageAckHandler: ((messageId: string) => void) | null = null;
+  private messageDeliveryFailureHandler: ((messageId: string) => void) | null = null;
+  private sessionLifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
   private xmpp: Agent | null = null;
   private connectPromise: Promise<void> | null = null;
   private connected = false;
@@ -177,6 +180,9 @@ export class BrowserXmppClient {
   setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.presenceHandler = h; }
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.lastSeenHandler = h; }
+  setMessageAckHandler(h: (messageId: string) => void) { this.messageAckHandler = h; }
+  setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.messageDeliveryFailureHandler = h; }
+  setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHandler = h; }
   setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
 
   // -- Connection lifecycle --
@@ -186,7 +192,9 @@ export class BrowserXmppClient {
     if (this.connectPromise) return this.connectPromise;
 
     // If the Agent exists but is disconnected, Stanza's autoReconnect is
-    // handling backoff — just wait for the next session:started.
+    // handling backoff — wait for either a fresh bind (session:started) or an
+    // XEP-0198 resume (stream:management:resumed); resume does NOT emit
+    // session:started because feature negotiation is short-circuited.
     if (this.xmpp && !this.destroying) {
       const xmpp = this.xmpp;
       this.connectPromise = new Promise<void>((resolve, reject) => {
@@ -195,9 +203,14 @@ export class BrowserXmppClient {
           this.connectPromise = null;
           reject(new Error("Reconnection timed out"));
         }, 60_000);
-        const cleanup = () => { clearTimeout(timeout); xmpp.off("session:started", onReady); };
+        const cleanup = () => {
+          clearTimeout(timeout);
+          xmpp.off("session:started", onReady);
+          xmpp.off("stream:management:resumed" as never, onReady);
+        };
         const onReady = () => { cleanup(); this.connectPromise = null; resolve(); };
         xmpp.on("session:started", onReady);
+        xmpp.on("stream:management:resumed" as never, onReady);
       });
       return this.connectPromise;
     }
@@ -222,7 +235,11 @@ export class BrowserXmppClient {
       resource: this.resource,
       transports: { websocket: this.session.xmpp_websocket_url, bosh: false },
       autoReconnect: true,
-      useStreamManagement: false,
+      // XEP-0198: per-stanza acks + session resume. stanza.js tracks unacked
+      // stanzas in memory and the server replays them on successful resume,
+      // closing the window where transient 503s or transport flaps lose
+      // messages.
+      useStreamManagement: true,
       sendReceipts: false, chatMarkers: false,
     });
     // Only keep OAUTHBEARER; session tokens aren't SCRAM/PLAIN passwords
@@ -231,10 +248,15 @@ export class BrowserXmppClient {
     this.wireEvents(xmpp);
     this.xmpp = xmpp;
 
-    // Wait for session:started before returning, so callers can safely
-    // use the connection. Reject on disconnect/stream errors.
+    // Wait for session:started (fresh bind) or stream:management:resumed (SM
+    // resume). Initial connects always take the fresh path, but subsequent
+    // auto-reconnects may resume — only one of the two will fire.
     const promise = new Promise<void>((resolve, reject) => {
-      const cleanup = () => { xmpp.off("session:started", onReady); xmpp.off("disconnected", onFail); };
+      const cleanup = () => {
+        xmpp.off("session:started", onReady);
+        xmpp.off("stream:management:resumed" as never, onReady);
+        xmpp.off("disconnected", onFail);
+      };
       const onReady = () => { cleanup(); this.connected = true; this.connectPromise = null; resolve(); };
       const onFail = (err?: Error) => {
         cleanup();
@@ -246,6 +268,7 @@ export class BrowserXmppClient {
         reject(err ?? new Error("XMPP connection failed"));
       };
       xmpp.on("session:started", onReady);
+      xmpp.on("stream:management:resumed" as never, onReady);
       xmpp.on("disconnected", onFail);
     });
     this.connectPromise = promise;
@@ -650,6 +673,10 @@ export class BrowserXmppClient {
       this.connected = true;
       this.startKeepAlive();
       this.statusHandler?.({ state: "online", detail: "Connection ready" });
+      // `session:started` fires on fresh bind only; SM resume short-circuits
+      // feature negotiation and does not emit this event. So any time we see
+      // it here, it's a fresh session — consumers may close MAM gaps.
+      this.sessionLifecycleHandler?.({ type: "fresh" });
       try {
         await xmpp.enableCarbons();
       } catch (error) {
@@ -683,6 +710,31 @@ export class BrowserXmppClient {
         }
       }
     });
+    xmpp.on("stream:management:resumed" as never, () => {
+      if (this.xmpp !== xmpp) return;
+      this.connected = true;
+      this.startKeepAlive();
+      this.statusHandler?.({ state: "online", detail: "Connection resumed" });
+      this.sessionLifecycleHandler?.({ type: "resumed" });
+    });
+
+    // XEP-0198: per-stanza ack from the server. stanza.js resolves individual
+    // stanzas against the ack count and emits message:acked with the original
+    // outbound Message. Downstream uses stanza.id to move the optimistic
+    // "sending" entry to "delivered".
+    xmpp.on("message:acked", (msg) => {
+      if (this.xmpp !== xmpp) return;
+      if (msg?.id) this.messageAckHandler?.(msg.id);
+    });
+
+    // XEP-0198: stanza.js emits message:failed when SM resume fails (server
+    // drops the session) or when we tried to send with no transport and SM is
+    // not resumable. The message was almost certainly not delivered.
+    xmpp.on("message:failed", (msg) => {
+      if (this.xmpp !== xmpp) return;
+      if (msg?.id) this.messageDeliveryFailureHandler?.(msg.id);
+    });
+
     xmpp.on("disconnected", (err) => {
       if (this.xmpp !== xmpp) return;
 

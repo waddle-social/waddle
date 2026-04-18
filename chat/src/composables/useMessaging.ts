@@ -6,6 +6,7 @@ import {
   roomBareJidFor,
   type LiveRoomMessage,
   type RoomActivityEvent,
+  type SessionLifecycleEvent,
   type XmppStatusSnapshot,
   type ChatStateType,
   type RoomHats,
@@ -333,25 +334,77 @@ export function useMessaging(
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {
-    // Check if this is a self-echo confirming delivery of an optimistic message.
-    // Match by ID first, then fall back to matching by body + author for cases
-    // where the MUC server assigns a different stanza ID on reflection.
+    // Check if this is a self-echo reconciling an optimistically-inserted
+    // message. Match by ID first; otherwise, for our own sends, match by
+    // body because MUC assigns a different stanza ID on reflection. The
+    // fallback covers messages in any outbound delivery state (sending,
+    // delivered, or even failed if the server later reflects it) so that
+    // ID reconciliation does not double-insert.
     const existing = messages.value.find(
       (m) =>
         m.id === msg.id ||
-        (m.deliveryStatus === "sending" && m.isSelf && msg.isSelf && m.body === msg.body),
+        (m.deliveryStatus != null && m.isSelf && msg.isSelf && m.body === msg.body),
     );
     if (existing) {
-      if (existing.deliveryStatus === "sending") {
-        // Self-echo received: upgrade from "sending" to "delivered"
-        messages.value = messages.value.map((m) =>
-          m.id === existing.id ? { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus } : m,
-        );
+      if (existing.id !== msg.id || existing.deliveryStatus === "sending") {
+        // Reconcile the ID to the server-assigned one; only promote to
+        // "delivered" if we haven't already been told about stricter states
+        // (ack/failure) via XEP-0198 events.
+        messages.value = messages.value.map((m) => {
+          if (m.id !== existing.id) return m;
+          const nextStatus: DeliveryStatus =
+            m.deliveryStatus === "sending" ? "delivered" : (m.deliveryStatus ?? "delivered");
+          return { ...m, id: msg.id, deliveryStatus: nextStatus };
+        });
       }
       return;
     }
     messages.value = [...messages.value, msg];
     void scrollToBottom();
+  }
+
+  /**
+   * XEP-0198: server acked our outbound stanza. The id here is the
+   * client-assigned stanza ID. Promote the matching optimistic entry to
+   * "delivered" even if the MUC self-echo hasn't arrived yet (the echo
+   * will later reconcile the ID through mergeLiveMessage).
+   */
+  function onMessageAck(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus === "sending"
+        ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /**
+   * XEP-0198: stanza.js gave up on the stanza (resume failed or no
+   * resumable transport). Mark the message as failed so the UI can
+   * surface a retry affordance. Kept in place so the user can see what
+   * did not go through.
+   */
+  function onMessageDeliveryFailure(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
+        ? { ...m, deliveryStatus: "failed" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /**
+   * On a fresh XMPP session (resume failed or first connect after a drop),
+   * refetch MAM to close any message gap for the current channel.
+   * Resumed sessions never call this — the server replays everything.
+   */
+  function onSessionLifecycle(event: SessionLifecycleEvent) {
+    if (event.type !== "fresh") return;
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    if (!waddleId || !channelId) return;
+    // Only catch up if we had already loaded this channel; otherwise the
+    // standard loadMessages call on channel-select handles it.
+    if (messages.value.length === 0) return;
+    void loadMessages(waddleId, channelId);
   }
 
   async function loadMessages(waddleId: string, channelId: string) {
@@ -724,5 +777,8 @@ export function useMessaging(
     clearChannelActivity,
     scrollToBottom,
     lastMentionActivity,
+    onMessageAck,
+    onMessageDeliveryFailure,
+    onSessionLifecycle,
   };
 }
