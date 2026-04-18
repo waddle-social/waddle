@@ -112,6 +112,9 @@ watchEffect(() => {
 const activeMessages = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.messages.value : messaging.messages.value,
 );
+const activeFirstUnseenId = computed(() =>
+  ui.sidebarMode.value === "dms" ? dmMessaging.firstUnseenId.value : messaging.firstUnseenId.value,
+);
 
 // Thread panel state — stack = breadcrumb trail into nested sub-threads.
 // Empty stack = panel closed. Only meaningful for channel messages since DMs
@@ -891,6 +894,7 @@ onUnmounted(() => {
         :dm-peer="activeDmPeer"
         :sidebar-mode="ui.sidebarMode.value"
         :messages="activeMessages"
+        :first-unseen-id="activeFirstUnseenId"
         :xmpp-status="messaging.xmppStatus.value"
         :action-error="ui.actionError.value"
         :is-loading-messages="activeIsLoadingMessages"

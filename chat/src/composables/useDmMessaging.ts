@@ -13,6 +13,10 @@ import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
+import { findMessageElementById } from "@/lib/message-targeting";
+import { dmKey, getLastSeen, setLastSeen } from "@/lib/last-seen-store";
+
+const AT_BOTTOM_THRESHOLD = 48;
 
 function fromLiveDmMessage(
   session: WaddleSession,
@@ -62,6 +66,7 @@ export function useDmMessaging(
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
   const isSearching = ref(false);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
+  const firstUnseenId = ref<string | null>(null);
 
   let messageRequestId = 0;
   let searchRequestId = 0;
@@ -73,11 +78,40 @@ export function useDmMessaging(
   // identical text doesn't mis-target already-reconciled messages.
   const pendingEchoClientIds = new Set<string>();
 
+  // Re-pin to bottom for a short window after the initial scroll so late DOM
+  // mutations (images, avatars) don't strand the user above the newest
+  // message. Same pattern as useMessaging.ts.
   async function scrollToBottom() {
     await nextTick();
     await nextTick();
-    if (timelineEl.value) {
-      timelineEl.value.scrollTop = timelineEl.value.scrollHeight;
+    const el = timelineEl.value;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    for (const child of Array.from(el.children)) {
+      observer.observe(child);
+    }
+    setTimeout(() => observer.disconnect(), 500);
+  }
+
+  function isAtBottom(): boolean {
+    const el = timelineEl.value;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD;
+  }
+
+  async function scrollFirstUnseenIntoView(messageId: string) {
+    await nextTick();
+    await nextTick();
+    const el = timelineEl.value;
+    if (!el) return;
+    const target = findMessageElementById(el, messageId);
+    if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
+      (target as HTMLElement).scrollIntoView({ block: "start" });
     }
   }
 
@@ -178,8 +212,13 @@ export function useDmMessaging(
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
+    const peerJid = activePeerJid.value;
+    const wasAtBottom = isAtBottom();
     messages.value = [...messages.value, msg];
     void scrollToBottom();
+    if (wasAtBottom && peerJid) {
+      setLastSeen(dmKey(barePeerJid(peerJid)), msg.id);
+    }
   }
 
   /** XEP-0198: SM ack promotes the matching self-sent message to delivered. */
@@ -288,7 +327,28 @@ export function useDmMessaging(
       }
       messages.value = timeline;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
-      await scrollToBottom();
+
+      // See useMessaging.loadMessages — same last-seen anchor semantics,
+      // keyed by peer bare JID.
+      const key = dmKey(barePeerJid(peerJid));
+      const lastSeenId = getLastSeen(key);
+      const lastSeenIdx = lastSeenId
+        ? timeline.findIndex((m) => m.id === lastSeenId)
+        : -1;
+      if (lastSeenIdx !== -1 && lastSeenIdx < timeline.length - 1) {
+        const firstUnseen = timeline[lastSeenIdx + 1];
+        firstUnseenId.value = firstUnseen?.id ?? null;
+        if (firstUnseen) {
+          await scrollFirstUnseenIntoView(firstUnseen.id);
+        } else {
+          await scrollToBottom();
+        }
+      } else {
+        firstUnseenId.value = null;
+        await scrollToBottom();
+        const newest = timeline[timeline.length - 1];
+        if (newest) setLastSeen(key, newest.id);
+      }
     } catch (e) {
       if (requestId === messageRequestId) {
         actionError.value = normalizeError(e);
@@ -540,6 +600,7 @@ export function useDmMessaging(
 
   return {
     messages,
+    firstUnseenId,
     draft,
     isLoadingMessages,
     isSending,

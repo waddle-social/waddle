@@ -15,6 +15,12 @@ import {
 import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
+import { findMessageElementById } from "@/lib/message-targeting";
+import { getLastSeen, roomKey, setLastSeen } from "@/lib/last-seen-store";
+
+// Distance (px) from the bottom still considered "pinned"; a little slack
+// covers the typing-indicator reserve and sub-pixel rounding.
+const AT_BOTTOM_THRESHOLD = 48;
 
 export function fromLiveMessage(
   session: WaddleSession,
@@ -92,6 +98,7 @@ export function useMessaging(
   const roomLastSeen = ref<Record<string, number>>({});
   const slowModeCooldown = ref(0);
   const uploadProgress = ref({ uploading: false, progress: 0, filename: "" });
+  const firstUnseenId = ref<string | null>(null);
   const activeChannels = ref<Set<string>>(new Set());
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
@@ -287,12 +294,45 @@ export function useMessaging(
     }, 3000);
   }
 
+  // Re-pin to the bottom for a short window after the initial scroll, so
+  // late-arriving layout (images, markup reflow, avatars) doesn't strand the
+  // user part-way up the list. Observes size changes on the scroll container
+  // and its children; tears down on timeout.
   async function scrollToBottom() {
     await nextTick();
-    // Double nextTick ensures the DOM has fully rendered after reactive updates
     await nextTick();
-    if (timelineEl.value) {
-      timelineEl.value.scrollTop = timelineEl.value.scrollHeight;
+    const el = timelineEl.value;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    for (const child of Array.from(el.children)) {
+      observer.observe(child);
+    }
+    setTimeout(() => observer.disconnect(), 500);
+  }
+
+  function isAtBottom(): boolean {
+    const el = timelineEl.value;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD;
+  }
+
+  function persistLastSeen(waddleId: string, channelId: string, messageId: string) {
+    setLastSeen(roomKey(waddleId, channelId), messageId);
+  }
+
+  async function scrollFirstUnseenIntoView(messageId: string) {
+    await nextTick();
+    await nextTick();
+    const el = timelineEl.value;
+    if (!el) return;
+    const target = findMessageElementById(el, messageId);
+    if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
+      (target as HTMLElement).scrollIntoView({ block: "start" });
     }
   }
 
@@ -385,8 +425,14 @@ export function useMessaging(
       if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
+    const waddleId = activeWaddleId.value;
+    const channelId = activeChannelId.value;
+    const wasAtBottom = isAtBottom();
     messages.value = [...messages.value, msg];
     void scrollToBottom();
+    if (wasAtBottom && waddleId && channelId) {
+      persistLastSeen(waddleId, channelId, msg.id);
+    }
   }
 
   /**
@@ -544,7 +590,29 @@ export function useMessaging(
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
       }
-      await scrollToBottom();
+
+      // Restore scroll position: if we have a last-seen anchor that's still in
+      // the MAM window AND there are unseen messages after it, park the view
+      // on the first unseen message and render a divider above it. Otherwise
+      // scroll to bottom and track the newest message as last-seen.
+      const lastSeenId = getLastSeen(roomKey(waddleId, channelId));
+      const lastSeenIdx = lastSeenId
+        ? timeline.findIndex((m) => m.id === lastSeenId)
+        : -1;
+      if (lastSeenIdx !== -1 && lastSeenIdx < timeline.length - 1) {
+        const firstUnseen = timeline[lastSeenIdx + 1];
+        firstUnseenId.value = firstUnseen?.id ?? null;
+        if (firstUnseen) {
+          await scrollFirstUnseenIntoView(firstUnseen.id);
+        } else {
+          await scrollToBottom();
+        }
+      } else {
+        firstUnseenId.value = null;
+        await scrollToBottom();
+        const newest = timeline[timeline.length - 1];
+        if (newest) persistLastSeen(waddleId, channelId, newest.id);
+      }
     } catch (e) {
       if (requestId === messageRequestId) {
         actionError.value = normalizeError(e);
@@ -875,6 +943,7 @@ export function useMessaging(
   return {
     xmppStatus,
     messages,
+    firstUnseenId,
     draft,
     isLoadingMessages,
     isSending,
