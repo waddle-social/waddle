@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Hash, MessageCircle, MessagesSquare, Settings, Search, X, Upload } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { findMessageElementById } from "@/lib/message-targeting";
@@ -74,6 +74,17 @@ const feedMessages = computed(() =>
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
 
+type MessageComposerHandle = {
+  addAttachments: (files: Array<File | Blob>) => void;
+  focus: () => void;
+};
+
+function focusComposer() {
+  // Wait for the reply chip/state update so the editor focus wins over the
+  // message action button that was just clicked.
+  void nextTick(() => composerRef.value?.focus());
+}
+
 function beginReply(message: TimelineMessage) {
   const author = message.author;
   replyingTo.value = {
@@ -81,6 +92,7 @@ function beginReply(message: TimelineMessage) {
     author,
     ...(message.body ? { body: message.body, preview: message.body } : {}),
   };
+  focusComposer();
 }
 
 function cancelReply() {
@@ -176,8 +188,8 @@ const messagesContainer = ref<HTMLDivElement | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
   messagesContainer.value = el;
 };
-const composerRef = ref<{ addAttachments: (files: Array<File | Blob>) => void } | null>(null);
-const setComposerRef = (instance: { addAttachments: (files: Array<File | Blob>) => void } | null) => {
+const composerRef = ref<MessageComposerHandle | null>(null);
+const setComposerRef = (instance: MessageComposerHandle | null) => {
   composerRef.value = instance;
 };
 const showSearch = ref(false);

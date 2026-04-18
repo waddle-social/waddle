@@ -255,7 +255,11 @@ function onSend(doc: Record<string, unknown>) {
   emit("send", serialized.body, serialized.markup, files.length > 0 ? files : undefined);
 }
 
-defineExpose({ addAttachments });
+function focus() {
+  editorRef.value?.focus();
+}
+
+defineExpose({ addAttachments, focus });
 
 function onEditorCancel() {
   const action = getComposerEscapeAction({
