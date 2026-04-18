@@ -263,6 +263,28 @@ pub fn build_caps_element(node: &str, identities: &[Identity], features: &[Featu
     Caps::new(node, &ver).build_element()
 }
 
+/// Build Waddle's standard entity capabilities element for presence stanzas.
+pub fn build_waddle_caps_element() -> Element {
+    let identities = vec![crate::disco::Identity::server(Some("Waddle XMPP Server"))];
+    let features = crate::disco::server_features();
+    build_caps_element(WADDLE_CAPS_NODE, &identities, &features)
+}
+
+/// Ensure a payload list contains an entity capabilities advertisement.
+///
+/// If the payload list already contains any XEP-0115 `<c/>` element, it is
+/// preserved as-is to avoid duplicating caps payloads in the same stanza.
+pub fn ensure_caps_payload(payloads: &mut Vec<Element>) {
+    if payloads
+        .iter()
+        .any(|payload| payload.name() == "c" && payload.ns() == NS_CAPS)
+    {
+        return;
+    }
+
+    payloads.push(build_waddle_caps_element());
+}
+
 /// Extract Caps from a presence stanza.
 pub fn extract_caps_from_presence(presence: &Element) -> Option<Caps> {
     presence
@@ -559,6 +581,41 @@ mod tests {
         // ver should be a valid hash
         let ver = elem.attr("ver").unwrap();
         assert!(BASE64.decode(ver).is_ok());
+    }
+
+    #[test]
+    fn test_build_waddle_caps_element() {
+        let elem = build_waddle_caps_element();
+
+        assert_eq!(elem.name(), "c");
+        assert_eq!(elem.ns(), NS_CAPS);
+        assert_eq!(elem.attr("node"), Some(WADDLE_CAPS_NODE));
+        assert_eq!(elem.attr("hash"), Some("sha-1"));
+    }
+
+    #[test]
+    fn test_ensure_caps_payload_adds_caps_once() {
+        let mut payloads = Vec::new();
+
+        ensure_caps_payload(&mut payloads);
+        ensure_caps_payload(&mut payloads);
+
+        let caps_payloads: Vec<_> = payloads
+            .iter()
+            .filter(|payload| payload.name() == "c" && payload.ns() == NS_CAPS)
+            .collect();
+        assert_eq!(caps_payloads.len(), 1);
+        assert_eq!(caps_payloads[0].attr("node"), Some(WADDLE_CAPS_NODE));
+    }
+
+    #[test]
+    fn test_ensure_caps_payload_preserves_existing_caps() {
+        let existing = Caps::new("https://example.com/caps", "existing").build_element();
+        let mut payloads = vec![existing.clone()];
+
+        ensure_caps_payload(&mut payloads);
+
+        assert_eq!(payloads, vec![existing]);
     }
 
     #[test]

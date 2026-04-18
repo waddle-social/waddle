@@ -728,8 +728,6 @@ impl XmppStream {
     /// Send stream features for resource binding.
     #[instrument(skip(self), name = "xmpp.stream.send_features_bind")]
     pub async fn send_features_bind(&mut self) -> Result<(), XmppError> {
-        let caps_feature = self.build_caps_stream_feature();
-
         // XEP-0198: Stream Management is advertised alongside bind
         // XEP-0397: ISR is also advertised for instant stream resumption
         // XEP-0352: CSI is advertised for client state indication
@@ -743,33 +741,19 @@ impl XmppStream {
                 <sm xmlns='{}'/>\
                 <isr xmlns='{}'/>\
                 <csi xmlns='urn:xmpp:csi:0'/>\
-                {}\
             </stream:features>",
             ns::BIND,
             ns::ROSTERVER,
             ns::SESSION,
             ns::SM,
-            ns::ISR,
-            caps_feature
+            ns::ISR
         );
 
         self.write_all(features.as_bytes()).await?;
         self.flush().await?;
 
-        debug!("Sent bind features (with rosterver, caps, Stream Management, ISR, and CSI)");
+        debug!("Sent bind features (with rosterver, Stream Management, ISR, and CSI)");
         Ok(())
-    }
-
-    fn build_caps_stream_feature(&self) -> String {
-        let identities = vec![crate::disco::Identity::server(Some("Waddle XMPP Server"))];
-        let features = crate::disco::server_features();
-        let ver = crate::xep::xep0115::compute_caps_hash(&identities, &features);
-        format!(
-            "<c xmlns='{}' hash='sha-1' node='{}' ver='{}'/>",
-            ns::CAPS,
-            crate::xep::xep0115::WADDLE_CAPS_NODE,
-            ver
-        )
     }
 
     /// Send stream features with only Stream Management (after bind, if SM was enabled).

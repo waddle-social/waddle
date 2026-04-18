@@ -272,6 +272,8 @@ pub fn build_available_presence(
         pres.statuses.insert(String::new(), status_text.to_string());
     }
 
+    crate::xep::ensure_caps_payload(&mut pres.payloads);
+
     pres
 }
 
@@ -636,6 +638,22 @@ mod tests {
             pres.statuses.values().next(),
             Some(&"Please add me".to_string())
         );
+    }
+
+    #[test]
+    fn test_build_available_presence_includes_waddle_caps() {
+        let from: jid::FullJid = "user@example.com/resource".parse().unwrap();
+        let to: BareJid = "contact@example.com".parse().unwrap();
+
+        let pres = build_available_presence(&from, &to, Some("chat"), Some("Ready"), 5);
+
+        let caps = pres
+            .payloads
+            .iter()
+            .find(|payload| payload.name() == "c" && payload.ns() == crate::xep::NS_CAPS)
+            .expect("available presence must include caps");
+
+        assert_eq!(caps.attr("node"), Some(crate::xep::WADDLE_CAPS_NODE));
     }
 
     #[test]
