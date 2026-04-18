@@ -5,7 +5,6 @@ import type { WaddleSummary } from "@/lib/waddle-api";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { ServerVersion } from "@/composables/useVersion";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
-import VersionFooter from "@/components/chat/VersionFooter.vue";
 
 const props = defineProps<{
   waddles: WaddleSummary[];
@@ -182,17 +181,12 @@ function waddleColor(waddle: WaddleSummary): string {
       :session="session"
       :notification-permission="notificationPermission"
       :notifications-enabled="notificationsEnabled"
+      :web-commit-sha="webCommitSha"
+      :server-version="serverVersion"
       compact
       @logout="emit('logout')"
       @request-notifications="emit('request-notifications')"
       @toggle-notifications="emit('toggle-notifications')"
-    />
-
-    <!-- Version / credits footer (vertical only; mobile drawer renders its own) -->
-    <VersionFooter
-      v-if="!horizontal"
-      :web-commit-sha="webCommitSha"
-      :server-version="serverVersion"
     />
   </div>
 </template>

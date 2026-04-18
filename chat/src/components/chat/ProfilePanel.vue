@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Bell, BellOff, LogOut } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
+import VersionFooter from "@/components/chat/VersionFooter.vue";
+import type { ServerVersion } from "@/composables/useVersion";
 import type { WaddleSession } from "@/lib/server-auth";
 
 const props = defineProps<{
@@ -9,6 +11,8 @@ const props = defineProps<{
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
   compact?: boolean;
+  webCommitSha?: string;
+  serverVersion?: ServerVersion | null;
 }>();
 
 const emit = defineEmits<{
@@ -24,6 +28,9 @@ const bellTitle = computed(() => {
   return "Enable notifications";
 });
 
+const detailsOpen = ref(false);
+const compactRootEl = ref<HTMLElement | null>(null);
+
 function handleBellClick() {
   if (props.notificationPermission === "denied") return;
   if (props.notificationPermission === "granted") {
@@ -32,56 +39,134 @@ function handleBellClick() {
     emit("request-notifications");
   }
 }
+
+function toggleDetails() {
+  detailsOpen.value = !detailsOpen.value;
+}
+
+function closeDetails() {
+  detailsOpen.value = false;
+}
+
+function handleLogout() {
+  closeDetails();
+  emit("logout");
+}
+
+function onWindowClick(event: MouseEvent) {
+  if (!props.compact || !detailsOpen.value) return;
+  const target = event.target as Node | null;
+  if (!compactRootEl.value || !target) return;
+  if (!compactRootEl.value.contains(target)) closeDetails();
+}
+
+function onEsc(event: KeyboardEvent) {
+  if (event.key === "Escape") closeDetails();
+}
+
+watch(
+  () => props.compact,
+  (compact) => {
+    if (!compact) closeDetails();
+  },
+);
+
+onMounted(() => {
+  window.addEventListener("mousedown", onWindowClick);
+  window.addEventListener("keydown", onEsc);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("mousedown", onWindowClick);
+  window.removeEventListener("keydown", onEsc);
+});
 </script>
 
 <template>
   <!-- Compact mode for icon rail -->
-  <div v-if="compact" class="flex flex-col items-center gap-1.5 pt-3 border-t border-border mt-2">
+  <div v-if="compact" ref="compactRootEl" class="relative mt-2 flex flex-col items-center gap-1.5 border-t border-border pt-3">
     <button
-      class="w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200"
+      class="flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200"
       :class="notificationPermission === 'denied'
-        ? 'opacity-30 cursor-not-allowed text-rail-foreground'
+        ? 'cursor-not-allowed text-rail-foreground opacity-30'
         : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
       :title="bellTitle"
       :aria-label="bellTitle"
       :disabled="notificationPermission === 'denied'"
       @click="handleBellClick"
     >
-      <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="w-3.5 h-3.5" />
-      <Bell v-else class="w-3.5 h-3.5" />
+      <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
+      <Bell v-else class="h-3.5 w-3.5" />
     </button>
     <button
-      class="w-10 h-10 flex items-center justify-center rounded-xl text-rail-foreground hover:bg-rail-hover hover:text-rail-active transition-all duration-200"
-      :title="`${session.username} — Log out`"
-      @click="emit('logout')"
+      class="flex h-10 w-10 items-center justify-center rounded-xl text-rail-foreground transition-all duration-200 hover:bg-rail-hover hover:text-rail-active"
+      :title="`${session.username} — Account and build details`"
+      aria-haspopup="dialog"
+      :aria-expanded="detailsOpen"
+      @click="toggleDetails"
     >
       <AppAvatar :name="session.username" :src="session.avatar_url" size="xs" />
     </button>
+    <div
+      v-if="detailsOpen"
+      class="animate-fade-in absolute bottom-0 left-full z-20 ml-3 w-60 rounded-2xl border border-border bg-popover/95 p-3 text-popover-foreground shadow-xl backdrop-blur-xl"
+    >
+      <div class="flex items-center gap-2.5">
+        <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
+        <div class="min-w-0 flex-1">
+          <div class="truncate text-[13px] font-medium">{{ session.username }}</div>
+          <div class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">Account & build</div>
+        </div>
+      </div>
+      <div class="mt-3 border-t border-border pt-3">
+        <VersionFooter
+          :web-commit-sha="webCommitSha"
+          :server-version="serverVersion"
+          layout="detail"
+        />
+      </div>
+      <button
+        class="mt-3 flex h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+        @click="handleLogout"
+      >
+        <LogOut class="h-3.5 w-3.5" />
+        <span>Log out</span>
+      </button>
+    </div>
   </div>
 
   <!-- Full mode for sidebar -->
-  <div v-else class="px-3 py-2.5 flex items-center gap-2.5 flex-shrink-0 border-t border-border">
-    <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
-    <span class="flex-1 min-w-0 text-[13px] font-medium truncate text-sidebar-foreground">{{ session.username }}</span>
-    <button
-      class="h-7 w-7 flex items-center justify-center rounded-lg transition-all duration-200 flex-shrink-0"
-      :class="notificationPermission === 'denied'
-        ? 'opacity-30 cursor-not-allowed'
-        : 'hover:bg-sidebar-accent text-sidebar-muted hover:text-primary'"
-      :title="bellTitle"
-      :aria-label="bellTitle"
-      :disabled="notificationPermission === 'denied'"
-      @click="handleBellClick"
-    >
-      <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="w-3.5 h-3.5" />
-      <Bell v-else class="w-3.5 h-3.5" />
-    </button>
-    <button
-      class="h-7 w-7 flex items-center justify-center rounded-lg text-sidebar-muted hover:bg-sidebar-accent hover:text-destructive transition-all duration-200 flex-shrink-0"
-      title="Log out"
-      @click="emit('logout')"
-    >
-      <LogOut class="w-3.5 h-3.5" />
-    </button>
+  <div v-else class="flex flex-shrink-0 flex-col gap-2.5 border-t border-border px-3 py-2.5">
+    <div class="flex items-center gap-2.5">
+      <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
+      <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-sidebar-foreground">{{ session.username }}</span>
+      <button
+        class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
+        :class="notificationPermission === 'denied'
+          ? 'cursor-not-allowed opacity-30'
+          : 'text-sidebar-muted hover:bg-sidebar-accent hover:text-primary'"
+        :title="bellTitle"
+        :aria-label="bellTitle"
+        :disabled="notificationPermission === 'denied'"
+        @click="handleBellClick"
+      >
+        <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
+        <Bell v-else class="h-3.5 w-3.5" />
+      </button>
+      <button
+        class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-sidebar-muted transition-all duration-200 hover:bg-sidebar-accent hover:text-destructive"
+        title="Log out"
+        @click="handleLogout"
+      >
+        <LogOut class="h-3.5 w-3.5" />
+      </button>
+    </div>
+    <div class="border-t border-border pt-2">
+      <VersionFooter
+        :web-commit-sha="webCommitSha"
+        :server-version="serverVersion"
+        layout="inline"
+      />
+    </div>
   </div>
 </template>

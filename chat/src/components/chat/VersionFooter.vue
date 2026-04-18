@@ -5,10 +5,10 @@ import { extractServerSha, type ServerVersion } from "@/composables/useVersion";
 const props = defineProps<{
   webCommitSha?: string;
   serverVersion?: ServerVersion | null;
-  layout?: "stacked" | "inline";
+  layout?: "detail" | "inline";
 }>();
 
-const layout = computed(() => props.layout ?? "stacked");
+const layout = computed(() => props.layout ?? "detail");
 
 const webShortSha = computed(() => (props.webCommitSha ?? "unknown").slice(0, 7));
 const serverShortSha = computed(() => {
@@ -23,27 +23,34 @@ const tooltip = computed(
 
 <template>
   <div
-    v-if="layout === 'stacked'"
-    class="flex flex-col items-center gap-0.5 text-[9px] leading-tight text-muted-foreground/60 select-text"
+    v-if="layout === 'detail'"
+    class="flex flex-col gap-2 text-[11px] leading-tight text-muted-foreground/75 select-text"
     :title="tooltip"
   >
-    <span class="font-mono">w {{ webShortSha }}</span>
-    <span class="font-mono">s {{ serverShortSha }}</span>
-    <span class="text-center leading-tight">
-      Made proudly in<br />
-      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
-    </span>
+    <div class="flex items-center justify-between gap-3">
+      <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">Build</span>
+      <span class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+        <span>Made proudly in</span>
+        <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
+      </span>
+    </div>
+    <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5">
+      <span class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">Web</span>
+      <span class="font-mono text-foreground/80">{{ webShortSha }}</span>
+      <span class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">Server</span>
+      <span class="font-mono text-foreground/80">{{ serverShortSha }}</span>
+    </div>
   </div>
   <div
     v-else
-    class="flex items-center justify-center gap-3 px-3 py-2 text-[10px] text-muted-foreground/70 select-text whitespace-nowrap"
+    class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] leading-tight text-muted-foreground/70 select-text"
     :title="tooltip"
   >
     <span class="font-mono">web {{ webShortSha }}</span>
     <span class="font-mono">srv {{ serverShortSha }}</span>
     <span class="flex items-center gap-1">
       <span>Made proudly in</span>
-      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴󠁧󠁢󠁳󠁣󠁴󠁿</span>
+      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
     </span>
   </div>
 </template>

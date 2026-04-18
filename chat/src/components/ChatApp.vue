@@ -14,7 +14,6 @@ import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
-import VersionFooter from "@/components/chat/VersionFooter.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
@@ -702,17 +701,12 @@ onUnmounted(() => {
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
+          :web-commit-sha="version.webCommitSha.value"
+          :server-version="version.serverVersion.value"
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
           @toggle-notifications="handleToggleNotifications"
         />
-        <div class="mt-auto border-t border-border">
-          <VersionFooter
-            :web-commit-sha="version.webCommitSha.value"
-            :server-version="version.serverVersion.value"
-            layout="inline"
-          />
-        </div>
       </div>
     </AppDrawer>
 
