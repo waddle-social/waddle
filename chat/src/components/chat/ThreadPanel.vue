@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { X, CornerDownRight, MessageSquarePlus, ChevronRight } from "lucide-vue-next";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -63,12 +63,26 @@ const draft = ref("");
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
 
+type MessageComposerHandle = {
+  focus: () => void;
+};
+
+const composerRef = ref<MessageComposerHandle | null>(null);
+const setComposerRef = (instance: MessageComposerHandle | null) => {
+  composerRef.value = instance;
+};
+
+function focusComposer() {
+  void nextTick(() => composerRef.value?.focus());
+}
+
 function beginReplyInThread(message: TimelineMessage) {
   replyingTo.value = {
     id: message.id,
     author: message.author,
     ...(message.body ? { body: message.body, preview: message.body } : {}),
   };
+  focusComposer();
 }
 
 function cancelReplyInThread() {
@@ -242,6 +256,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 
       <div class="border-t border-border flex-shrink-0">
         <MessageComposer
+          :ref="setComposerRef"
           v-model:draft="draft"
           :channel-name="`thread in ${channelName}`"
           :is-sending="isSending"
