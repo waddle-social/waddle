@@ -115,6 +115,46 @@ button {{ margin-top:12px; background:#2563eb; border-color:#1d4ed8; cursor:poin
     )
 }
 
+fn escape_html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn render_device_verify_html(code: &str) -> String {
+    let escaped_code = escape_html_attr(code);
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Device Authorization</title>
+<style>
+body {{ font-family: sans-serif; background:#0f172a; color:#e2e8f0; display:grid; place-items:center; min-height:100vh; margin:0; }}
+.card {{ width:min(480px,92vw); background:#1e293b; border:1px solid #334155; border-radius:12px; padding:24px; }}
+input, button {{ width:100%; font-size:16px; padding:10px; border-radius:8px; border:1px solid #475569; background:#0f172a; color:#e2e8f0; }}
+button {{ margin-top:12px; background:#2563eb; border-color:#1d4ed8; cursor:pointer; }}
+.error {{ color:#fca5a5; margin-top:10px; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Authorize Device</h1>
+    <p>Enter the code shown in your terminal.</p>
+    <form id="f" method="post" action="/api/auth/device/verify">
+      <input name="user_code" value="{escaped_code}" placeholder="ABCD-1234" required />
+      <button type="submit">Continue</button>
+    </form>
+  </div>
+</body>
+</html>"#
+    )
+}
+
 fn generate_device_code() -> String {
     let bytes: [u8; 32] = rand::rng().random();
     hex::encode(bytes)
