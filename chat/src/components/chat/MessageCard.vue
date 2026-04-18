@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from "vue";
-import { Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight } from "lucide-vue-next";
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
+import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
@@ -10,6 +11,7 @@ import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
+import { useLongPress } from "@/composables/useLongPress";
 
 const HAT_LABELS: Record<string, string> = {
   "urn:xmpp:hats:owner": "OWNER",
@@ -148,6 +150,70 @@ function emitAvatarClick() {
   }
 }
 
+const bubbleEl = ref<HTMLElement | null>(null);
+const mobileToolbarOpen = ref(false);
+const pickerOpen = ref(false);
+const menuOpen = ref(false);
+
+function closeAllMenus() {
+  mobileToolbarOpen.value = false;
+  pickerOpen.value = false;
+  menuOpen.value = false;
+}
+
+function react(emoji: string) {
+  emit("react", props.message.id, emoji);
+  closeAllMenus();
+}
+
+function startReplyFromMenu() {
+  emit("reply", props.message);
+  closeAllMenus();
+}
+
+function startEditFromMenu() {
+  startEdit();
+  closeAllMenus();
+}
+
+function retractFromMenu() {
+  emit("retract", props.message.id);
+  closeAllMenus();
+}
+
+function openPickerFromMenu() {
+  menuOpen.value = false;
+  pickerOpen.value = true;
+}
+
+const longPress = useLongPress({
+  onLongPress: () => {
+    mobileToolbarOpen.value = true;
+  },
+});
+
+function onBubbleContextMenu(event: MouseEvent) {
+  // Suppress iOS Safari / Android native long-press menu while the gesture is
+  // being handled. Desktop right-click (pointerType 'mouse' never sets
+  // isPressing) remains untouched.
+  if (longPress.isPressing.value) event.preventDefault();
+}
+
+function onWindowPointerDown(event: PointerEvent) {
+  if (!bubbleEl.value) return;
+  const target = event.target as Node | null;
+  if (target && bubbleEl.value.contains(target)) return;
+  closeAllMenus();
+}
+
+onMounted(() => {
+  window.addEventListener("pointerdown", onWindowPointerDown, true);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("pointerdown", onWindowPointerDown, true);
+});
+
 watch(
   styledHtml,
   () => {
@@ -184,7 +250,9 @@ watch(
   <!-- Normal message -->
   <div
     v-else
+    ref="bubbleEl"
     :data-message-id="message.id"
+    :data-mobile-open="mobileToolbarOpen || pickerOpen ? 'true' : 'false'"
     class="group relative flow-root px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned
@@ -193,7 +261,14 @@ watch(
           ? 'border-l-2 border-primary/20 hover:bg-muted/40'
           : 'hover:bg-muted/40',
       message.deliveryStatus === 'sending' ? 'opacity-50' : '',
+      longPress.isPressing.value ? 'no-callout' : '',
     ]"
+    @pointerdown="longPress.handlers.onPointerdown"
+    @pointermove="longPress.handlers.onPointermove"
+    @pointerup="longPress.handlers.onPointerup"
+    @pointercancel="longPress.handlers.onPointercancel"
+    @pointerleave="longPress.handlers.onPointerleave"
+    @contextmenu="onBubbleContextMenu"
   >
     <button
       class="float-left mr-3 mt-0.5 rounded-lg"
@@ -345,53 +420,146 @@ watch(
       </button>
     </div>
 
-    <!-- Floating action toolbar — absolute so no layout space when hidden -->
+    <!-- Floating action toolbar — absolute so no layout space when hidden.
+         Revealed by hover (mouse), focus-within (keyboard), or long-press (touch). -->
     <div
       v-if="!isEditing"
-      class="absolute -top-3 right-3 z-10 opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto transition-opacity duration-150 flex items-center gap-0.5 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1"
+      class="absolute -top-3 right-3 z-10 opacity-0 group-hover:opacity-100 focus-within:opacity-100 group-data-[mobile-open=true]:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto group-data-[mobile-open=true]:pointer-events-auto transition-opacity duration-150 flex items-center gap-0.5 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1"
     >
       <button
         v-for="e in quickEmojis"
         :key="e"
+        type="button"
         class="h-6 w-6 flex items-center justify-center text-[14px] leading-none rounded-md hover:bg-muted hover:scale-110 transition-all duration-150"
         :title="`React with ${e}`"
         :aria-label="`React to message with ${e}`"
-        @click="emit('react', message.id, e)"
+        @click="react(e)"
       >{{ e }}</button>
+      <div class="relative">
+        <button
+          type="button"
+          class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+          :class="pickerOpen ? 'bg-muted text-foreground' : ''"
+          title="Add reaction"
+          aria-label="Add reaction"
+          :aria-expanded="pickerOpen"
+          aria-haspopup="dialog"
+          @click="pickerOpen = !pickerOpen; mobileToolbarOpen = false"
+        >
+          <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+        <EmojiPicker
+          :open="pickerOpen"
+          @select="react"
+          @close="pickerOpen = false"
+        />
+      </div>
       <button
-        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
-        title="Add reaction"
-        aria-label="Add reaction"
-      >
-        <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
-      </button>
-      <button
+        type="button"
         class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Reply"
         aria-label="Reply to message"
-        @click="emit('reply', message)"
+        @click="startReplyFromMenu"
       >
         <Reply class="w-3.5 h-3.5" aria-hidden="true" />
       </button>
       <template v-if="message.isSelf">
         <div class="w-px h-4 bg-border mx-0.5" />
         <button
+          type="button"
           class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
           title="Edit message"
           aria-label="Edit message"
-          @click="startEdit"
+          @click="startEditFromMenu"
         >
           <Pencil class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
         <button
+          type="button"
           class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
           title="Delete message"
           aria-label="Delete message"
-          @click="emit('retract', message.id)"
+          @click="retractFromMenu"
         >
           <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
       </template>
+    </div>
+
+    <!-- Accessible always-reachable affordance: keyboard / screen-reader users
+         (and anyone who prefers a button to a long-press) get the same actions
+         via a standard menu. Positioned at the top-right of the bubble, low
+         contrast on desktop, prominent on touch where hover never fires. -->
+    <div v-if="!isEditing" class="absolute top-1 right-1 z-10">
+      <button
+        type="button"
+        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted opacity-40 hover:opacity-100 focus-visible:opacity-100 group-data-[mobile-open=true]:opacity-100 transition-all duration-150"
+        title="Message actions"
+        aria-label="Message actions"
+        :aria-expanded="menuOpen"
+        aria-haspopup="menu"
+        @click="menuOpen = !menuOpen; mobileToolbarOpen = false"
+      >
+        <MoreHorizontal class="w-3.5 h-3.5" aria-hidden="true" />
+      </button>
+      <div
+        v-if="menuOpen"
+        role="menu"
+        aria-label="Message actions"
+        class="absolute top-full right-0 mt-1 min-w-40 glass-panel border border-border rounded-xl shadow-2xl p-1 animate-fade-in"
+        @pointerdown.stop
+      >
+        <div class="flex items-center gap-0.5 px-1 py-1">
+          <button
+            v-for="e in quickEmojis"
+            :key="`menu-${e}`"
+            type="button"
+            role="menuitem"
+            class="h-8 w-8 flex items-center justify-center text-[16px] leading-none rounded-md hover:bg-muted transition-colors"
+            :aria-label="`React with ${e}`"
+            @click="react(e)"
+          >{{ e }}</button>
+        </div>
+        <button
+          type="button"
+          role="menuitem"
+          class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
+          @click="openPickerFromMenu"
+        >
+          <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
+          <span>More reactions…</span>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
+          @click="startReplyFromMenu"
+        >
+          <Reply class="w-3.5 h-3.5" aria-hidden="true" />
+          <span>Reply</span>
+        </button>
+        <template v-if="message.isSelf">
+          <div class="my-1 h-px bg-border" />
+          <button
+            type="button"
+            role="menuitem"
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
+            @click="startEditFromMenu"
+          >
+            <Pencil class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Edit</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-destructive/10 text-destructive transition-colors text-left"
+            @click="retractFromMenu"
+          >
+            <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Delete</span>
+          </button>
+        </template>
+      </div>
     </div>
   </div>
 </template>
