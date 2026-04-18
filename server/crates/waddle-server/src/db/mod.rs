@@ -56,7 +56,6 @@ impl Deref for ConnectionGuard<'_> {
     }
 }
 
-pub use actor::{DbActor, DbExecute, DbQuery, DbQueryOne, RowValues};
 pub use migrations::MigrationRunner;
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 // ConnectionGuard is public via the enum definition above
@@ -68,7 +67,6 @@ pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub trait ValueExt {
     fn as_string(&self) -> Result<String, DatabaseError>;
     fn as_optional_string(&self) -> Result<Option<String>, DatabaseError>;
-    fn as_i64(&self) -> Result<i64, DatabaseError>;
 }
 
 impl ValueExt for libsql::Value {
@@ -91,16 +89,6 @@ impl ValueExt for libsql::Value {
             libsql::Value::Text(s) => Ok(Some(s.clone())),
             other => Err(DatabaseError::QueryFailed(format!(
                 "expected text or null, got {:?}",
-                other
-            ))),
-        }
-    }
-
-    fn as_i64(&self) -> Result<i64, DatabaseError> {
-        match self {
-            libsql::Value::Integer(i) => Ok(*i),
-            other => Err(DatabaseError::QueryFailed(format!(
-                "expected integer, got {:?}",
                 other
             ))),
         }

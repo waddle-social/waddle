@@ -21,7 +21,6 @@
 //! channel:general#viewer@waddle:penguin-club#member
 //! ```
 
-pub mod actor;
 mod check;
 mod schema;
 mod tuple;

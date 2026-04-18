@@ -33,6 +33,10 @@ use waddle_xmpp::{
         parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
+    protocol::{
+        frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
+        StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
+    },
     registry::{ConnectionRegistry, OutboundStanza},
     xep::{
         build_command_items, build_command_result, build_spaces_metadata_form,
@@ -74,6 +78,10 @@ pub struct WebSocketState {
     pub command_registry: Arc<CommandRegistry>,
     /// Runtime extension manager for message embeds + feature advertisements
     pub extension_manager: Arc<ExtensionManager>,
+    /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
+    /// roster, carbons) are routed through this before falling back to the
+    /// legacy string-matching code paths below.
+    pub dispatcher: Arc<StanzaDispatcher>,
 }
 
 /// In-progress SCRAM-SHA-256 authentication state between challenge and response.
@@ -82,6 +90,33 @@ struct PendingScramAuth {
     stored_key: Vec<u8>,
     server_key: Vec<u8>,
     username: String,
+}
+
+/// Per-connection mutable state threaded through the legacy dispatch path.
+///
+/// The sans-I/O refactor (`waddle_xmpp::protocol::phase::ConnectionPhase`)
+/// will replace these loose booleans with an enum state machine. Until
+/// that migration completes (see the tracking PR), bundling them into a
+/// single struct cuts the per-function argument count and makes the
+/// invariants easier to audit.
+struct LegacyConnState {
+    authenticated: bool,
+    session_jid: Option<FullJid>,
+    authenticated_session: Option<Session>,
+    resource_bound: bool,
+    pending_scram: Option<PendingScramAuth>,
+}
+
+impl LegacyConnState {
+    fn new() -> Self {
+        Self {
+            authenticated: false,
+            session_jid: None,
+            authenticated_session: None,
+            resource_bound: false,
+            pending_scram: None,
+        }
+    }
 }
 
 /// Create the WebSocket router
@@ -119,12 +154,8 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundStanza>(OUTBOUND_CHANNEL_SIZE);
 
     // Track connection state
-    let mut authenticated = false;
-    let mut session_jid: Option<FullJid> = None;
-    let mut authenticated_session: Option<Session> = None;
+    let mut conn = LegacyConnState::new();
     let mut registered = false;
-    let mut resource_bound = false;
-    let mut pending_scram: Option<PendingScramAuth> = None;
 
     loop {
         tokio::select! {
@@ -132,24 +163,20 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        debug!(len = text.len(), content = %text, "Received XMPP WebSocket message");
+                        debug!(len = text.len(), "Received XMPP WebSocket message");
 
                         // Handle XMPP framing (RFC 7395)
                         let responses = handle_xmpp_frame(
                             &text,
                             &domain,
                             &state,
-                            &mut authenticated,
-                            &mut session_jid,
-                            &mut authenticated_session,
-                            &mut resource_bound,
-                            &mut pending_scram,
+                            &mut conn,
                         ).await;
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if authenticated && resource_bound && session_jid.is_some() && !registered {
-                            if let Some(ref jid) = session_jid {
+                        if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() && !registered {
+                            if let Some(ref jid) = conn.session_jid {
                                 state.connection_registry.register(jid.clone(), outbound_tx.clone());
                                 registered = true;
                                 info!(jid = %jid, "WebSocket connection registered");
@@ -157,7 +184,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
 
                         for response in responses {
-                            debug!(response = %response, "Sending XMPP WebSocket response");
+                            debug!(len = response.len(), "Sending XMPP WebSocket response");
                             if let Err(e) = ws_sender.send(Message::Text(response)).await {
                                 error!(error = %e, "Failed to send WebSocket message");
                                 break;
@@ -213,7 +240,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     }
 
     // Unregister connection on disconnect
-    if let Some(ref jid) = session_jid {
+    if let Some(ref jid) = conn.session_jid {
         state.connection_registry.unregister(jid);
         info!(jid = %jid, "WebSocket connection unregistered");
 
@@ -281,39 +308,12 @@ fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
 
 fn parse_iq_frame(frame: &str) -> Option<xmpp_parsers::iq::Iq> {
     // WebSocket clients may omit xmlns="jabber:client" on stanzas (they
-    // rely on stream-level namespace inheritance from <open>).  Inject it
-    // when missing so xmpp_parsers can parse the IQ.
-    let patched = inject_default_ns_if_missing(frame, "jabber:client");
+    // rely on stream-level namespace inheritance from <open>). Inject it
+    // when missing using the shared frame normalizer so xmpp_parsers can
+    // parse the IQ without duplicating brittle string surgery here.
+    let patched = inject_client_ns_if_missing(frame);
     let element = xmpp_parsers::minidom::Element::from_str(&patched).ok()?;
     xmpp_parsers::iq::Iq::try_from(element).ok()
-}
-
-/// Inject `xmlns` into the opening tag of an `<iq>`, `<message>`, or
-/// `<presence>` stanza when the attribute is absent.
-fn inject_default_ns_if_missing(xml: &str, ns: &str) -> String {
-    let trimmed = xml.trim();
-    if !(trimmed.starts_with("<iq")
-        || trimmed.starts_with("<message")
-        || trimmed.starts_with("<presence"))
-    {
-        return trimmed.to_string();
-    }
-    let Some(open_end) = trimmed.find('>') else {
-        return trimmed.to_string();
-    };
-    let open_tag = &trimmed[..open_end];
-    if open_tag.contains("xmlns=") {
-        return trimmed.to_string();
-    }
-    // Insert xmlns right after the tag name, before any `/>`or attributes
-    let insert_pos = trimmed
-        .find(|c: char| c.is_whitespace() || c == '/')
-        .unwrap_or(open_end);
-    format!(
-        "{} xmlns=\"{ns}\"{}",
-        &trimmed[..insert_pos],
-        &trimmed[insert_pos..]
-    )
 }
 
 fn build_iq_result_xml(
@@ -437,12 +437,24 @@ async fn handle_xmpp_frame(
     frame: &str,
     domain: &str,
     state: &WebSocketState,
-    authenticated: &mut bool,
-    session_jid: &mut Option<FullJid>,
-    authenticated_session: &mut Option<Session>,
-    resource_bound: &mut bool,
-    pending_scram: &mut Option<PendingScramAuth>,
+    conn: &mut LegacyConnState,
 ) -> Vec<String> {
+    if frame.len() > MAX_FRAME_SIZE {
+        warn!(len = frame.len(), "Dropping oversized XMPP frame");
+        return vec![];
+    }
+
+    // Split the bundle into the individual `&mut` borrows the legacy body
+    // expects. Once the sans-I/O migration lands (see the protocol module
+    // tracking PR), the whole body becomes a single
+    // `machine.handle(InboundEvent)` call and this shim goes away.
+    let LegacyConnState {
+        authenticated,
+        session_jid,
+        authenticated_session,
+        resource_bound,
+        pending_scram,
+    } = conn;
     let frame = frame.trim();
     let muc_domain = format!("muc.{}", domain);
 
@@ -528,13 +540,15 @@ async fn handle_xmpp_frame(
 
     // Handle IQ stanzas
     if frame.starts_with("<iq") {
-        return handle_iq(
+        return handle_iq_with_conn_state(
             frame,
             domain,
             &muc_domain,
             state,
             authenticated_session,
             session_jid,
+            *authenticated,
+            *resource_bound,
         )
         .await;
     }
@@ -551,7 +565,7 @@ async fn handle_xmpp_frame(
         .await;
     }
 
-    warn!(frame = %frame, "Unhandled XMPP frame");
+    warn!(len = frame.len(), "Unhandled XMPP frame");
     vec![]
 }
 
@@ -1110,6 +1124,33 @@ async fn handle_iq(
     authenticated_session: &Option<Session>,
     session_jid: &Option<FullJid>,
 ) -> Vec<String> {
+    let authenticated = authenticated_session.is_some() || session_jid.is_some();
+    let resource_bound = session_jid
+        .as_ref()
+        .is_some_and(|jid| jid.resource().as_str() != "pending");
+    handle_iq_with_conn_state(
+        frame,
+        domain,
+        muc_domain,
+        state,
+        authenticated_session,
+        session_jid,
+        authenticated,
+        resource_bound,
+    )
+    .await
+}
+
+async fn handle_iq_with_conn_state(
+    frame: &str,
+    domain: &str,
+    muc_domain: &str,
+    state: &WebSocketState,
+    authenticated_session: &Option<Session>,
+    session_jid: &Option<FullJid>,
+    authenticated: bool,
+    resource_bound: bool,
+) -> Vec<String> {
     let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
     let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
@@ -1152,28 +1193,49 @@ async fn handle_iq(
         return vec![];
     }
 
-    // Ping
-    if frame.contains("urn:xmpp:ping") {
-        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
+    // Sans-I/O dispatch: if the IQ namespace has a registered handler in
+    // the protocol dispatcher, route through it and translate the emitted
+    // OutboundEvents into outbound XML frames via `interpret()`.
+    //
+    // Handlers that still need async I/O (for example MAM, Jingle, disco,
+    // and any other namespaces not yet registered with the dispatcher)
+    // continue to fall through to the legacy string-matching branches
+    // below until the two-phase async callback machinery lands.
+    if let (Some(iq), Some(full_jid)) = (parsed_iq.as_ref(), session_jid.as_ref()) {
+        let payload_ns = match &iq.payload {
+            xmpp_parsers::iq::IqType::Get(e) | xmpp_parsers::iq::IqType::Set(e) => {
+                Some(e.ns().to_string())
+            }
+            _ => None,
+        };
+        if let Some(ns) = payload_ns {
+            if state.dispatcher.has_iq_handler(&ns) {
+                if !authenticated || !resource_bound {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "auth",
+                        "not-authorized",
+                    )];
+                }
+                let ctx = ProtocolStanzaContext { domain, full_jid };
+                let events = state.dispatcher.dispatch_iq(iq, &ctx);
+                let outcome = super::interpret::interpret(events).await;
+                if outcome.close {
+                    warn!(
+                        ns = %ns,
+                        "Sans-I/O handler requested transport close; \
+                         WebSocket adapter cannot honour CloseTransport yet"
+                    );
+                }
+                return outcome.frames;
+            }
+        }
     }
 
-    // Session establishment (legacy, but some clients need it)
-    if frame.contains("urn:ietf:params:xml:ns:xmpp-session") {
-        debug!("Session establishment requested");
-        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
-    }
-
-    // Roster query
-    if frame.contains("jabber:iq:roster") {
-        debug!("Roster query");
-        let query = xmpp_parsers::minidom::Element::builder("query", "jabber:iq:roster").build();
-        return vec![build_iq_result_xml(
-            &id,
-            response_from,
-            response_to,
-            Some(query),
-        )];
-    }
+    // jabber:iq:roster is now served by protocol::handlers::roster::RosterHandler
+    // through the sans-I/O dispatcher short-circuit above.
 
     // Disco info on MUC service
     if frame.contains("http://jabber.org/protocol/disco#info") {
@@ -1730,11 +1792,8 @@ async fn handle_iq(
         }
     }
 
-    // Carbons enable
-    if frame.contains("urn:xmpp:carbons:") {
-        debug!("Carbons request");
-        return vec![build_iq_result_xml(&id, response_from, response_to, None)];
-    }
+    // urn:xmpp:carbons:2 enable/disable is now served by
+    // protocol::handlers::carbons::CarbonsHandler via the short-circuit above.
 
     // XEP-0363: HTTP File Upload slot request
     if frame.contains("urn:xmpp:http:upload:0") {
@@ -1826,8 +1885,14 @@ async fn handle_iq(
         }
     }
 
-    // Unknown IQ - log it and return error
-    warn!(id = %id, frame = %frame, "Unhandled IQ stanza");
+    // Unknown IQ - log a compact summary and return an error.
+    let payload_ns = parsed_iq.as_ref().and_then(|iq| match &iq.payload {
+        xmpp_parsers::iq::IqType::Get(payload) | xmpp_parsers::iq::IqType::Set(payload) => {
+            Some(payload.ns().to_string())
+        }
+        xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_) => None,
+    });
+    warn!(id = %id, payload_ns, "Unhandled IQ stanza");
     vec![build_iq_error_xml_with_addresses(
         &id,
         response_from,
@@ -2023,12 +2088,9 @@ async fn archive_groupchat_message(
     room_jid: &BareJid,
     message: &xmpp_parsers::message::Message,
 ) -> Option<String> {
-    let Some(body) = prototype_body(message)
+    let body = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return None;
-    };
+        .filter(|value| !value.is_empty())?;
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
@@ -2554,6 +2616,9 @@ mod tests {
         let mam_storage = Arc::new(LibSqlMamStorage::new(mam_conn));
         mam_storage.initialize().await.expect("mam init");
 
+        let mut dispatcher = StanzaDispatcher::new();
+        waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
+
         Arc::new(WebSocketState {
             app_state,
             auth_state,
@@ -2562,6 +2627,7 @@ mod tests {
             mam_storage,
             command_registry: Arc::new(CommandRegistry::new()),
             extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
+            dispatcher: Arc::new(dispatcher),
         })
     }
 
@@ -2579,21 +2645,13 @@ mod tests {
     #[tokio::test]
     async fn websocket_features_advertise_oauthbearer() {
         let state = create_test_websocket_state().await;
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
+        let mut conn = LegacyConnState::new();
 
-        let mut pending_scram = None;
         let responses = handle_xmpp_frame(
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
             "example.com",
             state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
+            &mut conn,
         )
         .await;
 
@@ -2622,29 +2680,15 @@ mod tests {
                 .append(BASE64_STANDARD.encode("\0alice\0session-token"))
                 .build(),
         );
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
-        let mut pending_scram = None;
+        let mut conn = LegacyConnState::new();
 
-        let responses = handle_xmpp_frame(
-            &frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_failure_xml("invalid-mechanism")]);
-        assert!(!authenticated);
-        assert!(!resource_bound);
-        assert!(session_jid.is_none());
-        assert!(authenticated_session.is_none());
+        assert!(!conn.authenticated);
+        assert!(!conn.resource_bound);
+        assert!(conn.session_jid.is_none());
+        assert!(conn.authenticated_session.is_none());
     }
 
     #[tokio::test]
@@ -2658,36 +2702,26 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
-        let mut pending_scram = None;
+        let mut conn = LegacyConnState::new();
 
-        let responses = handle_xmpp_frame(
-            &frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
         assert_eq!(responses, vec![sasl_success_xml()]);
-        assert!(authenticated);
-        assert!(!resource_bound);
+        assert!(conn.authenticated);
+        assert!(!conn.resource_bound);
         assert_eq!(
-            authenticated_session.as_ref().map(|s| s.user_id.as_str()),
+            conn.authenticated_session
+                .as_ref()
+                .map(|s| s.user_id.as_str()),
             Some(session.user_id.as_str())
         );
         let expected_bare =
             localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
         assert_eq!(
-            session_jid.as_ref().map(|jid| jid.to_bare().to_string()),
+            conn.session_jid
+                .as_ref()
+                .map(|jid| jid.to_bare().to_string()),
             Some(expected_bare)
         );
     }
@@ -2718,38 +2752,16 @@ mod tests {
                 )
                 .build(),
         );
-        let mut authenticated = false;
-        let mut session_jid = None;
-        let mut authenticated_session = None;
-        let mut resource_bound = false;
-        let mut pending_scram = None;
+        let mut conn = LegacyConnState::new();
 
-        let auth_responses = handle_xmpp_frame(
-            &auth_frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
 
-        let bind_responses = handle_xmpp_frame(
-            &bind_frame,
-            "example.com",
-            state.as_ref(),
-            &mut authenticated,
-            &mut session_jid,
-            &mut authenticated_session,
-            &mut resource_bound,
-            &mut pending_scram,
-        )
-        .await;
+        let bind_responses =
+            handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
 
-        assert!(resource_bound);
+        assert!(conn.resource_bound);
         assert_eq!(bind_responses.len(), 1);
 
         let response = Element::from_str(&bind_responses[0]).expect("bind response XML");
@@ -2769,7 +2781,7 @@ mod tests {
                 .expect("session localpart should produce JID");
         assert_eq!(jid.text(), format!("{expected_bare}/web"));
         assert_eq!(
-            session_jid.as_ref().map(ToString::to_string),
+            conn.session_jid.as_ref().map(ToString::to_string),
             Some(format!("{expected_bare}/web"))
         );
     }
@@ -2872,6 +2884,7 @@ mod tests {
     #[tokio::test]
     async fn handle_iq_roster_query_returns_parseable_result() {
         let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         let frame = r#"<iq xmlns="jabber:client" id="roster-1" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
         let responses = handle_iq(
             frame,
@@ -2879,7 +2892,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &None,
+            &Some(jid),
         )
         .await;
         assert_eq!(responses.len(), 1);
@@ -2899,8 +2912,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_value() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let frame = r#"<iq id="roster-attr" type="get" data="xmlns=bogus"><query xmlns="jabber:iq:roster"/></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid),
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+
+        let iq_xml = responses.first().expect("roster response");
+        let element = Element::from_str(iq_xml).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+        assert_eq!(iq.id, "roster-attr");
+        assert!(matches!(
+            iq.payload,
+            xmpp_parsers::iq::IqType::Result(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_drops_oversized_input() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        let huge = format!("<iq id=\"big\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+        let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
+        assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_ping_roundtrips_through_sans_io_path() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some("alice@example.com/web".parse().expect("valid jid"));
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="ping-roundtrip" type="get"><ping xmlns="urn:xmpp:ping"/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let element = Element::from_str(&responses[0]).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+        assert_eq!(iq.id, "ping-roundtrip");
+        assert!(matches!(iq.payload, xmpp_parsers::iq::IqType::Result(None)));
+    }
+
+    #[tokio::test]
     async fn handle_iq_carbons_enable_returns_parseable_result() {
         let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         let frame = r#"<iq xmlns="jabber:client" id="carbons-1" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
         let responses = handle_iq(
             frame,
@@ -2908,7 +2980,7 @@ mod tests {
             "muc.example.com",
             state.as_ref(),
             &None,
-            &None,
+            &Some(jid),
         )
         .await;
         assert_eq!(responses.len(), 1);

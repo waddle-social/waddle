@@ -124,14 +124,6 @@ impl DatabasePool {
             .map_err(|e| DatabaseError::Internal(libsql::Error::ConnectionFailed(e.to_string())))
     }
 
-    /// Get or spawn the actor for a per-Waddle database.
-    pub async fn get_waddle_actor(
-        &self,
-        waddle_id: &str,
-    ) -> Result<ActorRef<DbActor>, DatabaseError> {
-        self.get_or_spawn_waddle_actor(waddle_id).await
-    }
-
     /// Create a new per-Waddle database
     ///
     /// This is called when a new Waddle is created.
