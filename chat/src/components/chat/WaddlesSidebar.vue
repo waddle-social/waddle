@@ -24,6 +24,7 @@ const emit = defineEmits<{
   createWaddle: [];
   browsePublicWaddles: [];
   toggleDms: [];
+  openSettings: [];
   logout: [];
   "request-notifications": [];
   "toggle-notifications": [];
@@ -184,6 +185,7 @@ function waddleColor(waddle: WaddleSummary): string {
       :web-commit-sha="webCommitSha"
       :server-version="serverVersion"
       compact
+      @open-settings="emit('openSettings')"
       @logout="emit('logout')"
       @request-notifications="emit('request-notifications')"
       @toggle-notifications="emit('toggle-notifications')"

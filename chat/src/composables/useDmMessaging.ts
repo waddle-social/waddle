@@ -1,4 +1,4 @@
-import { nextTick, ref, type Ref } from "vue";
+import { nextTick, ref, watch, type Ref } from "vue";
 import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
 import type {
   BrowserXmppClient,
@@ -14,7 +14,9 @@ import type { WaddleSession } from "@/lib/server-auth";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { findMessageElementById } from "@/lib/message-targeting";
+import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
 import { dmKey, getLastSeen, setLastSeen } from "@/lib/last-seen-store";
+import { useScrollDirection } from "@/composables/useScrollDirection";
 
 function fromLiveDmMessage(
   session: WaddleSession,
@@ -54,6 +56,7 @@ export function useDmMessaging(
   actionError: Ref<string>,
   clearActionError: () => void,
 ) {
+  const { mode: scrollDirection } = useScrollDirection();
   const peerNameFromJid = (jid: string) => barePeerJid(jid).split("@")[0] ?? "unknown";
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
@@ -76,24 +79,24 @@ export function useDmMessaging(
   // identical text doesn't mis-target already-reconciled messages.
   const pendingEchoClientIds = new Set<string>();
 
-  async function scrollToBottom() {
+  async function scrollToPinnedEdge() {
     await nextTick();
     await nextTick();
     const el = timelineEl.value;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
   }
 
   // Initial-load variant: re-pin for ~500ms so late layout (images, avatars,
   // markup reflow) doesn't strand the user above the newest message. Not
   // used per-message — ResizeObserver allocation per live message would be
   // O(n) overhead. Same pattern as useMessaging.ts.
-  async function scrollToBottomAndPin() {
-    await scrollToBottom();
+  async function scrollToPinnedEdgeAndPin() {
+    await scrollToPinnedEdge();
     const el = timelineEl.value;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      el.scrollTop = el.scrollHeight;
+      el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
     });
     observer.observe(el);
     for (const child of Array.from(el.children)) {
@@ -103,6 +106,10 @@ export function useDmMessaging(
   }
 
   async function scrollFirstUnseenIntoView(messageId: string) {
+    if (isTopPinnedScrollDirection(scrollDirection.value)) {
+      await scrollToPinnedEdgeAndPin();
+      return;
+    }
     await nextTick();
     await nextTick();
     const el = timelineEl.value;
@@ -118,6 +125,14 @@ export function useDmMessaging(
     if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
       (target as HTMLElement).scrollIntoView({ block: "start" });
     }
+  }
+
+  async function alignTimelineToPreference() {
+    if (firstUnseenId.value) {
+      await scrollFirstUnseenIntoView(firstUnseenId.value);
+      return;
+    }
+    await scrollToPinnedEdgeAndPin();
   }
 
   function isFeedVisible(m: TimelineMessage): boolean {
@@ -223,8 +238,8 @@ export function useDmMessaging(
     }
     const peerJid = activePeerJid.value;
     messages.value = [...messages.value, msg];
-    // Always snaps to bottom, so last-seen advances in lockstep.
-    void scrollToBottom();
+    // Always snaps to the active edge, so last-seen advances in lockstep.
+    void scrollToPinnedEdge();
     if (peerJid && isFeedVisible(msg)) {
       setLastSeen(dmKey(barePeerJid(peerJid)), msg.id);
     }
@@ -355,7 +370,7 @@ export function useDmMessaging(
         await scrollFirstUnseenIntoView(firstUnseen.id);
       } else {
         firstUnseenId.value = null;
-        await scrollToBottomAndPin();
+        await scrollToPinnedEdgeAndPin();
         const newest = [...timeline].reverse().find(isFeedVisible);
         if (newest) setLastSeen(key, newest.id);
       }
@@ -453,7 +468,7 @@ export function useDmMessaging(
             }));
           }
           messages.value = [...messages.value, optimistic];
-          void scrollToBottom();
+          void scrollToPinnedEdge();
         }
         if (fromComposer) draft.value = "";
         if (composingTimeout) {
@@ -610,6 +625,10 @@ export function useDmMessaging(
     applyReaction(event.messageId, peerNameFromJid(event.peerJid), event.emojis);
   }
 
+  watch(scrollDirection, () => {
+    void alignTimelineToPreference();
+  });
+
   return {
     messages,
     firstUnseenId,
@@ -639,5 +658,6 @@ export function useDmMessaging(
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,
+    scrollToPinnedEdge,
   };
 }

@@ -2,6 +2,7 @@ import { ref } from "vue";
 import type { AdminTab } from "@/lib/chat-ui";
 
 export function useUiState() {
+  const activePage = ref<"chat" | "settings">("chat");
   const adminTab = ref<AdminTab>("rooms");
   const sidebarMode = ref<"channels" | "dms">("channels");
   const showMobileNav = ref(false);
@@ -27,6 +28,7 @@ export function useUiState() {
   }
 
   return {
+    activePage,
     adminTab,
     sidebarMode,
     showMobileNav,

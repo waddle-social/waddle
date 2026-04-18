@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPath, parseRoute } from "../src/composables/useRouting";
+import { buildPath, buildSettingsPath, parseRoute } from "../src/composables/useRouting";
 import type { ChannelSummary, WaddleSummary } from "../src/lib/waddle-api";
 
 const waddle: WaddleSummary = {
@@ -13,8 +13,22 @@ const channel: ChannelSummary = {
 } as ChannelSummary;
 
 describe("parseRoute / buildPath threadStack", () => {
+  test("parses the dedicated settings route", () => {
+    const route = parseRoute("/_settings");
+    expect(route.page).toBe("settings");
+    expect(route.waddleSlug).toBeNull();
+    expect(route.channelSlug).toBeNull();
+    expect(route.dmUsername).toBeNull();
+    expect(route.threadStack).toEqual([]);
+  });
+
+  test("buildSettingsPath returns the settings page path", () => {
+    expect(buildSettingsPath()).toBe("/_settings");
+  });
+
   test("reads an empty thread stack when the query param is missing", () => {
     const route = parseRoute("/my-waddle/general", "");
+    expect(route.page).toBe("chat");
     expect(route.waddleSlug).toBe("my-waddle");
     expect(route.channelSlug).toBe("general");
     expect(route.threadStack).toEqual([]);
