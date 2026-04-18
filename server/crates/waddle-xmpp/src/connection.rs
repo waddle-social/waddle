@@ -3403,6 +3403,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Build a modified presence with XEP-0153 vCard avatar hash.
         let mut pres_clone = pres.clone();
+        crate::xep::ensure_waddle_caps_payload(&mut pres_clone.payloads);
         let vcard_update =
             crate::xep::xep0153::build_vcard_update_element(self.avatar_hash.as_deref());
         pres_clone.payloads.push(vcard_update);
