@@ -112,6 +112,16 @@ impl Feature {
         Self::new("urn:xmpp:reply:0")
     }
 
+    /// XEP-0428 Fallback Indication feature.
+    pub fn fallback_indication() -> Self {
+        Self::new("urn:xmpp:fallback:0")
+    }
+
+    /// XEP-0201 Message Threads discovery feature (waddle-local advertisement).
+    pub fn threads() -> Self {
+        Self::new("urn:xmpp:threads:0")
+    }
+
     /// Stream Management feature
     pub fn stream_management() -> Self {
         Self::new("urn:xmpp:sm:3")
@@ -449,6 +459,8 @@ pub fn server_features() -> Vec<Feature> {
         Feature::roster_versioning(),
         Feature::mam(),
         Feature::replies(),
+        Feature::fallback_indication(),
+        Feature::threads(),
         Feature::stream_management(),
         Feature::roster(),
         Feature::carbons(),
@@ -542,6 +554,8 @@ pub fn muc_room_features(persistent: bool, members_only: bool, moderated: bool) 
         Feature::muc(),
         Feature::mam(),
         Feature::replies(),
+        Feature::fallback_indication(),
+        Feature::threads(),
         Feature::vcard(),
         Feature::occupant_id(),
         Feature::muc_semianonymous(),

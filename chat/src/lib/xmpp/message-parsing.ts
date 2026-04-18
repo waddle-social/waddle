@@ -7,7 +7,16 @@ import type {
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
-  "body" | "mentions" | "broadcastMention" | "sharedFiles" | "isSticker" | "replacesId" | "markup"
+  | "body"
+  | "mentions"
+  | "broadcastMention"
+  | "sharedFiles"
+  | "isSticker"
+  | "replacesId"
+  | "markup"
+  | "replyTo"
+  | "threadId"
+  | "parentThreadId"
 >;
 
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
@@ -28,10 +37,43 @@ export function extractMessageExtensions(
   extractExplicitMentions(msg, base);
   extractFileSharing(msg, base);
   extractMarkup(msg, base);
+  extractReplyAndThread(msg, base);
+  stripReplyFallback(msg, base);
 
   if (ext(msg).sticker) {
     base.isSticker = true;
   }
+}
+
+/** XEP-0461 reply pointer + RFC 6121 / XEP-0201 thread id + parent. */
+function extractReplyAndThread(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const reply = ext(msg).reply as { to?: string; id?: string } | undefined;
+  if (reply?.id) {
+    base.replyTo = { id: reply.id, ...(reply.to ? { author: reply.to } : {}) };
+  }
+  const threadId = ext(msg).thread as string | undefined;
+  if (threadId) base.threadId = threadId;
+  const parentThread = ext(msg).parentThread as string | undefined;
+  if (parentThread) base.parentThreadId = parentThread;
+}
+
+interface FallbackPayload {
+  for?: string;
+  body?: { start?: number; end?: number };
+}
+
+/**
+ * XEP-0428: strip any `urn:xmpp:reply:0` fallback range from the displayed
+ * body so the `> quoted` prefix doesn't double-render on top of the reply chip.
+ */
+function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
+  const fallbacks = ext(msg).fallbacks as FallbackPayload[] | undefined;
+  if (!fallbacks?.length || !base.body) return;
+  const range = fallbacks.find((f) => f.for === "urn:xmpp:reply:0")?.body;
+  if (!range) return;
+  const start = Math.max(0, Math.min(range.start ?? 0, base.body.length));
+  const end = Math.max(start, Math.min(range.end ?? start, base.body.length));
+  base.body = base.body.slice(0, start) + base.body.slice(end);
 }
 
 function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget): void {

@@ -10,6 +10,7 @@ import stickers from "./stickers";
 import mentions from "./mentions";
 import push from "./push";
 import markup from "./markup";
+import replies from "./replies";
 
 const allDefinitions = [
   ...hats,
@@ -22,6 +23,7 @@ const allDefinitions = [
   ...mentions,
   ...push,
   ...markup,
+  ...replies,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {

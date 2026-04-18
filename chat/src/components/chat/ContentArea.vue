@@ -40,7 +40,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
+  send: [
+    body: string,
+    markup: MarkupSpan[],
+    files?: Array<File | Blob>,
+    replyTo?: { id: string; author: string; body?: string },
+  ];
   typing: [];
   selectGif: [url: string];
   editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
@@ -52,6 +57,42 @@ const emit = defineEmits<{
   clearSearch: [];
   openDm: [peerJid: string];
 }>();
+
+const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
+
+function beginReply(message: TimelineMessage) {
+  const author = message.author;
+  replyingTo.value = {
+    id: message.id,
+    author,
+    ...(message.body ? { body: message.body, preview: message.body } : {}),
+  };
+}
+
+function cancelReply() {
+  replyingTo.value = null;
+}
+
+function scrollToMessage(messageId: string) {
+  const el = messagesContainer.value?.querySelector(`[data-message-id="${messageId}"]`);
+  if (el instanceof HTMLElement) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ring-2", "ring-primary/40");
+    setTimeout(() => el.classList.remove("ring-2", "ring-primary/40"), 1400);
+  }
+}
+
+function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) {
+  const pending = replyingTo.value;
+  emit(
+    "send",
+    body,
+    markup,
+    files,
+    pending ? { id: pending.id, author: pending.author, ...(pending.body ? { body: pending.body } : {}) } : undefined,
+  );
+  replyingTo.value = null;
+}
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
 const setMessagesContainer = (el: HTMLDivElement | null) => {
@@ -296,6 +337,8 @@ watch(
           @edit="(id, body, m) => emit('editMessage', id, body, m)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
+          @reply="beginReply"
+          @scroll-to-message="scrollToMessage"
           @avatar-click="onAvatarClick"
         />
       </div>
@@ -328,7 +371,9 @@ watch(
       :member-names="memberNames"
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
-      @send="(body, markup, files) => emit('send', body, markup, files)"
+      :replying-to="replyingTo"
+      @send="onSend"
+      @cancel-reply="cancelReply"
       @typing="emit('typing')"
       @select-gif="(url) => emit('selectGif', url)"
     />

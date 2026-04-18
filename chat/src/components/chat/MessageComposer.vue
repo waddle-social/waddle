@@ -25,13 +25,21 @@ const props = defineProps<{
   memberNames: string[];
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
+  replyingTo?: { id: string; author: string; preview?: string } | null;
 }>();
 
 const emit = defineEmits<{
   send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
   typing: [];
   selectGif: [url: string];
+  cancelReply: [];
 }>();
+
+const replyAuthorName = computed(() => {
+  const author = props.replyingTo?.author;
+  if (!author) return "";
+  return author.includes("/") ? author.split("/").pop()! : author.split("@")[0] ?? author;
+});
 
 const showGifPicker = ref(false);
 const showMentions = ref(false);
@@ -280,6 +288,25 @@ watch(
 
 <template>
   <div class="relative px-4 py-3 flex-shrink-0" @keydown="onKeydown" @paste="onPaste">
+    <!-- Reply context chip -->
+    <div
+      v-if="replyingTo"
+      class="flex items-center gap-2 px-3 py-1.5 mb-2 rounded-xl bg-muted/70 border border-border text-[12px] animate-fade-in"
+    >
+      <span class="text-muted-foreground">Replying to</span>
+      <span class="font-medium text-primary/90">@{{ replyAuthorName }}</span>
+      <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
+      <button
+        type="button"
+        class="ml-auto h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        title="Cancel reply"
+        aria-label="Cancel reply"
+        @click="emit('cancelReply')"
+      >
+        <X class="w-3 h-3" />
+      </button>
+    </div>
+
     <!-- Pending attachment previews -->
     <div
       v-if="pendingAttachments.length > 0"

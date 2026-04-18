@@ -143,6 +143,7 @@ pub mod xep0172;
 pub mod xep0184;
 pub mod xep0191;
 pub mod xep0199;
+pub mod xep0201;
 pub mod xep0202;
 pub mod xep0203;
 pub mod xep0223;
@@ -170,6 +171,7 @@ pub mod xep0410;
 pub mod xep0421;
 pub mod xep0424;
 pub mod xep0425;
+pub mod xep0428;
 pub mod xep0431;
 pub mod xep0433;
 pub mod xep0437;
@@ -271,6 +273,11 @@ pub use xep0184::{
 };
 
 pub use xep0199::{build_ping_result, is_ping, NS_PING};
+
+pub use xep0201::{
+    build_thread_element, install_thread_element, parse_thread_info, thread_parent_from_message,
+    ThreadInfo, NS_THREAD_FEATURE, THREAD_ELEMENT,
+};
 
 pub use xep0092::{
     build_version_element, build_version_response, is_version_query, parse_version_response,
@@ -412,6 +419,11 @@ pub use xep0444::{
     build_reaction_element, build_reaction_message, build_reactions_element, extract_reacted_id,
     extract_reactions_from_message, is_reaction_message, is_reactions_element, set_reactions,
     strip_reactions, ReactionCarrier, ReactionError, ReactionSet, NS_REACTIONS,
+};
+
+pub use xep0428::{
+    build_fallback_element, is_fallback_element, parse_fallbacks_from_message,
+    set_fallback_payloads, strip_fallback_ranges, FallbackIndication, FallbackRange, NS_FALLBACK,
 };
 
 pub use xep0402::{

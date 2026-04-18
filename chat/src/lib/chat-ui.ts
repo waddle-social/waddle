@@ -40,6 +40,11 @@ export interface TimelineMessage {
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */
   markup?: MarkupSpan[];
+  /** XEP-0461: Parent message this replies to, with optional preview text. */
+  replyTo?: { id: string; author?: string; preview?: string };
+  /** RFC 6121 / XEP-0201: Thread identifier + optional parent thread. */
+  threadId?: string;
+  parentThreadId?: string;
 }
 
 export interface CommunityFormData {

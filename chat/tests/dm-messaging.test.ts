@@ -15,9 +15,9 @@ describe("dm messaging", () => {
     const xmpp = makeAgent();
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
-    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "", [
-      { url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 },
-    ]);
+    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "", {
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 }],
+    });
 
     expect(typeof messageId).toBe("string");
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);
@@ -28,7 +28,7 @@ describe("dm messaging", () => {
       type: "chat",
       body: fileUrl,
       links: [{ url: fileUrl }],
-      fallback: { for: "urn:xmpp:sfs:0", body: true },
+      fallbacks: [{ for: "urn:xmpp:sfs:0" }],
       processingHints: { store: true },
     });
     expect(Array.isArray(call.fileSharing)).toBe(true);
@@ -45,14 +45,14 @@ describe("dm messaging", () => {
     const xmpp = makeAgent();
     const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg";
 
-    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "check this out", [
-      { url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 },
-    ]);
+    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "check this out", {
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345 }],
+    });
 
     expect(typeof messageId).toBe("string");
     const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
     expect(call.body).toBe("check this out");
-    expect(call.fallback).toBeUndefined();
+    expect(call.fallbacks).toBeUndefined();
     expect(call.links).toEqual([{ url: fileUrl }]);
     expect(Array.isArray(call.fileSharing)).toBe(true);
     expect((call.fileSharing as unknown[]).length).toBe(1);
@@ -65,10 +65,12 @@ describe("dm messaging", () => {
       "https://xmpp.waddle.social/upload/a/2.jpg",
     ];
 
-    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "gallery", [
-      { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1 },
-      { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2 },
-    ]);
+    const messageId = sendDirectMessage(xmpp, "bob@waddle.social", "gallery", {
+      files: [
+        { url: urls[0], name: "1.jpg", mediaType: "image/jpeg", size: 1 },
+        { url: urls[1], name: "2.jpg", mediaType: "image/jpeg", size: 2 },
+      ],
+    });
 
     expect(typeof messageId).toBe("string");
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(1);

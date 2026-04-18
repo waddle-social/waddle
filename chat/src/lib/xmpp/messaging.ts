@@ -1,6 +1,7 @@
 /** Outbound message operations — all send* functions as standalone. */
 import type { Agent } from "stanza";
 import type { MarkupSpan } from "@/lib/chat-ui";
+import type { WaddleFallback } from "./extensions/fallback";
 import type { WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
 
@@ -11,6 +12,15 @@ export interface OutboundFileAttachment {
   size: number;
   width?: number;
   height?: number;
+}
+
+export interface ReplyTarget {
+  /** Stanza id of the message being replied to. */
+  id: string;
+  /** JID (user or room occupant) of the original author. */
+  author: string;
+  /** Original message body, used to build the > quoted fallback prefix. */
+  body?: string;
 }
 
 /** Build one XEP-0447 <file-sharing> payload for a single attachment. */
@@ -24,6 +34,20 @@ export function fileSharingElement(file: OutboundFileAttachment): Record<string,
     ...(file.height ? { height: String(file.height) } : {}),
     url: file.url,
   };
+}
+
+/**
+ * Build a `> quoted\n\n` fallback prefix for a reply.
+ *
+ * Returns the prefix string and its UTF-16 code-unit length so callers can
+ * attach an XEP-0428 `<fallback/>` with a precise body range.
+ */
+export function buildReplyFallbackPrefix(parentBody: string | undefined): { prefix: string; length: number } {
+  if (!parentBody) return { prefix: "", length: 0 };
+  const lines = parentBody.split("\n");
+  const quoted = lines.map((line) => `> ${line}`).join("\n");
+  const prefix = `${quoted}\n\n`;
+  return { prefix, length: prefix.length };
 }
 
 export function sendChatState(xmpp: Agent, roomJid: string, state: ChatStateType): void {
@@ -95,9 +119,18 @@ export function sendCorrection(xmpp: Agent, roomJid: string, body: string, repla
   return msgId;
 }
 
+export interface SendGroupMessageOptions {
+  markup?: MarkupSpan[];
+  files?: OutboundFileAttachment[];
+  replyTo?: ReplyTarget;
+  threadId?: string;
+  parentThreadId?: string;
+  id?: string;
+}
+
 /**
- * Send a groupchat message. Optionally includes XEP-0447 file-sharing
- * attachments alongside the user's text body in a single stanza.
+ * Send a groupchat message. Supports XEP-0447 attachments, XEP-0461 replies with
+ * XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
  * Pass a pre-generated `id` when the caller already created an optimistic
  * timeline entry so the stanza ID matches.
  */
@@ -105,16 +138,23 @@ export function sendGroupMessage(
   xmpp: Agent,
   roomJid: string,
   body: string,
-  markup?: MarkupSpan[],
-  files?: OutboundFileAttachment[],
-  id?: string,
+  opts: SendGroupMessageOptions = {},
 ): string | null {
+  const { markup, files, replyTo, threadId, parentThreadId, id } = opts;
   const text = body.trim();
   const hasFiles = !!files && files.length > 0;
   if (!text && !hasFiles) return null;
 
   const msgId = id ?? crypto.randomUUID();
-  const effectiveBody = text || (hasFiles ? files![0].url : "");
+  const { prefix, length: prefixLength } = replyTo
+    ? buildReplyFallbackPrefix(replyTo.body)
+    : { prefix: "", length: 0 };
+  const markupPrefixLength = byteLen(prefix);
+  const bodyText = text || (hasFiles ? files![0].url : "");
+  const effectiveBody = prefix + bodyText;
+  const rebasedMarkup = markup && markup.length > 0
+    ? shiftMarkupSpans(markup, markupPrefixLength)
+    : undefined;
 
   // XEP-0372: Build reference objects for @mentions (only scan user text)
   const references: Array<{ type: string; uri: string; begin: string; end: string }> = [];
@@ -123,7 +163,7 @@ export function sendGroupMessage(
     let match: RegExpExecArray | null;
     while ((match = mentionRe.exec(text)) !== null) {
       const nick = match[1]!;
-      const begin = match.index + (match[0].length - nick.length - 1);
+      const begin = prefixLength + match.index + (match[0].length - nick.length - 1);
       const end = begin + nick.length + 1;
       references.push({ type: "mention", begin: String(begin), end: String(end), uri: `xmpp:${nick}` });
     }
@@ -134,6 +174,11 @@ export function sendGroupMessage(
   if (text && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "everyone" });
   if (text && /(?:^|\s)@here(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "here" });
 
+  const fallbacks: WaddleFallback[] = [];
+  if (replyTo && prefixLength > 0) {
+    fallbacks.push({ for: "urn:xmpp:reply:0", body: { start: 0, end: prefixLength } });
+  }
+
   const msgData: Record<string, unknown> = {
     id: msgId, to: roomJid, type: "groupchat", body: effectiveBody,
     receipt: { type: "request" },
@@ -142,17 +187,25 @@ export function sendGroupMessage(
   };
   if (references.length > 0) msgData.references = references;
   if (explicitMentionItems.length > 0) msgData.explicitMentions = { items: explicitMentionItems };
-  if (markup && markup.length > 0) {
-    msgData.markup = { spans: toStanzaSpans(markup) };
+  if (rebasedMarkup && rebasedMarkup.length > 0) {
+    msgData.markup = { spans: toStanzaSpans(rebasedMarkup) };
+  }
+  if (replyTo) {
+    msgData.reply = { to: replyTo.author, id: replyTo.id };
+  }
+  if (threadId) {
+    msgData.thread = threadId;
+    if (parentThreadId) msgData.parentThread = parentThreadId;
   }
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);
     msgData.links = files!.map((f) => ({ url: f.url }));
     if (!text) {
       // Body is acting as the SFS URL fallback — mark it so compliant clients skip it.
-      msgData.fallback = { for: "urn:xmpp:sfs:0", body: true };
+      fallbacks.push({ for: "urn:xmpp:sfs:0" });
     }
   }
+  if (fallbacks.length > 0) msgData.fallbacks = fallbacks;
 
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;

@@ -13,6 +13,15 @@ export interface XmppStatusSnapshot {
  */
 export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
 
+export interface ReplyPreview {
+  /** Stanza id of the parent message being replied to. */
+  id: string;
+  /** Author JID/occupant of the parent message, if known. */
+  author?: string;
+  /** Optional rendered preview text (populated by the UI, not the wire). */
+  preview?: string;
+}
+
 export interface LiveRoomMessage {
   id: string;
   roomJid: string;
@@ -34,6 +43,11 @@ export interface LiveRoomMessage {
   isSticker?: boolean;
   /** XEP-0513 */
   broadcastMention?: "everyone" | "here";
+  /** XEP-0461 */
+  replyTo?: ReplyPreview;
+  /** RFC 6121 / XEP-0201 */
+  threadId?: string;
+  parentThreadId?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }
@@ -54,6 +68,11 @@ export interface LiveDmMessage {
   markup?: import("@/lib/chat-ui").MarkupSpan[];
   sharedFiles?: SharedFileInfo[];
   isSticker?: boolean;
+  /** XEP-0461 */
+  replyTo?: ReplyPreview;
+  /** RFC 6121 / XEP-0201 */
+  threadId?: string;
+  parentThreadId?: string;
   _reactionTarget?: string;
   _reactionEmojis?: string[];
 }

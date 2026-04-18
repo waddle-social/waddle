@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from "vue";
-import { Pencil, SmilePlus, Trash2, FileDown } from "lucide-vue-next";
+import { Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
@@ -41,6 +41,8 @@ const emit = defineEmits<{
   edit: [messageId: string, newBody: string, markup?: MarkupSpan[]];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
+  reply: [message: TimelineMessage];
+  scrollToMessage: [messageId: string];
   avatarClick: [author: string];
 }>();
 
@@ -98,6 +100,13 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const replyAuthorName = computed(() => {
+  const author = props.message.replyTo?.author;
+  if (!author) return "";
+  const nickPart = author.includes("/") ? author.split("/").pop()! : author.split("@")[0];
+  return nickPart ?? author;
+});
+
 const isMentioned = computed(() => {
   if (props.message.broadcastMention) return true;
   if (!props.currentUser || !props.message.mentions) return false;
@@ -152,6 +161,7 @@ watch(
   <!-- Retracted tombstone -->
   <div
     v-if="message.isRetracted"
+    :data-message-id="message.id"
     class="flow-root px-3 py-2 opacity-30 animate-message-in"
   >
     <AppAvatar
@@ -174,9 +184,14 @@ watch(
   <!-- Normal message -->
   <div
     v-else
+    :data-message-id="message.id"
     class="group relative flow-root px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
-      isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
+      isMentioned
+        ? 'bg-warning/5 border-l-2 border-warning/30'
+        : message.threadId
+          ? 'border-l-2 border-primary/20 hover:bg-muted/40'
+          : 'hover:bg-muted/40',
       message.deliveryStatus === 'sending' ? 'opacity-50' : '',
     ]"
   >
@@ -208,6 +223,20 @@ watch(
         Read by {{ message.readBy.length }}
       </span>
     </div>
+
+    <!-- Reply preview chip -->
+    <button
+      v-if="message.replyTo"
+      type="button"
+      class="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-0.5 hover:text-foreground transition-colors max-w-full"
+      :title="`Jump to replied message`"
+      @click="emit('scrollToMessage', message.replyTo.id)"
+    >
+      <CornerDownRight class="w-3 h-3 flex-shrink-0" />
+      <span class="text-primary/80 font-medium">@{{ replyAuthorName }}</span>
+      <span v-if="message.replyTo.preview" class="truncate opacity-70">{{ message.replyTo.preview }}</span>
+      <span v-else class="opacity-60 font-mono">{{ message.replyTo.id.slice(0, 8) }}</span>
+    </button>
 
     <!-- Edit mode -->
     <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
@@ -333,6 +362,13 @@ watch(
         title="Add reaction"
       >
         <SmilePlus class="w-3.5 h-3.5" />
+      </button>
+      <button
+        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        title="Reply"
+        @click="emit('reply', message)"
+      >
+        <Reply class="w-3.5 h-3.5" />
       </button>
       <template v-if="message.isSelf">
         <div class="w-px h-4 bg-border mx-0.5" />

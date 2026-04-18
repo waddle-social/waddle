@@ -26,6 +26,11 @@ function fromLiveDmMessage(session: WaddleSession, msg: LiveDmMessage): Timeline
   if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
   if (msg.isSticker) tm.isSticker = true;
+  if (msg.replyTo) {
+    tm.replyTo = { id: msg.replyTo.id, ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}) };
+  }
+  if (msg.threadId) tm.threadId = msg.threadId;
+  if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
   return tm;
 }
 
@@ -277,7 +282,12 @@ export function useDmMessaging(
     }
   }
 
-  async function sendMessage(explicitBody?: string, _markup?: unknown, files?: Array<File | Blob>) {
+  async function sendMessage(
+    explicitBody?: string,
+    _markup?: unknown,
+    files?: Array<File | Blob>,
+    replyTo?: { id: string; author: string; body?: string },
+  ) {
     const bodyText = explicitBody ?? draft.value;
     const fromComposer = _markup !== undefined;
     const client = xmppClient.value;
@@ -311,7 +321,13 @@ export function useDmMessaging(
         });
       }
 
-      const msgId = await client.sendDirectMessage(peerJid, bodyText, attachments);
+      const parent = replyTo ? messages.value.find((m) => m.id === replyTo.id) : undefined;
+      const threadId = parent?.threadId ?? (replyTo ? replyTo.id : undefined);
+      const msgId = await client.sendDirectMessage(peerJid, bodyText, {
+        files: attachments,
+        ...(replyTo ? { replyTo } : {}),
+        ...(threadId ? { threadId } : {}),
+      });
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
       if (isStillActive) {
         if (msgId) {
@@ -324,6 +340,14 @@ export function useDmMessaging(
             isSelf: true,
             deliveryStatus: "sending",
           };
+          if (replyTo) {
+            optimistic.replyTo = {
+              id: replyTo.id,
+              author: replyTo.author,
+              ...(replyTo.body ? { preview: replyTo.body } : {}),
+            };
+          }
+          if (threadId) optimistic.threadId = threadId;
           if (attachments && attachments.length > 0) {
             optimistic.sharedFiles = attachments.map((a) => ({
               url: a.url,

@@ -39,6 +39,11 @@ function fromLiveMessage(session: WaddleSession, msg: LiveRoomMessage): Timeline
   if (msg.markup && msg.markup.length > 0) {
     tm.markup = msg.markup;
   }
+  if (msg.replyTo) {
+    tm.replyTo = { id: msg.replyTo.id, ...(msg.replyTo.author ? { author: msg.replyTo.author } : {}) };
+  }
+  if (msg.threadId) tm.threadId = msg.threadId;
+  if (msg.parentThreadId) tm.parentThreadId = msg.parentThreadId;
   return tm;
 }
 
@@ -537,7 +542,12 @@ export function useMessaging(
     await loadMessages(activeWaddleId.value, channelId);
   }
 
-  async function sendMessage(body?: string, markup?: MarkupSpan[], files?: Array<File | Blob>) {
+  async function sendMessage(
+    body?: string,
+    markup?: MarkupSpan[],
+    files?: Array<File | Blob>,
+    replyTo?: { id: string; author: string; body?: string },
+  ) {
     const bodyText = body ?? draft.value;
     // markup !== undefined means this came from the rich editor (composer send)
     // undefined means it came from a programmatic send (GIF, etc.)
@@ -575,7 +585,14 @@ export function useMessaging(
         });
       }
 
-      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, markup, attachments);
+      const parent = replyTo ? messages.value.find((m) => m.id === replyTo.id) : undefined;
+      const threadId = parent?.threadId ?? (replyTo ? replyTo.id : undefined);
+      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, {
+        markup,
+        files: attachments,
+        ...(replyTo ? { replyTo } : {}),
+        ...(threadId ? { threadId } : {}),
+      });
       const isStillCurrentChannel =
         xmppClient.value === client &&
         activeWaddleId.value === waddleId &&
@@ -592,6 +609,14 @@ export function useMessaging(
           deliveryStatus: "sending",
           markup,
         };
+        if (replyTo) {
+          optimistic.replyTo = {
+            id: replyTo.id,
+            author: replyTo.author,
+            ...(replyTo.body ? { preview: replyTo.body } : {}),
+          };
+        }
+        if (threadId) optimistic.threadId = threadId;
         if (attachments && attachments.length > 0) {
           optimistic.sharedFiles = attachments.map((a) => ({
             url: a.url,

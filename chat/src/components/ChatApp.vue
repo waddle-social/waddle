@@ -284,12 +284,17 @@ const activeUploadProgress = computed(() =>
   ui.sidebarMode.value === "dms" ? dmMessaging.uploadProgress.value : messaging.uploadProgress.value,
 );
 
-async function sendActiveMessage(body?: string, markup?: MarkupSpan[], files?: Array<File | Blob>) {
+async function sendActiveMessage(
+  body?: string,
+  markup?: MarkupSpan[],
+  files?: Array<File | Blob>,
+  replyTo?: { id: string; author: string; body?: string },
+) {
   if (ui.sidebarMode.value === "dms") {
-    await dmMessaging.sendMessage(body, markup, files);
+    await dmMessaging.sendMessage(body, markup, files, replyTo);
     return;
   }
-  await messaging.sendMessage(body, markup, files);
+  await messaging.sendMessage(body, markup, files, replyTo);
 }
 
 function notifyActiveComposing() {
