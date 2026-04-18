@@ -71,7 +71,7 @@ const nonImageAttachments = computed(() =>
 const displayBody = computed(() => {
   const body = props.message.body;
   if (!body) return "";
-  if (sharedFiles.value.length === 0) return body;
+  if (sharedFiles.value.length === 0) return isGif.value ? "" : body;
   const matchesAttachment = sharedFiles.value.some((f) => f.url === body.trim());
   return matchesAttachment ? "" : body;
 });
