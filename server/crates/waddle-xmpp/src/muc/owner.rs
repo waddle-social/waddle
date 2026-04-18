@@ -105,6 +105,21 @@ pub fn parse_owner_query(iq: &Iq, muc_domain: &str) -> Result<OwnerQuery, XmppEr
         ))));
     }
 
+    // Block instant room creation/configuration for managed channel JIDs
+    // Managed channels must be created via XEP-0050 ad-hoc commands (waddle:create-channel)
+    // Pattern: {waddle_id}_{channel_id}@muc.{domain}
+    let localpart = room_jid.node().map(|n| n.as_str()).unwrap_or("");
+    if localpart.contains('_') {
+        // Check if this looks like a managed channel JID pattern
+        let parts: Vec<&str> = localpart.split('_').collect();
+        if parts.len() == 2 {
+            // This could be a managed channel JID - block room creation/config
+            return Err(XmppError::not_allowed(Some(
+                "Cannot create or configure managed channel rooms directly. Use the waddle:create-channel ad-hoc command instead.".into(),
+            )));
+        }
+    }
+
     // Get the sender's JID
     let from = iq
         .from

@@ -10,7 +10,9 @@ pub use create_channel::{
     handle_create_channel, ChannelMetadata, CreateChannelDeps, CreateChannelResult,
     NODE_CREATE_CHANNEL,
 };
-pub use registry::{CommandContext, CommandHandler, CommandRegistry, CommandResult, CommandSession};
+pub use registry::{
+    CommandContext, CommandHandler, CommandMetadata, CommandRegistry, CommandResult, CommandSession,
+};
 
 // Re-export common XEP-0050 types for convenience
 pub use crate::xep::xep0050::{

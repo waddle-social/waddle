@@ -511,4 +511,9 @@ impl<S: AppState> XmppServer<S> {
     pub fn mam_storage(&self) -> &Arc<LibSqlMamStorage> {
         &self.mam_storage
     }
+
+    /// Get the ad-hoc command registry.
+    pub fn command_registry(&self) -> &Arc<CommandRegistry> {
+        &self.command_registry
+    }
 }

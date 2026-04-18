@@ -52,13 +52,11 @@ impl ChannelState {
 }
 
 /// Create the channels router
+///
+/// NOTE: Channel creation is now XMPP-native via XEP-0050 ad-hoc commands.
+/// The create_channel_handler HTTP route has been removed.
 pub fn router(channel_state: Arc<ChannelState>) -> Router {
     Router::new()
-        // Waddle-scoped routes
-        .route(
-            "/v1/waddles/:waddle_id/channels",
-            post(create_channel_handler),
-        )
         // Channel-scoped routes (require waddle_id in query params)
         .route("/v1/channels/:id", patch(update_channel_handler))
         .route("/v1/channels/:id", delete(delete_channel_handler))
@@ -226,9 +224,21 @@ fn channel_error_to_response(err: ChannelError) -> (StatusCode, Json<ErrorRespon
 
 // === Handlers ===
 
+// NOTE: Channel creation has been moved to XMPP-native XEP-0050 ad-hoc commands.
+// The HTTP create_channel_handler endpoint has been removed as part of the cutover.
+// Channel creation is now exclusively handled by the waddle:create-channel command.
+//
+// The insert_channel helper function below is still used by the XMPP command handler
+// (see waddle-server::server::xmpp_state::CreateChannelDeps implementation).
+
+/*
 /// POST /v1/waddles/:waddle_id/channels
 ///
 /// Create a new channel in a waddle. Requires create_channel permission on the waddle.
+///
+/// DEPRECATED: This HTTP endpoint has been removed. Use the XMPP ad-hoc command instead:
+/// - Node: waddle:create-channel
+/// - Protocol: XEP-0050 (Ad-Hoc Commands)
 #[instrument(skip(state))]
 pub async fn create_channel_handler(
     State(state): State<Arc<ChannelState>>,
@@ -236,128 +246,9 @@ pub async fn create_channel_handler(
     Query(params): Query<SessionQuery>,
     Json(request): Json<CreateChannelRequest>,
 ) -> impl IntoResponse {
-    info!(
-        "Creating channel '{}' in waddle {}",
-        request.name, waddle_id
-    );
-
-    // Validate session
-    let session = match state
-        .session_manager
-        .validate_session(&params.session_id)
-        .await
-    {
-        Ok(session) => session,
-        Err(err) => {
-            warn!("Session validation failed: {}", err);
-            return channel_error_to_response(ChannelError::Auth(err)).into_response();
-        }
-    };
-
-    // Validate input
-    if request.name.trim().is_empty() {
-        return channel_error_to_response(ChannelError::InvalidInput(
-            "Channel name cannot be empty".to_string(),
-        ))
-        .into_response();
-    }
-
-    // Check if user has permission to create channels in this waddle
-    let subject = Subject::user(&session.user_id);
-    let waddle_object = Object::new(ObjectType::Waddle, &waddle_id);
-
-    let can_create = state
-        .permission_service
-        .check(&subject, "create_channel", &waddle_object)
-        .await
-        .map(|r| r.allowed)
-        .unwrap_or(false);
-
-    if !can_create {
-        return channel_error_to_response(ChannelError::Permission(PermissionError::Denied(
-            "You do not have permission to create channels in this waddle".to_string(),
-        )))
-        .into_response();
-    }
-
-    // Get or create the waddle database
-    let waddle_db = match state.app_state.db_pool.get_waddle_db(&waddle_id).await {
-        Ok(db) => db,
-        Err(err) => {
-            error!("Failed to get waddle database: {}", err);
-            return channel_error_to_response(ChannelError::Database(format!(
-                "Failed to access waddle database: {}",
-                err
-            )))
-            .into_response();
-        }
-    };
-
-    // Generate channel ID
-    let channel_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let channel_type = match normalize_channel_type(&request.channel_type) {
-        Ok(channel_type) => channel_type,
-        Err(err) => return channel_error_to_response(err).into_response(),
-    };
-
-    // Insert channel into database
-    if let Err(err) = insert_channel(
-        &waddle_db,
-        &channel_id,
-        &request.name,
-        request.description.as_deref(),
-        &channel_type,
-        request.position,
-        false, // not default
-        &now,
-    )
-    .await
-    {
-        error!("Failed to insert channel: {}", err);
-        return channel_error_to_response(ChannelError::Database(err)).into_response();
-    }
-
-    // Create permission tuple: channel#parent@waddle
-    // This establishes the parent relationship so channel permissions can inherit from waddle
-    let parent_tuple = Tuple::new(
-        Object::new(ObjectType::Channel, &channel_id),
-        Relation::new("parent"),
-        Subject {
-            subject_type: SubjectType::Waddle,
-            id: waddle_id.clone(),
-            relation: None,
-        },
-    );
-
-    if let Err(err) = state.permission_service.write_tuple(parent_tuple).await {
-        error!("Failed to write parent permission tuple: {}", err);
-        // Clean up: delete the channel
-        let _ = delete_channel_from_db(&waddle_db, &channel_id).await;
-        return channel_error_to_response(ChannelError::Permission(err)).into_response();
-    }
-
-    info!(
-        "Channel created: {} ({}) in waddle {}",
-        request.name, channel_id, waddle_id
-    );
-
-    (
-        StatusCode::CREATED,
-        Json(ChannelResponse {
-            id: channel_id,
-            waddle_id,
-            name: request.name,
-            description: request.description,
-            channel_type,
-            position: request.position,
-            is_default: false,
-            created_at: now.clone(),
-            updated_at: Some(now),
-        }),
-    )
-        .into_response()
+    ... code removed ...
 }
+*/
 
 /// PATCH /v1/channels/:id
 ///

@@ -62,6 +62,16 @@ pub type CommandHandler = Arc<
         + Sync,
 >;
 
+/// Command metadata for discovery.
+pub struct CommandMetadata {
+    /// Command node identifier
+    pub node: String,
+    /// Human-readable command name
+    pub name: String,
+    /// Handler function
+    pub handler: CommandHandler,
+}
+
 /// Active command session tracking state.
 #[derive(Clone)]
 pub struct CommandSession {
@@ -103,8 +113,8 @@ impl CommandSession {
 
 /// Registry for ad-hoc commands.
 pub struct CommandRegistry {
-    /// Registered command handlers by node
-    handlers: RwLock<HashMap<String, CommandHandler>>,
+    /// Registered command metadata by node
+    commands: RwLock<HashMap<String, CommandMetadata>>,
     /// Active command sessions
     sessions: RwLock<HashMap<String, CommandSession>>,
 }
@@ -113,7 +123,7 @@ impl CommandRegistry {
     /// Create a new command registry.
     pub fn new() -> Self {
         Self {
-            handlers: RwLock::new(HashMap::new()),
+            commands: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -122,26 +132,39 @@ impl CommandRegistry {
     ///
     /// # Arguments
     /// - `node`: The command node identifier (e.g., "waddle:create-channel")
+    /// - `name`: The human-readable command name (e.g., "Create Channel")
     /// - `handler`: The handler function
-    pub async fn register<F, Fut>(&self, node: impl Into<String>, handler: F)
+    pub async fn register<F, Fut>(&self, node: impl Into<String>, name: impl Into<String>, handler: F)
     where
         F: Fn(CommandContext) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = CommandResult> + Send + 'static,
     {
         let node = node.into();
+        let name = name.into();
         let wrapped: CommandHandler = Arc::new(move |ctx| Box::pin(handler(ctx)));
-        self.handlers.write().await.insert(node.clone(), wrapped);
-        debug!(node = %node, "Registered ad-hoc command");
+        let metadata = CommandMetadata {
+            node: node.clone(),
+            name: name.clone(),
+            handler: wrapped,
+        };
+        self.commands.write().await.insert(node.clone(), metadata);
+        debug!(node = %node, name = %name, "Registered ad-hoc command");
     }
 
-    /// List all registered command nodes.
-    pub async fn list_commands(&self) -> Vec<String> {
-        self.handlers.read().await.keys().cloned().collect()
+    /// List all registered commands with their names.
+    /// Returns (node, name) tuples.
+    pub async fn list_commands(&self) -> Vec<(String, String)> {
+        self.commands
+            .read()
+            .await
+            .values()
+            .map(|cmd| (cmd.node.clone(), cmd.name.clone()))
+            .collect()
     }
 
     /// Check if a command is registered.
     pub async fn has_command(&self, node: &str) -> bool {
-        self.handlers.read().await.contains_key(node)
+        self.commands.read().await.contains_key(node)
     }
 
     /// Dispatch a command request.
@@ -160,9 +183,9 @@ impl CommandRegistry {
 
         // Get the handler
         let handler = {
-            let handlers = self.handlers.read().await;
-            match handlers.get(node) {
-                Some(h) => Arc::clone(h),
+            let commands = self.commands.read().await;
+            match commands.get(node) {
+                Some(cmd) => Arc::clone(&cmd.handler),
                 None => {
                     return CommandResult::Error(XmppError::service_unavailable(Some(format!(
                         "Command '{}' not found",

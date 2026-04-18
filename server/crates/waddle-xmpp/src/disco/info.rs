@@ -75,6 +75,11 @@ impl Identity {
     pub fn spaces_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
+
+    /// Automation identity (category="automation", type="command-node") for XEP-0050.
+    pub fn automation(name: Option<&str>) -> Self {
+        Self::new("automation", "command-node", name)
+    }
 }
 
 /// Feature element for disco#info response.
@@ -493,6 +498,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::private_storage(),
         Feature::avatar_metadata_notify(),
         Feature::pep_vcard_conversion(),
+        Feature::new(crate::xep::xep0050::NS_COMMANDS), // XEP-0050: Ad-Hoc Commands
     ]
 }
 

@@ -4074,6 +4074,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_push_disable(iq).await;
         }
 
+        // Check if this is an ad-hoc command request (XEP-0050)
+        if crate::xep::xep0050::is_command_request(&iq) {
+            return self.handle_command_iq(iq).await;
+        }
+
         // Unhandled IQ get/set - RFC 6120 §8.2.3 requires an error response
         debug!("Received unhandled IQ stanza, returning service-unavailable");
         let error_to = iq
@@ -4145,10 +4150,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Some(target)
                 if target == self.domain && query.node.as_deref() == Some(NODE_COMMANDS) =>
             {
-                return Err(XmppError::service_unavailable(Some(format!(
-                    "Ad-hoc commands node {} is not supported",
-                    NODE_COMMANDS
-                ))));
+                // disco#info on the commands node - advertise that we support commands
+                debug!("disco#info query to commands node");
+                (
+                    vec![Identity::automation(Some("Ad-Hoc Commands"))],
+                    vec![
+                        crate::disco::Feature::disco_info(),
+                        crate::disco::Feature::disco_items(),
+                        crate::disco::Feature::new(crate::xep::xep0050::NS_COMMANDS),
+                    ],
+                    vec![],
+                )
             }
             // Query to server domain
             Some(target) if target == self.domain => {
@@ -4415,10 +4427,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             Some(target)
                 if target == self.domain && query.node.as_deref() == Some(NODE_COMMANDS) =>
             {
-                return Err(XmppError::service_unavailable(Some(format!(
-                    "Ad-hoc commands node {} is not supported",
-                    NODE_COMMANDS
-                ))));
+                // disco#items on commands node - return list of available commands
+                debug!("disco#items query to commands node - listing available commands");
+                let commands = self.command_registry.list_commands().await;
+                commands
+                    .into_iter()
+                    .map(|(node, name)| DiscoItem::command(&self.domain, &node, &name))
+                    .collect()
             }
             // Query to server domain - return all service components
             Some(target) if target == self.domain => {
@@ -7549,6 +7564,91 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         let response = build_push_disable_result(&iq);
         self.stream.write_stanza(&Stanza::Iq(response)).await
+    }
+
+    /// Handle an ad-hoc command IQ (XEP-0050).
+    async fn handle_command_iq(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        use crate::commands::{CommandContext, CommandResult};
+        use crate::xep::xep0050::{build_command_result, parse_command_from_iq, Status};
+
+        let sender_jid = match &self.jid {
+            Some(jid) => jid.clone().into(),
+            None => {
+                warn!("Command IQ received before JID bound");
+                return Err(XmppError::not_authorized(Some("Not authenticated".into())));
+            }
+        };
+
+        // Parse the command from the IQ
+        let command = match parse_command_from_iq(&iq) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                return Err(XmppError::bad_request(Some(format!(
+                    "Invalid command request: {}",
+                    e
+                ))));
+            }
+        };
+
+        debug!(
+            from = %sender_jid,
+            node = %command.node,
+            action = ?command.action,
+            session_id = ?command.session_id,
+            "Processing ad-hoc command"
+        );
+
+        // Build command context
+        let node = command.node.clone();
+        let session_id = command.session_id.clone();
+        let ctx = CommandContext {
+            from: sender_jid,
+            iq: iq.clone(),
+            command,
+        };
+
+        // Dispatch to command registry
+        let result = self.command_registry.dispatch(ctx).await;
+
+        // Convert CommandResult to IQ response
+        let response_command = match result {
+            CommandResult::Executing {
+                form,
+                session_id,
+                notes,
+            } => {
+                let mut cmd = crate::xep::xep0050::Command::new(node.clone());
+                cmd.status = Some(Status::Executing);
+                cmd.session_id = Some(session_id);
+                cmd.form = Some(form);
+                cmd.notes = notes;
+                cmd
+            }
+            CommandResult::Completed { form, notes } => {
+                let mut cmd = crate::xep::xep0050::Command::new(node.clone());
+                cmd.status = Some(Status::Completed);
+                cmd.session_id = session_id.clone();
+                cmd.form = form;
+                cmd.notes = notes;
+                cmd
+            }
+            CommandResult::Canceled { notes } => {
+                let mut cmd = crate::xep::xep0050::Command::new(node.clone());
+                cmd.status = Some(Status::Canceled);
+                cmd.session_id = session_id.clone();
+                cmd.notes = notes;
+                cmd
+            }
+            CommandResult::Error(err) => {
+                return Err(err);
+            }
+        };
+
+        let response = build_command_result(&iq, &response_command);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
+
+        debug!("Sent command result");
+        Ok(())
     }
 }
 

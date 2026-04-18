@@ -79,6 +79,11 @@ impl DiscoItem {
     pub fn pubsub_node(jid: &str, node: &str) -> Self {
         Self::new(jid, None, Some(node))
     }
+
+    /// Create an ad-hoc command item (XEP-0050).
+    pub fn command(jid: &str, node: &str, name: &str) -> Self {
+        Self::new(jid, Some(name), Some(node))
+    }
 }
 
 /// Check if an IQ is a disco#items query.
