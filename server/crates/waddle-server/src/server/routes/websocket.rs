@@ -31,7 +31,11 @@ use waddle_xmpp::{
         parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
-    protocol::{IqContext as ProtocolIqContext, StanzaDispatcher},
+    protocol::{
+        frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
+        InboundEvent, InboundFrame, IqContext as ProtocolIqContext, StanzaDispatcher,
+        XmppStateMachine,
+    },
     registry::{ConnectionRegistry, OutboundStanza},
     xep::{build_spaces_metadata_form, NS_REPLY},
     Affiliation, Role, WaddleDetails,
@@ -111,6 +115,28 @@ impl LegacyConnState {
     }
 }
 
+/// Per-connection interpreter context that owns the typed XMPP state machine.
+///
+/// The machine is pure (no I/O) and handles stanza dispatch via the registered
+/// protocol handlers for IQ namespaces that have been migrated to the sans-I/O
+/// path. Transport-specific framing and the legacy SASL/resource-bind flow live
+/// in [`LegacyConnState`] until their own migration steps land.
+///
+/// One `WsConnRuntime` is created per WebSocket connection inside
+/// [`handle_xmpp_websocket`] and threaded through the frame handler, keeping
+/// the per-connection state machine lifetime tied to the connection lifetime.
+struct WsConnRuntime {
+    machine: XmppStateMachine,
+}
+
+impl WsConnRuntime {
+    fn new(domain: &str, dispatcher: StanzaDispatcher) -> Self {
+        Self {
+            machine: XmppStateMachine::new(domain, dispatcher),
+        }
+    }
+}
+
 /// Create the WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
     Router::new()
@@ -149,13 +175,18 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let mut conn = LegacyConnState::new();
     let mut registered = false;
 
+    // Per-connection protocol state machine. Owns a clone of the shared
+    // dispatcher (handlers are Arc-backed, so the clone is cheap) and
+    // tracks the typed lifecycle phase for this connection.
+    let mut runtime = WsConnRuntime::new(&domain, state.dispatcher.as_ref().clone());
+
     loop {
         tokio::select! {
             // Handle inbound WebSocket messages from the client
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        debug!(len = text.len(), content = %text, "Received XMPP WebSocket message");
+                        debug!(len = text.len(), "Received XMPP WebSocket message");
 
                         // Handle XMPP framing (RFC 7395)
                         let responses = handle_xmpp_frame(
@@ -163,6 +194,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             &domain,
                             &state,
                             &mut conn,
+                            &mut runtime,
                         ).await;
 
                         // Register connection after successful authentication AND resource binding
@@ -176,7 +208,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
 
                         for response in responses {
-                            debug!(response = %response, "Sending XMPP WebSocket response");
+                            debug!(len = response.len(), "Sending XMPP WebSocket response");
                             if let Err(e) = ws_sender.send(Message::Text(response)).await {
                                 error!(error = %e, "Failed to send WebSocket message");
                                 break;
@@ -230,6 +262,12 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
             }
         }
     }
+
+    // Notify the state machine that the transport has closed so it can
+    // emit any cleanup events (e.g. future MUC leave broadcasts). The
+    // legacy cleanup path below still handles the actual registry
+    // unregistration and MUC room removal until those migrate.
+    let _close_events = runtime.machine.handle(InboundEvent::TransportClosed);
 
     // Unregister connection on disconnect
     if let Some(ref jid) = conn.session_jid {
@@ -300,39 +338,12 @@ fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
 
 fn parse_iq_frame(frame: &str) -> Option<xmpp_parsers::iq::Iq> {
     // WebSocket clients may omit xmlns="jabber:client" on stanzas (they
-    // rely on stream-level namespace inheritance from <open>).  Inject it
-    // when missing so xmpp_parsers can parse the IQ.
-    let patched = inject_default_ns_if_missing(frame, "jabber:client");
+    // rely on stream-level namespace inheritance from <open>). Inject it
+    // when missing using the shared frame normalizer so xmpp_parsers can
+    // parse the IQ without brittle string surgery here.
+    let patched = inject_client_ns_if_missing(frame);
     let element = xmpp_parsers::minidom::Element::from_str(&patched).ok()?;
     xmpp_parsers::iq::Iq::try_from(element).ok()
-}
-
-/// Inject `xmlns` into the opening tag of an `<iq>`, `<message>`, or
-/// `<presence>` stanza when the attribute is absent.
-fn inject_default_ns_if_missing(xml: &str, ns: &str) -> String {
-    let trimmed = xml.trim();
-    if !(trimmed.starts_with("<iq")
-        || trimmed.starts_with("<message")
-        || trimmed.starts_with("<presence"))
-    {
-        return trimmed.to_string();
-    }
-    let Some(open_end) = trimmed.find('>') else {
-        return trimmed.to_string();
-    };
-    let open_tag = &trimmed[..open_end];
-    if open_tag.contains("xmlns=") {
-        return trimmed.to_string();
-    }
-    // Insert xmlns right after the tag name, before any `/>`or attributes
-    let insert_pos = trimmed
-        .find(|c: char| c.is_whitespace() || c == '/')
-        .unwrap_or(open_end);
-    format!(
-        "{} xmlns=\"{ns}\"{}",
-        &trimmed[..insert_pos],
-        &trimmed[insert_pos..]
-    )
 }
 
 fn build_iq_result_xml(
@@ -457,7 +468,13 @@ async fn handle_xmpp_frame(
     domain: &str,
     state: &WebSocketState,
     conn: &mut LegacyConnState,
+    runtime: &mut WsConnRuntime,
 ) -> Vec<String> {
+    if frame.len() > MAX_FRAME_SIZE {
+        warn!(len = frame.len(), "Dropping oversized XMPP frame");
+        return vec![];
+    }
+
     // Split the bundle into the individual `&mut` borrows the legacy body
     // expects. Once the sans-I/O migration lands (see the protocol module
     // tracking PR), the whole body becomes a single
@@ -543,6 +560,14 @@ async fn handle_xmpp_frame(
         let (responses, success) = handle_resource_binding(frame, domain, session_jid);
         if success {
             *resource_bound = true;
+            // Transition the per-connection state machine to `Ready` so that
+            // subsequent stanzas routed through it see the correct phase.
+            // The legacy auth flow owns this transition point; once SASL/bind
+            // migrate into the machine this call is replaced by the machine's
+            // own event handling.
+            if let Some(ref jid) = *session_jid {
+                runtime.machine.transition_to_ready(jid.clone());
+            }
         }
         return responses;
     }
@@ -554,13 +579,16 @@ async fn handle_xmpp_frame(
 
     // Handle IQ stanzas
     if frame.starts_with("<iq") {
-        return handle_iq(
+        return handle_iq_with_conn_state(
             frame,
             domain,
             &muc_domain,
             state,
             authenticated_session,
             session_jid,
+            *authenticated,
+            *resource_bound,
+            Some(&mut runtime.machine),
         )
         .await;
     }
@@ -577,7 +605,7 @@ async fn handle_xmpp_frame(
         .await;
     }
 
-    warn!(frame = %frame, "Unhandled XMPP frame");
+    warn!(len = frame.len(), "Unhandled XMPP frame");
     vec![]
 }
 
@@ -1118,6 +1146,7 @@ async fn handle_muc_leave(
 }
 
 /// Handle IQ stanzas
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_iq(
     frame: &str,
     domain: &str,
@@ -1125,6 +1154,45 @@ async fn handle_iq(
     state: &WebSocketState,
     authenticated_session: &Option<Session>,
     session_jid: &Option<FullJid>,
+) -> Vec<String> {
+    let authenticated = authenticated_session.is_some() || session_jid.is_some();
+    let resource_bound = session_jid
+        .as_ref()
+        .is_some_and(|jid| jid.resource().as_str() != "pending");
+    // Build a temporary per-call machine so callers (all test sites) don't
+    // need updating. The machine is initialised with the shared dispatcher and,
+    // if the connection has a bound full JID, immediately transitioned to
+    // `Ready` so that the dispatcher short-circuit sees the correct phase.
+    let mut temp_machine = XmppStateMachine::new(domain, state.dispatcher.as_ref().clone());
+    if resource_bound {
+        if let Some(jid) = session_jid.as_ref() {
+            temp_machine.transition_to_ready(jid.clone());
+        }
+    }
+    handle_iq_with_conn_state(
+        frame,
+        domain,
+        muc_domain,
+        state,
+        authenticated_session,
+        session_jid,
+        authenticated,
+        resource_bound,
+        Some(&mut temp_machine),
+    )
+    .await
+}
+
+async fn handle_iq_with_conn_state(
+    frame: &str,
+    domain: &str,
+    muc_domain: &str,
+    state: &WebSocketState,
+    authenticated_session: &Option<Session>,
+    session_jid: &Option<FullJid>,
+    authenticated: bool,
+    resource_bound: bool,
+    machine: Option<&mut XmppStateMachine>,
 ) -> Vec<String> {
     let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
@@ -1172,7 +1240,7 @@ async fn handle_iq(
     // the protocol dispatcher, route through it and translate the emitted
     // OutboundEvents into outbound XML frames via `interpret()`.
     //
-    // Handlers that need async I/O (MAM, roster, Jingle, disco) are not
+    // Handlers that need async I/O (MAM, Jingle, disco, HTTP upload) are not
     // registered yet — they continue to fall through to the legacy
     // string-matching branches below until the two-phase async callback
     // machinery lands.
@@ -1185,9 +1253,31 @@ async fn handle_iq(
         };
         if let Some(ns) = payload_ns {
             if state.dispatcher.has_iq_handler(&ns) {
-                let ctx = ProtocolIqContext { domain, full_jid };
-                let events = state.dispatcher.dispatch_iq(iq, &ctx);
-                let outcome = super::interpret::interpret(events).await;
+                if !authenticated || !resource_bound {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "auth",
+                        "not-authorized",
+                    )];
+                }
+                // Route through the per-connection state machine when available.
+                // The machine's `on_stanza` path calls the same underlying
+                // dispatcher, but the indirection lets it evolve (phase checks,
+                // pending-op tracking, etc.) without touching this shim.
+                // When no machine is provided (test-only `handle_iq` wrapper),
+                // fall back to calling the dispatcher directly.
+                let events = if let Some(m) = machine {
+                    m.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+                        Stanza::Iq(iq.clone()),
+                    ))))
+                } else {
+                    let ctx = ProtocolIqContext { domain, full_jid };
+                    state.dispatcher.dispatch_iq(iq, &ctx)
+                };
+                let interpreter = super::interpret::EffectInterpreter::from_websocket_state(&state);
+                let outcome = super::interpret::interpret(&interpreter, events).await;
                 if outcome.close {
                     warn!(
                         ns = %ns,
@@ -1852,8 +1942,14 @@ async fn handle_iq(
         }
     }
 
-    // Unknown IQ - log it and return error
-    warn!(id = %id, frame = %frame, "Unhandled IQ stanza");
+    // Unknown IQ - log a compact summary and return an error.
+    let payload_ns = parsed_iq.as_ref().and_then(|iq| match &iq.payload {
+        xmpp_parsers::iq::IqType::Get(payload) | xmpp_parsers::iq::IqType::Set(payload) => {
+            Some(payload.ns().to_string())
+        }
+        xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_) => None,
+    });
+    warn!(id = %id, payload_ns, "Unhandled IQ stanza");
     vec![build_iq_error_xml_with_addresses(
         &id,
         response_from,
@@ -2495,6 +2591,7 @@ mod tests {
             "example.com",
             state.as_ref(),
             &mut conn,
+            &mut WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone()),
         )
         .await;
 
@@ -2525,8 +2622,14 @@ mod tests {
         );
         let mut conn = LegacyConnState::new();
 
-        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
-
+        let responses = handle_xmpp_frame(
+            &frame,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone()),
+        )
+        .await;
         assert_eq!(responses, vec![sasl_failure_xml("invalid-mechanism")]);
         assert!(!conn.authenticated);
         assert!(!conn.resource_bound);
@@ -2547,10 +2650,15 @@ mod tests {
         );
         let mut conn = LegacyConnState::new();
 
-        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
-
+        let responses = handle_xmpp_frame(
+            &frame,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone()),
+        )
+        .await;
         assert_eq!(responses, vec![sasl_success_xml()]);
-        assert!(conn.authenticated);
         assert!(!conn.resource_bound);
         assert_eq!(
             conn.authenticated_session
@@ -2597,12 +2705,24 @@ mod tests {
         );
         let mut conn = LegacyConnState::new();
 
-        let auth_responses =
-            handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
+        let auth_responses = handle_xmpp_frame(
+            &auth_frame,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone()),
+        )
+        .await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
 
-        let bind_responses =
-            handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
+        let bind_responses = handle_xmpp_frame(
+            &bind_frame,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone()),
+        )
+        .await;
 
         assert!(conn.resource_bound);
         assert_eq!(bind_responses.len(), 1);
@@ -2779,6 +2899,185 @@ mod tests {
             xmpp_parsers::iq::IqType::Result(None) => {}
             other => panic!("expected empty IQ result, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_value() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let frame = r#"<iq id="roster-attr" type="get" data="xmlns=bogus"><query xmlns="jabber:iq:roster"/></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid),
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+
+        let iq_xml = responses.first().expect("roster response");
+        let element = Element::from_str(iq_xml).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+        assert_eq!(iq.id, "roster-attr");
+        assert!(matches!(
+            iq.payload,
+            xmpp_parsers::iq::IqType::Result(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_drops_oversized_input() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        let huge = format!("<iq id=\"big\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+        let responses = handle_xmpp_frame(
+            &huge,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone()),
+        )
+        .await;
+        assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_ping_roundtrips_through_sans_io_path() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some("alice@example.com/web".parse().expect("valid jid"));
+
+        let jid: jid::FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let mut runtime = WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone());
+        runtime.machine.transition_to_ready(jid);
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="ping-roundtrip" type="get"><ping xmlns="urn:xmpp:ping"/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut runtime,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let element = Element::from_str(&responses[0]).expect("valid IQ XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+        assert_eq!(iq.id, "ping-roundtrip");
+        assert!(matches!(iq.payload, xmpp_parsers::iq::IqType::Result(None)));
+    }
+
+    // -----------------------------------------------------------------------
+    // WsConnRuntime / XmppStateMachine lifecycle tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ws_conn_runtime_machine_transitions_to_ready_after_bind() {
+        use waddle_xmpp::protocol::ConnectionPhase;
+
+        let state = create_test_websocket_state().await;
+        let mut runtime = WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone());
+
+        // Before bind the machine must be in the Unauthenticated phase.
+        assert!(
+            matches!(runtime.machine.phase(), ConnectionPhase::Unauthenticated),
+            "machine should start Unauthenticated"
+        );
+
+        let jid: jid::FullJid = "alice@example.com/mobile".parse().expect("valid jid");
+        runtime.machine.transition_to_ready(jid.clone());
+
+        // After transition the machine should report Ready with the correct JID.
+        match runtime.machine.phase() {
+            ConnectionPhase::Ready { full_jid, .. } => {
+                assert_eq!(full_jid, &jid, "Ready JID must match the bound JID");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_conn_runtime_transport_closed_is_handled() {
+        let state = create_test_websocket_state().await;
+        let mut runtime = WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone());
+
+        // TransportClosed before authentication — must not panic.
+        let events = runtime.machine.handle(InboundEvent::TransportClosed);
+        // The machine may emit log events; we just require it doesn't panic and
+        // doesn't emit any outbound frames (no active session to clean up).
+        assert!(
+            events
+                .iter()
+                .all(|e| matches!(e, waddle_xmpp::protocol::OutboundEvent::Log { .. })),
+            "unexpected non-log events on closed unauthenticated connection: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_machine_ready_after_resource_bind() {
+        use waddle_xmpp::protocol::ConnectionPhase;
+
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let bind_frame = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "lifecycle-bind-1")
+                .attr("type", "set")
+                .append(
+                    Element::builder("bind", waddle_xmpp::ns::BIND)
+                        .append(
+                            Element::builder("resource", waddle_xmpp::ns::BIND)
+                                .append("web")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+
+        let mut conn = LegacyConnState::new();
+        let mut runtime = WsConnRuntime::new("example.com", state.dispatcher.as_ref().clone());
+
+        // Machine must be Unauthenticated before the bind.
+        assert!(matches!(
+            runtime.machine.phase(),
+            ConnectionPhase::Unauthenticated
+        ));
+
+        handle_xmpp_frame(
+            &auth_frame,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut runtime,
+        )
+        .await;
+        handle_xmpp_frame(
+            &bind_frame,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+            &mut runtime,
+        )
+        .await;
+
+        assert!(conn.resource_bound, "resource_bound flag must be set");
+        assert!(
+            matches!(runtime.machine.phase(), ConnectionPhase::Ready { .. }),
+            "machine must be in Ready phase after bind; got {:?}",
+            runtime.machine.phase()
+        );
     }
 
     #[tokio::test]

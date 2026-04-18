@@ -80,17 +80,28 @@ impl XmppStateMachine {
     /// [`Self::register_pending_op`] to stash the context needed when the
     /// matching [`InboundEvent`] completion arrives.
     pub fn next_callback_id(&mut self) -> CallbackId {
-        self.next_callback = self.next_callback.wrapping_add(1);
+        self.next_callback = self
+            .next_callback
+            .checked_add(1)
+            .expect("callback id space exhausted");
         CallbackId(self.next_callback)
+    }
+
+    /// Register the completion context for a previously allocated callback id.
+    ///
+    /// Handlers must call this before emitting an async delegation event so
+    /// the matching completion can recover its state.
+    pub fn register_pending_op(&mut self, id: CallbackId, op: PendingOp) {
+        assert!(
+            self.pending_ops.insert(id, op).is_none(),
+            "duplicate callback id registered: {id:?}"
+        );
     }
 
     /// Consume a previously-registered [`PendingOp`] when its completion
     /// event arrives. Returns `None` for unknown ids (late / duplicate
     /// completions — logged and dropped by the caller).
     ///
-    /// A `register_pending_op` counterpart will be reintroduced alongside
-    /// the first async handler that needs it. For now the field is
-    /// populated directly from tests in the same module.
     fn take_pending_op(&mut self, id: CallbackId) -> Option<PendingOp> {
         self.pending_ops.remove(&id)
     }
@@ -99,6 +110,25 @@ impl XmppStateMachine {
     /// know whether the connection is registered, and for tests.
     pub fn phase(&self) -> &ConnectionPhase {
         &self.phase
+    }
+
+    /// Transition the machine into the `Ready` phase.
+    ///
+    /// Called by the WebSocket transport adapter after the legacy SASL flow
+    /// has authenticated the user and the resource IQ has been bound.  This
+    /// bridge exists because SASL/resource-bind are still handled by the
+    /// legacy code path; once that migration step lands this method will be
+    /// replaced by ordinary `handle(InboundEvent::…)` calls inside the
+    /// state machine itself.
+    ///
+    /// Calling this method while the machine is already in `Ready` resets
+    /// the joined-room set — transport adapters must not call it twice for
+    /// the same connection.
+    pub fn transition_to_ready(&mut self, full_jid: jid::FullJid) {
+        self.phase = ConnectionPhase::Ready {
+            full_jid,
+            joined_rooms: std::collections::HashSet::new(),
+        };
     }
 
     /// The pure event → events transition.
@@ -413,7 +443,7 @@ mod tests {
         // the op, emit a DEBUG log (matched=true) and drop the entry.
         let mut sm = XmppStateMachine::new("waddle.social", StanzaDispatcher::new());
         let id = sm.next_callback_id();
-        sm.pending_ops.insert(
+        sm.register_pending_op(
             id,
             PendingOp::MamQuery {
                 request_id: "mam-7".to_string(),
