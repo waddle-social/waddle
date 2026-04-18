@@ -582,14 +582,16 @@ async fn handle_xmpp_frame(
     if frame.starts_with("<iq") {
         return handle_iq_with_conn_state(
             frame,
-            domain,
-            &muc_domain,
-            state,
-            authenticated_session,
-            session_jid,
-            *authenticated,
-            *resource_bound,
-            Some(&mut runtime.machine),
+            IqHandlingContext {
+                domain,
+                muc_domain: &muc_domain,
+                state,
+                authenticated_session,
+                session_jid,
+                authenticated: *authenticated,
+                resource_bound: *resource_bound,
+                machine: Some(&mut runtime.machine),
+            },
         )
         .await;
     }
@@ -1172,6 +1174,33 @@ async fn handle_iq(
     }
     handle_iq_with_conn_state(
         frame,
+        IqHandlingContext {
+            domain,
+            muc_domain,
+            state,
+            authenticated_session,
+            session_jid,
+            authenticated,
+            resource_bound,
+            machine: Some(&mut temp_machine),
+        },
+    )
+    .await
+}
+
+struct IqHandlingContext<'a> {
+    domain: &'a str,
+    muc_domain: &'a str,
+    state: &'a WebSocketState,
+    authenticated_session: &'a Option<Session>,
+    session_jid: &'a Option<FullJid>,
+    authenticated: bool,
+    resource_bound: bool,
+    machine: Option<&'a mut XmppStateMachine>,
+}
+
+async fn handle_iq_with_conn_state(frame: &str, ctx: IqHandlingContext<'_>) -> Vec<String> {
+    let IqHandlingContext {
         domain,
         muc_domain,
         state,
@@ -1179,22 +1208,9 @@ async fn handle_iq(
         session_jid,
         authenticated,
         resource_bound,
-        Some(&mut temp_machine),
-    )
-    .await
-}
+        machine,
+    } = ctx;
 
-async fn handle_iq_with_conn_state(
-    frame: &str,
-    domain: &str,
-    muc_domain: &str,
-    state: &WebSocketState,
-    authenticated_session: &Option<Session>,
-    session_jid: &Option<FullJid>,
-    authenticated: bool,
-    resource_bound: bool,
-    machine: Option<&mut XmppStateMachine>,
-) -> Vec<String> {
     let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
     let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
@@ -1277,15 +1293,7 @@ async fn handle_iq_with_conn_state(
                     let ctx = ProtocolIqContext { domain, full_jid };
                     state.dispatcher.dispatch_iq(iq, &ctx)
                 };
-                let interpreter = EffectInterpreter::new(
-                    Arc::clone(&state.app_state),
-                    Arc::clone(&state.auth_state),
-                    Arc::clone(&state.connection_registry),
-                    Arc::clone(&state.muc_registry),
-                    Arc::clone(&state.mam_storage),
-                    Arc::clone(&state.github_enricher),
-                    state.sfu_service.clone(),
-                );
+                let interpreter = EffectInterpreter::from_websocket_state(state);
                 let outcome = interpreter.interpret(events).await;
                 if outcome.close {
                     warn!(

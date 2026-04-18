@@ -15,6 +15,9 @@ use std::str::FromStr;
 use thiserror::Error;
 use xmpp_parsers::minidom::Element;
 
+pub const CLIENT_STANZA_NS: &str = "jabber:client";
+pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
+
 /// A fully parsed inbound XMPP frame, ready for typed dispatch.
 ///
 /// Covers the RFC 7395 framing layer plus SASL negotiation frames. IQ-bind
@@ -58,11 +61,14 @@ pub enum ParseError {
     /// The payload was empty or contained only whitespace.
     #[error("frame is empty")]
     Empty,
+    /// The payload exceeded the parser's maximum accepted frame size.
+    #[error("frame exceeds maximum size")]
+    TooLarge,
     /// The payload was not well-formed XML.
     #[error("invalid XML: {0}")]
     InvalidXml(String),
-    /// The payload's root element is not one of the five frames we know
-    /// how to handle (`open`, `close`, `auth`, `response`, `iq`, `message`,
+    /// The payload's root element is not one of the seven frame roots we
+    /// know how to handle (`open`, `close`, `auth`, `response`, `iq`, `message`,
     /// `presence`).
     #[error("unknown root element: <{0}>")]
     UnknownRoot(String),
@@ -93,6 +99,9 @@ pub fn parse_frame(frame: &str) -> Result<InboundFrame, ParseError> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
         return Err(ParseError::Empty);
+    }
+    if trimmed.len() > MAX_FRAME_SIZE {
+        return Err(ParseError::TooLarge);
     }
 
     let root = peek_root_name(trimmed)
@@ -150,7 +159,7 @@ fn parse_response(frame: &str) -> Result<InboundFrame, ParseError> {
 }
 
 fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
-    let patched = inject_default_ns(frame, "jabber:client");
+    let patched = inject_client_ns_if_missing(frame);
     let element =
         Element::from_str(&patched).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
 
@@ -189,20 +198,136 @@ fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
 /// relying on the stream-level `<open>` to scope them. Since we parse each
 /// frame in isolation, we reintroduce the namespace here so that
 /// `xmpp_parsers` accepts the element.
-fn inject_default_ns(xml: &str, ns: &str) -> String {
-    let open_end = match xml.find('>') {
-        Some(idx) => idx,
-        None => return xml.to_string(),
+pub fn inject_client_ns_if_missing(xml: &str) -> String {
+    let trimmed = xml.trim();
+    let Some(scan) = scan_start_tag(trimmed) else {
+        return trimmed.to_string();
     };
-    let open_tag = &xml[..open_end];
-    if open_tag.contains("xmlns=") {
-        return xml.to_string();
+    if scan.has_default_xmlns {
+        return trimmed.to_string();
     }
-    let tag_end = xml[1..]
-        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
-        .map(|idx| idx + 1)
-        .unwrap_or(open_end);
-    format!(r#"{} xmlns="{ns}"{}"#, &xml[..tag_end], &xml[tag_end..])
+
+    let mut patched = String::with_capacity(trimmed.len() + CLIENT_STANZA_NS.len() + 9);
+    patched.push_str(&trimmed[..scan.name_end]);
+    patched.push_str(r#" xmlns=""#);
+    patched.push_str(CLIENT_STANZA_NS);
+    patched.push('"');
+    patched.push_str(&trimmed[scan.name_end..]);
+    patched
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StartTagScan {
+    name_end: usize,
+    has_default_xmlns: bool,
+}
+
+fn scan_start_tag(xml: &str) -> Option<StartTagScan> {
+    let bytes = xml.as_bytes();
+    if bytes.first().copied()? != b'<' {
+        return None;
+    }
+
+    let mut idx = 1;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || matches!(bytes[idx], b'/' | b'!' | b'?') {
+        return None;
+    }
+
+    let name_start = idx;
+    while idx < bytes.len()
+        && !bytes[idx].is_ascii_whitespace()
+        && !matches!(bytes[idx], b'>' | b'/')
+    {
+        idx += 1;
+    }
+    if idx == name_start {
+        return None;
+    }
+    let name_end = idx;
+    let mut has_default_xmlns = false;
+
+    loop {
+        idx = skip_ascii_whitespace(bytes, idx);
+        if idx >= bytes.len() {
+            return None;
+        }
+
+        match bytes[idx] {
+            b'>' => {
+                return Some(StartTagScan {
+                    name_end,
+                    has_default_xmlns,
+                });
+            }
+            b'/' if idx + 1 < bytes.len() && bytes[idx + 1] == b'>' => {
+                return Some(StartTagScan {
+                    name_end,
+                    has_default_xmlns,
+                });
+            }
+            b'/' => return None,
+            _ => {}
+        }
+
+        let attr_start = idx;
+        while idx < bytes.len()
+            && !bytes[idx].is_ascii_whitespace()
+            && !matches!(bytes[idx], b'=' | b'>' | b'/')
+        {
+            idx += 1;
+        }
+        if idx == attr_start {
+            return None;
+        }
+        if &xml[attr_start..idx] == "xmlns" {
+            has_default_xmlns = true;
+        }
+
+        idx = skip_ascii_whitespace(bytes, idx);
+        if idx >= bytes.len() {
+            return None;
+        }
+        if bytes[idx] != b'=' {
+            continue;
+        }
+
+        idx += 1;
+        idx = skip_ascii_whitespace(bytes, idx);
+        if idx >= bytes.len() {
+            return None;
+        }
+
+        match bytes[idx] {
+            quote @ (b'"' | b'\'') => {
+                idx += 1;
+                while idx < bytes.len() && bytes[idx] != quote {
+                    idx += 1;
+                }
+                if idx >= bytes.len() {
+                    return None;
+                }
+                idx += 1;
+            }
+            _ => {
+                while idx < bytes.len()
+                    && !bytes[idx].is_ascii_whitespace()
+                    && !matches!(bytes[idx], b'>' | b'/')
+                {
+                    idx += 1;
+                }
+            }
+        }
+    }
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut idx: usize) -> usize {
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
 }
 
 #[cfg(test)]
@@ -355,15 +480,41 @@ mod tests {
     #[test]
     fn inject_default_ns_is_noop_when_xmlns_present() {
         let input = r#"<iq xmlns="jabber:client" id="x"/>"#;
-        assert_eq!(inject_default_ns(input, "jabber:client"), input);
+        assert_eq!(inject_client_ns_if_missing(input), input);
     }
 
     #[test]
     fn inject_default_ns_adds_attr_after_tag_name() {
         let input = r#"<iq id="x"/>"#;
         assert_eq!(
-            inject_default_ns(input, "jabber:client"),
+            inject_client_ns_if_missing(input),
             r#"<iq xmlns="jabber:client" id="x"/>"#
         );
+    }
+
+    #[test]
+    fn inject_default_ns_ignores_xmlns_like_attribute_values() {
+        let input = r#"<iq id="x" data="xmlns=bogus"/>"#;
+        assert_eq!(
+            inject_client_ns_if_missing(input),
+            r#"<iq xmlns="jabber:client" id="x" data="xmlns=bogus"/>"#
+        );
+    }
+
+    #[test]
+    fn inject_default_ns_handles_gt_inside_attribute_value() {
+        let input = r#"<iq id="x" data="1 > 0"><ping xmlns="urn:xmpp:ping"/></iq>"#;
+        let patched = inject_client_ns_if_missing(input);
+        assert_eq!(
+            patched,
+            r#"<iq xmlns="jabber:client" id="x" data="1 > 0"><ping xmlns="urn:xmpp:ping"/></iq>"#
+        );
+        assert!(Element::from_str(&patched).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_frame() {
+        let huge = format!("<iq id=\"x\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+        assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
     }
 }
