@@ -47,18 +47,21 @@ export function sendDmCorrection(xmpp: Agent, peerJid: string, body: string, rep
 /**
  * Send a direct (type="chat") message. Optionally includes XEP-0447 file-sharing
  * attachments alongside the user's text body in a single stanza.
+ * Pass a pre-generated `id` when the caller already created an optimistic
+ * timeline entry so the stanza ID matches.
  */
 export function sendDirectMessage(
   xmpp: Agent,
   peerJid: string,
   body: string,
   files?: OutboundFileAttachment[],
+  id?: string,
 ): string | null {
   const text = body.trim();
   const hasFiles = !!files && files.length > 0;
   if (!text && !hasFiles) return null;
 
-  const msgId = crypto.randomUUID();
+  const msgId = id ?? crypto.randomUUID();
   const effectiveBody = text || (hasFiles ? files![0].url : "");
 
   const msgData: Record<string, unknown> = {

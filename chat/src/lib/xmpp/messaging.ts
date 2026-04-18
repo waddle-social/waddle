@@ -98,6 +98,8 @@ export function sendCorrection(xmpp: Agent, roomJid: string, body: string, repla
 /**
  * Send a groupchat message. Optionally includes XEP-0447 file-sharing
  * attachments alongside the user's text body in a single stanza.
+ * Pass a pre-generated `id` when the caller already created an optimistic
+ * timeline entry so the stanza ID matches.
  */
 export function sendGroupMessage(
   xmpp: Agent,
@@ -105,12 +107,13 @@ export function sendGroupMessage(
   body: string,
   markup?: MarkupSpan[],
   files?: OutboundFileAttachment[],
+  id?: string,
 ): string | null {
   const text = body.trim();
   const hasFiles = !!files && files.length > 0;
   if (!text && !hasFiles) return null;
 
-  const msgId = crypto.randomUUID();
+  const msgId = id ?? crypto.randomUUID();
   const effectiveBody = text || (hasFiles ? files![0].url : "");
 
   // XEP-0372: Build reference objects for @mentions (only scan user text)

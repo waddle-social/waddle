@@ -279,6 +279,7 @@ export function useDmMessaging(
 
   async function sendMessage(explicitBody?: string, _markup?: unknown, files?: Array<File | Blob>) {
     const bodyText = explicitBody ?? draft.value;
+    const fromComposer = _markup !== undefined;
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     const hasFiles = !!files && files.length > 0;
@@ -337,14 +338,14 @@ export function useDmMessaging(
           messages.value = [...messages.value, optimistic];
           void scrollToBottom();
         }
-        if (!explicitBody) draft.value = "";
+        if (fromComposer) draft.value = "";
         if (composingTimeout) {
           clearTimeout(composingTimeout);
           composingTimeout = null;
         }
         lastChatState = "active";
       }
-      await client.sendDmChatState(peerJid, "active");
+      void client.sendDmChatState(peerJid, "active").catch(() => undefined);
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
