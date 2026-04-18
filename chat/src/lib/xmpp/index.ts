@@ -20,6 +20,7 @@ export type {
   OccupantPresence,
   RoomHats,
   RoomPresence,
+  SessionLifecycleEvent,
   SharedFileInfo,
   XmppStatusSnapshot,
 } from "./types";

@@ -7,6 +7,7 @@ import type {
   DmDisplayedEvent,
   DmReactionEvent,
   LiveDmMessage,
+  SessionLifecycleEvent,
 } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -52,6 +53,10 @@ export function useDmMessaging(
   let lastChatState: ChatStateType = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Client-assigned stanza ids still awaiting server-echo reconciliation.
+  // Only these participate in the body-based fallback match so repeated
+  // identical text doesn't mis-target already-reconciled messages.
+  const pendingEchoClientIds = new Set<string>();
 
   async function scrollToBottom() {
     await nextTick();
@@ -138,19 +143,68 @@ export function useDmMessaging(
   }
 
   function mergeLiveMessage(msg: TimelineMessage) {
-    const existing = messages.value.find((m) =>
-      m.id === msg.id || (m.deliveryStatus === "sending" && m.isSelf && msg.isSelf && m.body === msg.body),
+    // Self-echo reconciliation: match by id first; otherwise body-match only
+    // against messages still awaiting reconciliation so duplicates don't
+    // retarget already-reconciled entries. Echo = authoritative → delivered.
+    const existing = messages.value.find(
+      (m) =>
+        m.id === msg.id ||
+        (pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body),
     );
     if (existing) {
-      if (existing.deliveryStatus === "sending") {
-        messages.value = messages.value.map((m) => (
-          m.id === existing.id ? { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus } : m
-        ));
+      const wasPending = existing.id !== msg.id;
+      if (wasPending || existing.deliveryStatus === "sending") {
+        messages.value = messages.value.map((m) =>
+          m.id !== existing.id
+            ? m
+            : { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus },
+        );
       }
+      if (wasPending) pendingEchoClientIds.delete(existing.id);
       return;
     }
     messages.value = [...messages.value, msg];
     void scrollToBottom();
+  }
+
+  /** XEP-0198: SM ack promotes the matching self-sent message to delivered. */
+  function onMessageAck(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus === "sending"
+        ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /** XEP-0198: stanza.js gave up on the stanza — surface as failed so the
+   *  user can retry. */
+  function onMessageDeliveryFailure(messageId: string) {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
+        ? { ...m, deliveryStatus: "failed" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  /** On a fresh session (SM resume failed), re-fetch MAM to close any gap
+   *  for the currently-open conversation. Local optimistic sends are
+   *  preserved across the reload so the user keeps retry affordances. */
+  function onSessionLifecycle(event: SessionLifecycleEvent) {
+    if (event.type !== "fresh") return;
+    const peerJid = activePeerJid.value;
+    if (!peerJid) return;
+    if (messages.value.length === 0) return;
+    const preserved = messages.value.filter(
+      (m) =>
+        m.isSelf && (m.deliveryStatus === "sending" || m.deliveryStatus === "failed"),
+    );
+    void (async () => {
+      await loadMessages(peerJid);
+      if (preserved.length === 0 || activePeerJid.value !== peerJid) return;
+      const existingIds = new Set(messages.value.map((m) => m.id));
+      const toAppend = preserved.filter((m) => !existingIds.has(m.id));
+      if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
+    })();
   }
 
   async function loadMessages(peerJid: string) {
@@ -260,6 +314,7 @@ export function useDmMessaging(
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
       if (isStillActive) {
         if (msgId) {
+          pendingEchoClientIds.add(msgId);
           const optimistic: TimelineMessage = {
             id: msgId,
             author: session.value.username,
@@ -458,5 +513,8 @@ export function useDmMessaging(
     onChatState,
     onDisplayed,
     onReaction,
+    onMessageAck,
+    onMessageDeliveryFailure,
+    onSessionLifecycle,
   };
 }
