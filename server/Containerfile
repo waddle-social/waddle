@@ -34,7 +34,6 @@ ARG TARGETARCH
 # Commit SHA baked into the binary so XEP-0092 advertises a real revision.
 # Defaults to "unknown"; CI overrides via --build-arg WADDLE_GIT_SHA=$GITHUB_SHA.
 ARG WADDLE_GIT_SHA=unknown
-ENV WADDLE_GIT_SHA=${WADDLE_GIT_SHA}
 
 COPY --from=planner /workspace/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
@@ -65,7 +64,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc ;; \
       *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    cargo build --release --locked --target "${RUST_TARGET}" --package waddle-server --bin waddle-server; \
+    WADDLE_GIT_SHA="${WADDLE_GIT_SHA}" cargo build --release --locked --target "${RUST_TARGET}" --package waddle-server --bin waddle-server; \
     mkdir -p /out; \
     cp "target/${RUST_TARGET}/release/waddle-server" /out/waddle-server
 
