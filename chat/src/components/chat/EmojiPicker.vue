@@ -3,9 +3,19 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Search, X } from "lucide-vue-next";
 import { searchEmoji } from "@/lib/emoji";
 
-const props = defineProps<{
-  open: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    open: boolean;
+    /**
+     * "popover" (default): absolutely positioned panel anchored to an anchor
+     * element outside this component — desktop inline-toolbar usage.
+     * "sheet": renders as a full-width in-flow grid that assumes its parent
+     * controls positioning — used inside the mobile action sheet.
+     */
+    variant?: "popover" | "sheet";
+  }>(),
+  { variant: "popover" },
+);
 
 const emit = defineEmits<{
   select: [emoji: string];
@@ -86,6 +96,9 @@ function onKey(event: KeyboardEvent) {
 
 function attachWindowListeners() {
   if (typeof window === "undefined") return;
+  // Sheet variant is embedded inside a modal that already owns outside-tap
+  // and Escape handling; attaching here would double-close on every click.
+  if (props.variant === "sheet") return;
   window.addEventListener("pointerdown", onWindowPointer, true);
   window.addEventListener("keydown", onKey);
 }
@@ -120,9 +133,14 @@ onBeforeUnmount(detachWindowListeners);
   <div
     v-if="open"
     ref="panelEl"
-    role="dialog"
+    :role="variant === 'popover' ? 'dialog' : 'group'"
     aria-label="Choose a reaction"
-    class="absolute top-full right-0 mt-1 w-72 glass-panel border border-border rounded-xl z-50 shadow-2xl animate-fade-in overflow-hidden flex flex-col max-h-80"
+    :class="[
+      'flex flex-col overflow-hidden',
+      variant === 'popover'
+        ? 'absolute top-full right-0 mt-1 w-72 glass-panel border border-border rounded-xl z-50 shadow-2xl animate-fade-in max-h-80'
+        : 'w-full max-h-[60vh]',
+    ]"
     @pointerdown.stop
   >
     <div class="flex items-center gap-2.5 px-3 py-2 border-b border-border">
@@ -148,12 +166,15 @@ onBeforeUnmount(detachWindowListeners);
     <div class="flex-1 overflow-auto p-2">
       <template v-if="searchResults.length > 0">
         <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Results</div>
-        <div class="grid grid-cols-8 gap-0.5">
+        <div :class="['grid gap-0.5', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
           <button
             v-for="e in searchResults"
             :key="`s-${e}`"
             type="button"
-            class="h-8 w-8 flex items-center justify-center text-[18px] leading-none rounded-md hover:bg-muted transition-all duration-150"
+            :class="[
+              'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
+              variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
+            ]"
             :aria-label="`React with ${e}`"
             @click="onSelect(e)"
           >{{ e }}</button>
@@ -165,24 +186,30 @@ onBeforeUnmount(detachWindowListeners);
       <template v-else>
         <template v-if="recents.length > 0">
           <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Recent</div>
-          <div class="grid grid-cols-8 gap-0.5 mb-2">
+          <div :class="['grid gap-0.5 mb-2', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
             <button
               v-for="e in recents"
               :key="`r-${e}`"
               type="button"
-              class="h-8 w-8 flex items-center justify-center text-[18px] leading-none rounded-md hover:bg-muted transition-all duration-150"
+              :class="[
+              'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
+              variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
+            ]"
               :aria-label="`React with ${e}`"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>
         </template>
         <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Common</div>
-        <div class="grid grid-cols-8 gap-0.5">
+        <div :class="['grid gap-0.5', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
           <button
             v-for="e in COMMON_EMOJIS"
             :key="`c-${e}`"
             type="button"
-            class="h-8 w-8 flex items-center justify-center text-[18px] leading-none rounded-md hover:bg-muted transition-all duration-150"
+            :class="[
+              'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
+              variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
+            ]"
             :aria-label="`React with ${e}`"
             @click="onSelect(e)"
           >{{ e }}</button>

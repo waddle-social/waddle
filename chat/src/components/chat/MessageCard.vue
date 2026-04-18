@@ -109,6 +109,16 @@ const replyAuthorName = computed(() => {
   return nickPart ?? author;
 });
 
+const replyChipExpanded = ref(false);
+
+function onReplyChipClick() {
+  if (!props.message.replyTo) return;
+  if (props.message.replyTo.preview) {
+    replyChipExpanded.value = !replyChipExpanded.value;
+  }
+  emit("scrollToMessage", props.message.replyTo.id);
+}
+
 const isMentioned = computed(() => {
   if (props.message.broadcastMention) return true;
   if (!props.currentUser || !props.message.mentions) return false;
@@ -151,61 +161,58 @@ function emitAvatarClick() {
 }
 
 const bubbleEl = ref<HTMLElement | null>(null);
-const mobileToolbarOpen = ref(false);
+// Inline hover toolbar's SmilePlus popover. Desktop-only; bound to hover.
 const pickerOpen = ref(false);
-const menuOpen = ref(false);
+// Unified action sheet: touch long-press, MoreHorizontal click, and keyboard
+// focus all open the same surface so there is never more than one emoji rail
+// on screen at a time.
+const sheetOpen = ref(false);
+type SheetView = "actions" | "emoji";
+const sheetView = ref<SheetView>("actions");
 
-const anyOverlayOpen = computed(
-  () => mobileToolbarOpen.value || pickerOpen.value || menuOpen.value,
-);
+const anyOverlayOpen = computed(() => pickerOpen.value || sheetOpen.value);
 
-function closeAllMenus() {
-  mobileToolbarOpen.value = false;
+function closeSheet() {
+  sheetOpen.value = false;
+  sheetView.value = "actions";
+}
+
+function openSheet() {
   pickerOpen.value = false;
-  menuOpen.value = false;
+  sheetView.value = "actions";
+  sheetOpen.value = true;
 }
 
 function togglePicker() {
   const next = !pickerOpen.value;
-  closeAllMenus();
+  closeSheet();
   pickerOpen.value = next;
-}
-
-function toggleMenu() {
-  const next = !menuOpen.value;
-  closeAllMenus();
-  menuOpen.value = next;
 }
 
 function react(emoji: string) {
   emit("react", props.message.id, emoji);
-  closeAllMenus();
+  pickerOpen.value = false;
+  closeSheet();
 }
 
 function startReplyFromMenu() {
   emit("reply", props.message);
-  closeAllMenus();
+  closeSheet();
 }
 
 function startEditFromMenu() {
   startEdit();
-  closeAllMenus();
+  closeSheet();
 }
 
 function retractFromMenu() {
   emit("retract", props.message.id);
-  closeAllMenus();
-}
-
-function openPickerFromMenu() {
-  closeAllMenus();
-  pickerOpen.value = true;
+  closeSheet();
 }
 
 const longPress = useLongPress({
   onLongPress: () => {
-    closeAllMenus();
-    mobileToolbarOpen.value = true;
+    openSheet();
   },
 });
 
@@ -217,14 +224,17 @@ function onBubbleContextMenu(event: MouseEvent) {
 }
 
 function onWindowPointerDown(event: PointerEvent) {
+  if (sheetOpen.value) return;
   if (!bubbleEl.value) return;
   const target = event.target as Node | null;
   if (target && bubbleEl.value.contains(target)) return;
-  closeAllMenus();
+  pickerOpen.value = false;
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") closeAllMenus();
+  if (event.key !== "Escape") return;
+  if (sheetOpen.value) closeSheet();
+  else pickerOpen.value = false;
 }
 
 // Only listen globally while an overlay is actually open. Otherwise every
@@ -288,7 +298,7 @@ watch(
     v-else
     ref="bubbleEl"
     :data-message-id="message.id"
-    :data-mobile-open="anyOverlayOpen ? 'true' : 'false'"
+    :data-sheet-open="sheetOpen ? 'true' : 'false'"
     class="group relative flow-root px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned
@@ -335,19 +345,27 @@ watch(
       </span>
     </div>
 
-    <!-- Reply preview chip -->
-    <button
-      v-if="message.replyTo"
-      type="button"
-      class="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-0.5 hover:text-foreground transition-colors max-w-full"
-      :title="`Jump to replied message`"
-      @click="emit('scrollToMessage', message.replyTo.id)"
-    >
-      <CornerDownRight class="w-3 h-3 flex-shrink-0" />
-      <span class="text-primary/80 font-medium">@{{ replyAuthorName }}</span>
-      <span v-if="message.replyTo.preview" class="truncate opacity-70">{{ message.replyTo.preview }}</span>
-      <span v-else class="opacity-60 font-mono">{{ message.replyTo.id.slice(0, 8) }}</span>
-    </button>
+    <!-- Reply preview chip. Clicking scrolls to the parent message; if the
+         preview is available we also expand it inline so users still see the
+         full quoted text even when the parent has scrolled off-screen or
+         hasn't loaded from history yet. -->
+    <div v-if="message.replyTo" class="mb-0.5">
+      <button
+        type="button"
+        class="flex items-start gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors max-w-full text-left"
+        :aria-expanded="replyChipExpanded"
+        :title="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'"
+        @click="onReplyChipClick"
+      >
+        <CornerDownRight class="w-3 h-3 flex-shrink-0 mt-0.5" />
+        <span class="text-primary/80 font-medium">@{{ replyAuthorName }}</span>
+        <span
+          v-if="message.replyTo.preview"
+          :class="['flex-1 min-w-0 opacity-70', replyChipExpanded ? 'whitespace-pre-wrap break-words' : 'truncate']"
+        >{{ message.replyTo.preview }}</span>
+        <span v-else class="opacity-60 font-mono">{{ message.replyTo.id.slice(0, 8) }}</span>
+      </button>
+    </div>
 
     <!-- Edit mode -->
     <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
@@ -456,11 +474,13 @@ watch(
       </button>
     </div>
 
-    <!-- Floating action toolbar — absolute so no layout space when hidden.
-         Revealed by hover (mouse), focus-within (keyboard), or long-press (touch). -->
+    <!-- Floating action toolbar — desktop-only hover/focus affordance. On
+         touch devices (where hover never fires) long-press opens the action
+         sheet instead, so this toolbar stays hidden and we never show two
+         emoji rails at once. -->
     <div
       v-if="!isEditing"
-      class="absolute -top-3 right-3 z-10 opacity-0 group-hover:opacity-100 focus-within:opacity-100 group-data-[mobile-open=true]:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto group-data-[mobile-open=true]:pointer-events-auto transition-opacity duration-150 flex items-center gap-0.5 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1"
+      class="absolute -top-3 right-3 z-10 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden"
     >
       <button
         v-for="e in quickEmojis"
@@ -522,77 +542,109 @@ watch(
       </template>
     </div>
 
-    <!-- Accessible always-reachable affordance: keyboard / screen-reader users
-         (and anyone who prefers a button to a long-press) get the same actions
-         via a standard menu. Positioned at the top-right of the bubble, low
-         contrast on desktop, prominent on touch where hover never fires. -->
-    <div v-if="!isEditing" class="absolute top-1 right-1 z-10">
-      <button
-        type="button"
-        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted opacity-40 hover:opacity-100 focus-visible:opacity-100 group-data-[mobile-open=true]:opacity-100 transition-all duration-150"
-        title="Message actions"
-        aria-label="Message actions"
-        :aria-expanded="menuOpen"
-        aria-haspopup="dialog"
-        @click="toggleMenu"
-      >
-        <MoreHorizontal class="w-3.5 h-3.5" aria-hidden="true" />
-      </button>
+    <!-- Action-sheet trigger. Small and low-contrast on desktop (where hover
+         already reveals the inline toolbar) and enlarged on touch so fingers
+         can actually hit it when long-press feels awkward. -->
+    <button
+      v-if="!isEditing"
+      type="button"
+      class="absolute top-1 right-1 z-10 h-6 w-6 [@media(pointer:coarse)]:h-10 [@media(pointer:coarse)]:w-10 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted opacity-40 hover:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-70 transition-all duration-150"
+      title="Message actions"
+      aria-label="Message actions"
+      :aria-expanded="sheetOpen"
+      aria-haspopup="dialog"
+      @click="openSheet"
+    >
+      <MoreHorizontal class="w-3.5 h-3.5 [@media(pointer:coarse)]:w-5 [@media(pointer:coarse)]:h-5" aria-hidden="true" />
+    </button>
+  </div>
+
+  <!-- Unified action sheet: opened by touch long-press, the MoreHorizontal
+       trigger, or keyboard focus. Teleported so it escapes overflow-hidden
+       ancestors; anchored at the bottom on mobile for large touch targets
+       and centred as a modal on desktop. -->
+  <Teleport to="body">
+    <div
+      v-if="sheetOpen"
+      class="fixed inset-0 z-[55] flex items-end sm:items-center justify-center animate-fade-in"
+      role="presentation"
+    >
+      <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="closeSheet" />
       <div
-        v-if="menuOpen"
         role="dialog"
+        aria-modal="true"
         aria-label="Message actions"
-        class="absolute top-full right-0 mt-1 min-w-40 glass-panel border border-border rounded-xl shadow-2xl p-1 animate-fade-in"
+        class="relative w-full sm:max-w-sm glass-panel border border-border rounded-t-2xl sm:rounded-2xl shadow-2xl animate-slide-up p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
         @pointerdown.stop
       >
-        <div class="flex items-center gap-0.5 px-1 py-1">
-          <button
-            v-for="e in quickEmojis"
-            :key="`menu-${e}`"
-            type="button"
-            class="h-8 w-8 flex items-center justify-center text-[16px] leading-none rounded-md hover:bg-muted transition-colors"
-            :aria-label="`React with ${e}`"
-            @click="react(e)"
-          >{{ e }}</button>
+        <div class="sm:hidden flex justify-center mb-2">
+          <div class="h-1 w-10 rounded-full bg-muted-foreground/30" />
         </div>
-        <button
-          type="button"
-          class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
-          @click="openPickerFromMenu"
-        >
-          <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
-          <span>More reactions…</span>
-        </button>
-        <button
-          type="button"
-          class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
-          @click="startReplyFromMenu"
-        >
-          <Reply class="w-3.5 h-3.5" aria-hidden="true" />
-          <span>Reply</span>
-        </button>
-        <template v-if="message.isSelf">
-          <div class="my-1 h-px bg-border" />
+
+        <template v-if="sheetView === 'actions'">
+          <div class="grid grid-cols-6 gap-1 mb-3">
+            <button
+              v-for="e in quickEmojis"
+              :key="`sheet-${e}`"
+              type="button"
+              class="h-12 flex items-center justify-center text-[26px] leading-none rounded-xl hover:bg-muted active:bg-muted transition-colors"
+              :aria-label="`React with ${e}`"
+              @click="react(e)"
+            >{{ e }}</button>
+            <button
+              type="button"
+              class="h-12 flex items-center justify-center rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted active:bg-muted transition-colors"
+              aria-label="More reactions"
+              @click="sheetView = 'emoji'"
+            >
+              <SmilePlus class="w-5 h-5" aria-hidden="true" />
+            </button>
+          </div>
+
           <button
             type="button"
-            class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-muted transition-colors text-left"
-            @click="startEditFromMenu"
+            class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] hover:bg-muted active:bg-muted transition-colors text-left"
+            @click="startReplyFromMenu"
           >
-            <Pencil class="w-3.5 h-3.5" aria-hidden="true" />
-            <span>Edit</span>
+            <Reply class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
+            <span>Reply</span>
           </button>
+          <template v-if="message.isSelf">
+            <button
+              type="button"
+              class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] hover:bg-muted active:bg-muted transition-colors text-left"
+              @click="startEditFromMenu"
+            >
+              <Pencil class="w-5 h-5 text-muted-foreground" aria-hidden="true" />
+              <span>Edit</span>
+            </button>
+            <button
+              type="button"
+              class="w-full flex items-center gap-3 px-3 h-12 rounded-xl text-[15px] text-destructive hover:bg-destructive/10 active:bg-destructive/10 transition-colors text-left"
+              @click="retractFromMenu"
+            >
+              <Trash2 class="w-5 h-5" aria-hidden="true" />
+              <span>Delete</span>
+            </button>
+          </template>
           <button
             type="button"
-            class="w-full flex items-center gap-2 px-2 py-1.5 text-[13px] rounded-md hover:bg-destructive/10 text-destructive transition-colors text-left"
-            @click="retractFromMenu"
-          >
-            <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
-            <span>Delete</span>
-          </button>
+            class="sm:hidden mt-2 w-full h-12 rounded-xl text-[14px] text-muted-foreground hover:bg-muted active:bg-muted transition-colors"
+            @click="closeSheet"
+          >Cancel</button>
+        </template>
+
+        <template v-else>
+          <EmojiPicker
+            :open="true"
+            variant="sheet"
+            @select="react"
+            @close="sheetView = 'actions'"
+          />
         </template>
       </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <style scoped>

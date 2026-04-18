@@ -284,6 +284,25 @@
   user-select: none;
 }
 
+/* Visible flash when a user jumps to a replied-to message via the reply chip.
+   Uses an outline + background pulse so it can't be clipped by overflow:hidden
+   on ancestor elements the way Tailwind's `ring-*` utilities can be, and is
+   vivid enough to be noticed at a glance. */
+@keyframes message-jump-flash {
+  0% { background-color: color-mix(in oklab, var(--primary) 20%, transparent); }
+  100% { background-color: transparent; }
+}
+.message-jump-flash {
+  animation: message-jump-flash 1.8s ease-out both;
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  border-radius: 0.75rem;
+  transition: outline-color 1.6s ease-out 0.2s;
+}
+.message-jump-flash.message-jump-flash-fade {
+  outline-color: transparent;
+}
+
 /* Glass panel utility */
 .glass-panel {
   background: var(--card);
