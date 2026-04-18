@@ -4,6 +4,28 @@ import type { MarkupSpan } from "@/lib/chat-ui";
 import type { WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
 
+export interface OutboundFileAttachment {
+  url: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  width?: number;
+  height?: number;
+}
+
+/** Build one XEP-0447 <file-sharing> payload for a single attachment. */
+export function fileSharingElement(file: OutboundFileAttachment): Record<string, unknown> {
+  return {
+    disposition: "inline",
+    name: file.name,
+    mediaType: file.mediaType,
+    size: String(file.size),
+    ...(file.width ? { width: String(file.width) } : {}),
+    ...(file.height ? { height: String(file.height) } : {}),
+    url: file.url,
+  };
+}
+
 export function sendChatState(xmpp: Agent, roomJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: roomJid, type: "groupchat", chatState: state });
 }
@@ -73,30 +95,44 @@ export function sendCorrection(xmpp: Agent, roomJid: string, body: string, repla
   return msgId;
 }
 
-export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, markup?: MarkupSpan[]): string | null {
+/**
+ * Send a groupchat message. Optionally includes XEP-0447 file-sharing
+ * attachments alongside the user's text body in a single stanza.
+ */
+export function sendGroupMessage(
+  xmpp: Agent,
+  roomJid: string,
+  body: string,
+  markup?: MarkupSpan[],
+  files?: OutboundFileAttachment[],
+): string | null {
   const text = body.trim();
-  if (!text) return null;
+  const hasFiles = !!files && files.length > 0;
+  if (!text && !hasFiles) return null;
 
   const msgId = crypto.randomUUID();
+  const effectiveBody = text || (hasFiles ? files![0].url : "");
 
-  // XEP-0372: Build reference objects for @mentions
+  // XEP-0372: Build reference objects for @mentions (only scan user text)
   const references: Array<{ type: string; uri: string; begin: string; end: string }> = [];
-  const mentionRe = /(?:^|\s)@(\S+)/g;
-  let match: RegExpExecArray | null;
-  while ((match = mentionRe.exec(text)) !== null) {
-    const nick = match[1]!;
-    const begin = match.index + (match[0].length - nick.length - 1);
-    const end = begin + nick.length + 1;
-    references.push({ type: "mention", begin: String(begin), end: String(end), uri: `xmpp:${nick}` });
+  if (text) {
+    const mentionRe = /(?:^|\s)@(\S+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = mentionRe.exec(text)) !== null) {
+      const nick = match[1]!;
+      const begin = match.index + (match[0].length - nick.length - 1);
+      const end = begin + nick.length + 1;
+      references.push({ type: "mention", begin: String(begin), end: String(end), uri: `xmpp:${nick}` });
+    }
   }
 
   // XEP-0513: Explicit @everyone / @here
   const explicitMentionItems: Array<{ type: string }> = [];
-  if (/(?:^|\s)@everyone(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "everyone" });
-  if (/(?:^|\s)@here(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "here" });
+  if (text && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "everyone" });
+  if (text && /(?:^|\s)@here(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "here" });
 
   const msgData: Record<string, unknown> = {
-    id: msgId, to: roomJid, type: "groupchat", body: text,
+    id: msgId, to: roomJid, type: "groupchat", body: effectiveBody,
     receipt: { type: "request" },
     marker: { type: "markable" },
     processingHints: { store: true },
@@ -106,40 +142,15 @@ export function sendGroupMessage(xmpp: Agent, roomJid: string, body: string, mar
   if (markup && markup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(markup) };
   }
+  if (hasFiles) {
+    msgData.fileSharing = files!.map(fileSharingElement);
+    msgData.links = files!.map((f) => ({ url: f.url }));
+    if (!text) {
+      // Body is acting as the SFS URL fallback — mark it so compliant clients skip it.
+      msgData.fallback = { for: "urn:xmpp:sfs:0", body: true };
+    }
+  }
 
-  xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
-  return msgId;
-}
-
-/** XEP-0447: Send a file-sharing message in a group chat (MUC). */
-export function sendGroupFileMessage(
-  xmpp: Agent,
-  roomJid: string,
-  fileUrl: string,
-  file: { name: string; mediaType: string; size: number; width?: number; height?: number },
-): string {
-  const msgId = crypto.randomUUID();
-  const msgData: Record<string, unknown> = {
-    id: msgId,
-    to: roomJid,
-    type: "groupchat",
-    body: fileUrl,
-    links: [{ url: fileUrl }],
-    fallback: { for: "urn:xmpp:sfs:0", body: true },
-    receipt: { type: "request" },
-    marker: { type: "markable" },
-    processingHints: { store: true },
-    fileSharing: {
-      disposition: "inline",
-      name: file.name,
-      mediaType: file.mediaType,
-      size: String(file.size),
-      ...(file.width ? { width: String(file.width) } : {}),
-      ...(file.height ? { height: String(file.height) } : {}),
-      url: fileUrl,
-    },
-  };
-  // stanza.js types don't include XEP-0447 fileSharing/fallback custom extensions
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
 }

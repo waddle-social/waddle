@@ -1,5 +1,6 @@
 import type { Agent } from "stanza";
 import type { ChatStateType } from "./types";
+import { fileSharingElement, type OutboundFileAttachment } from "./messaging";
 
 export function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state, processingHints: { noStore: true } });
@@ -43,50 +44,40 @@ export function sendDmCorrection(xmpp: Agent, peerJid: string, body: string, rep
   return msgId;
 }
 
-export function sendDirectMessage(xmpp: Agent, peerJid: string, body: string): string | null {
-  const text = body.trim();
-  if (!text) return null;
-  const msgId = crypto.randomUUID();
-  xmpp.sendMessage({
-    id: msgId,
-    to: peerJid,
-    type: "chat",
-    body: text,
-    receipt: { type: "request" },
-    marker: { type: "markable" },
-    processingHints: { store: true },
-  } as Record<string, unknown>);
-  return msgId;
-}
-
-/** XEP-0447: Send a file-sharing message in a DM. */
-export function sendDirectFileMessage(
+/**
+ * Send a direct (type="chat") message. Optionally includes XEP-0447 file-sharing
+ * attachments alongside the user's text body in a single stanza.
+ */
+export function sendDirectMessage(
   xmpp: Agent,
   peerJid: string,
-  fileUrl: string,
-  file: { name: string; mediaType: string; size: number; width?: number; height?: number },
-): string {
+  body: string,
+  files?: OutboundFileAttachment[],
+): string | null {
+  const text = body.trim();
+  const hasFiles = !!files && files.length > 0;
+  if (!text && !hasFiles) return null;
+
   const msgId = crypto.randomUUID();
-  xmpp.sendMessage({
+  const effectiveBody = text || (hasFiles ? files![0].url : "");
+
+  const msgData: Record<string, unknown> = {
     id: msgId,
     to: peerJid,
     type: "chat",
-    body: fileUrl,
-    links: [{ url: fileUrl }],
-    fallback: { for: "urn:xmpp:sfs:0", body: true },
+    body: effectiveBody,
     receipt: { type: "request" },
     marker: { type: "markable" },
     processingHints: { store: true },
-    fileSharing: {
-      disposition: "inline",
-      name: file.name,
-      mediaType: file.mediaType,
-      size: String(file.size),
-      ...(file.width ? { width: String(file.width) } : {}),
-      ...(file.height ? { height: String(file.height) } : {}),
-      url: fileUrl,
-    },
-  // stanza.js types don't include XEP-0447 fileSharing/fallback custom extensions
-  } as Record<string, unknown>);
+  };
+  if (hasFiles) {
+    msgData.fileSharing = files!.map(fileSharingElement);
+    msgData.links = files!.map((f) => ({ url: f.url }));
+    if (!text) {
+      msgData.fallback = { for: "urn:xmpp:sfs:0", body: true };
+    }
+  }
+
+  xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
 }
