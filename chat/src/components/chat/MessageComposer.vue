@@ -3,6 +3,7 @@ import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { Send, Image, X } from "lucide-vue-next";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import { searchEmoji } from "@/lib/emoji";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
 import { getComposerEscapeAction } from "@/lib/reply-ux";
@@ -54,6 +55,11 @@ const editorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editorRef.value = instance;
 };
+
+const tiptapEditor = computed(() => {
+  const e = editorRef.value as any;
+  return e?.editor?.value ?? e?.editor ?? null;
+});
 
 const pendingAttachments = ref<PendingAttachment[]>([]);
 
@@ -478,5 +484,6 @@ watch(
       <Send v-else class="w-4 h-4" aria-hidden="true" />
     </button>
     </div>
+    <EditorBubbleToolbar v-if="tiptapEditor" :editor="tiptapEditor" />
   </div>
 </template>
