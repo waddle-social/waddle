@@ -14,6 +14,7 @@ import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
 import LoginScreen from "@/components/chat/LoginScreen.vue";
 import WaddlesSidebar from "@/components/chat/WaddlesSidebar.vue";
+import VersionFooter from "@/components/chat/VersionFooter.vue";
 import TopicsPanel from "@/components/chat/TopicsPanel.vue";
 import DmPanel from "@/components/chat/DmPanel.vue";
 import ContentArea from "@/components/chat/ContentArea.vue";
@@ -650,8 +651,6 @@ onUnmounted(() => {
             :active-sidebar-mode="ui.sidebarMode.value"
             :has-unread-dms="dmConversations.hasUnread.value"
             :session="null"
-            :web-commit-sha="version.webCommitSha.value"
-            :server-version="version.serverVersion.value"
             horizontal
             @select-waddle="selectWaddle($event)"
             @toggle-dms="ui.sidebarMode.value = 'dms'"
@@ -692,6 +691,13 @@ onUnmounted(() => {
           @request-notifications="handleRequestNotifications"
           @toggle-notifications="handleToggleNotifications"
         />
+        <div class="mt-auto border-t border-border">
+          <VersionFooter
+            :web-commit-sha="version.webCommitSha.value"
+            :server-version="version.serverVersion.value"
+            layout="inline"
+          />
+        </div>
       </div>
     </AppDrawer>
 
