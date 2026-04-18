@@ -14,17 +14,19 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
-use jid::{BareJid, FullJid};
+use jid::{BareJid, FullJid, Jid};
 use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
+    commands::{CommandContext, CommandRegistry, CommandResult},
     connection::Stanza,
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
-        build_disco_items_response, parse_disco_info_query, parse_disco_items_query,
-        spaces_service_features, upload_service_features, DiscoItem, Feature, Identity,
+        build_disco_items_response, muc_room_features, parse_disco_info_query,
+        parse_disco_items_query, spaces_service_features, upload_service_features, DiscoItem,
+        Feature, Identity,
     },
     mam::{
         add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
@@ -32,8 +34,11 @@ use waddle_xmpp::{
     },
     muc::{MucRoomRegistry, Occupant, RoomConfig},
     registry::{ConnectionRegistry, OutboundStanza},
-    xep::{build_spaces_metadata_form, NS_REPLY},
-    Affiliation, Role, WaddleDetails,
+    xep::{
+        build_command_items, build_command_result, build_spaces_metadata_form,
+        parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS, NS_REPLY,
+    },
+    Affiliation, Role, StanzaErrorCondition, StanzaErrorType, WaddleDetails, XmppError,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
@@ -42,7 +47,7 @@ use waddle_extensions::{message_has_embed_for_namespaces, ExtensionManager};
 
 use super::auth::AuthState;
 use crate::auth::{localpart_to_jid, NativeUserStore, Session};
-use crate::server::routes::channels::list_channels_from_db;
+use crate::server::routes::channels::{get_channel_from_db, list_channels_from_db};
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
 };
@@ -65,6 +70,8 @@ pub struct WebSocketState {
     pub muc_registry: Arc<MucRoomRegistry>,
     /// Shared XMPP MAM storage for archived message history.
     pub mam_storage: Arc<LibSqlMamStorage>,
+    /// Registry for ad-hoc commands exposed over the WebSocket transport.
+    pub command_registry: Arc<CommandRegistry>,
     /// Runtime extension manager for message embeds + feature advertisements
     pub extension_manager: Arc<ExtensionManager>,
 }
@@ -909,19 +916,29 @@ async fn handle_muc_join(
     let room_data = match state.muc_registry.get_room_data(room_jid) {
         Some(data) => data,
         None => {
-            // Create the room if it doesn't exist
-            let config = RoomConfig {
-                name: room_jid
-                    .node()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "Room".to_string()),
-                members_only: false, // Allow anyone to join for now
-                ..Default::default()
-            };
+            let managed_channel = get_managed_channel_for_room(state, room_jid).await;
+            let config = managed_channel
+                .as_ref()
+                .map(|channel| RoomConfig {
+                    name: channel.name.clone(),
+                    description: channel.description.clone(),
+                    members_only: false,
+                    forum: channel.channel_type == "forum",
+                    ..Default::default()
+                })
+                .unwrap_or_else(|| RoomConfig {
+                    name: room_jid
+                        .node()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "Room".to_string()),
+                    members_only: false, // Allow anyone to join for now
+                    ..Default::default()
+                });
 
-            // Derive waddle_id and channel_id from the room JID node.
-            // Convention: node is "waddle_channel" (underscore-separated).
-            let (waddle_id, channel_id) = parse_room_jid_context(room_jid);
+            let (waddle_id, channel_id) = managed_channel
+                .as_ref()
+                .map(|channel| (channel.waddle_id.clone(), channel.id.clone()))
+                .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
             match state.muc_registry.get_or_create_room(
                 room_jid.clone(),
@@ -1161,6 +1178,11 @@ async fn handle_iq(
     // Disco info on MUC service
     if frame.contains("http://jabber.org/protocol/disco#info") {
         if let Some(request_iq) = parsed_iq.as_ref() {
+            let query = match parse_disco_info_query(request_iq) {
+                Ok(query) => query,
+                Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+            };
+
             if to.as_deref() == Some(muc_domain) {
                 let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
                 let mut features = vec![Feature::muc(), Feature::replies()];
@@ -1179,13 +1201,55 @@ async fn handle_iq(
             if let Some(target) = to.as_deref() {
                 let room_target = target.split('/').next().unwrap_or(target);
                 if let Ok(room_jid) = room_target.parse::<BareJid>() {
+                    if let Some(room_data) = state.muc_registry.get_room_data(&room_jid) {
+                        let room = room_data.read().await;
+                        let identities = vec![Identity::muc_room(Some(&room.config.name))];
+                        let mut features = muc_room_features(
+                            room.config.persistent,
+                            room.config.members_only,
+                            room.config.moderated,
+                            room.config.forum,
+                        );
+                        features.extend(
+                            state
+                                .extension_manager
+                                .extension_features()
+                                .into_iter()
+                                .map(|ns| Feature::new(&ns)),
+                        );
+                        let response =
+                            build_disco_info_response(request_iq, &identities, &features, None);
+                        return vec![iq_to_xml(response)];
+                    }
+
                     if muc_registry.is_muc_jid(&room_jid) {
+                        if let Some(channel) = get_managed_channel_for_room(state, &room_jid).await
+                        {
+                            let identities = vec![Identity::muc_room(Some(&channel.name))];
+                            let mut features = muc_room_features(
+                                true,
+                                false,
+                                false,
+                                channel.channel_type == "forum",
+                            );
+                            features.extend(
+                                state
+                                    .extension_manager
+                                    .extension_features()
+                                    .into_iter()
+                                    .map(|ns| Feature::new(&ns)),
+                            );
+                            let response =
+                                build_disco_info_response(request_iq, &identities, &features, None);
+                            return vec![iq_to_xml(response)];
+                        }
+
                         let room_name = room_jid
                             .node()
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "Room".to_string());
                         let identities = vec![Identity::muc_room(Some(&room_name))];
-                        let mut features = vec![Feature::muc(), Feature::mam(), Feature::replies()];
+                        let mut features = muc_room_features(false, false, false, false);
                         features.extend(
                             state
                                 .extension_manager
@@ -1200,13 +1264,24 @@ async fn handle_iq(
                 }
             }
 
+            if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
+                let identities = vec![Identity::automation(Some("Ad-Hoc Commands"))];
+                let features = vec![
+                    Feature::disco_info(),
+                    Feature::disco_items(),
+                    Feature::commands(),
+                ];
+                let response = build_disco_info_response(
+                    request_iq,
+                    &identities,
+                    &features,
+                    Some(NODE_COMMANDS),
+                );
+                return vec![iq_to_xml(response)];
+            }
+
             // Disco info on spaces service
             if to.as_deref() == Some(spaces_domain.as_str()) {
-                let query = match parse_disco_info_query(request_iq) {
-                    Ok(query) => query,
-                    Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
-                };
-
                 if let Some(node) = query.node.as_deref() {
                     let waddle = match get_waddle_by_id(state.app_state.db_pool.global(), node)
                         .await
@@ -1303,6 +1378,7 @@ async fn handle_iq(
                 Feature::replies(),
                 Feature::disco_info(),
                 Feature::disco_items(),
+                Feature::commands(),
                 Feature::spaces(),
             ];
             features.extend(
@@ -1322,6 +1398,11 @@ async fn handle_iq(
     // Disco items - list services/rooms
     if frame.contains("http://jabber.org/protocol/disco#items") {
         if let Some(request_iq) = parsed_iq.as_ref() {
+            let query = match parse_disco_items_query(request_iq) {
+                Ok(query) => query,
+                Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+            };
+
             if to.as_deref() == Some(muc_domain) {
                 debug!("Disco items query on MUC service");
                 let mut rooms = muc_registry.list_rooms();
@@ -1348,11 +1429,17 @@ async fn handle_iq(
                 return vec![iq_to_xml(response)];
             }
 
-            if to.as_deref() == Some(spaces_domain.as_str()) {
-                let Ok(query) = parse_disco_items_query(request_iq) else {
-                    return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-                };
+            if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
+                let commands = state.command_registry.list_commands().await;
+                let command_refs: Vec<(&str, &str)> = commands
+                    .iter()
+                    .map(|(node, name)| (node.as_str(), name.as_str()))
+                    .collect();
+                let response = build_command_items(request_iq, &command_refs, domain);
+                return vec![iq_to_xml(response)];
+            }
 
+            if to.as_deref() == Some(spaces_domain.as_str()) {
                 let global_db = state.app_state.db_pool.global();
                 let items: Vec<DiscoItem> = match query.node.as_deref() {
                     Some(node) => {
@@ -1490,6 +1577,12 @@ async fn handle_iq(
         }
 
         return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+    }
+
+    if let Some(request_iq) = parsed_iq.as_ref() {
+        if frame.contains("http://jabber.org/protocol/commands") {
+            return handle_command_iq(request_iq, state, authenticated_session, session_jid).await;
+        }
     }
 
     // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
@@ -2298,6 +2391,135 @@ fn parse_room_jid_context(room_jid: &jid::BareJid) -> (String, String) {
     ("default".to_string(), "default".to_string())
 }
 
+async fn get_managed_channel_for_room(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Option<crate::server::routes::channels::ChannelResponse> {
+    let (waddle_id, channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid)?;
+    let waddle_db = state
+        .app_state
+        .db_pool
+        .get_waddle_db(&waddle_id)
+        .await
+        .ok()?;
+    get_channel_from_db(&waddle_db, &waddle_id, &channel_id)
+        .await
+        .ok()
+        .flatten()
+}
+
+fn build_xmpp_error_response(request_iq: &xmpp_parsers::iq::Iq, err: XmppError) -> String {
+    match err {
+        XmppError::Stanza {
+            condition,
+            error_type,
+            text,
+        } => waddle_xmpp::generate_iq_error(
+            &request_iq.id,
+            request_iq
+                .from
+                .as_ref()
+                .map(|jid| jid.to_string())
+                .as_deref(),
+            request_iq.to.as_ref().map(|jid| jid.to_string()).as_deref(),
+            condition,
+            error_type,
+            text.as_deref(),
+        ),
+        other => waddle_xmpp::generate_iq_error(
+            &request_iq.id,
+            request_iq
+                .from
+                .as_ref()
+                .map(|jid| jid.to_string())
+                .as_deref(),
+            request_iq.to.as_ref().map(|jid| jid.to_string()).as_deref(),
+            StanzaErrorCondition::InternalServerError,
+            StanzaErrorType::Wait,
+            Some(&other.to_string()),
+        ),
+    }
+}
+
+async fn handle_command_iq(
+    request_iq: &xmpp_parsers::iq::Iq,
+    state: &WebSocketState,
+    authenticated_session: &Option<Session>,
+    session_jid: &Option<FullJid>,
+) -> Vec<String> {
+    let sender_jid: Jid = match request_iq
+        .from
+        .clone()
+        .or_else(|| session_jid.as_ref().map(|jid| jid.clone().into()))
+    {
+        Some(jid) => jid,
+        None => {
+            return vec![build_xmpp_error_response(
+                request_iq,
+                XmppError::not_authorized(Some("Authenticated session required".to_string())),
+            )];
+        }
+    };
+
+    let command = match parse_command_from_iq(request_iq) {
+        Ok(command) => command,
+        Err(err) => {
+            return vec![build_xmpp_error_response(
+                request_iq,
+                XmppError::bad_request(Some(format!("Invalid command request: {err}"))),
+            )];
+        }
+    };
+
+    let node = command.node.clone();
+    let session_id = command.session_id.clone();
+    let ctx = CommandContext {
+        from: sender_jid,
+        authenticated_user_id: authenticated_session
+            .as_ref()
+            .map(|session| session.user_id.clone()),
+        iq: request_iq.clone(),
+        command,
+    };
+
+    let result = state.command_registry.dispatch(ctx).await;
+    let response_command = match result {
+        CommandResult::Executing {
+            form,
+            session_id,
+            notes,
+        } => {
+            let mut command = Command::new(node.clone());
+            command.status = Some(CommandStatus::Executing);
+            command.session_id = Some(session_id);
+            command.form = Some(form);
+            command.notes = notes;
+            command
+        }
+        CommandResult::Completed { form, notes } => {
+            let mut command = Command::new(node.clone());
+            command.status = Some(CommandStatus::Completed);
+            command.session_id = session_id;
+            command.form = form;
+            command.notes = notes;
+            command
+        }
+        CommandResult::Canceled { notes } => {
+            let mut command = Command::new(node.clone());
+            command.status = Some(CommandStatus::Canceled);
+            command.session_id = session_id;
+            command.notes = notes;
+            command
+        }
+        CommandResult::Error(err) => return vec![build_xmpp_error_response(request_iq, err)],
+    };
+
+    vec![iq_to_xml(build_command_result(
+        request_iq,
+        &response_command,
+    ))]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2338,6 +2560,7 @@ mod tests {
             connection_registry: Arc::new(ConnectionRegistry::new()),
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
             mam_storage,
+            command_registry: Arc::new(CommandRegistry::new()),
             extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
         })
     }
@@ -2772,6 +2995,55 @@ mod tests {
         assert!(
             responses.is_empty(),
             "IQ error should produce no response, got: {responses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_iq_command_request_routes_to_registry() {
+        let state = create_test_websocket_state().await;
+        state
+            .command_registry
+            .register(
+                "waddle:create-channel",
+                "Create Channel",
+                |ctx: CommandContext| async move {
+                    CommandResult::Executing {
+                        form: waddle_xmpp::xep::xep0004::DataForm::new(
+                            waddle_xmpp::xep::xep0004::FormType::Form,
+                        ),
+                        session_id: ctx.command.session_id.unwrap_or_default(),
+                        notes: vec![],
+                    }
+                },
+            )
+            .await;
+
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let frame = r#"<iq xmlns="jabber:client" id="cmd-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="waddle:create-channel" action="execute"/></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(session),
+            &Some(sender_jid),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let response = responses.first().expect("command response");
+        assert!(
+            response.contains("status=\"executing\"") || response.contains("status='executing'"),
+            "expected executing command response, got: {response}"
+        );
+        assert!(
+            response.contains("sessionid=\"") || response.contains("sessionid='"),
+            "expected command session ID in response, got: {response}"
+        );
+        assert!(
+            !response.contains("feature-not-implemented"),
+            "command IQ should not fall through to unhandled feature-not-implemented: {response}"
         );
     }
 
