@@ -877,7 +877,8 @@ final class AppModel: ObservableObject {
             isRetracted: false,
             replyToID: event.replyToID,
             replyToSenderName: replyToSenderName,
-            replyToBody: replyToBody
+            replyToBody: replyToBody,
+            markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans
         )
     }
 

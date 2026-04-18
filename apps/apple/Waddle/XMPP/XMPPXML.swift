@@ -268,6 +268,7 @@ enum XMPPXML {
         let replyElement = element.firstChild(named: "reply")
         let rawBody = element.firstChild(named: "body")?.text
         let strippedBody = stripReplyFallbackBody(rawBody, from: element)
+        let markupSpans = parseMarkupSpans(from: element, strippedBody: strippedBody, rawBody: rawBody)
         return XMPPMessageEvent(
             from: element.attribute("from"),
             to: element.attribute("to"),
@@ -284,8 +285,43 @@ enum XMPPXML {
             reactionTargetID: reactionElement?.attribute("id"),
             reactionEmojis: reactionElement?.children(named: "reaction").map(\.text).filter { !$0.isEmpty } ?? [],
             replyToID: replyElement?.attribute("id"),
-            replyToSender: replyElement?.attribute("to")
+            replyToSender: replyElement?.attribute("to"),
+            markupSpans: markupSpans
         )
+    }
+
+    private static func parseMarkupSpans(from element: XMPPElement, strippedBody: String?, rawBody: String?) -> [XMPPMarkupSpan] {
+        guard let markup = element.firstChild(named: "markup") else { return [] }
+        let fallbackOffset = replyFallbackOffset(from: element, rawBody: rawBody)
+        var spans: [XMPPMarkupSpan] = []
+        for child in markup.children {
+            guard let spanType = XMPPMarkupSpan.SpanType(rawValue: child.localName) else { continue }
+            guard let startStr = child.attribute("start"), let start = Int(startStr),
+                  let endStr = child.attribute("end"), let end = Int(endStr),
+                  start >= 0, end > start else { continue }
+            let adjustedStart = max(0, start - fallbackOffset)
+            let adjustedEnd = max(0, end - fallbackOffset)
+            guard adjustedEnd > adjustedStart else { continue }
+            spans.append(XMPPMarkupSpan(
+                type: spanType,
+                start: adjustedStart,
+                end: adjustedEnd,
+                uri: child.attribute("uri")
+            ))
+        }
+        return spans
+    }
+
+    private static func replyFallbackOffset(from element: XMPPElement, rawBody: String?) -> Int {
+        guard let rawBody else { return 0 }
+        for fallback in element.children(named: "fallback") {
+            guard fallback.attribute("for") == "urn:xmpp:reply:0" else { continue }
+            guard let bodyRange = fallback.firstChild(named: "body") else { continue }
+            let end = Int(bodyRange.attribute("end") ?? "0") ?? 0
+            guard end > 0, end <= rawBody.utf16.count else { continue }
+            return end
+        }
+        return 0
     }
 
     private static func stripReplyFallbackBody(_ body: String?, from element: XMPPElement) -> String? {

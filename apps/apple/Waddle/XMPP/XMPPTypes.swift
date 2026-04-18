@@ -79,6 +79,23 @@ struct XMPPStreamFeatures: Sendable, Equatable {
     }
 }
 
+struct XMPPMarkupSpan: Sendable, Equatable, Hashable {
+    enum SpanType: String, Sendable, Equatable, Hashable {
+        case bold = "b"
+        case italic = "i"
+        case strikethrough = "s"
+        case code = "code"
+        case codeBlock = "code-block"
+        case blockquote = "blockquote"
+        case link = "link"
+    }
+
+    let type: SpanType
+    let start: Int
+    let end: Int
+    let uri: String?
+}
+
 struct XMPPMessageEvent: Sendable, Equatable {
     let from: String?
     let to: String?
@@ -95,6 +112,7 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let reactionEmojis: [String]
     let replyToID: String?
     let replyToSender: String?
+    let markupSpans: [XMPPMarkupSpan]
 }
 
 struct XMPPPresenceEvent: Sendable, Equatable {

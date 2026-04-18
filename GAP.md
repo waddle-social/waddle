@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-18 (loop 1)
+> Last updated: 2026-04-19 (loop 2)
 
 ## Legend
 
@@ -23,7 +23,7 @@
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 1.1 | Message replies (quote-reply) | CRITICAL | [x] | XEP-0461, XEP-0428 | Reply stanza construction/parsing, fallback stripping, reply indicator UI, context menu reply action, composer reply preview |
-| 1.2 | Rich text markup (bold, italic, code, etc.) | CRITICAL | [ ] | XEP-0394 | Web uses TipTap editor with offset-based spans |
+| 1.2 | Rich text markup (bold, italic, code, etc.) | CRITICAL | [x] | XEP-0394 | Parse markup spans from stanzas, render with AttributedString (bold, italic, strikethrough, code, links), rebase offsets for reply fallback |
 | 1.3 | @mentions with autocomplete | CRITICAL | [ ] | XEP-0372 | Web has inline autocomplete in editor |
 | 1.4 | Broadcast mentions (@everyone, @here) | HIGH | [ ] | XEP-0513 | Web supports both broadcast types |
 | 1.5 | Read receipts / chat markers | HIGH | [ ] | XEP-0333 | Web sends `<displayed/>` markers |

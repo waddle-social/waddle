@@ -479,7 +479,7 @@ struct ChatMessageRowView: View {
                     .italic()
                     .foregroundStyle(.secondary)
             } else {
-                Text(message.body)
+                Text(message.styledBody)
                     .font(.body)
                     .lineSpacing(usesOperationalLayout ? 3 : 0)
                     .multilineTextAlignment(message.isOutgoing ? .trailing : .leading)
@@ -565,7 +565,7 @@ struct ChatMessageRowView: View {
                     .italic()
                     .foregroundStyle(.secondary)
             } else {
-                Text(message.body)
+                Text(message.styledBody)
                     .font(.subheadline)
                     .foregroundStyle(.primary)
                     .lineSpacing(3)

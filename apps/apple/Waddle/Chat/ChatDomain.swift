@@ -85,6 +85,7 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var replyToID: String?
     var replyToSenderName: String?
     var replyToBody: String?
+    var markupSpans: [XMPPMarkupSpan]?
 }
 
 struct ChatRoomHistoryState: Hashable {
@@ -199,6 +200,48 @@ struct ChatRoomHistoryPage {
 }
 
 extension ChatTimelineMessage {
+    var styledBody: AttributedString {
+        guard let spans = markupSpans, !spans.isEmpty, !body.isEmpty else {
+            return AttributedString(body)
+        }
+
+        var attributed = AttributedString(body)
+        let utf8View = body.utf8
+
+        for span in spans {
+            guard span.start >= 0, span.end <= utf8View.count, span.start < span.end else { continue }
+            guard let startIndex = body.utf8.index(body.startIndex, offsetBy: span.start, limitedBy: body.endIndex),
+                  let endIndex = body.utf8.index(body.startIndex, offsetBy: span.end, limitedBy: body.endIndex) else {
+                continue
+            }
+            let startAttr = AttributedString.Index(startIndex, within: attributed)
+            let endAttr = AttributedString.Index(endIndex, within: attributed)
+            guard let startAttr, let endAttr, startAttr < endAttr else { continue }
+
+            switch span.type {
+            case .bold:
+                attributed[startAttr..<endAttr].inlinePresentationIntent = .stronglyEmphasized
+            case .italic:
+                attributed[startAttr..<endAttr].inlinePresentationIntent = .emphasized
+            case .strikethrough:
+                attributed[startAttr..<endAttr].strikethroughStyle = .single
+            case .code:
+                attributed[startAttr..<endAttr].inlinePresentationIntent = .code
+                attributed[startAttr..<endAttr].backgroundColor = .secondary.opacity(0.12)
+            case .codeBlock:
+                attributed[startAttr..<endAttr].inlinePresentationIntent = .code
+                attributed[startAttr..<endAttr].backgroundColor = .secondary.opacity(0.12)
+            case .blockquote:
+                attributed[startAttr..<endAttr].inlinePresentationIntent = .emphasized
+            case .link:
+                if let uri = span.uri, let url = URL(string: uri) {
+                    attributed[startAttr..<endAttr].link = url
+                }
+            }
+        }
+        return attributed
+    }
+
     var timelineSortDate: Date {
         editedAt ?? sentAt
     }
@@ -249,7 +292,8 @@ extension ChatTimelineMessage {
             isRetracted: isRetracted,
             replyToID: other.replyToID ?? replyToID,
             replyToSenderName: other.replyToSenderName ?? replyToSenderName,
-            replyToBody: other.replyToBody ?? replyToBody
+            replyToBody: other.replyToBody ?? replyToBody,
+            markupSpans: other.markupSpans ?? markupSpans
         )
     }
 
