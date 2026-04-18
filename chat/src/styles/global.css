@@ -151,6 +151,17 @@
   button, input, textarea, select {
     font: inherit;
   }
+  /* Prevent iOS Safari from zooming when focusing editable elements.
+     Mobile WebKit auto-zooms inputs whose computed font-size is below 16px. */
+  @media (max-width: 1023px) {
+    input,
+    textarea,
+    select,
+    [contenteditable="true"],
+    [contenteditable="true"] * {
+      font-size: 16px;
+    }
+  }
 }
 
 /* Ambient gradient mesh background */
