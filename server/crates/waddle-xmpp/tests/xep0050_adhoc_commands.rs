@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0050_server_disco_advertises_commands() {
+async fn xep0050_server_disco_does_not_advertise_commands() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -23,14 +23,14 @@ async fn xep0050_server_disco_advertises_commands() {
         .expect("disco response");
 
     assert!(
-        response.contains("http://jabber.org/protocol/commands"),
-        "Expected commands feature, got: {}",
+        !response.contains("http://jabber.org/protocol/commands"),
+        "Server should not advertise commands without runtime support, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0050_commands_disco_items_lists_available_commands() {
+async fn xep0050_commands_disco_items_returns_service_unavailable() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -53,14 +53,19 @@ async fn xep0050_commands_disco_items_lists_available_commands() {
         .expect("response");
 
     assert!(
-        response.contains("type='result'") || response.contains("type=\"result\""),
-        "Expected result IQ, got: {}",
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable for unsupported commands node, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0050_execute_unknown_command_returns_item_not_found() {
+async fn xep0050_execute_unknown_command_returns_service_unavailable() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -87,10 +92,9 @@ async fn xep0050_execute_unknown_command_returns_item_not_found() {
         "Expected error for unknown command, got: {}",
         response
     );
-    // Server may return item-not-found or service-unavailable
     assert!(
-        response.contains("item-not-found") || response.contains("service-unavailable"),
-        "Expected item-not-found or service-unavailable, got: {}",
+        response.contains("service-unavailable"),
+        "Expected service-unavailable, got: {}",
         response
     );
 }

@@ -76,6 +76,7 @@ use crate::xep::xep0049::{
     build_private_storage_result, build_private_storage_success, is_private_storage_query,
     parse_private_storage_get, parse_private_storage_set,
 };
+use crate::xep::xep0050::NODE_COMMANDS;
 use crate::xep::xep0054::{
     build_empty_vcard_response, build_vcard_success, is_vcard_get, is_vcard_set,
 };
@@ -85,6 +86,7 @@ use crate::xep::xep0191::{
     build_unblock_push, is_blocking_query, parse_blocking_request, BlockingRequest,
 };
 use crate::xep::xep0199::{build_ping_result, is_ping};
+use crate::xep::xep0202::{build_time_response_utc, is_time_query};
 use crate::xep::xep0249::{parse_direct_invite_from_message, DirectInvite};
 use crate::xep::xep0357::{
     build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
@@ -3729,6 +3731,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return self.handle_last_activity(iq).await;
         }
 
+        // Check if this is an entity time query (XEP-0202)
+        if is_time_query(&iq) {
+            return self.handle_time_query(iq).await;
+        }
+
         // Check if this is an ISR token refresh request (XEP-0397)
         if is_isr_token_request(&iq) {
             return self.handle_isr_token_request(iq).await;
@@ -3898,6 +3905,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Determine what entity is being queried
         let (identities, features, extensions) = match query.target.as_deref() {
+            Some(target)
+                if target == self.domain && query.node.as_deref() == Some(NODE_COMMANDS) =>
+            {
+                return Err(XmppError::service_unavailable(Some(format!(
+                    "Ad-hoc commands node {} is not supported",
+                    NODE_COMMANDS
+                ))));
+            }
             // Query to server domain
             Some(target) if target == self.domain => {
                 debug!(domain = %self.domain, "disco#info query to server domain");
@@ -4102,13 +4117,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 )
             }
             // No target or unknown target - default to server
-            None | Some(_) => {
-                debug!(target = ?query.target, "disco#info query (defaulting to server)");
+            None => {
+                debug!("disco#info query to implicit server target");
                 (
                     vec![Identity::server(Some("Waddle XMPP Server"))],
                     merge_extension_features(server_features(), &extension_features),
                     vec![build_server_info_abuse_form(&self.domain)],
                 )
+            }
+            Some(target) => {
+                return Err(XmppError::service_unavailable(Some(format!(
+                    "Unsupported disco#info target {}",
+                    target
+                ))));
             }
         };
 
@@ -4146,6 +4167,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Determine what entity is being queried
         let items = match query.target.as_deref() {
+            Some(target)
+                if target == self.domain && query.node.as_deref() == Some(NODE_COMMANDS) =>
+            {
+                return Err(XmppError::service_unavailable(Some(format!(
+                    "Ad-hoc commands node {} is not supported",
+                    NODE_COMMANDS
+                ))));
+            }
             // Query to server domain - return all service components
             Some(target) if target == self.domain => {
                 debug!(domain = %self.domain, "disco#items query to server domain");
@@ -4207,15 +4236,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     vec![]
                 }
             }
-            // No target or unknown target - default to server services
-            None | Some(_) => {
-                debug!(target = ?query.target, "disco#items query (defaulting to server)");
+            // No target - default to server services
+            None => {
+                debug!("disco#items query to implicit server target");
                 vec![
                     DiscoItem::muc_service(muc_domain, Some("Multi-User Chat")),
                     DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
                     DiscoItem::pubsub_service(&pubsub_domain, Some("Publish-Subscribe")),
                     DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
                 ]
+            }
+            Some(target) => {
+                return Err(XmppError::service_unavailable(Some(format!(
+                    "Unsupported disco#items target {}",
+                    target
+                ))));
             }
         };
 
@@ -4529,6 +4564,24 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             None,
         );
         self.stream.write_raw(&error).await?;
+        Ok(())
+    }
+
+    /// Handle XEP-0202 entity time queries.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_time_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        if let Some(to) = &iq.to {
+            let target = to.to_bare().to_string();
+            if target != self.domain {
+                return Err(XmppError::service_unavailable(Some(format!(
+                    "Entity time is only available on {}",
+                    self.domain
+                ))));
+            }
+        }
+
+        let response = build_time_response_utc(&iq);
+        self.stream.write_stanza(&Stanza::Iq(response)).await?;
         Ok(())
     }
 

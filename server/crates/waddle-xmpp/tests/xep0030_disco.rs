@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    disco_info_query, establish_bound_session, init_test_env, join_muc_room, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    disco_info_query, establish_bound_session, init_test_env, RawXmppClient, TestServer,
+    DEFAULT_TIMEOUT,
 };
 
 // =========================================================================
@@ -141,7 +141,7 @@ async fn xep0030_muc_disco_info_returns_conference_identity() {
 // =========================================================================
 
 #[tokio::test]
-async fn xep0030_disco_info_to_unknown_host_returns_response() {
+async fn xep0030_disco_info_to_unknown_host_returns_service_unavailable() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -153,13 +153,14 @@ async fn xep0030_disco_info_to_unknown_host_returns_response() {
         .await
         .expect("disco response");
 
-    // Server may fall back to own disco for unknown subdomains
     assert!(
-        response.contains("type='result'")
-            || response.contains("type=\"result\"")
-            || response.contains("type='error'")
-            || response.contains("type=\"error\""),
-        "Expected result or error for unknown component, got: {}",
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error for unknown component, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable for unknown component, got: {}",
         response
     );
 }

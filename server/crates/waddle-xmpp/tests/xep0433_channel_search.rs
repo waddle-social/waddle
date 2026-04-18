@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0433_muc_service_disco_returns_result() {
+async fn xep0433_muc_service_does_not_advertise_channel_search() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -28,14 +28,14 @@ async fn xep0433_muc_service_disco_returns_result() {
         response
     );
     assert!(
-        response.contains("http://jabber.org/protocol/muc"),
-        "Expected MUC feature, got: {}",
+        !response.contains("urn:xmpp:channel-search:0"),
+        "MUC service should not advertise XEP-0433 before runtime support exists, got: {}",
         response
     );
 }
 
 #[tokio::test]
-async fn xep0433_search_request_to_muc_returns_response() {
+async fn xep0433_search_request_to_muc_returns_service_unavailable() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -48,12 +48,11 @@ async fn xep0433_search_request_to_muc_returns_response() {
         .await
         .expect("join room");
 
-    // Search for rooms (server may or may not support XEP-0433 IQ)
     client
         .send(
             "<iq type='get' id='search-1' to='muc.localhost' xmlns='jabber:client'>\
                 <search xmlns='urn:xmpp:channel-search:0'>\
-                    <q>searchable</q>\
+                    <query>searchable</query>\
                 </search>\
             </iq>",
         )
@@ -64,13 +63,14 @@ async fn xep0433_search_request_to_muc_returns_response() {
         .await
         .expect("response");
 
-    // Must respond (result or error)
     assert!(
-        response.contains("type='result'")
-            || response.contains("type=\"result\"")
-            || response.contains("type='error'")
-            || response.contains("type=\"error\""),
-        "Expected result or error IQ, got: {}",
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error IQ, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable for unsupported search, got: {}",
         response
     );
 }

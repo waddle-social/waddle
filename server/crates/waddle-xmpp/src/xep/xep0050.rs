@@ -19,11 +19,12 @@
 //!    client fills and submits. This repeats until the server sets status
 //!    `completed` or `canceled`.
 //!
-//! ## Service Discovery
+//! ## Runtime Status
 //!
-//! Advertises `http://jabber.org/protocol/commands` as a feature in disco#info.
-//! The automation category identity `(automation, command-list)` is used for the
-//! commands node; individual commands use `(automation, command-node)`.
+//! This module provides parser/builder helpers for XEP-0050 payloads.
+//! The server runtime does not currently advertise or dispatch ad-hoc commands.
+//! Unsupported command requests therefore receive the normal
+//! `<service-unavailable/>` IQ error path instead.
 
 use std::fmt;
 use std::str::FromStr;

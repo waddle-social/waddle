@@ -10,7 +10,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn xep0488_invite_request_to_muc_returns_response() {
+async fn xep0488_invite_request_to_muc_returns_service_unavailable() {
     init_test_env();
     let server = TestServer::start().await;
     let mut client = RawXmppClient::connect(server.addr).await.expect("connect");
@@ -26,7 +26,7 @@ async fn xep0488_invite_request_to_muc_returns_response() {
     // Request invite token
     client
         .send(
-            "<iq type='get' id='invite-req-1' to='invroom@muc.localhost' xmlns='jabber:client'>\
+            "<iq type='set' id='invite-req-1' to='invroom@muc.localhost' xmlns='jabber:client'>\
                 <request xmlns='urn:xmpp:muc-token-invite:0'/>\
             </iq>",
         )
@@ -37,13 +37,14 @@ async fn xep0488_invite_request_to_muc_returns_response() {
         .await
         .expect("response");
 
-    // Server should respond with result (token) or error
     assert!(
-        response.contains("type='result'")
-            || response.contains("type=\"result\"")
-            || response.contains("type='error'")
-            || response.contains("type=\"error\""),
-        "Expected result or error for invite request, got: {}",
+        response.contains("type='error'") || response.contains("type=\"error\""),
+        "Expected error for unsupported invite request, got: {}",
+        response
+    );
+    assert!(
+        response.contains("service-unavailable"),
+        "Expected service-unavailable for unsupported invite request, got: {}",
         response
     );
 }
@@ -69,6 +70,9 @@ async fn xep0488_invite_share_in_message() {
         .await
         .expect("bob join");
 
+    alice.clear();
+    bob.clear();
+
     // Alice shares invite token in groupchat
     alice
         .send(
@@ -88,5 +92,15 @@ async fn xep0488_invite_share_in_message() {
     assert!(
         bob_response.contains("Join us!"),
         "Bob should receive invite share message"
+    );
+    assert!(
+        bob_response.contains("urn:xmpp:muc-token-invite:0"),
+        "Invite namespace should be preserved, got: {}",
+        bob_response
+    );
+    assert!(
+        bob_response.contains("token='token123'") || bob_response.contains("token=\"token123\""),
+        "Invite token should be preserved, got: {}",
+        bob_response
     );
 }
