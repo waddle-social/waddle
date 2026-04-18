@@ -84,6 +84,32 @@ describe("groupchat replies + threads", () => {
     expect(call.fallbacks).toBeUndefined();
   });
 
+  test("original messages self-identify as their own thread root (XEP-0201)", () => {
+    // Per XEP-0201, every message SHOULD carry <thread>. Originals use their
+    // own msgId so MAM-by-thread can retrieve the whole conversation — root
+    // included — and the index can detect "this starts a thread" from the
+    // stanza alone.
+    const xmpp = makeAgent();
+
+    const messageId = sendGroupMessage(xmpp, "general@muc.waddle.social", "starting a topic");
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.thread).toBe(messageId);
+    expect(call.parentThread).toBeUndefined();
+  });
+
+  test("explicit threadId overrides the default self-thread id", () => {
+    const xmpp = makeAgent();
+
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "reply body", {
+      replyTo: { id: "root-1", author: "general@muc.waddle.social/alice" },
+      threadId: "root-1",
+    });
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.thread).toBe("root-1");
+  });
+
   test("rebases rich markup spans when a reply fallback prefix is prepended", () => {
     const xmpp = makeAgent();
     const body = "bold code link";

@@ -6,11 +6,17 @@ import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
-import type { ThreadIndex } from "@/composables/useThreads";
+import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
 
 const props = defineProps<{
   threadStack: string[];
   threadIndex: ThreadIndex;
+  /**
+   * Resolves a thread entry, synthesising an empty one when the id points
+   * at a known message with no replies yet (e.g. a freshly-started
+   * sub-thread). Returns undefined when the root hasn't been loaded.
+   */
+  resolveEntry: (threadId: string) => ThreadEntry | undefined;
   currentUser?: string;
   avatarUrlByAuthor: Record<string, string | null>;
   authorJidByNick?: Record<string, string>;
@@ -50,7 +56,7 @@ const parentThreadId = computed(() =>
   props.threadStack.length >= 2 ? props.threadStack[props.threadStack.length - 2] : undefined,
 );
 const activeEntry = computed(() =>
-  activeThreadId.value ? props.threadIndex.get(activeThreadId.value) ?? null : null,
+  activeThreadId.value ? props.resolveEntry(activeThreadId.value) ?? null : null,
 );
 
 const draft = ref("");
@@ -78,7 +84,7 @@ watch(activeThreadId, () => {
 
 const breadcrumbLabels = computed(() =>
   props.threadStack.map((id) => {
-    const entry = props.threadIndex.get(id);
+    const entry = props.resolveEntry(id);
     const body = entry?.root?.body?.trim() ?? "";
     return body.length > 0 ? body.slice(0, 40) : id.slice(0, 8);
   }),

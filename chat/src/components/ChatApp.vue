@@ -303,6 +303,14 @@ async function sendActiveMessage(
     return;
   }
   await messaging.sendMessage(body, markup, files, replyTo);
+  // A reply inherits the parent's thread and is then filtered out of the
+  // main feed (only roots stay). Open the thread panel so the user actually
+  // sees their reply land somewhere.
+  if (replyTo) {
+    const parent = messaging.messages.value.find((m) => m.id === replyTo.id);
+    const threadId = parent?.threadId ?? replyTo.id;
+    if (threadId) openThread(threadId);
+  }
 }
 
 async function sendThreadMessage(
@@ -929,6 +937,7 @@ onUnmounted(() => {
         v-if="ui.sidebarMode.value === 'channels'"
         :thread-stack="activeThreadStack"
         :thread-index="threads.index.value"
+        :resolve-entry="threads.resolveEntry"
         :current-user="connectionStore.session?.username"
         :avatar-url-by-author="avatarUrlByAuthor"
         :author-jid-by-nick="memberJidByNick"

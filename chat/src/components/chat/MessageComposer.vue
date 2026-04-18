@@ -27,6 +27,8 @@ const props = defineProps<{
   slowModeCooldown: number;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   replyingTo?: { id: string; author: string; preview?: string } | null;
+  /** True in channel mode, where a reply auto-joins its parent's thread. */
+  replyJoinsThread?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -301,17 +303,20 @@ watch(
 
 <template>
   <div class="relative px-4 py-3 flex-shrink-0" @keydown="onKeydown" @paste="onPaste">
-    <!-- Reply context chip -->
+    <!-- Reply context chip. In channel mode every reply joins a thread, so we
+         tell the user their message will show up in the thread panel. -->
     <div
       v-if="replyingTo"
-      class="flex items-center gap-2 px-3 py-1.5 mb-2 rounded-xl bg-muted/70 border border-border text-[12px] animate-fade-in"
+      class="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5 mb-2 rounded-xl bg-muted/70 border border-border text-[12px] animate-fade-in"
     >
       <span class="text-muted-foreground">Replying to</span>
       <span class="font-medium text-primary/90">@{{ replyAuthorName }}</span>
-      <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
+      <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1 min-w-0">{{ replyingTo.preview }}</span>
+      <span v-if="replyJoinsThread" class="text-[11px] text-primary/70 ml-auto">in thread</span>
       <button
         type="button"
-        class="ml-auto h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        class="h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        :class="{ 'ml-auto': !replyJoinsThread }"
         title="Cancel reply"
         aria-label="Cancel reply"
         @click="emit('cancelReply')"
