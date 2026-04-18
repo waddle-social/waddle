@@ -455,6 +455,8 @@ struct WaddleChatWorkspaceView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+                ChatTypingIndicatorView(typingUsers: store.typingUsers)
+
                 Divider()
                     .padding(.horizontal, 12)
 
@@ -469,6 +471,7 @@ struct WaddleChatWorkspaceView: View {
                 ) {
                     Task { await store.sendComposerMessage() }
                 }
+                .onChange(of: store.composerText) { _, _ in model.notifyComposing() }
                 .padding(12)
             }
         }
@@ -507,6 +510,8 @@ struct WaddleChatWorkspaceView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+                    ChatTypingIndicatorView(typingUsers: store.typingUsers)
+
                     Divider()
 
                     ChatComposerView(
@@ -521,6 +526,7 @@ struct WaddleChatWorkspaceView: View {
                     ) {
                         Task { await store.sendComposerMessage() }
                     }
+                    .onChange(of: store.composerText) { _, _ in model.notifyComposing() }
                 }
             )
         }

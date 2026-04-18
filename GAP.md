@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 2)
+> Last updated: 2026-04-19 (loop 2, items 1.2/1.5/1.6)
 
 ## Legend
 
@@ -26,8 +26,8 @@
 | 1.2 | Rich text markup (bold, italic, code, etc.) | CRITICAL | [x] | XEP-0394 | Parse markup spans from stanzas, render with AttributedString (bold, italic, strikethrough, code, links), rebase offsets for reply fallback |
 | 1.3 | @mentions with autocomplete | CRITICAL | [ ] | XEP-0372 | Web has inline autocomplete in editor |
 | 1.4 | Broadcast mentions (@everyone, @here) | HIGH | [ ] | XEP-0513 | Web supports both broadcast types |
-| 1.5 | Read receipts / chat markers | HIGH | [ ] | XEP-0333 | Web sends `<displayed/>` markers |
-| 1.6 | Typing indicators (chat state) | HIGH | [ ] | XEP-0085 | Web shows composing/paused per user per room |
+| 1.5 | Read receipts / chat markers | HIGH | [x] | XEP-0333 | Send displayed markers for incoming messages, parse displayed marker stanzas |
+| 1.6 | Typing indicators (chat state) | HIGH | [x] | XEP-0085 | Send composing/paused on text input, parse incoming chat state, typing indicator UI with auto-expiry |
 | 1.7 | Message moderation (admin retract) | MEDIUM | [ ] | XEP-0425 | Web supports moderation with reason field |
 | 1.8 | Delivery status echo matching | LOW | [~] | - | Apple has states but web has body-fallback matching + pendingEcho tracking |
 

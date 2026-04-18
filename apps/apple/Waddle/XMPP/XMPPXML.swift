@@ -124,6 +124,14 @@ enum XMPPXML {
         "<presence to='\(escape(roomJID))/\(escape(nick))'><x xmlns='http://jabber.org/protocol/muc'/></presence>"
     }
 
+    static func chatStateMessage(to roomJID: String, state: String) -> String {
+        "<message to='\(escape(roomJID))' type='groupchat'><\(escape(state)) xmlns='http://jabber.org/protocol/chatstates'/></message>"
+    }
+
+    static func displayedMarker(to roomJID: String, messageID: String) -> String {
+        "<message to='\(escape(roomJID))' type='groupchat'><displayed xmlns='urn:xmpp:chat-markers:0' id='\(escape(messageID))'/></message>"
+    }
+
     static func groupchatMessage(to roomJID: String, body: String, thread: String? = nil) -> String {
         var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
         payload += "<body>\(escape(body))</body>"
@@ -269,6 +277,8 @@ enum XMPPXML {
         let rawBody = element.firstChild(named: "body")?.text
         let strippedBody = stripReplyFallbackBody(rawBody, from: element)
         let markupSpans = parseMarkupSpans(from: element, strippedBody: strippedBody, rawBody: rawBody)
+        let chatState = parseChatState(from: element)
+        let displayedMarkerID = element.firstChild(named: "displayed")?.attribute("id")
         return XMPPMessageEvent(
             from: element.attribute("from"),
             to: element.attribute("to"),
@@ -286,8 +296,20 @@ enum XMPPXML {
             reactionEmojis: reactionElement?.children(named: "reaction").map(\.text).filter { !$0.isEmpty } ?? [],
             replyToID: replyElement?.attribute("id"),
             replyToSender: replyElement?.attribute("to"),
-            markupSpans: markupSpans
+            markupSpans: markupSpans,
+            chatState: chatState,
+            displayedMarkerID: displayedMarkerID
         )
+    }
+
+    private static func parseChatState(from element: XMPPElement) -> String? {
+        let chatStates: Set<String> = ["active", "composing", "paused", "inactive", "gone"]
+        for child in element.children {
+            if chatStates.contains(child.localName) {
+                return child.localName
+            }
+        }
+        return nil
     }
 
     private static func parseMarkupSpans(from element: XMPPElement, strippedBody: String?, rawBody: String?) -> [XMPPMarkupSpan] {

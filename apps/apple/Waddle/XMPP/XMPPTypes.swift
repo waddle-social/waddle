@@ -113,6 +113,8 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let replyToID: String?
     let replyToSender: String?
     let markupSpans: [XMPPMarkupSpan]
+    let chatState: String?
+    let displayedMarkerID: String?
 }
 
 struct XMPPPresenceEvent: Sendable, Equatable {

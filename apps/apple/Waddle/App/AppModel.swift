@@ -707,6 +707,20 @@ final class AppModel: ObservableObject {
             return
         }
 
+        let senderNick = XMPPJID(string: event.from ?? "")?.resource ?? ""
+
+        if let chatState = event.chatState, senderNick != session.username, roomJID == currentRoomJID {
+            handleChatState(chatState, from: senderNick)
+            if event.body == nil, event.subject == nil, event.replacesID == nil,
+               event.retractsID == nil, event.reactionTargetID == nil, event.displayedMarkerID == nil {
+                return
+            }
+        }
+
+        if event.displayedMarkerID != nil {
+            return
+        }
+
         let deltaMessages = timelineMessages(
             from: [TimelineEventDescriptor(event: event, fallbackID: nil)],
             roomJID: roomJID,
@@ -719,10 +733,77 @@ final class AppModel: ObservableObject {
         let messages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
         messagesByRoomJID[roomJID] = messages
 
+        if senderNick != session.username, roomJID == currentRoomJID {
+            removeTypingUser(senderNick)
+        }
+
         syncChatRooms()
         if roomJID == currentRoomJID {
             syncChatMessages()
             updateChatSurfaceState()
+        }
+
+        if roomJID == currentRoomJID, !deltaMessages.isEmpty,
+           let lastMessage = deltaMessages.last, !lastMessage.isOutgoing {
+            sendDisplayedMarkerForCurrentRoom(messageID: lastMessage.id)
+        }
+    }
+
+    private var typingTimers: [String: Task<Void, Never>] = [:]
+
+    private func handleChatState(_ state: String, from nick: String) {
+        if state == "composing" {
+            addTypingUser(nick)
+        } else {
+            removeTypingUser(nick)
+        }
+    }
+
+    private func addTypingUser(_ nick: String) {
+        var users = chatStore.typingUsers
+        if !users.contains(nick) {
+            users.append(nick)
+            chatStore.typingUsers = users
+        }
+        typingTimers[nick]?.cancel()
+        typingTimers[nick] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            self?.removeTypingUser(nick)
+        }
+    }
+
+    private func removeTypingUser(_ nick: String) {
+        typingTimers[nick]?.cancel()
+        typingTimers.removeValue(forKey: nick)
+        var users = chatStore.typingUsers
+        users.removeAll { $0 == nick }
+        chatStore.typingUsers = users
+    }
+
+    private func sendDisplayedMarkerForCurrentRoom(messageID: String) {
+        guard let roomJID = currentRoomJID, let xmppService else { return }
+        Task {
+            try? await xmppService.sendDisplayedMarker(roomJID: roomJID, messageID: messageID)
+        }
+    }
+
+    private var composingTimer: Task<Void, Never>?
+    private var lastSentChatState: String?
+
+    func notifyComposing() {
+        guard let roomJID = currentRoomJID, let xmppService else { return }
+        if lastSentChatState != "composing" {
+            lastSentChatState = "composing"
+            Task { try? await xmppService.sendChatState(roomJID: roomJID, state: "composing") }
+        }
+        composingTimer?.cancel()
+        composingTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self, self.lastSentChatState == "composing" else { return }
+            self.lastSentChatState = "paused"
+            if let roomJID = self.currentRoomJID, let xmppService = self.xmppService {
+                try? await xmppService.sendChatState(roomJID: roomJID, state: "paused")
+            }
         }
     }
 

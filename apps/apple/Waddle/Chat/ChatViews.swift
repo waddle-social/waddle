@@ -964,6 +964,38 @@ struct ChatMemberListSection: View {
     }
 }
 
+struct ChatTypingIndicatorView: View {
+    let typingUsers: [String]
+
+    var body: some View {
+        if !typingUsers.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: "ellipsis.bubble")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .symbolEffect(.pulse)
+                Text(typingLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var typingLabel: String {
+        switch typingUsers.count {
+        case 1:
+            return "\(typingUsers[0]) is typing"
+        case 2:
+            return "\(typingUsers[0]) and \(typingUsers[1]) are typing"
+        default:
+            return "\(typingUsers[0]) and \(typingUsers.count - 1) others are typing"
+        }
+    }
+}
+
 struct ChatLoadingStateView: View {
     var title: String = "Loading conversation…"
 

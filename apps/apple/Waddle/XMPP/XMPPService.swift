@@ -122,6 +122,16 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.groupchatMessage(to: roomJID, body: body, thread: thread))
     }
 
+    func sendChatState(roomJID: String, state: String) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.chatStateMessage(to: roomJID, state: state))
+    }
+
+    func sendDisplayedMarker(roomJID: String, messageID: String) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.displayedMarker(to: roomJID, messageID: messageID))
+    }
+
     func sendGroupchatReplyMessage(
         roomJID: String,
         body: String,

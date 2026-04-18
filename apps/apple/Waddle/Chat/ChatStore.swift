@@ -23,6 +23,7 @@ final class ChatSurfaceStore: ObservableObject {
     @Published var isSendingMessage: Bool
     @Published var roomHistoryState: ChatRoomHistoryState
     @Published var replyingToMessage: ChatTimelineMessage?
+    @Published var typingUsers: [String] = []
 
     private var sendHandler: ChatMessageSendHandler?
     private var roomHistoryLoadHandler: ChatRoomHistoryLoadHandler?
