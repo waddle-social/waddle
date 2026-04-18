@@ -275,6 +275,15 @@
   50% { box-shadow: 0 0 0 2px var(--glow-strong), 0 0 20px 4px var(--glow); }
 }
 
+/* Suppress the iOS Safari callout / selection while a long-press is in progress.
+   Tailwind's `select-none` omits the iOS-only -webkit-touch-callout property,
+   and without it the system "Copy / Share" magnifier appears mid-gesture. */
+.no-callout {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* Glass panel utility */
 .glass-panel {
   background: var(--card);
