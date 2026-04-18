@@ -133,7 +133,7 @@ onBeforeUnmount(detachWindowListeners);
   <div
     v-if="open"
     ref="panelEl"
-    role="dialog"
+    :role="variant === 'popover' ? 'dialog' : 'group'"
     aria-label="Choose a reaction"
     :class="[
       'flex flex-col overflow-hidden',

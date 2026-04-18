@@ -95,19 +95,47 @@ function showReplyJumpNotice(message: string) {
   }, 2800);
 }
 
+// Tracks pending flash timers so repeated jumps don't race each other — a
+// stale fade/cleanup from the previous animation would otherwise remove the
+// classes in the middle of the new flash.
+let flashEl: HTMLElement | null = null;
+let flashFadeTimer: ReturnType<typeof setTimeout> | null = null;
+let flashCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelPendingFlash() {
+  if (flashFadeTimer !== null) {
+    clearTimeout(flashFadeTimer);
+    flashFadeTimer = null;
+  }
+  if (flashCleanupTimer !== null) {
+    clearTimeout(flashCleanupTimer);
+    flashCleanupTimer = null;
+  }
+  if (flashEl) {
+    flashEl.classList.remove("message-jump-flash", "message-jump-flash-fade");
+    flashEl = null;
+  }
+}
+
 function scrollToMessage(messageId: string) {
   const el = findMessageElementById(messagesContainer.value, messageId);
   const notice = getReplyJumpNotice(el instanceof HTMLElement);
   if (!notice && el instanceof HTMLElement) {
     clearReplyJumpNotice();
+    cancelPendingFlash();
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     // Force a reflow before re-adding so repeat clicks re-trigger the animation.
-    el.classList.remove("message-jump-flash", "message-jump-flash-fade");
     void el.offsetWidth;
     el.classList.add("message-jump-flash");
-    setTimeout(() => el.classList.add("message-jump-flash-fade"), 200);
-    setTimeout(() => {
+    flashEl = el;
+    flashFadeTimer = setTimeout(() => {
+      flashFadeTimer = null;
+      el.classList.add("message-jump-flash-fade");
+    }, 200);
+    flashCleanupTimer = setTimeout(() => {
+      flashCleanupTimer = null;
       el.classList.remove("message-jump-flash", "message-jump-flash-fade");
+      if (flashEl === el) flashEl = null;
     }, 2000);
     return;
   }
