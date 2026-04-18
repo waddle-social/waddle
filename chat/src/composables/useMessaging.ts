@@ -554,10 +554,11 @@ export function useMessaging(
   }
 
   /**
-   * Backfill a thread via XEP-0313 MAM filtered by thread id. Fetches every
-   * archived message whose `<thread>` element matches `threadId`, including
-   * the root itself (waddle now tags every groupchat message with `<thread>`
-   * per XEP-0201, so a thread-filtered MAM query returns the full conversation).
+   * Backfill a thread via XEP-0313 MAM filtered by thread id. Returns every
+   * archived reply whose `<thread>` element matches `threadId`. The thread
+   * root does not carry `<thread>` (threads start when someone replies into
+   * one), so MAM-by-thread never includes it — the panel resolves the root
+   * separately from the loaded channel window.
    */
   async function backfillThread(threadId: string): Promise<void> {
     const client = xmppClient.value;
@@ -646,8 +647,10 @@ export function useMessaging(
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
         : undefined;
-      const threadId = threadOverride?.threadId
-        ?? (parent ? (parent.threadId ?? replyTo?.id) : undefined);
+      // Thread membership is explicit: only set when the caller passed an
+      // override (i.e. the thread panel composer). Bare `<reply>` from the
+      // channel composer stays inline as a quote — not a thread join.
+      const threadId = threadOverride?.threadId;
       const parentThreadId = threadOverride?.parentThreadId;
       const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, {
         markup,
@@ -680,10 +683,7 @@ export function useMessaging(
             ...(replyTo.body ? { preview: replyTo.body } : {}),
           };
         }
-        // XEP-0201: the wire always carries `<thread>`; root-of-thread falls
-        // back to the message's own id so the optimistic timeline matches the
-        // echo we'll receive back.
-        optimistic.threadId = threadId ?? msgId;
+        if (threadId) optimistic.threadId = threadId;
         if (parentThreadId) optimistic.parentThreadId = parentThreadId;
         if (attachments && attachments.length > 0) {
           optimistic.sharedFiles = attachments.map((a) => ({

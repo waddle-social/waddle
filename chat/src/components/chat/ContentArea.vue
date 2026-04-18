@@ -470,7 +470,6 @@ onBeforeUnmount(() => {
       :slow-mode-cooldown="slowModeCooldown"
       :upload-progress="uploadProgress"
       :replying-to="replyingTo"
-      :reply-joins-thread="!dmPeer && !!replyingTo"
       @send="onSend"
       @cancel-reply="cancelReply"
       @typing="emit('typing')"
