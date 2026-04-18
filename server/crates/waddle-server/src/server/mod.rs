@@ -594,7 +594,8 @@ async fn start_http_server(
         xmpp_native_auth_enabled,
         mam_storage,
         acme_http01_challenge_service,
-    );
+    )
+    .await;
 
     let addr = listener.local_addr()?;
     info!("Starting Axum HTTP server on {}", addr);
@@ -832,7 +833,7 @@ fn build_cors(origins: Option<&str>) -> CorsLayer {
 }
 
 /// Create the Axum router with all routes and middleware.
-fn create_router(
+async fn create_router(
     state: Arc<AppState>,
     server_config: ServerConfig,
     xmpp_native_auth_enabled: bool,
@@ -868,6 +869,28 @@ fn create_router(
         }),
     );
 
+    let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
+    {
+        use waddle_xmpp::commands::{handle_create_channel, NODE_CREATE_CHANNEL};
+
+        let app_state_for_command = Arc::new(
+            XmppAppState::new(
+                xmpp_domain.clone(),
+                Arc::new(state.db_pool.global().clone()),
+                state.db_pool.global_actor().clone(),
+                encryption_key.as_ref().map(|s| s.as_bytes()),
+            )
+            .with_db_pool(Arc::clone(&state.db_pool)),
+        );
+        websocket_command_registry
+            .register(NODE_CREATE_CHANNEL, "Create Channel", move |ctx| {
+                let deps = Arc::clone(&app_state_for_command);
+                handle_create_channel(deps, ctx)
+            })
+            .await;
+        info!("Registered create-channel command for WebSocket");
+    }
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         app_state: state.clone(),
@@ -875,6 +898,7 @@ fn create_router(
         connection_registry,
         muc_registry,
         mam_storage,
+        command_registry: websocket_command_registry,
         extension_manager,
     });
     let websocket_router = routes::websocket::router(websocket_state);
@@ -1184,7 +1208,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1211,7 +1235,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1231,7 +1255,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1259,7 +1283,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1284,7 +1308,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, mam_storage, None).await;
 
         let response = app
             .oneshot(
@@ -1304,7 +1328,7 @@ mod tests {
         let state = create_test_state().await;
         let server_config = ServerConfig::test_homeserver();
         let mam_storage = create_websocket_mam_storage(None).await.unwrap();
-        let app = create_router(state, server_config, true, mam_storage, None);
+        let app = create_router(state, server_config, true, mam_storage, None).await;
 
         let response = app
             .oneshot(
