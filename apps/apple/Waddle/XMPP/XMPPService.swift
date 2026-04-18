@@ -3,6 +3,7 @@ import Foundation
 enum XMPPServiceError: LocalizedError {
     case notReady
     case disconnected
+    case timeout(String)
     case iqError(String)
 
     var errorDescription: String? {
@@ -11,6 +12,8 @@ enum XMPPServiceError: LocalizedError {
             return "XMPP session is not ready yet."
         case .disconnected:
             return "The XMPP session disconnected before the request completed."
+        case .timeout(let message):
+            return message
         case .iqError(let message):
             return message
         }
@@ -48,6 +51,7 @@ final class XMPPService: ObservableObject {
         let roomJID: String
         let continuation: CheckedContinuation<XMPPArchivePage, Error>
         var messages: [XMPPArchiveMessage] = []
+        var timeoutTask: Task<Void, Never>?
 
         init(id: String, roomJID: String, continuation: CheckedContinuation<XMPPArchivePage, Error>) {
             self.id = id
@@ -128,6 +132,10 @@ final class XMPPService: ObservableObject {
         return try await withCheckedThrowingContinuation { continuation in
             let request = PendingArchiveQuery(id: id, roomJID: roomJID, continuation: continuation)
             pendingArchiveQuery = request
+            request.timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                await self?.handleArchiveQueryTimeout(id: id, roomJID: roomJID)
+            }
 
             Task { [weak self] in
                 guard let self else { return }
@@ -517,6 +525,7 @@ final class XMPPService: ObservableObject {
         let pageInfo = XMPPXML.parseMamPageInfo(from: element)
         let page = XMPPArchivePage(messages: pendingArchiveQuery.messages, pageInfo: pageInfo)
         self.pendingArchiveQuery = nil
+        pendingArchiveQuery.timeoutTask?.cancel()
         pendingArchiveQuery.continuation.resume(returning: page)
         return true
     }
@@ -527,7 +536,20 @@ final class XMPPService: ObservableObject {
         }
 
         self.pendingArchiveQuery = nil
+        pendingArchiveQuery.timeoutTask?.cancel()
         pendingArchiveQuery.continuation.resume(throwing: error)
+    }
+
+    private func handleArchiveQueryTimeout(id: String, roomJID: String) {
+        guard let pendingArchiveQuery,
+              pendingArchiveQuery.id == id,
+              pendingArchiveQuery.roomJID == roomJID else {
+            return
+        }
+
+        resumePendingArchiveQuery(
+            with: XMPPServiceError.timeout("Timed out loading message history for \(roomJID).")
+        )
     }
 
     private func resumeAllPendingIQs(with error: Error) {

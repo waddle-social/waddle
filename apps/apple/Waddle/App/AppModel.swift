@@ -61,11 +61,15 @@ final class AppModel: ObservableObject {
     private var publicCatalogWaddles: [WaddleSummary] = []
     private var accessibleWaddles: [WaddleSummary] = []
     private var devicePollTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var xmppService: XMPPService?
     private var xmppEventsTask: Task<Void, Never>?
     private var messagesByRoomJID: [String: [ChatTimelineMessage]] = [:]
     private var presenceByRoomJID: [String: [String: ChatPresenceState]] = [:]
+    private var joinedRoomJIDs: Set<String> = []
+    private var roomJoinContinuations: [String: CheckedContinuation<Void, Error>] = [:]
+    private var roomJoinTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var roomHistoryBeforeCursorByRoomJID: [String: String] = [:]
     private let roomHistoryPageSize = 50
 
@@ -216,13 +220,16 @@ final class AppModel: ObservableObject {
         defer { isLoadingWaddles = false }
 
         do {
+            let previousSelection = selectedWaddleID
             publicCatalogWaddles = try await client.listPublicWaddles(
                 sessionID: session.sessionID,
                 query: searchQuery
             )
             mergeVisibleWaddles()
-            if selectedWaddleID == nil {
-                selectedWaddleID = publicWaddles.first?.id
+            if previousSelection == nil,
+               let selectedWaddleID,
+               xmppService?.connectionState == .ready {
+                await selectWaddle(selectedWaddleID)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -270,8 +277,16 @@ final class AppModel: ObservableObject {
             return
         }
 
-        await joinSelectedChannel()
-        Task { await chatStore.refreshSelectedRoomHistory() }
+        do {
+            try await joinSelectedChannel()
+            await chatStore.refreshSelectedRoomHistory()
+            updateChatSurfaceState()
+        } catch {
+            errorMessage = error.localizedDescription
+            chatStore.setBannerState(.error(message: error.localizedDescription))
+            chatStore.failRoomHistoryLoad(error.localizedDescription)
+            updateChatSurfaceState()
+        }
     }
 
     func reloadSelectedWaddleStructure() async {
@@ -412,7 +427,12 @@ final class AppModel: ObservableObject {
     }
 
     private func connectXMPP(using session: WaddleSession) async {
+        reconnectTask?.cancel()
+        reconnectTask = nil
         xmppEventsTask?.cancel()
+        failPendingRoomJoins(with: XMPPServiceError.disconnected)
+        joinedRoomJIDs.removeAll()
+        presenceByRoomJID.removeAll()
         if let xmppService {
             await xmppService.disconnect(emitEvent: false)
         }
@@ -445,6 +465,8 @@ final class AppModel: ObservableObject {
         case .resourceBound:
             updateConnectionBanner(for: .binding)
         case .sessionReady:
+            reconnectTask?.cancel()
+            reconnectTask = nil
             updateConnectionBanner(for: .ready)
             do {
                 try await xmppService?.sendPresence()
@@ -452,7 +474,9 @@ final class AppModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
             await refreshAccessibleWaddles()
-            if let nextWaddleID = selectedWaddleID ?? publicWaddles.first?.id {
+            if let selectedWaddleID {
+                await loadStructure(for: selectedWaddleID)
+            } else if let nextWaddleID = publicWaddles.first?.id {
                 await selectWaddle(nextWaddleID)
             } else {
                 updateChatSurfaceState()
@@ -476,7 +500,11 @@ final class AppModel: ObservableObject {
             chatStore.setBannerState(.error(message: message))
             updateChatSurfaceState()
         case .disconnected:
+            joinedRoomJIDs.removeAll()
+            presenceByRoomJID.removeAll()
+            failPendingRoomJoins(with: XMPPServiceError.disconnected)
             chatStore.setBannerState(.disconnected(message: "Disconnected from live chat."))
+            scheduleReconnectIfNeeded()
             updateChatSurfaceState()
         }
     }
@@ -567,20 +595,30 @@ final class AppModel: ObservableObject {
         updateChatSurfaceState()
     }
 
-    private func joinSelectedChannel() async {
+    private func joinSelectedChannel() async throws {
         guard let session,
               let selectedWaddleID,
               let selectedChannelID,
               let xmppService else {
+            throw ChatSendError.noRoom
+        }
+
+        let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: selectedChannelID)
+        if joinedRoomJIDs.contains(roomJID) {
+            if roomJID == currentRoomJID {
+                let roomTitle = chatStore.selectedRoom?.title ?? selectedChannel?.name ?? "chat"
+                chatStore.setBannerState(.connected(message: "Connected to #\(roomTitle)"))
+            }
             return
         }
 
-        do {
-            let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: selectedChannelID)
-            try await xmppService.joinRoom(roomJID, nick: session.username)
-        } catch {
-            errorMessage = error.localizedDescription
-            chatStore.setSurfaceState(.error(title: "Unable to join room", message: error.localizedDescription))
+        updateConnectionBanner(for: .ready)
+        try await xmppService.joinRoom(roomJID, nick: session.username)
+        try await waitForRoomJoin(roomJID: roomJID, nick: session.username)
+
+        if roomJID == currentRoomJID {
+            let roomTitle = chatStore.selectedRoom?.title ?? selectedChannel?.name ?? "chat"
+            chatStore.setBannerState(.connected(message: "Connected to #\(roomTitle)"))
         }
     }
 
@@ -842,8 +880,27 @@ final class AppModel: ObservableObject {
         }
 
         var roomPresence = presenceByRoomJID[roomJID] ?? [:]
-        roomPresence[nick] = presenceState(from: event)
+        if event.type == "unavailable" {
+            roomPresence.removeValue(forKey: nick)
+        } else {
+            roomPresence[nick] = presenceState(from: event)
+        }
         presenceByRoomJID[roomJID] = roomPresence
+
+        if session?.username == nick {
+            let joinKey = roomJoinKey(roomJID: roomJID, nick: nick)
+            if event.type == "unavailable" {
+                joinedRoomJIDs.remove(roomJID)
+                failPendingRoomJoin(key: joinKey, error: XMPPServiceError.disconnected)
+            } else {
+                joinedRoomJIDs.insert(roomJID)
+                finishPendingRoomJoin(key: joinKey)
+                if roomJID == currentRoomJID {
+                    let roomTitle = chatStore.selectedRoom?.title ?? selectedChannel?.name ?? "chat"
+                    chatStore.setBannerState(.connected(message: "Connected to #\(roomTitle)"))
+                }
+            }
+        }
 
         if roomJID == currentRoomJID {
             syncChatMembers()
@@ -917,6 +974,22 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if let connectionState = xmppService?.connectionState {
+            switch connectionState {
+            case .ready:
+                break
+            case .connecting, .negotiating, .authenticating, .binding, .disconnecting:
+                chatStore.setSurfaceState(.loading)
+                return
+            case .disconnected:
+                chatStore.setSurfaceState(.empty(title: "Live chat offline", message: "Reconnect to restore rooms and history."))
+                return
+            case .failed(let message):
+                chatStore.setSurfaceState(.error(title: "Live chat unavailable", message: message))
+                return
+            }
+        }
+
         guard selectedChannelID != nil else {
             chatStore.setSurfaceState(.empty(title: "No channels yet", message: "Join the waddle or wait for room discovery to finish."))
             return
@@ -938,7 +1011,7 @@ final class AppModel: ObservableObject {
         case .binding:
             chatStore.setBannerState(.connecting(message: "Binding live resource…"))
         case .ready:
-            chatStore.setBannerState(.connected(message: "Connected to live chat"))
+            chatStore.setBannerState(.connecting(message: "Preparing live chat…"))
         case .disconnecting:
             chatStore.setBannerState(.reconnecting(message: "Disconnecting live chat…"))
         case .failed(let message):
@@ -970,8 +1043,11 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState() async {
+        reconnectTask?.cancel()
+        reconnectTask = nil
         xmppEventsTask?.cancel()
         xmppEventsTask = nil
+        failPendingRoomJoins(with: XMPPServiceError.disconnected)
         if let xmppService {
             await xmppService.disconnect(emitEvent: false)
         }
@@ -986,6 +1062,7 @@ final class AppModel: ObservableObject {
         selectedChannelID = nil
         members = []
         joinedWaddleIDs.removeAll()
+        joinedRoomJIDs.removeAll()
         messagesByRoomJID.removeAll()
         presenceByRoomJID.removeAll()
         roomHistoryBeforeCursorByRoomJID.removeAll()
@@ -995,5 +1072,77 @@ final class AppModel: ObservableObject {
         chatStore.replaceMessages([])
         chatStore.setBannerState(.hidden)
         chatStore.setSurfaceState(.empty(title: "Select a waddle", message: "Sign in to browse and join live rooms."))
+    }
+
+    private func scheduleReconnectIfNeeded() {
+        guard let session, reconnectTask == nil else {
+            return
+        }
+
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.connectXMPP(using: session)
+        }
+    }
+
+    private func roomJoinKey(roomJID: String, nick: String) -> String {
+        "\(roomJID)|\(nick.lowercased())"
+    }
+
+    private func waitForRoomJoin(roomJID: String, nick: String) async throws {
+        if joinedRoomJIDs.contains(roomJID) {
+            return
+        }
+
+        let key = roomJoinKey(roomJID: roomJID, nick: nick)
+        if roomJoinContinuations[key] != nil {
+            return
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            roomJoinContinuations[key] = continuation
+            roomJoinTimeoutTasks.removeValue(forKey: key)?.cancel()
+            roomJoinTimeoutTasks[key] = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                await self?.handleRoomJoinTimeout(key: key, roomJID: roomJID)
+            }
+        }
+    }
+
+    private func finishPendingRoomJoin(key: String) {
+        roomJoinTimeoutTasks.removeValue(forKey: key)?.cancel()
+        guard let continuation = roomJoinContinuations.removeValue(forKey: key) else {
+            return
+        }
+        continuation.resume()
+    }
+
+    private func failPendingRoomJoin(key: String, error: Error) {
+        roomJoinTimeoutTasks.removeValue(forKey: key)?.cancel()
+        guard let continuation = roomJoinContinuations.removeValue(forKey: key) else {
+            return
+        }
+        continuation.resume(throwing: error)
+    }
+
+    private func failPendingRoomJoins(with error: Error) {
+        for task in roomJoinTimeoutTasks.values {
+            task.cancel()
+        }
+        roomJoinTimeoutTasks.removeAll()
+
+        let continuations = roomJoinContinuations.values
+        roomJoinContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: error)
+        }
+    }
+
+    private func handleRoomJoinTimeout(key: String, roomJID: String) {
+        failPendingRoomJoin(
+            key: key,
+            error: XMPPServiceError.timeout("Timed out joining \(roomJID).")
+        )
     }
 }
