@@ -234,10 +234,23 @@ export class BrowserXmppClient {
           clearTimeout(timeout);
           xmpp.off("session:started", onReady);
           xmpp.off("stream:management:resumed", onReady);
+          xmpp.off("disconnected", onDisconnected);
         };
         const onReady = () => { cleanup(); this.connectPromise = null; resolve(); };
+        // Intentional teardown (logout / unmount) sets this.destroying and
+        // calls xmpp.disconnect(); stanza then fires `disconnected`.  Abort
+        // any in-flight awaiters instead of making them wait for the 15s
+        // timeout.  Mid-reconnect drops keep waiting — stanza will re-fire
+        // session:started or stream:management:resumed.
+        const onDisconnected = () => {
+          if (!this.destroying) return;
+          cleanup();
+          this.connectPromise = null;
+          reject(new Error("Client disconnected"));
+        };
         xmpp.on("session:started", onReady);
         xmpp.on("stream:management:resumed", onReady);
+        xmpp.on("disconnected", onDisconnected);
       });
       if (Date.now() - this.lastStanzaKickAt > 2_000) {
         this.lastStanzaKickAt = Date.now();
