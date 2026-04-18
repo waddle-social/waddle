@@ -63,7 +63,7 @@ async fn xep0452_room_mentions_do_not_synthesize_notification_stanzas() {
 
     bob.clear();
     assert!(
-        bob.read(std::time::Duration::from_millis(250))
+        bob.read_until("urn:xmpp:mmn:0", std::time::Duration::from_millis(250))
             .await
             .is_err(),
         "Server should not generate an extra XEP-0452 notification stanza without runtime support"
