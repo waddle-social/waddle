@@ -122,147 +122,150 @@ watch(
   <!-- Retracted tombstone -->
   <div
     v-if="message.isRetracted"
-    class="flex gap-3 px-3 py-2 opacity-30 animate-message-in"
+    class="flow-root px-3 py-2 opacity-30 animate-message-in"
   >
-    <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
-    <div class="flex-1 min-w-0 pt-0.5">
-      <div class="flex items-baseline gap-2 mb-0.5">
-        <span class="font-medium text-[13px]">{{ message.author }}</span>
-        <span class="text-[11px] font-mono text-muted-foreground tabular-nums">
-          {{ formatStamp(message.createdAt) }}
-        </span>
-      </div>
-      <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
+    <AppAvatar
+      class="float-left mr-3 mt-0.5"
+      :name="message.author"
+      :src="avatarUrl"
+      :presence="presence"
+      :last-seen="lastSeen"
+      size="md"
+    />
+    <div class="flex items-baseline gap-2 mb-0.5">
+      <span class="font-medium text-[13px]">{{ message.author }}</span>
+      <span class="text-[11px] font-mono text-muted-foreground tabular-nums">
+        {{ formatStamp(message.createdAt) }}
+      </span>
     </div>
+    <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
   </div>
 
   <!-- Normal message -->
   <div
     v-else
-    class="group relative flex gap-3 px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
+    class="group relative flow-root px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned ? 'bg-warning/5 border-l-2 border-warning/30' : 'hover:bg-muted/40',
       message.deliveryStatus === 'sending' ? 'opacity-50' : '',
     ]"
   >
     <button
-      class="mt-0.5 rounded-lg shrink-0"
+      class="float-left mr-3 mt-0.5 rounded-lg"
       type="button"
       @click.stop="emitAvatarClick"
     >
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
     </button>
-    <div class="flex-1 min-w-0">
-      <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
-        <span class="font-semibold text-[13px]">{{ message.author }}</span>
-        <span
-          v-for="hat in hats"
-          :key="hat.uri"
-          class="inline-block px-1.5 py-px text-[9px] font-bold uppercase tracking-wider rounded-md leading-none"
-          :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
-          :title="hat.title"
-        >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
-        <span class="text-[11px] font-mono text-muted-foreground/60 tabular-nums">
-          {{ formatStamp(message.createdAt) }}
-        </span>
-        <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
-        <span
-          v-if="message.isSelf && message.readBy && message.readBy.length > 0"
-          class="text-[11px] text-muted-foreground/50"
-          :title="message.readBy.join(', ')"
-        >
-          Read by {{ message.readBy.length }}
-        </span>
-      </div>
+    <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
+      <span class="font-semibold text-[13px]">{{ message.author }}</span>
+      <span
+        v-for="hat in hats"
+        :key="hat.uri"
+        class="inline-block px-1.5 py-px text-[9px] font-bold uppercase tracking-wider rounded-md leading-none"
+        :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
+        :title="hat.title"
+      >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
+      <span class="text-[11px] font-mono text-muted-foreground/60 tabular-nums">
+        {{ formatStamp(message.createdAt) }}
+      </span>
+      <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
+      <span
+        v-if="message.isSelf && message.readBy && message.readBy.length > 0"
+        class="text-[11px] text-muted-foreground/50"
+        :title="message.readBy.join(', ')"
+      >
+        Read by {{ message.readBy.length }}
+      </span>
+    </div>
 
-      <!-- Edit mode -->
-      <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
-        <ChatEditor
-          :ref="setEditEditorRef"
-          compact
-          :initial-content="editInitialContent"
-          placeholder="Edit message..."
-          @send="submitEditFromEditor"
-          @cancel="cancelEdit"
-          class="flex-1"
-        />
-        <button
-          class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200 shrink-0"
-          @click="cancelEdit"
-        >Cancel</button>
-      </div>
+    <!-- Edit mode -->
+    <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
+      <ChatEditor
+        :ref="setEditEditorRef"
+        compact
+        :initial-content="editInitialContent"
+        placeholder="Edit message..."
+        @send="submitEditFromEditor"
+        @cancel="cancelEdit"
+        class="flex-1"
+      />
+      <button
+        class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200 shrink-0"
+        @click="cancelEdit"
+      >Cancel</button>
+    </div>
 
-      <!-- Sticker -->
-      <div v-else-if="message.isSticker && message.sharedFile" class="mt-1">
+    <!-- Sticker -->
+    <div v-else-if="message.isSticker && message.sharedFile" class="mt-1">
+      <img
+        :src="message.sharedFile.url"
+        :alt="message.sharedFile.desc ?? message.body ?? 'Sticker'"
+        class="max-w-28 max-h-28 object-contain"
+        loading="lazy"
+      />
+    </div>
+
+    <!-- Shared file (image inline) -->
+    <div v-else-if="isSharedImage && message.sharedFile" class="mt-2">
+      <a :href="message.sharedFile.url" target="_blank" rel="noopener noreferrer">
         <img
           :src="message.sharedFile.url"
-          :alt="message.sharedFile.desc ?? message.body ?? 'Sticker'"
-          class="max-w-28 max-h-28 object-contain"
-          loading="lazy"
-        />
-      </div>
-
-      <!-- Shared file (image inline) -->
-      <div v-else-if="isSharedImage && message.sharedFile" class="mt-2">
-        <a :href="message.sharedFile.url" target="_blank" rel="noopener noreferrer">
-          <img
-            :src="message.sharedFile.url"
-            :alt="message.sharedFile.name ?? 'Shared image'"
-            class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
-            loading="lazy"
-          />
-        </a>
-        <div v-if="message.sharedFile.name" class="text-[11px] text-muted-foreground/60 mt-1">
-          {{ message.sharedFile.name }}
-          <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
-        </div>
-      </div>
-
-      <!-- Shared file (non-image) -->
-      <div v-else-if="message.sharedFile" class="mt-2">
-        <a
-          :href="message.sharedFile.url"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200"
-        >
-          <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-          <div class="flex-1 min-w-0">
-            <div class="text-[13px] font-medium truncate">{{ message.sharedFile.name ?? "File" }}</div>
-            <div class="text-[11px] text-muted-foreground">
-              {{ message.sharedFile.mediaType ?? "file" }}
-              <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
-            </div>
-          </div>
-        </a>
-      </div>
-
-      <!-- Inline GIF -->
-      <div v-else-if="isGif" class="mt-2">
-        <img
-          :src="message.body.trim()"
-          alt="GIF"
+          :alt="message.sharedFile.name ?? 'Shared image'"
           class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
           loading="lazy"
         />
+      </a>
+      <div v-if="message.sharedFile.name" class="text-[11px] text-muted-foreground/60 mt-1">
+        {{ message.sharedFile.name }}
+        <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
       </div>
+    </div>
 
-      <!-- Normal display -->
-      <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
+    <!-- Shared file (non-image) -->
+    <div v-else-if="message.sharedFile" class="mt-2">
+      <a
+        :href="message.sharedFile.url"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200"
+      >
+        <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+        <div class="flex-1 min-w-0">
+          <div class="text-[13px] font-medium truncate">{{ message.sharedFile.name ?? "File" }}</div>
+          <div class="text-[11px] text-muted-foreground">
+            {{ message.sharedFile.mediaType ?? "file" }}
+            <span v-if="message.sharedFile.size"> · {{ formatFileSize(message.sharedFile.size) }}</span>
+          </div>
+        </div>
+      </a>
+    </div>
 
-      <!-- Existing reactions (inline, always visible when present) -->
-      <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-1.5">
-        <button
-          v-for="(nicks, emoji) in message.reactions"
-          :key="emoji"
-          class="inline-flex items-center gap-1 px-2 py-0.5 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
-          :title="nicks.join(', ')"
-          @click="emit('react', message.id, emoji)"
-        >
-          <span>{{ emoji }}</span>
-          <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
-        </button>
-      </div>
+    <!-- Inline GIF -->
+    <div v-else-if="isGif" class="mt-2">
+      <img
+        :src="message.body.trim()"
+        alt="GIF"
+        class="max-w-xs max-h-56 rounded-xl border border-border object-contain"
+        loading="lazy"
+      />
+    </div>
+
+    <!-- Normal display -->
+    <div v-else :ref="setStyledBodyRef" class="text-[13px] leading-relaxed break-words styled-body" v-html="styledHtml" />
+
+    <!-- Existing reactions (inline, always visible when present) -->
+    <div v-if="message.reactions && Object.keys(message.reactions).length > 0" class="flex flex-wrap gap-1 mt-1.5">
+      <button
+        v-for="(nicks, emoji) in message.reactions"
+        :key="emoji"
+        class="inline-flex items-center gap-1 px-2 py-0.5 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+        :title="nicks.join(', ')"
+        @click="emit('react', message.id, emoji)"
+      >
+        <span>{{ emoji }}</span>
+        <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
+      </button>
     </div>
 
     <!-- Floating action toolbar — absolute so no layout space when hidden -->
