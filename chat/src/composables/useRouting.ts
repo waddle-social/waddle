@@ -1,12 +1,15 @@
 import type { WaddleSummary, ChannelSummary } from "@/lib/waddle-api";
 
 export interface RouteState {
+  page: "chat" | "settings";
   waddleSlug: string | null;
   channelSlug: string | null;
   dmUsername: string | null;
   /** XEP-0201 thread stack from `?thread=rootId,childId,...`. Empty = panel closed. */
   threadStack: string[];
 }
+
+const SETTINGS_PATH = "/settings";
 
 function slugify(name: string): string {
   return name
@@ -48,8 +51,18 @@ export function parseRoute(pathname: string, search?: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
   const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
   const threadStack = parseThreadStack(resolvedSearch);
+  if (segments[0] === "settings" && segments.length === 1) {
+    return {
+      page: "settings",
+      waddleSlug: null,
+      channelSlug: null,
+      dmUsername: null,
+      threadStack: [],
+    };
+  }
   if (segments[0] === "dm") {
     return {
+      page: "chat",
       waddleSlug: null,
       channelSlug: null,
       dmUsername: segments[1] ? decodeURIComponent(segments[1]) : null,
@@ -57,6 +70,7 @@ export function parseRoute(pathname: string, search?: string): RouteState {
     };
   }
   return {
+    page: "chat",
     waddleSlug: segments[0] ? decodeURIComponent(segments[0]) : null,
     channelSlug: segments[1] ? decodeURIComponent(segments[1]) : null,
     dmUsername: null,
@@ -96,6 +110,15 @@ export function buildPath(
   return `/${wSlug}${search}`;
 }
 
+export function buildDmPath(username: string | null, threadStack?: string[]): string {
+  const search = buildSearch(threadStack);
+  return username ? `/dm/${encodeURIComponent(slugify(username))}${search}` : `/${search}`;
+}
+
+export function buildSettingsPath(): string {
+  return SETTINGS_PATH;
+}
+
 export function pushRoute(
   waddle: WaddleSummary | null,
   channel: ChannelSummary | null,
@@ -104,15 +127,21 @@ export function pushRoute(
   const path = buildPath(waddle, channel, threadStack);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
-    window.history.pushState(null, "", path);
+    window.history.pushState({ waddlePage: "chat" }, "", path);
   }
 }
 
 export function pushDmRoute(username: string | null, threadStack?: string[]) {
-  const search = buildSearch(threadStack);
-  const path = username ? `/dm/${encodeURIComponent(slugify(username))}${search}` : `/${search}`;
+  const path = buildDmPath(username, threadStack);
   const current = window.location.pathname + window.location.search;
   if (current !== path) {
-    window.history.pushState(null, "", path);
+    window.history.pushState({ waddlePage: "chat" }, "", path);
+  }
+}
+
+export function pushSettingsRoute(origin: "app" | "direct" = "app") {
+  const current = window.location.pathname + window.location.search;
+  if (current !== SETTINGS_PATH) {
+    window.history.pushState({ waddlePage: "settings", origin }, "", SETTINGS_PATH);
   }
 }

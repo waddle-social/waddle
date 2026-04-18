@@ -9,7 +9,7 @@ import { useThreads } from "@/composables/useThreads";
 import { useUiState } from "@/composables/useUiState";
 import { useNotifications } from "@/composables/useNotifications";
 import { useVersion } from "@/composables/useVersion";
-import { parseRoute, pushDmRoute, pushRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
+import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import LandingState from "@/components/chat/LandingState.vue";
@@ -21,6 +21,7 @@ import ContentArea from "@/components/chat/ContentArea.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import MobileHeader from "@/components/chat/MobileHeader.vue";
 import ProfilePanel from "@/components/chat/ProfilePanel.vue";
+import UserSettingsPage from "@/components/chat/UserSettingsPage.vue";
 import AppDrawer from "@/components/ui/AppDrawer.vue";
 import CreateWaddleDialog from "@/components/modals/CreateWaddleDialog.vue";
 import BrowsePublicWaddlesDialog from "@/components/modals/BrowsePublicWaddlesDialog.vue";
@@ -264,6 +265,17 @@ watch(xmppClient, (client) => {
 const publicBrowseQuery = ref("");
 const isApplyingRoute = ref(false);
 let routeRequestId = 0;
+const settingsPath = buildSettingsPath();
+
+const currentChatPath = computed(() =>
+  ui.sidebarMode.value === "dms" && activeDmPeer.value
+    ? buildDmPath(activeDmPeer.value.peerUsername)
+    : buildPath(
+      waddles.currentWaddle.value,
+      waddles.currentChannel.value,
+      activeThreadStack.value,
+    ),
+);
 
 async function setupPushSubscription() {
   if (!xmppClient.value || !connectionStore.session) return;
@@ -396,6 +408,10 @@ function clearActiveSearch() {
 
 function updateUrl() {
   if (isApplyingRoute.value) return;
+  if (ui.activePage.value === "settings") {
+    pushSettingsRoute("app");
+    return;
+  }
   if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
     pushDmRoute(activeDmPeer.value.peerUsername);
   } else {
@@ -418,9 +434,45 @@ watch(
 );
 
 watch(activeThreadStack, updateUrl, { deep: true });
+watch(() => ui.activePage.value, updateUrl);
+
+function openUserSettings() {
+  ui.showMobileNav.value = false;
+  ui.showMobileDetails.value = false;
+  ui.activePage.value = "settings";
+}
+
+function closeUserSettings() {
+  const state = window.history.state as { waddlePage?: string; origin?: string } | null;
+  if (
+    window.location.pathname === settingsPath
+    && state?.waddlePage === "settings"
+    && state.origin === "app"
+  ) {
+    window.history.back();
+    return;
+  }
+  ui.activePage.value = "chat";
+  if (window.location.pathname + window.location.search !== currentChatPath.value) {
+    if (ui.sidebarMode.value === "dms" && activeDmPeer.value) {
+      pushDmRoute(activeDmPeer.value.peerUsername);
+    } else {
+      pushRoute(
+        waddles.currentWaddle.value,
+        waddles.currentChannel.value,
+        activeThreadStack.value,
+      );
+    }
+  }
+}
 
 function onPopState() {
   const route = parseRoute(window.location.pathname, window.location.search);
+  ui.activePage.value = route.page;
+  if (route.page === "settings") {
+    activeThreadStack.value = [];
+    return;
+  }
   if (!route.waddleSlug && !route.dmUsername) return;
 
   const requestId = ++routeRequestId;
@@ -433,6 +485,11 @@ function onPopState() {
 }
 
 async function applyRouteTarget(route: ReturnType<typeof parseRoute>, requestId: number) {
+  ui.activePage.value = route.page;
+  if (route.page === "settings") {
+    activeThreadStack.value = [];
+    return;
+  }
   if (route.dmUsername) {
     const username = route.dmUsername.replace(/^@/, "").trim();
     if (username) {
@@ -521,6 +578,7 @@ async function onConnectionReady() {
 // --- Actions ---
 
 async function handleLogout() {
+  ui.activePage.value = "chat";
   messaging.disconnect();
   dmMessaging.disconnect();
   waddles.clearData();
@@ -531,6 +589,7 @@ async function handleLogout() {
 }
 
 async function selectWaddle(waddleId: string, preferredChannelId?: string | null) {
+  ui.activePage.value = "chat";
   ui.sidebarMode.value = "channels";
   dmConversations.closeDm();
   waddles.activeWaddleId.value = waddleId;
@@ -543,6 +602,7 @@ async function selectWaddle(waddleId: string, preferredChannelId?: string | null
 }
 
 async function selectChannel(channelId: string) {
+  ui.activePage.value = "chat";
   ui.sidebarMode.value = "channels";
   dmConversations.closeDm();
   memberJidByNick.value = {};
@@ -560,6 +620,7 @@ async function selectChannel(channelId: string) {
 }
 
 async function handleOpenDm(peerJid: string) {
+  ui.activePage.value = "chat";
   ui.sidebarMode.value = "dms";
   await dmConversations.openDm(peerJid);
   dmMessaging.clearMessages();
@@ -736,6 +797,7 @@ onUnmounted(() => {
   <div v-else class="h-dvh flex flex-col bg-background">
     <!-- Mobile header -->
     <MobileHeader
+      :page="ui.activePage.value"
       :waddle="waddles.currentWaddle.value"
       :channel="waddles.currentChannel.value"
       :dm-peer="activeDmPeer"
@@ -796,6 +858,7 @@ onUnmounted(() => {
           :notifications-enabled="notifications.notificationsEnabled.value"
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
+          @open-settings="openUserSettings"
           @logout="handleLogout"
           @request-notifications="handleRequestNotifications"
           @toggle-notifications="handleToggleNotifications"
@@ -848,6 +911,7 @@ onUnmounted(() => {
           :notifications-enabled="notifications.notificationsEnabled.value"
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
+          @open-settings="openUserSettings"
           @select-waddle="selectWaddle($event)"
           @toggle-dms="ui.sidebarMode.value = 'dms'"
           @browse-public-waddles="openBrowsePublicWaddles"
@@ -885,77 +949,86 @@ onUnmounted(() => {
       </div>
 
       <!-- Main content -->
-      <ContentArea
-        :ref="setContentAreaRef"
-        v-model:draft="activeDraft"
-        v-model:forum-title="activeForumTitle"
-        :waddle="waddles.currentWaddle.value"
-        :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
-        :dm-peer="activeDmPeer"
-        :sidebar-mode="ui.sidebarMode.value"
-        :messages="activeMessages"
-        :first-unseen-id="activeFirstUnseenId"
-        :xmpp-status="messaging.xmppStatus.value"
-        :action-error="ui.actionError.value"
-        :is-loading-messages="activeIsLoadingMessages"
-        :is-sending="activeIsSending"
-        :can-manage-channels="waddles.canManageChannels.value"
-        :typing-users="activeTypingUsers"
-        :current-user="connectionStore.session?.username"
-        :self-domain="selfDomain"
-        :avatar-url-by-author="avatarUrlByAuthor"
-        :author-jid-by-nick="memberJidByNick"
-        :tenor-api-key="tenorApiKey"
-        :member-names="waddles.members.value.map((m) => m.username)"
-        :room-hats="messaging.roomHats.value"
-        :room-presence="messaging.roomPresence.value"
-        :room-last-seen="messaging.roomLastSeen.value"
-        :slow-mode-cooldown="messaging.slowModeCooldown.value"
-        :search-results="activeSearchResults"
-        :is-searching="activeIsSearching"
-        :upload-progress="activeUploadProgress"
-        :thread-index="threads.index.value"
-        @send="sendActiveMessage"
-        @typing="notifyActiveComposing"
-        @edit-message="editActiveMessage"
-        @retract-message="retractActiveMessage"
-        @react-message="reactActiveMessage"
-        @displayed="markActiveDisplayed"
-        @search="searchActiveMessages"
-        @clear-search="clearActiveSearch"
-        @edit-channel="openChannelEdit"
-        @open-dm="handleOpenDm"
-        @open-thread="openThread"
+      <UserSettingsPage
+        v-if="ui.activePage.value === 'settings' && connectionStore.session"
+        :session="connectionStore.session"
+        :web-commit-sha="version.webCommitSha.value"
+        :server-version="version.serverVersion.value"
+        @close="closeUserSettings"
       />
+      <template v-else>
+        <ContentArea
+          :ref="setContentAreaRef"
+          v-model:draft="activeDraft"
+          v-model:forum-title="activeForumTitle"
+          :waddle="waddles.currentWaddle.value"
+          :channel="ui.sidebarMode.value === 'dms' ? null : waddles.currentChannel.value"
+          :dm-peer="activeDmPeer"
+          :sidebar-mode="ui.sidebarMode.value"
+          :messages="activeMessages"
+          :first-unseen-id="activeFirstUnseenId"
+          :xmpp-status="messaging.xmppStatus.value"
+          :action-error="ui.actionError.value"
+          :is-loading-messages="activeIsLoadingMessages"
+          :is-sending="activeIsSending"
+          :can-manage-channels="waddles.canManageChannels.value"
+          :typing-users="activeTypingUsers"
+          :current-user="connectionStore.session?.username"
+          :self-domain="selfDomain"
+          :avatar-url-by-author="avatarUrlByAuthor"
+          :author-jid-by-nick="memberJidByNick"
+          :tenor-api-key="tenorApiKey"
+          :member-names="waddles.members.value.map((m) => m.username)"
+          :room-hats="messaging.roomHats.value"
+          :room-presence="messaging.roomPresence.value"
+          :room-last-seen="messaging.roomLastSeen.value"
+          :slow-mode-cooldown="messaging.slowModeCooldown.value"
+          :search-results="activeSearchResults"
+          :is-searching="activeIsSearching"
+          :upload-progress="activeUploadProgress"
+          :thread-index="threads.index.value"
+          @send="sendActiveMessage"
+          @typing="notifyActiveComposing"
+          @edit-message="editActiveMessage"
+          @retract-message="retractActiveMessage"
+          @react-message="reactActiveMessage"
+          @displayed="markActiveDisplayed"
+          @search="searchActiveMessages"
+          @clear-search="clearActiveSearch"
+          @edit-channel="openChannelEdit"
+          @open-dm="handleOpenDm"
+          @open-thread="openThread"
+        />
 
-      <ThreadPanel
-        v-if="ui.sidebarMode.value === 'channels'"
-        :thread-stack="activeThreadStack"
-        :thread-index="threads.index.value"
-        :resolve-entry="threads.resolveEntry"
-        :current-user="connectionStore.session?.username"
-        :avatar-url-by-author="avatarUrlByAuthor"
-        :author-jid-by-nick="memberJidByNick"
-        :room-hats="messaging.roomHats.value"
-        :room-presence="messaging.roomPresence.value"
-        :room-last-seen="messaging.roomLastSeen.value"
-        :tenor-api-key="tenorApiKey"
-        :member-names="waddles.members.value.map((m) => m.username)"
-        :slow-mode-cooldown="messaging.slowModeCooldown.value"
-        :is-sending="messaging.isSending.value"
-        :upload-progress="messaging.uploadProgress.value"
-        :channel-name="waddles.currentChannel.value?.name ?? ''"
-        @close="closeThreadPanel"
-        @pop-to="popThreadTo"
-        @push-thread="pushThread"
-        @send="sendThreadMessage"
-        @edit-message="editActiveMessage"
-        @retract-message="retractActiveMessage"
-        @react-message="reactActiveMessage"
-        @displayed="markActiveDisplayed"
-        @select-gif="sendGif"
-        @typing="notifyActiveComposing"
-      />
+        <ThreadPanel
+          v-if="ui.sidebarMode.value === 'channels'"
+          :thread-stack="activeThreadStack"
+          :thread-index="threads.index.value"
+          :resolve-entry="threads.resolveEntry"
+          :current-user="connectionStore.session?.username"
+          :avatar-url-by-author="avatarUrlByAuthor"
+          :author-jid-by-nick="memberJidByNick"
+          :room-hats="messaging.roomHats.value"
+          :room-presence="messaging.roomPresence.value"
+          :room-last-seen="messaging.roomLastSeen.value"
+          :tenor-api-key="tenorApiKey"
+          :member-names="waddles.members.value.map((m) => m.username)"
+          :slow-mode-cooldown="messaging.slowModeCooldown.value"
+          :is-sending="messaging.isSending.value"
+          :upload-progress="messaging.uploadProgress.value"
+          :channel-name="waddles.currentChannel.value?.name ?? ''"
+          @close="closeThreadPanel"
+          @pop-to="popThreadTo"
+          @push-thread="pushThread"
+          @send="sendThreadMessage"
+          @edit-message="editActiveMessage"
+          @retract-message="retractActiveMessage"
+          @react-message="reactActiveMessage"
+          @displayed="markActiveDisplayed"
+          @select-gif="sendGif"
+          @typing="notifyActiveComposing"
+        />
+      </template>
     </div>
 
     <!-- Dialogs -->

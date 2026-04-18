@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { Bell, BellOff, LogOut } from "lucide-vue-next";
+import { Bell, BellOff, LogOut, Settings } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
-import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
 import type { ServerVersion } from "@/composables/useVersion";
 import type { WaddleSession } from "@/lib/server-auth";
@@ -18,6 +17,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   logout: [];
+  "open-settings": [];
   "request-notifications": [];
   "toggle-notifications": [];
 }>();
@@ -47,6 +47,11 @@ function toggleDetails() {
 
 function closeDetails() {
   detailsOpen.value = false;
+}
+
+function handleOpenSettings() {
+  closeDetails();
+  emit("open-settings");
 }
 
 function handleLogout() {
@@ -84,7 +89,6 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- Compact mode for icon rail -->
   <div v-if="compact" ref="compactRootEl" class="relative mt-2 flex flex-col items-center gap-1.5 border-t border-border pt-3">
     <button
       class="flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200"
@@ -119,9 +123,16 @@ onUnmounted(() => {
           <div class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">Account & build</div>
         </div>
       </div>
-      <div class="mt-3 border-t border-border pt-3">
-        <ThemeSwitcher />
-      </div>
+      <button
+        class="mt-3 flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-border/70 px-3 text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
+        @click="handleOpenSettings"
+      >
+        <span class="flex items-center gap-2">
+          <Settings class="h-3.5 w-3.5 text-primary/70" />
+          <span>Settings</span>
+        </span>
+        <span class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">Open</span>
+      </button>
       <div class="mt-3 border-t border-border pt-3">
         <VersionFooter
           :web-commit-sha="webCommitSha"
@@ -139,11 +150,17 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <!-- Full mode for sidebar -->
   <div v-else class="flex flex-shrink-0 flex-col gap-2.5 border-t border-border px-3 py-2.5">
-    <div class="flex items-center gap-2.5">
-      <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
-      <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-sidebar-foreground">{{ session.username }}</span>
+    <div class="flex items-center gap-2">
+      <button
+        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-1.5 py-1.5 text-left transition-all duration-200 hover:bg-sidebar-accent"
+        title="Open settings"
+        @click="handleOpenSettings"
+      >
+        <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
+        <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-sidebar-foreground">{{ session.username }}</span>
+        <Settings class="h-3.5 w-3.5 flex-shrink-0 text-sidebar-muted" />
+      </button>
       <button
         class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
         :class="notificationPermission === 'denied'
@@ -164,9 +181,6 @@ onUnmounted(() => {
       >
         <LogOut class="h-3.5 w-3.5" />
       </button>
-    </div>
-    <div class="border-t border-border pt-2">
-      <ThemeSwitcher />
     </div>
     <div class="border-t border-border pt-2">
       <VersionFooter

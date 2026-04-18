@@ -18,7 +18,9 @@ import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui"
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { findMessageElementById } from "@/lib/message-targeting";
+import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
 import { getLastSeen, roomKey, setLastSeen } from "@/lib/last-seen-store";
+import { useScrollDirection } from "@/composables/useScrollDirection";
 
 export function fromLiveMessage(
   session: WaddleSession,
@@ -123,6 +125,7 @@ export function useMessaging(
   actionError: Ref<string>,
   clearActionError: () => void,
 ) {
+  const { mode: scrollDirection } = useScrollDirection();
   const xmppStatus = ref<XmppStatusSnapshot>({
     state: "offline",
     detail: "Live room offline",
@@ -337,24 +340,24 @@ export function useMessaging(
     }, 3000);
   }
 
-  async function scrollToBottom() {
+  async function scrollToPinnedEdge() {
     await nextTick();
     await nextTick();
     const el = timelineEl.value;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
   }
 
   // Initial-load variant: after scrolling, re-pin for ~500ms via a
   // ResizeObserver so late layout (images, avatars, markup reflow) doesn't
   // strand the user above the newest message. Not used per-message —
   // ResizeObserver allocation per live message would be O(n) overhead.
-  async function scrollToBottomAndPin() {
-    await scrollToBottom();
+  async function scrollToPinnedEdgeAndPin() {
+    await scrollToPinnedEdge();
     const el = timelineEl.value;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      el.scrollTop = el.scrollHeight;
+      el.scrollTop = getPinnedScrollTop(el, scrollDirection.value);
     });
     observer.observe(el);
     for (const child of Array.from(el.children)) {
@@ -368,6 +371,10 @@ export function useMessaging(
   }
 
   async function scrollFirstUnseenIntoView(messageId: string) {
+    if (isTopPinnedScrollDirection(scrollDirection.value)) {
+      await scrollToPinnedEdgeAndPin();
+      return;
+    }
     await nextTick();
     await nextTick();
     const el = timelineEl.value;
@@ -384,6 +391,14 @@ export function useMessaging(
     if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
       (target as HTMLElement).scrollIntoView({ block: "start" });
     }
+  }
+
+  async function alignTimelineToPreference() {
+    if (firstUnseenId.value) {
+      await scrollFirstUnseenIntoView(firstUnseenId.value);
+      return;
+    }
+    await scrollToPinnedEdgeAndPin();
   }
 
   function applyDisplayed(messageId: string, nick: string) {
@@ -479,10 +494,10 @@ export function useMessaging(
     const waddleId = activeWaddleId.value;
     const channelId = activeChannelId.value;
     messages.value = applyForumContext([...messages.value, msg]);
-    // mergeLiveMessage always snaps to bottom, so last-seen should advance
+    // mergeLiveMessage always snaps to the active edge, so last-seen should advance
     // in lockstep regardless of the user's prior scroll position — if we're
     // scrolling them to the message, by definition they can see it.
-    void scrollToBottom();
+    void scrollToPinnedEdge();
     if (waddleId && channelId && isFeedVisible(msg)) {
       persistLastSeen(waddleId, channelId, msg.id);
     }
@@ -674,7 +689,7 @@ export function useMessaging(
         await scrollFirstUnseenIntoView(firstUnseen.id);
       } else {
         firstUnseenId.value = null;
-        await scrollToBottomAndPin();
+        await scrollToPinnedEdgeAndPin();
         const newest = [...timeline].reverse().find(isFeedVisible);
         if (newest) persistLastSeen(waddleId, channelId, newest.id);
       }
@@ -859,7 +874,7 @@ export function useMessaging(
         }
         pendingEchoClientIds.add(msgId);
         messages.value = applyForumContext([...messages.value, optimistic]);
-        void scrollToBottom();
+        void scrollToPinnedEdge();
       }
 
       // Clear draft on successful send (triggers ChatEditor clear via watcher)
@@ -1036,6 +1051,10 @@ export function useMessaging(
     activeChannels.value = next;
   }
 
+  watch(scrollDirection, () => {
+    void alignTimelineToPreference();
+  });
+
   return {
     xmppStatus,
     messages,
@@ -1072,7 +1091,7 @@ export function useMessaging(
     searchMessages,
     clearSearch,
     clearChannelActivity,
-    scrollToBottom,
+    scrollToPinnedEdge,
     lastMentionActivity,
     onMessageAck,
     onMessageDeliveryFailure,

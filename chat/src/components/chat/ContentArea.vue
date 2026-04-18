@@ -4,10 +4,15 @@ import { Hash, MessageCircle, MessagesSquare, Settings, Search, X, Upload } from
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
+import {
+  getNewMessagesDividerPlacement,
+  orderTimelineForScrollDirection,
+} from "@/lib/scroll-direction";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
@@ -70,6 +75,13 @@ const emit = defineEmits<{
 // Keep thread roots (id === threadId) and any message with no threadId.
 const feedMessages = computed(() =>
   props.messages.filter((m) => !m.threadId || m.id === m.threadId),
+);
+const { mode: scrollDirection } = useScrollDirection();
+const orderedFeedMessages = computed(() =>
+  orderTimelineForScrollDirection(feedMessages.value, scrollDirection.value),
+);
+const newMessagesDividerPlacement = computed(() =>
+  getNewMessagesDividerPlacement(scrollDirection.value),
 );
 
 const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
@@ -302,6 +314,14 @@ onBeforeUnmount(() => {
     clearTimeout(replyJumpNoticeTimeout);
   }
 });
+
+function showDividerBefore(messageId: string): boolean {
+  return props.firstUnseenId === messageId && newMessagesDividerPlacement.value === "before";
+}
+
+function showDividerAfter(messageId: string): boolean {
+  return props.firstUnseenId === messageId && newMessagesDividerPlacement.value === "after";
+}
 </script>
 
 <template>
@@ -467,9 +487,9 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else class="max-w-none">
-        <template v-for="msg in feedMessages" :key="msg.id">
+        <template v-for="msg in orderedFeedMessages" :key="msg.id">
           <div
-            v-if="msg.id === firstUnseenId"
+            v-if="showDividerBefore(msg.id)"
             class="flex items-center gap-3 py-2 text-[11px] font-medium uppercase tracking-wide text-destructive"
             data-new-messages-divider
             role="separator"
@@ -496,6 +516,17 @@ onBeforeUnmount(() => {
             @avatar-click="onAvatarClick"
             @open-thread="(tid: string) => emit('openThread', tid)"
           />
+          <div
+            v-if="showDividerAfter(msg.id)"
+            class="flex items-center gap-3 py-2 text-[11px] font-medium uppercase tracking-wide text-destructive"
+            data-new-messages-divider
+            role="separator"
+            aria-label="New messages"
+          >
+            <div class="flex-1 h-px bg-destructive/40" />
+            <span>New messages</span>
+            <div class="flex-1 h-px bg-destructive/40" />
+          </div>
         </template>
       </div>
     </div>
