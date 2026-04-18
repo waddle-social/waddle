@@ -94,7 +94,7 @@ function waddleColor(waddle: WaddleSummary): string {
         />
         <span
           v-if="activeWaddleId === waddle.id && horizontal"
-          class="absolute -bottom-2 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
+          class="absolute bottom-0 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
         <!-- Lock badge -->
