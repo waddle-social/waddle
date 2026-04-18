@@ -623,10 +623,14 @@ export class BrowserXmppClient {
     if (!xmpp || !this.connected || this.destroying) return;
     const domain = this.session.jid.split("@")[1];
     if (!domain) return;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error("ping timeout")), 10_000);
+      });
       await Promise.race([
         xmpp.sendIQ({ type: "get", to: domain, ping: true } as Parameters<Agent["sendIQ"]>[0]),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("ping timeout")), 10_000)),
+        timeout,
       ]);
     } catch (err) {
       // Server-side XMPP errors (e.g. service-unavailable) mean the connection
@@ -635,6 +639,8 @@ export class BrowserXmppClient {
       // Transport-level failure — drop the socket so autoReconnect re-opens it.
       if (this.xmpp !== xmpp) return;
       try { xmpp.disconnect(); } catch { /* ignore */ }
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
     }
   }
 

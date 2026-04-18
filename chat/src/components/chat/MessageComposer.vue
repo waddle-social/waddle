@@ -48,18 +48,17 @@ const setEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
 const pendingAttachments = ref<PendingAttachment[]>([]);
 
 function addAttachments(files: Array<File | Blob>) {
+  const next = pendingAttachments.value.slice();
   for (const file of files) {
     const name = file instanceof File ? file.name : `image-${Date.now()}.png`;
-    pendingAttachments.value = [
-      ...pendingAttachments.value,
-      {
-        id: crypto.randomUUID(),
-        file,
-        name,
-        previewUrl: URL.createObjectURL(file),
-      },
-    ];
+    next.push({
+      id: crypto.randomUUID(),
+      file,
+      name,
+      previewUrl: URL.createObjectURL(file),
+    });
   }
+  pendingAttachments.value = next;
 }
 
 function removeAttachment(id: string) {
@@ -303,9 +302,10 @@ watch(
           type="button"
           class="absolute top-1 right-1 h-5 w-5 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
           :title="`Remove ${att.name}`"
+          :aria-label="`Remove attachment ${att.name}`"
           @click="removeAttachment(att.id)"
         >
-          <X class="w-3 h-3" />
+          <X class="w-3 h-3" aria-hidden="true" />
         </button>
       </div>
     </div>
