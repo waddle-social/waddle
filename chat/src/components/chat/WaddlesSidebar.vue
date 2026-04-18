@@ -126,12 +126,16 @@ function waddleColor(waddle: WaddleSummary): string {
         />
         <span
           v-if="activeWaddleId === waddle.id && horizontal"
-          class="absolute -bottom-2 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
+          class="absolute bottom-0 left-1/2 -translate-x-1/2 h-[3px] w-5 rounded-t-full"
           :style="{ backgroundColor: waddleColor(waddle) }"
         />
       </button>
 
-      <div v-if="waddles.length === 0" class="text-muted-foreground/30 text-[10px] text-center" :class="horizontal ? '' : 'mt-3'">
+      <div
+        v-if="waddles.length === 0"
+        class="text-muted-foreground/30 text-[10px] text-center"
+        :class="horizontal ? 'flex-1 self-stretch flex items-center justify-center' : 'mt-3'"
+      >
         No waddles
       </div>
     </div>
