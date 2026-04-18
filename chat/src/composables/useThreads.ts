@@ -20,6 +20,13 @@ export type ThreadIndex = ReadonlyMap<string, ThreadEntry>;
 export interface UseThreadsResult {
   index: Readonly<Ref<ThreadIndex>>;
   getEntry: (threadId: string | null | undefined) => ThreadEntry | undefined;
+  /**
+   * Like `getEntry`, but synthesises an empty entry rooted at the matching
+   * message when no replies exist yet. Use this for the thread panel so
+   * opening an empty sub-thread renders the root and composer instead of
+   * "Loading…".
+   */
+  resolveEntry: (threadId: string | null | undefined) => ThreadEntry | undefined;
   hasChildren: (messageId: string) => boolean;
   rootOf: (message: TimelineMessage | null | undefined) => TimelineMessage | null;
 }
@@ -114,10 +121,31 @@ function buildIndex(messages: readonly TimelineMessage[]): ThreadIndex {
  */
 export function useThreads(messages: Ref<readonly TimelineMessage[]>): UseThreadsResult {
   const index = computed<ThreadIndex>(() => buildIndex(messages.value));
+  const byId = computed<ReadonlyMap<string, TimelineMessage>>(() => {
+    const map = new Map<string, TimelineMessage>();
+    for (const m of messages.value) map.set(m.id, m);
+    return map;
+  });
 
   function getEntry(threadId: string | null | undefined): ThreadEntry | undefined {
     if (!threadId) return undefined;
     return index.value.get(threadId);
+  }
+
+  function resolveEntry(threadId: string | null | undefined): ThreadEntry | undefined {
+    if (!threadId) return undefined;
+    const existing = index.value.get(threadId);
+    if (existing) return existing;
+    const root = byId.value.get(threadId);
+    if (!root) return undefined;
+    return {
+      threadId,
+      root,
+      directChildren: [],
+      allDescendants: [],
+      count: 0,
+      lastTs: root.createdAt,
+    };
   }
 
   function hasChildren(messageId: string): boolean {
@@ -131,5 +159,5 @@ export function useThreads(messages: Ref<readonly TimelineMessage[]>): UseThread
     return index.value.get(message.threadId)?.root ?? null;
   }
 
-  return { index, getEntry, hasChildren, rootOf };
+  return { index, getEntry, resolveEntry, hasChildren, rootOf };
 }

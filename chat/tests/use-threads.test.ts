@@ -83,4 +83,28 @@ describe("useThreads", () => {
     expect(getEntry(undefined)).toBeUndefined();
     expect(getEntry("nope")).toBeUndefined();
   });
+
+  test("resolveEntry synthesises an empty entry for a freshly-started sub-thread", () => {
+    // User clicks "Start sub-thread" on a reply (`c1`) before typing. The
+    // sub-thread has zero messages, so there's no index entry — but the
+    // panel still needs to render the root + composer instead of "Loading…".
+    const messages = ref<TimelineMessage[]>([
+      makeMessage({ id: "root", threadId: "root", createdAt: "2026-01-01T00:00:00Z", body: "root msg" }),
+      makeMessage({ id: "c1", threadId: "root", createdAt: "2026-01-01T00:01:00Z", body: "reply" }),
+    ]);
+    const { getEntry, resolveEntry } = useThreads(messages);
+    expect(getEntry("c1")).toBeUndefined();
+    const entry = resolveEntry("c1");
+    expect(entry).toBeTruthy();
+    expect(entry!.root?.id).toBe("c1");
+    expect(entry!.directChildren).toEqual([]);
+    expect(entry!.count).toBe(0);
+  });
+
+  test("resolveEntry returns undefined when the id doesn't match any loaded message", () => {
+    const messages = ref<TimelineMessage[]>([]);
+    const { resolveEntry } = useThreads(messages);
+    expect(resolveEntry("nope")).toBeUndefined();
+    expect(resolveEntry(undefined)).toBeUndefined();
+  });
 });

@@ -937,6 +937,7 @@ onUnmounted(() => {
         v-if="ui.sidebarMode.value === 'channels'"
         :thread-stack="activeThreadStack"
         :thread-index="threads.index.value"
+        :resolve-entry="threads.resolveEntry"
         :current-user="connectionStore.session?.username"
         :avatar-url-by-author="avatarUrlByAuthor"
         :author-jid-by-nick="memberJidByNick"
