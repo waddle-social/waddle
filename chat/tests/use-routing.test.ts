@@ -14,7 +14,7 @@ const channel: ChannelSummary = {
 
 describe("parseRoute / buildPath threadStack", () => {
   test("parses the dedicated settings route", () => {
-    const route = parseRoute("/settings");
+    const route = parseRoute("/_settings");
     expect(route.page).toBe("settings");
     expect(route.waddleSlug).toBeNull();
     expect(route.channelSlug).toBeNull();
@@ -23,7 +23,7 @@ describe("parseRoute / buildPath threadStack", () => {
   });
 
   test("buildSettingsPath returns the settings page path", () => {
-    expect(buildSettingsPath()).toBe("/settings");
+    expect(buildSettingsPath()).toBe("/_settings");
   });
 
   test("reads an empty thread stack when the query param is missing", () => {

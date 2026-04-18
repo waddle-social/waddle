@@ -9,7 +9,7 @@ export interface RouteState {
   threadStack: string[];
 }
 
-const SETTINGS_PATH = "/settings";
+const SETTINGS_PATH = "/_settings";
 
 function slugify(name: string): string {
   return name
@@ -51,7 +51,7 @@ export function parseRoute(pathname: string, search?: string): RouteState {
   const segments = pathname.split("/").filter(Boolean);
   const resolvedSearch = search ?? (typeof window !== "undefined" ? window.location.search : "");
   const threadStack = parseThreadStack(resolvedSearch);
-  if (segments[0] === "settings" && segments.length === 1) {
+  if (pathname === SETTINGS_PATH) {
     return {
       page: "settings",
       waddleSlug: null,
