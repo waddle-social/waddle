@@ -120,8 +120,8 @@ async fn xep0050_create_channel_command_prevents_managed_jid_instant_room() {
         Ok(response) => {
             // If we get a response, verify it's not a successful join
             assert!(
-                !response.contains("<status code='110'/>") &&
-                !response.contains("<status code=\"110\"/>"),
+                !response.contains("<status code='110'/>")
+                    && !response.contains("<status code=\"110\"/>"),
                 "Should not successfully join managed JID without creating channel first, got: {}",
                 response
             );

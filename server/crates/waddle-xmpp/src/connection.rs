@@ -7611,6 +7611,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let session_id = command.session_id.clone();
         let ctx = CommandContext {
             from: sender_jid,
+            authenticated_user_id: self.session.as_ref().map(|session| session.user_id.clone()),
             iq: iq.clone(),
             command,
         };

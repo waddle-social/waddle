@@ -19,9 +19,7 @@ pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
         if id.trim().is_empty() {
             // skip empty thread
         } else if !element.children().any(|child| child.name() == "thread") {
-            let thread_elem = Element::builder("thread", element.ns())
-                .append(id)
-                .build();
+            let thread_elem = Element::builder("thread", element.ns()).append(id).build();
             element.append_child(thread_elem);
         }
     }

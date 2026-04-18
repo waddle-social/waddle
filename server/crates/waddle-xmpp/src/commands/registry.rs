@@ -42,6 +42,8 @@ pub enum CommandResult {
 pub struct CommandContext {
     /// The requester's JID
     pub from: Jid,
+    /// The authenticated internal principal for this connection.
+    pub authenticated_user_id: Option<String>,
     /// The original IQ request
     pub iq: Iq,
     /// The parsed command
@@ -56,9 +58,11 @@ pub struct CommandContext {
 /// - Processing command logic
 /// - Returning appropriate forms or completion status
 pub type CommandHandler = Arc<
-    dyn Fn(CommandContext) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = CommandResult> + Send + 'static>,
-        > + Send
+    dyn Fn(
+            CommandContext,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'static>>
+        + Send
         + Sync,
 >;
 
@@ -134,8 +138,12 @@ impl CommandRegistry {
     /// - `node`: The command node identifier (e.g., "waddle:create-channel")
     /// - `name`: The human-readable command name (e.g., "Create Channel")
     /// - `handler`: The handler function
-    pub async fn register<F, Fut>(&self, node: impl Into<String>, name: impl Into<String>, handler: F)
-    where
+    pub async fn register<F, Fut>(
+        &self,
+        node: impl Into<String>,
+        name: impl Into<String>,
+        handler: F,
+    ) where
         F: Fn(CommandContext) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = CommandResult> + Send + 'static,
     {
@@ -174,7 +182,7 @@ impl CommandRegistry {
     /// 2. Creates or retrieves a session
     /// 3. Calls the handler
     /// 4. Cleans up expired sessions
-    pub async fn dispatch(&self, ctx: CommandContext) -> CommandResult {
+    pub async fn dispatch(&self, mut ctx: CommandContext) -> CommandResult {
         let node = &ctx.command.node;
         let from = &ctx.from;
 
@@ -197,6 +205,7 @@ impl CommandRegistry {
 
         // Handle session creation/retrieval
         let action = ctx.command.action.unwrap_or(Action::Execute);
+        let mut created_session_id = None;
         match action {
             Action::Execute => {
                 // Create a new session
@@ -212,6 +221,8 @@ impl CommandRegistry {
                     from = %from,
                     "Created command session"
                 );
+                ctx.command.session_id = Some(session_id.clone());
+                created_session_id = Some(session_id);
             }
             Action::Cancel => {
                 // Cancel and clean up session
@@ -240,7 +251,21 @@ impl CommandRegistry {
         }
 
         // Call the handler
-        handler(ctx).await
+        match (created_session_id, handler(ctx).await) {
+            (
+                Some(session_id),
+                CommandResult::Executing {
+                    form,
+                    session_id: response_session_id,
+                    notes,
+                },
+            ) if response_session_id.is_empty() => CommandResult::Executing {
+                form,
+                session_id,
+                notes,
+            },
+            (_, result) => result,
+        }
     }
 
     /// Get a command session by ID.
@@ -300,12 +325,16 @@ mod tests {
         let registry = CommandRegistry::new();
 
         registry
-            .register("test:command", |_ctx| async { CommandResult::Canceled { notes: vec![] } })
+            .register(
+                "test:command",
+                "Test Command",
+                |_ctx: CommandContext| async { CommandResult::Canceled { notes: vec![] } },
+            )
             .await;
 
         let commands = registry.list_commands().await;
         assert_eq!(commands.len(), 1);
-        assert!(commands.contains(&"test:command".to_string()));
+        assert!(commands.contains(&("test:command".to_string(), "Test Command".to_string())));
     }
 
     #[tokio::test]
@@ -317,5 +346,48 @@ mod tests {
         );
 
         assert!(!session.is_expired());
+    }
+
+    #[tokio::test]
+    async fn test_execute_threads_generated_session_id_to_handler() {
+        let registry = CommandRegistry::new();
+
+        registry
+            .register(
+                "test:command",
+                "Test Command",
+                |ctx: CommandContext| async move {
+                    CommandResult::Executing {
+                        form: DataForm::new(crate::xep::xep0004::FormType::Form),
+                        session_id: ctx.command.session_id.unwrap_or_default(),
+                        notes: vec![],
+                    }
+                },
+            )
+            .await;
+
+        let result = registry
+            .dispatch(CommandContext {
+                from: "user@localhost".parse().unwrap(),
+                authenticated_user_id: Some("user-123".to_string()),
+                iq: Iq {
+                    from: None,
+                    to: None,
+                    id: "test-iq".to_string(),
+                    payload: xmpp_parsers::iq::IqType::Set(
+                        "<query xmlns='urn:test'/>".parse().unwrap(),
+                    ),
+                },
+                command: Command::new("test:command").with_action(Action::Execute),
+            })
+            .await;
+
+        let session_id = match result {
+            CommandResult::Executing { session_id, .. } => session_id,
+            _ => panic!("expected executing result"),
+        };
+
+        assert!(!session_id.is_empty());
+        assert!(registry.get_session(&session_id).await.is_some());
     }
 }

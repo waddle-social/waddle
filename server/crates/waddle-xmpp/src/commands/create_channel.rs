@@ -1,14 +1,15 @@
 //! Create Channel Command Handler (XEP-0050)
 
-use std::sync::Arc;
-use tracing::debug;
 use crate::commands::{CommandContext, CommandResult, NoteType};
 use crate::xep::xep0004::{DataForm, Field, FieldOption, FieldType, FormType};
 use crate::xep::xep0050::Note;
 use crate::ChannelType;
+use std::sync::Arc;
+use tracing::debug;
 
 pub const NODE_CREATE_CHANNEL: &str = "waddle:create-channel";
 
+#[derive(Debug)]
 pub struct ChannelMetadata {
     pub name: String,
     pub description: Option<String>,
@@ -120,16 +121,10 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
     ctx: CommandContext,
 ) -> CommandResult {
     let from = &ctx.from;
-    let action = ctx.command.action.unwrap_or(crate::xep::xep0050::Action::Execute);
-
-    let user_id = match from.node() {
-        Some(node) => node.as_str(),
-        None => {
-            return CommandResult::Error(crate::XmppError::bad_request(Some(
-                "JID must have a localpart".to_string(),
-            )));
-        }
-    };
+    let action = ctx
+        .command
+        .action
+        .unwrap_or(crate::xep::xep0050::Action::Execute);
 
     match action {
         crate::xep::xep0050::Action::Execute => {
@@ -166,6 +161,15 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                 }
             };
 
+            let user_id = match ctx.authenticated_user_id.as_deref() {
+                Some(user_id) => user_id,
+                None => {
+                    return CommandResult::Error(crate::XmppError::not_authorized(Some(
+                        "Authenticated session required".to_string(),
+                    )));
+                }
+            };
+
             match deps.create_channel(user_id, &waddle_id, metadata).await {
                 Ok(result) => {
                     let result_form = build_result_form(&result.channel_id, &result.channel_jid);
@@ -183,17 +187,65 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                 },
             }
         }
-        _ => {
-            CommandResult::Error(crate::XmppError::bad_request(Some(
-                "Unsupported action for create-channel command".to_string(),
-            )))
-        }
+        _ => CommandResult::Error(crate::XmppError::bad_request(Some(
+            "Unsupported action for create-channel command".to_string(),
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::Action;
+    use crate::xep::xep0050::Command;
+    use jid::Jid;
+    use minidom::Element;
+    use std::sync::Mutex;
+    use xmpp_parsers::iq::{Iq, IqType};
+
+    #[derive(Default)]
+    struct MockDeps {
+        captured_user_id: Mutex<Option<String>>,
+    }
+
+    impl CreateChannelDeps for MockDeps {
+        async fn create_channel(
+            &self,
+            user_id: &str,
+            _waddle_id: &str,
+            _metadata: ChannelMetadata,
+        ) -> Result<CreateChannelResult, String> {
+            *self.captured_user_id.lock().unwrap() = Some(user_id.to_string());
+            Ok(CreateChannelResult {
+                channel_id: "channel-123".to_string(),
+                channel_jid: "test-waddle_channel-123@muc.localhost".to_string(),
+            })
+        }
+    }
+
+    fn test_command_context(
+        action: Action,
+        session_id: Option<&str>,
+        form: Option<DataForm>,
+        authenticated_user_id: Option<&str>,
+    ) -> CommandContext {
+        CommandContext {
+            from: "alice@localhost/resource".parse::<Jid>().unwrap(),
+            authenticated_user_id: authenticated_user_id.map(str::to_string),
+            iq: Iq {
+                from: None,
+                to: None,
+                id: "test-iq".to_string(),
+                payload: IqType::Set("<query xmlns='urn:test'/>".parse::<Element>().unwrap()),
+            },
+            command: {
+                let mut command = Command::new(NODE_CREATE_CHANNEL).with_action(action);
+                command.session_id = session_id.map(str::to_string);
+                command.form = form;
+                command
+            },
+        }
+    }
 
     #[test]
     fn test_parse_channel_form_minimal() {
@@ -214,8 +266,7 @@ mod tests {
             .add_field(Field::hidden("waddle_id", "test-waddle"))
             .add_field(Field::text_single("name", "Announcements"))
             .add_field(
-                Field::new("description", FieldType::TextMulti)
-                    .with_value("Important updates"),
+                Field::new("description", FieldType::TextMulti).with_value("Important updates"),
             )
             .add_field(Field::new("channel_type", FieldType::ListSingle).with_value("forum"))
             .add_field(Field::text_single("position", "10"));
@@ -223,10 +274,7 @@ mod tests {
         let (waddle_id, metadata) = parse_channel_form(&form).unwrap();
         assert_eq!(waddle_id, "test-waddle");
         assert_eq!(metadata.name, "Announcements");
-        assert_eq!(
-            metadata.description,
-            Some("Important updates".to_string())
-        );
+        assert_eq!(metadata.description, Some("Important updates".to_string()));
         assert_eq!(metadata.channel_type, "forum");
         assert_eq!(metadata.position, 10);
     }
@@ -251,5 +299,48 @@ mod tests {
         let result = parse_channel_form(&form);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required field: name"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_returns_session_id_from_context() {
+        let result = handle_create_channel(
+            Arc::new(MockDeps::default()),
+            test_command_context(Action::Execute, Some("session-123"), None, Some("user-123")),
+        )
+        .await;
+
+        match result {
+            CommandResult::Executing { session_id, .. } => assert_eq!(session_id, "session-123"),
+            _ => panic!("expected executing result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_uses_authenticated_user_id_for_create_channel() {
+        let deps = Arc::new(MockDeps::default());
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::hidden("waddle_id", "test-waddle"))
+            .add_field(Field::text_single("name", "General"));
+
+        let result = handle_create_channel(
+            Arc::clone(&deps),
+            test_command_context(
+                Action::Complete,
+                Some("session-123"),
+                Some(form),
+                Some("user-123"),
+            ),
+        )
+        .await;
+
+        match result {
+            CommandResult::Completed { .. } => {}
+            _ => panic!("expected completed result"),
+        }
+
+        assert_eq!(
+            deps.captured_user_id.lock().unwrap().as_deref(),
+            Some("user-123")
+        );
     }
 }

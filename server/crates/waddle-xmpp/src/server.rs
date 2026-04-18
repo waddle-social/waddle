@@ -13,6 +13,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, info_span, warn, Instrument};
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 
+use crate::commands::CommandRegistry;
 use crate::connection::ConnectionActor;
 use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
@@ -24,7 +25,6 @@ use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
 use crate::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
 use crate::{AppState, XmppError};
-use crate::commands::CommandRegistry;
 
 /// XMPP server configuration.
 #[derive(Debug, Clone)]

@@ -723,18 +723,9 @@ mod tests {
     ) -> String {
         let channel_id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
-        insert_channel(
-            waddle_db,
-            &channel_id,
-            name,
-            None,
-            "text",
-            0,
-            false,
-            &now,
-        )
-        .await
-        .unwrap();
+        insert_channel(waddle_db, &channel_id, name, None, "text", 0, false, &now)
+            .await
+            .unwrap();
 
         let parent_tuple = Tuple::new(
             Object::new(ObjectType::Channel, &channel_id),
