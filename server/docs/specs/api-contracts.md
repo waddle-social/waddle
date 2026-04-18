@@ -217,7 +217,7 @@ POST   /invites/:code/join        Join via invite
 ### Channels
 
 ```
-POST   /waddles/:wid/channels     Create channel
+XMPP   waddle:create-channel      Create channel
 GET    /channels/:id              Get channel
 PATCH  /channels/:id              Update channel
 DELETE /channels/:id              Delete channel
@@ -226,6 +226,9 @@ POST   /channels/:id/messages     Send message
 GET    /channels/:id/pins         Get pinned messages
 POST   /channels/:id/typing       Send typing indicator
 ```
+
+Channel creation is handled by the XMPP `waddle:create-channel` ad-hoc command,
+not by an HTTP endpoint.
 
 ### Messages
 

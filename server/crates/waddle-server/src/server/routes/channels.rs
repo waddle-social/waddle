@@ -1,11 +1,12 @@
 //! Channel CRUD API Routes
 //!
 //! Provides HTTP endpoints for managing Channels within Waddles:
-//! - POST /v1/waddles/:wid/channels - Create a new channel in a waddle
-//! - GET /v1/waddles/:wid/channels - List channels in a waddle
-//! - GET /v1/channels/:id - Get channel details (requires waddle_id query param)
 //! - PATCH /v1/channels/:id - Update channel metadata
 //! - DELETE /v1/channels/:id - Delete a channel
+//!
+//! NOTE: Channel creation is now XMPP-native via XEP-0050 ad-hoc command:
+//! - Node: waddle:create-channel
+//! - Protocol: XEP-0050 (Ad-Hoc Commands)
 
 use crate::auth::{AuthError, SessionManager};
 use crate::db::Database;
@@ -17,14 +18,15 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, patch, post},
+    routing::{delete, patch},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, instrument, warn};
+
+#[cfg(test)]
 use uuid::Uuid;
-use waddle_xmpp::ChannelType;
 
 /// Extended application state for channel routes
 pub struct ChannelState {
@@ -54,7 +56,7 @@ impl ChannelState {
 /// Create the channels router
 ///
 /// NOTE: Channel creation is now XMPP-native via XEP-0050 ad-hoc commands.
-/// The create_channel_handler HTTP route has been removed.
+/// The HTTP create-channel route has been removed.
 pub fn router(channel_state: Arc<ChannelState>) -> Router {
     Router::new()
         // Channel-scoped routes (require waddle_id in query params)
@@ -64,36 +66,6 @@ pub fn router(channel_state: Arc<ChannelState>) -> Router {
 }
 
 // === Request/Response Types ===
-
-/// Request body for creating a new channel
-#[derive(Debug, Deserialize)]
-pub struct CreateChannelRequest {
-    /// Channel name (required)
-    pub name: String,
-    /// Channel description (optional)
-    pub description: Option<String>,
-    /// Channel type (default: "text")
-    #[serde(default = "default_channel_type")]
-    pub channel_type: String,
-    /// Position in channel list (default: 0)
-    #[serde(default)]
-    pub position: i32,
-}
-
-fn default_channel_type() -> String {
-    ChannelType::Text.as_str().to_string()
-}
-
-fn normalize_channel_type(channel_type: &str) -> Result<String, ChannelError> {
-    ChannelType::parse(channel_type)
-        .map(|kind| kind.as_str().to_string())
-        .ok_or_else(|| {
-            ChannelError::InvalidInput(format!(
-                "Unsupported channel_type '{}'. Expected one of: text, forum",
-                channel_type
-            ))
-        })
-}
 
 /// Request body for updating a channel
 #[derive(Debug, Deserialize)]
@@ -127,13 +99,6 @@ pub struct ChannelResponse {
     pub created_at: String,
     /// When the channel was last updated
     pub updated_at: Option<String>,
-}
-
-/// Query parameters for session authentication
-#[derive(Debug, Deserialize)]
-pub struct SessionQuery {
-    /// Session ID for authentication
-    pub session_id: String,
 }
 
 /// Query parameters for getting/updating/deleting a channel
@@ -223,32 +188,6 @@ fn channel_error_to_response(err: ChannelError) -> (StatusCode, Json<ErrorRespon
 }
 
 // === Handlers ===
-
-// NOTE: Channel creation has been moved to XMPP-native XEP-0050 ad-hoc commands.
-// The HTTP create_channel_handler endpoint has been removed as part of the cutover.
-// Channel creation is now exclusively handled by the waddle:create-channel command.
-//
-// The insert_channel helper function below is still used by the XMPP command handler
-// (see waddle-server::server::xmpp_state::CreateChannelDeps implementation).
-
-/*
-/// POST /v1/waddles/:waddle_id/channels
-///
-/// Create a new channel in a waddle. Requires create_channel permission on the waddle.
-///
-/// DEPRECATED: This HTTP endpoint has been removed. Use the XMPP ad-hoc command instead:
-/// - Node: waddle:create-channel
-/// - Protocol: XEP-0050 (Ad-Hoc Commands)
-#[instrument(skip(state))]
-pub async fn create_channel_handler(
-    State(state): State<Arc<ChannelState>>,
-    Path(waddle_id): Path<String>,
-    Query(params): Query<SessionQuery>,
-    Json(request): Json<CreateChannelRequest>,
-) -> impl IntoResponse {
-    ... code removed ...
-}
-*/
 
 /// PATCH /v1/channels/:id
 ///
@@ -776,187 +715,54 @@ mod tests {
         (waddle_id, waddle_db)
     }
 
-    #[tokio::test]
-    async fn test_create_channel() {
-        let channel_state = create_test_channel_state().await;
-        let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
-        let app = router(channel_state);
+    async fn create_test_channel(
+        state: &ChannelState,
+        waddle_db: &Database,
+        waddle_id: &str,
+        name: &str,
+    ) -> String {
+        let channel_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_channel(
+            waddle_db,
+            &channel_id,
+            name,
+            None,
+            "text",
+            0,
+            false,
+            &now,
+        )
+        .await
+        .unwrap();
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        r#"{"name": "test-channel", "description": "A test channel"}"#,
-                    ))
-                    .unwrap(),
-            )
+        let parent_tuple = Tuple::new(
+            Object::new(ObjectType::Channel, &channel_id),
+            Relation::new("parent"),
+            Subject {
+                subject_type: SubjectType::Waddle,
+                id: waddle_id.to_string(),
+                relation: None,
+            },
+        );
+        state
+            .permission_service
+            .write_tuple(parent_tuple)
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::CREATED);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(json["name"], "test-channel");
-        assert_eq!(json["description"], "A test channel");
-        assert_eq!(json["waddle_id"], waddle_id);
-        assert_eq!(json["channel_type"], "text");
-        assert!(!json["is_default"].as_bool().unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_create_channel_empty_name() {
-        let channel_state = create_test_channel_state().await;
-        let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
-        let app = router(channel_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": ""}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "invalid_input");
-    }
-
-    #[tokio::test]
-    async fn test_create_forum_channel() {
-        let channel_state = create_test_channel_state().await;
-        let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
-        let app = router(channel_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        r#"{"name": "announcements", "channel_type": "forum"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::CREATED);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["channel_type"], "forum");
-    }
-
-    #[tokio::test]
-    async fn test_create_channel_rejects_unknown_type() {
-        let channel_state = create_test_channel_state().await;
-        let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
-        let app = router(channel_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        r#"{"name": "mystery", "channel_type": "voice"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn test_create_channel_permission_denied() {
-        let channel_state = create_test_channel_state().await;
-        let session = create_test_session(&channel_state).await;
-        // Don't set up permissions - user has no create_channel permission
-        let waddle_id = Uuid::new_v4().to_string();
-        let app = router(channel_state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "test-channel"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        channel_id
     }
 
     #[tokio::test]
     async fn test_update_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
-        // Create a channel
-        let create_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "test-channel"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let body = create_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let channel_id = create_json["id"].as_str().unwrap();
+        let channel_id =
+            create_test_channel(&channel_state, &waddle_db, &waddle_id, "test-channel").await;
 
         // Update the channel
         let response = app
@@ -989,34 +795,11 @@ mod tests {
     async fn test_delete_channel() {
         let channel_state = create_test_channel_state().await;
         let session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
+        let (waddle_id, waddle_db) = setup_waddle_with_permissions(&channel_state, &session).await;
         let app = router(channel_state.clone());
 
-        // Create a channel
-        let create_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "test-channel"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let body = create_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let channel_id = create_json["id"].as_str().unwrap();
+        let channel_id =
+            create_test_channel(&channel_state, &waddle_db, &waddle_id, "test-channel").await;
 
         // Delete the channel
         let response = app
@@ -1042,7 +825,7 @@ mod tests {
         let channel_state = create_test_channel_state().await;
         let owner_session = create_test_session(&channel_state).await;
         let other_session = create_test_session(&channel_state).await;
-        let (waddle_id, _waddle_db) =
+        let (waddle_id, waddle_db) =
             setup_waddle_with_permissions(&channel_state, &owner_session).await;
 
         // Give other_session member permission only (not admin, so can't delete)
@@ -1059,31 +842,8 @@ mod tests {
 
         let app = router(channel_state.clone());
 
-        // Create a channel as owner
-        let create_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/v1/waddles/{}/channels?session_id={}",
-                        waddle_id, owner_session.id
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"name": "owner-channel"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let body = create_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        let create_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let channel_id = create_json["id"].as_str().unwrap();
+        let channel_id =
+            create_test_channel(&channel_state, &waddle_db, &waddle_id, "owner-channel").await;
 
         // Try to delete as other user (non-admin)
         let response = app
