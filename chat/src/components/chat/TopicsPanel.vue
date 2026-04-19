@@ -12,6 +12,7 @@ const props = defineProps<{
   isLoading: boolean;
   memberCount: number;
   activeChannelJids: Set<string>;
+  channelUnreadMap?: Record<string, { unread: number; mentions: number }>;
   roomAvatarHashes?: Record<string, string>;
 }>();
 
@@ -22,6 +23,10 @@ function hasActivity(channelId: string): boolean {
     }
   }
   return false;
+}
+
+function channelUnread(channelId: string): { unread: number; mentions: number } {
+  return props.channelUnreadMap?.[channelId] ?? { unread: 0, mentions: 0 };
 }
 
 function channelIcon(channel: ChannelSummary) {
@@ -103,7 +108,7 @@ const emit = defineEmits<{
             class="text-[13px] truncate flex-1"
             :class="[
               activeChannelId === channel.id ? 'font-medium' : '',
-              hasActivity(channel.id) && activeChannelId !== channel.id ? 'font-semibold text-sidebar-foreground' : '',
+              (channelUnread(channel.id).unread > 0 || hasActivity(channel.id)) && activeChannelId !== channel.id ? 'font-semibold text-sidebar-foreground' : '',
             ]"
           >{{ channel.name }}</span>
           <span
@@ -113,7 +118,15 @@ const emit = defineEmits<{
             Forum
           </span>
           <span
-            v-if="hasActivity(channel.id) && activeChannelId !== channel.id"
+            v-if="channelUnread(channel.id).mentions > 0 && activeChannelId !== channel.id"
+            class="inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full text-[10px] font-semibold bg-destructive text-destructive-foreground"
+          >{{ channelUnread(channel.id).mentions }}</span>
+          <span
+            v-else-if="channelUnread(channel.id).unread > 0 && activeChannelId !== channel.id"
+            class="inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full text-[10px] font-semibold bg-primary text-primary-foreground"
+          >{{ channelUnread(channel.id).unread }}</span>
+          <span
+            v-else-if="hasActivity(channel.id) && activeChannelId !== channel.id"
             class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
           />
         </button>

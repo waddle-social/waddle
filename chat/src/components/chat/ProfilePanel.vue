@@ -11,6 +11,8 @@ const props = defineProps<{
   session: WaddleSession;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
+  totalUnreadCount?: number;
+  totalMentionCount?: number;
   compact?: boolean;
   webCommitSha?: string;
   serverVersion?: ServerVersion | null;
@@ -92,7 +94,7 @@ onUnmounted(() => {
 <template>
   <div v-if="compact" ref="compactRootEl" class="relative mt-2 flex flex-col items-center gap-1.5 border-t border-border pt-3">
     <button
-      class="flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200"
+      class="relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200"
       :class="notificationPermission === 'denied'
         ? 'cursor-not-allowed text-rail-foreground opacity-30'
         : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
@@ -103,6 +105,14 @@ onUnmounted(() => {
     >
       <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
       <Bell v-else class="h-3.5 w-3.5" />
+      <span
+        v-if="(totalMentionCount ?? 0) > 0"
+        class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-destructive text-destructive-foreground"
+      >{{ totalMentionCount }}</span>
+      <span
+        v-else-if="(totalUnreadCount ?? 0) > 0"
+        class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-primary text-primary-foreground"
+      >{{ totalUnreadCount }}</span>
     </button>
     <button
       class="flex h-10 w-10 items-center justify-center rounded-xl text-rail-foreground transition-all duration-200 hover:bg-rail-hover hover:text-rail-active"
@@ -167,7 +177,7 @@ onUnmounted(() => {
         <Settings class="h-3.5 w-3.5 flex-shrink-0 text-sidebar-muted" />
       </button>
       <button
-        class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
+        class="relative flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
         :class="notificationPermission === 'denied'
           ? 'cursor-not-allowed opacity-30'
           : 'text-sidebar-muted hover:bg-sidebar-accent hover:text-primary'"
@@ -178,6 +188,14 @@ onUnmounted(() => {
       >
         <BellOff v-if="notificationPermission === 'denied' || (notificationPermission === 'granted' && !notificationsEnabled)" class="h-3.5 w-3.5" />
         <Bell v-else class="h-3.5 w-3.5" />
+        <span
+          v-if="(totalMentionCount ?? 0) > 0"
+          class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-destructive text-destructive-foreground"
+        >{{ totalMentionCount }}</span>
+        <span
+          v-else-if="(totalUnreadCount ?? 0) > 0"
+          class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-primary text-primary-foreground"
+        >{{ totalUnreadCount }}</span>
       </button>
       <button
         class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-sidebar-muted transition-all duration-200 hover:bg-sidebar-accent hover:text-destructive"

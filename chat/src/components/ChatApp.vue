@@ -9,6 +9,7 @@ import { useThreads } from "@/composables/useThreads";
 import { useUiState } from "@/composables/useUiState";
 import { useAppUpdate } from "@/composables/useAppUpdate";
 import { useNotifications } from "@/composables/useNotifications";
+import { useChannelUnread } from "@/composables/useChannelUnread";
 import { useVersion } from "@/composables/useVersion";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
 import { barePeerJid, jidDomain, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
@@ -84,6 +85,8 @@ const dmConversations = useDmConversations(
   session,
   xmppClient,
 );
+
+const channelUnread = useChannelUnread(xmppClient);
 
 const dmMessaging = useDmMessaging(
   session,
@@ -169,6 +172,8 @@ const activeDmPeer = computed(() => {
   };
 });
 
+const computedChannelUnreadMap = computed(() => channelUnread.channelUnreadMap());
+
 const notifications = useNotifications();
 const appUpdate = useAppUpdate();
 const version = useVersion(xmppClient);
@@ -221,6 +226,12 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
   messaging.lastMentionActivity.value = null;
 });
 
+watch(() => messaging.lastBackgroundActivity.value, (event) => {
+  if (!event) return;
+  channelUnread.incrementUnread(event);
+  messaging.lastBackgroundActivity.value = null;
+});
+
 watch(xmppClient, (client) => {
   if (!client || !session.value) return;
   client.setDirectMessageHandler((msg) => {
@@ -266,6 +277,7 @@ watch(xmppClient, (client) => {
     messaging.onSessionLifecycle(event);
     dmMessaging.onSessionLifecycle(event);
     void dmConversations.hydrateFromInbox();
+    void channelUnread.hydrateFromInbox();
   });
 }, { immediate: true });
 
@@ -580,6 +592,7 @@ async function onConnectionReady() {
   }
 
   void dmConversations.hydrateFromInbox();
+  void channelUnread.hydrateFromInbox();
 
   // Register service worker and sync push subscription (best-effort, non-blocking)
   void (async () => {
@@ -625,6 +638,7 @@ async function selectChannel(channelId: string) {
   if (waddles.activeWaddleId.value && connectionStore.session) {
     const roomJid = roomBareJidFor(connectionStore.session, waddles.activeWaddleId.value, channelId);
     messaging.clearChannelActivity(roomJid);
+    channelUnread.markRead(roomJid);
   }
   if (waddles.activeWaddleId.value) {
     await messaging.loadMessages(waddles.activeWaddleId.value, channelId);
@@ -864,6 +878,7 @@ onUnmounted(() => {
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
           :active-channel-jids="messaging.activeChannels.value"
+          :channel-unread-map="computedChannelUnreadMap"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
@@ -883,6 +898,8 @@ onUnmounted(() => {
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
+          :total-unread-count="channelUnread.totalUnreadCount.value"
+          :total-mention-count="channelUnread.totalMentionCount.value"
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
           @open-settings="openUserSettings"
@@ -936,6 +953,8 @@ onUnmounted(() => {
           :session="connectionStore.session"
           :notification-permission="notifications.permissionState.value"
           :notifications-enabled="notifications.notificationsEnabled.value"
+          :total-unread-count="channelUnread.totalUnreadCount.value"
+          :total-mention-count="channelUnread.totalMentionCount.value"
           :web-commit-sha="version.webCommitSha.value"
           :server-version="version.serverVersion.value"
           @open-settings="openUserSettings"
@@ -961,6 +980,7 @@ onUnmounted(() => {
           :is-loading="waddles.isLoadingStructure.value"
           :member-count="waddles.members.value.length"
           :active-channel-jids="messaging.activeChannels.value"
+          :channel-unread-map="computedChannelUnreadMap"
           @select-channel="selectChannel"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
