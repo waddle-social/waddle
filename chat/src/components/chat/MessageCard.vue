@@ -324,9 +324,7 @@ function submitEditFromEditor(doc: Record<string, unknown>) {
 }
 
 function emitAvatarClick() {
-  if (props.authorJid && !props.message.isSelf) {
-    emit("avatarClick", props.message.author);
-  }
+  emit("avatarClick", props.message.author);
 }
 
 const bubbleEl = ref<HTMLElement | null>(null);

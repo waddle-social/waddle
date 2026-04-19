@@ -1017,6 +1017,7 @@ onUnmounted(() => {
           :is-searching="activeIsSearching"
           :upload-progress="activeUploadProgress"
           :thread-index="threads.index.value"
+          :xmpp-client="xmppClient"
           @send="sendActiveMessage"
           @typing="notifyActiveComposing"
           @edit-message="editActiveMessage"
