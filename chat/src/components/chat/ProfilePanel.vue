@@ -32,6 +32,13 @@ const bellTitle = computed(() => {
   return "Enable notifications";
 });
 
+const bellAriaLabel = computed(() => {
+  const base = bellTitle.value;
+  if ((props.totalMentionCount ?? 0) > 0) return `${base}, ${props.totalMentionCount} unread mention${props.totalMentionCount === 1 ? "" : "s"}`;
+  if ((props.totalUnreadCount ?? 0) > 0) return `${base}, ${props.totalUnreadCount} unread message${props.totalUnreadCount === 1 ? "" : "s"}`;
+  return base;
+});
+
 const detailsOpen = ref(false);
 const compactRootEl = ref<HTMLElement | null>(null);
 
@@ -99,7 +106,7 @@ onUnmounted(() => {
         ? 'cursor-not-allowed text-rail-foreground opacity-30'
         : 'text-rail-foreground hover:bg-rail-hover hover:text-primary'"
       :title="bellTitle"
-      :aria-label="bellTitle"
+      :aria-label="bellAriaLabel"
       :disabled="notificationPermission === 'denied'"
       @click="handleBellClick"
     >
@@ -108,10 +115,12 @@ onUnmounted(() => {
       <span
         v-if="(totalMentionCount ?? 0) > 0"
         class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-destructive text-destructive-foreground"
+        aria-hidden="true"
       >{{ totalMentionCount }}</span>
       <span
         v-else-if="(totalUnreadCount ?? 0) > 0"
         class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-primary text-primary-foreground"
+        aria-hidden="true"
       >{{ totalUnreadCount }}</span>
     </button>
     <button
@@ -182,7 +191,7 @@ onUnmounted(() => {
           ? 'cursor-not-allowed opacity-30'
           : 'text-sidebar-muted hover:bg-sidebar-accent hover:text-primary'"
         :title="bellTitle"
-        :aria-label="bellTitle"
+        :aria-label="bellAriaLabel"
         :disabled="notificationPermission === 'denied'"
         @click="handleBellClick"
       >
@@ -191,10 +200,12 @@ onUnmounted(() => {
         <span
           v-if="(totalMentionCount ?? 0) > 0"
           class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-destructive text-destructive-foreground"
+          aria-hidden="true"
         >{{ totalMentionCount }}</span>
         <span
           v-else-if="(totalUnreadCount ?? 0) > 0"
           class="absolute -right-0.5 -top-0.5 inline-flex min-w-[14px] h-[14px] px-0.5 items-center justify-center rounded-full text-[8px] font-bold bg-primary text-primary-foreground"
+          aria-hidden="true"
         >{{ totalUnreadCount }}</span>
       </button>
       <button

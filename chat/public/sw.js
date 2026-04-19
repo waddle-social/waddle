@@ -1,6 +1,6 @@
-/** Generated from src/service-worker/sw-template.js for build f1ec722ab0db. */
+/** Generated from src/service-worker/sw-template.js for build fb2fbaa8b735. */
 
-const CACHE_NAME = "waddle-f1ec722ab0db";
+const CACHE_NAME = "waddle-fb2fbaa8b735";
 const PRECACHE_URLS = ["/offline.html", "/manifest.webmanifest", "/favicon.svg", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

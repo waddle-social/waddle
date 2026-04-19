@@ -208,7 +208,6 @@ export function useMessaging(
   const firstUnseenId = ref<string | null>(null);
   const activeChannels = ref<Set<string>>(new Set());
   const lastMentionActivity = ref<RoomActivityEvent | null>(null);
-  const lastBackgroundActivity = ref<RoomActivityEvent | null>(null);
   const roomAvatarHashes = ref<Record<string, string>>({});
   const searchQuery = ref("");
   const searchResults = ref<{ id: string; nick: string; body: string; createdAt: string }[]>([]);
@@ -325,7 +324,6 @@ export function useMessaging(
       });
       client.setActivityHandler((event) => {
         activeChannels.value = new Set([...activeChannels.value, event.roomJid]);
-        lastBackgroundActivity.value = event;
         if (event.mentions?.length || event.broadcastMention) {
           lastMentionActivity.value = event;
         }
@@ -1211,7 +1209,6 @@ export function useMessaging(
     clearChannelActivity,
     scrollToPinnedEdge,
     lastMentionActivity,
-    lastBackgroundActivity,
     onMessageQueueStatus,
     onMessageAck,
     onMessageDeliveryFailure,
