@@ -34,8 +34,8 @@ const bellTitle = computed(() => {
 
 const bellAriaLabel = computed(() => {
   const base = bellTitle.value;
-  if ((props.totalMentionCount ?? 0) > 0) return `${base}, ${props.totalMentionCount} unread mention${props.totalMentionCount === 1 ? "" : "s"}`;
-  if ((props.totalUnreadCount ?? 0) > 0) return `${base}, ${props.totalUnreadCount} unread message${props.totalUnreadCount === 1 ? "" : "s"}`;
+  if ((props.totalMentionCount ?? 0) > 0) return `${base}, ${props.totalMentionCount} unread mention${props.totalMentionCount === 1 ? "" : "s"} in channels`;
+  if ((props.totalUnreadCount ?? 0) > 0) return `${base}, ${props.totalUnreadCount} unread message${props.totalUnreadCount === 1 ? "" : "s"} in channels`;
   return base;
 });
 
