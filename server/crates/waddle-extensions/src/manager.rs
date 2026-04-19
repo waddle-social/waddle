@@ -43,13 +43,21 @@ impl ExtensionManager {
         let mut feature_namespaces = Vec::new();
 
         for module in &config.modules {
+            // Advertise the configured namespace unconditionally, even if the
+            // WASM component fails to load. This keeps disco#info deterministic
+            // across deployments and lets clients send payloads in the
+            // advertised namespace regardless of runtime load status.
+            if !module.namespace.is_empty() && !feature_namespaces.contains(&module.namespace) {
+                feature_namespaces.push(module.namespace.clone());
+            }
+
             let wasm_path = match puller.resolve_wasm_path(module) {
                 Ok(path) => path,
                 Err(error) => {
                     warn!(
                         extension = %module.name,
                         %error,
-                        "failed to resolve extension WASM path; skipping extension"
+                        "failed to resolve extension WASM path; skipping enrichment actor"
                     );
                     continue;
                 }
@@ -61,7 +69,7 @@ impl ExtensionManager {
                     warn!(
                         extension = %module.name,
                         %error,
-                        "failed to compile extension component; skipping"
+                        "failed to compile extension component; skipping enrichment actor"
                     );
                     continue;
                 }
@@ -74,20 +82,16 @@ impl ExtensionManager {
                     warn!(
                         extension = %module.name,
                         %error,
-                        "extension init() failed; skipping"
+                        "extension init() failed; skipping enrichment actor"
                     );
                     continue;
                 }
             };
 
             let info = actor.info();
-            let namespace = if module.namespace.is_empty() {
-                info.namespace.clone()
-            } else {
-                module.namespace.clone()
-            };
-
-            feature_namespaces.push(namespace);
+            if !info.namespace.is_empty() && !feature_namespaces.contains(&info.namespace) {
+                feature_namespaces.push(info.namespace.clone());
+            }
             for feature in &info.features {
                 if !feature_namespaces.contains(&feature.namespace) {
                     feature_namespaces.push(feature.namespace.clone());
