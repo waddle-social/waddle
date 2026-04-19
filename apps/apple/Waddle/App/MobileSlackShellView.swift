@@ -619,10 +619,11 @@ private struct MobileHeroCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Waddle")
                         .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundStyle(WaddleTheme.textPrimary)
 
                     Text("A calmer, sharper phone shell for switching teams and dropping into chat.")
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(WaddleTheme.textSecondary)
                 }
 
                 Spacer(minLength: 12)
@@ -675,26 +676,27 @@ private struct MobileWorkspaceCard: View {
                     HStack(spacing: 8) {
                         Text(waddle.name)
                             .font(.headline)
+                            .foregroundStyle(WaddleTheme.textPrimary)
 
                         if isCurrent {
                             Text("Current")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(WaddleTheme.textMuted)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(.quaternary.opacity(0.9), in: Capsule())
+                                .background(WaddleTheme.surfaceRaised, in: Capsule())
                         }
                     }
 
                     if let description = waddle.description, !description.isEmpty {
                         Text(description)
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(WaddleTheme.textSecondary)
                             .lineLimit(3)
                     } else {
                         Text(isJoined ? "Ready for quick switching on mobile." : "Public space available to explore.")
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(WaddleTheme.textSecondary)
                     }
                 }
 
@@ -704,12 +706,12 @@ private struct MobileWorkspaceCard: View {
             HStack(spacing: 8) {
                 Label(isJoined ? "Joined" : "Public", systemImage: isJoined ? "checkmark.circle.fill" : "globe")
                     .font(.footnote.weight(.medium))
-                    .foregroundStyle(isJoined ? .green : .secondary)
+                    .foregroundStyle(isJoined ? .green : WaddleTheme.textMuted)
 
                 if let role = waddle.role, !role.isEmpty {
                     Label(role.capitalized, systemImage: "person.crop.circle")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(WaddleTheme.textMuted)
                 }
             }
 
@@ -800,22 +802,11 @@ private struct MobileWorkspaceAvatar: View {
     var body: some View {
         Text(initials)
             .font(.system(size: size * 0.36, weight: .bold, design: .rounded))
-            .foregroundStyle(.primary)
+            .foregroundStyle(.white)
             .frame(width: size, height: size)
             .background(
-                LinearGradient(
-                    colors: [
-                        Color.accentColor.opacity(0.22),
-                        Color(.secondarySystemBackground)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
+                WaddleTheme.accent.opacity(0.7),
                 in: RoundedRectangle(cornerRadius: size * 0.34, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.34, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
             )
     }
 
@@ -830,89 +821,22 @@ private struct MobileWorkspaceAvatar: View {
 }
 
 private struct MobileShellBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
     var body: some View {
-        ZStack {
-            baseColor
-                .ignoresSafeArea()
-
-            LinearGradient(
-                colors: gradientColors,
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .opacity(reduceTransparency ? 0.55 : 0.9)
-            .ignoresSafeArea()
-
-            if !reduceTransparency {
-                Circle()
-                    .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.18 : 0.1))
-                    .frame(width: 260, height: 260)
-                    .blur(radius: 70)
-                    .offset(x: -120, y: -250)
-
-                Circle()
-                    .fill(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.18))
-                    .frame(width: 220, height: 220)
-                    .blur(radius: 90)
-                    .offset(x: 150, y: -200)
-            }
-        }
-    }
-
-    private var baseColor: Color {
-        colorScheme == .dark ? Color.black : Color(.systemGroupedBackground)
-    }
-
-    private var gradientColors: [Color] {
-        if colorScheme == .dark {
-            return [
-                Color(.systemGray6).opacity(0.22),
-                Color.accentColor.opacity(0.08),
-                Color.black
-            ]
-        }
-
-        return [
-            Color.accentColor.opacity(0.06),
-            Color(.systemBackground),
-            Color(.secondarySystemBackground)
-        ]
+        WaddleTheme.chatBackground.ignoresSafeArea()
     }
 }
 
 private struct MobileShellCardModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let padding: CGFloat
 
     func body(content: Content) -> some View {
         content
             .padding(padding)
-            .background(cardFill, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(cardStroke, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(WaddleTheme.divider, lineWidth: 1)
             )
-            .shadow(color: shadowColor, radius: colorScheme == .dark ? 18 : 12, y: 10)
-    }
-
-    private var cardFill: AnyShapeStyle {
-        if reduceTransparency {
-            return AnyShapeStyle(colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.94))
-        }
-
-        return AnyShapeStyle(colorScheme == .dark ? .thinMaterial : .regularMaterial)
-    }
-
-    private var cardStroke: Color {
-        colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.55)
-    }
-
-    private var shadowColor: Color {
-        colorScheme == .dark ? Color.black.opacity(0.28) : Color.black.opacity(0.08)
     }
 }
 
@@ -923,9 +847,10 @@ private extension View {
 
     func mobileStatPill() -> some View {
         font(.footnote.weight(.medium))
+            .foregroundStyle(WaddleTheme.textSecondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(.quaternary.opacity(0.75), in: Capsule())
+            .background(WaddleTheme.surfaceRaised, in: Capsule())
     }
 }
 #endif
