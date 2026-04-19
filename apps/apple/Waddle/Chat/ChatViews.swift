@@ -338,232 +338,165 @@ struct ChatMessageRowView: View {
     @State private var lightboxImage: XMPPSharedFile?
 
     var body: some View {
-        if usesOperationalLayout {
-            operationalRow
-        } else if usesCompactConversationStyle {
-            compactPhoneRow
+        if message.isAction {
+            Text(message.body)
+                .font(.caption)
+                .foregroundStyle(WaddleTheme.textMuted)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .center)
         } else {
-            bubbleRow
+            slackStyleRow
         }
     }
 
-    private var usesOperationalLayout: Bool {
-#if os(macOS)
-        return true
-#else
-        return false
-#endif
-    }
-
     @ViewBuilder
-    private var operationalRow: some View {
-        if message.isAction {
-            Text(message.body)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.secondary.opacity(0.10), in: Capsule())
-                .frame(maxWidth: .infinity, alignment: .center)
-        } else {
-            HStack(alignment: .top, spacing: 12) {
-                if message.isOutgoing {
-                    Spacer(minLength: 72)
-                    messageCard(applyBackground: true, horizontalPadding: 14, verticalPadding: 10, maxWidth: 620)
-                } else {
-                    avatar
-                        .frame(width: 36, height: 36)
-                    messageCard(applyBackground: false, horizontalPadding: 0, verticalPadding: 2, maxWidth: 760)
-                    Spacer(minLength: 0)
-                }
+    private var slackStyleRow: some View {
+        let showsHeader = !message.formsCompactCluster(with: previousMessage)
+
+        HStack(alignment: .top, spacing: 10) {
+            if showsHeader {
+                avatar
+                    .frame(width: WaddleTheme.messageAvatarSize, height: WaddleTheme.messageAvatarSize)
+            } else {
+                Color.clear
+                    .frame(width: WaddleTheme.messageAvatarSize, height: 1)
             }
-            .frame(maxWidth: .infinity, alignment: message.isOutgoing ? .trailing : .leading)
-        }
-    }
 
-    @ViewBuilder
-    private var compactPhoneRow: some View {
-        if message.isAction {
-            Text(message.body)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.secondary.opacity(0.10), in: Capsule())
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 4)
-        } else {
-            HStack(alignment: .top, spacing: 10) {
-                if showsCompactAvatar {
-                    avatar
-                } else {
-                    Color.clear
-                        .frame(width: 32, height: 1)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                if showsHeader {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(message.senderDisplayName)
+                            .font(WaddleTheme.senderFont)
+                            .foregroundStyle(WaddleTheme.textPrimary)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    if showsCompactMetadata {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(message.isOutgoing ? "You" : message.senderDisplayName)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
+                        Text(message.sentAt, style: .time)
+                            .font(WaddleTheme.timestampFont)
+                            .foregroundStyle(WaddleTheme.textMuted)
 
-                            Text(message.sentAt, style: .time)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        if message.editedAt != nil {
+                            Text("(edited)")
+                                .font(WaddleTheme.timestampFont)
+                                .foregroundStyle(WaddleTheme.textMuted)
+                        }
 
-                            if message.editedAt != nil {
-                                Text("edited")
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
+                        if let hats = message.hatTitles {
+                            ForEach(hats, id: \.self) { hat in
+                                Text(hat)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(hatColor(for: hat))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(hatColor(for: hat).opacity(0.15), in: Capsule())
                             }
+                        }
 
-                            Spacer(minLength: 0)
+                        if let mention = message.broadcastMention {
+                            Text("@\(mention)")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.orange, in: Capsule())
                         }
                     }
-
-                    compactMessageCard
                 }
 
-                Spacer(minLength: 0)
+                if let replyToID = message.replyToID, !replyToID.isEmpty {
+                    replyIndicator
+                }
+
+                if message.isRetracted {
+                    Text("This message was deleted.")
+                        .font(WaddleTheme.bodyFont)
+                        .italic()
+                        .foregroundStyle(WaddleTheme.textMuted)
+                } else {
+                    if !message.displayBody.isEmpty {
+                        Text(message.styledBody)
+                            .font(WaddleTheme.bodyFont)
+                            .foregroundStyle(WaddleTheme.textPrimary)
+                            .textSelection(.enabled)
+                    }
+
+                    inlineImagesView(for: message, maxWidth: 300)
+                    downloadableFilesView(for: message)
+                }
+
+                if let reactions = message.reactions, !reactions.isEmpty {
+                    reactionBar(reactions)
+                }
             }
-            .padding(.top, showsCompactMetadata ? 2 : 1)
-            .padding(.bottom, endsCompactCluster ? 10 : 2)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, showsHeader ? 8 : 1)
+        .padding(.bottom, 1)
+        .contextMenu {
+            if !message.isAction, !message.isRetracted {
+                if onReply != nil {
+                    Button { onReply?(message) } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+                if message.isOutgoing, onRetract != nil {
+                    Button(role: .destructive) { onRetract?(message) } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
         }
     }
 
-    private var bubbleRow: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if message.isOutgoing {
-                Spacer(minLength: 28)
-                messageCard(applyBackground: true, horizontalPadding: 14, verticalPadding: 11, maxWidth: 520)
-            } else {
-                avatar
-                messageCard(applyBackground: true, horizontalPadding: 14, verticalPadding: 11, maxWidth: 520)
-                Spacer(minLength: 28)
+    private func reactionBar(_ reactions: [String: [String]]) -> some View {
+        HStack(spacing: 4) {
+            ForEach(reactions.keys.sorted(), id: \.self) { emoji in
+                let count = reactions[emoji]?.count ?? 0
+                HStack(spacing: 3) {
+                    Text(emoji).font(.caption)
+                    Text("\(count)").font(.caption2.weight(.medium)).foregroundStyle(WaddleTheme.textSecondary)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(WaddleTheme.divider))
             }
         }
     }
 
     private var avatar: some View {
         Text(message.senderInitials ?? initials(from: message.senderDisplayName))
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .frame(width: 32, height: 32)
-            .background(.quaternary.opacity(0.5), in: Circle())
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.white)
+            .frame(width: WaddleTheme.messageAvatarSize, height: WaddleTheme.messageAvatarSize)
+            .background(
+                WaddleTheme.accent.opacity(0.6),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
     }
 
-    private func messageCard(
-        applyBackground: Bool,
-        horizontalPadding: CGFloat,
-        verticalPadding: CGFloat,
-        maxWidth: CGFloat
-    ) -> some View {
-        VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(message.senderDisplayName)
-                    .font(.subheadline.weight(.semibold))
-                Text(message.sentAt, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if message.editedAt != nil {
-                    Text("edited")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let hats = message.hatTitles {
-                    ForEach(hats, id: \.self) { hat in
-                        Text(hat)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(hatColor(for: hat))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(hatColor(for: hat).opacity(0.12), in: Capsule())
-                    }
-                }
-                if let mention = message.broadcastMention {
-                    Text("@\(mention)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.orange, in: Capsule())
-                }
-            }
+    @ViewBuilder
+    private var replyIndicator: some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(WaddleTheme.accent)
+                .frame(width: 2)
 
-            if let replyToID = message.replyToID, !replyToID.isEmpty {
-                replyIndicator
-            }
-
-            if message.isRetracted {
-                Text("Message removed")
-                    .font(.body)
-                    .italic()
-                    .foregroundStyle(.secondary)
-            } else {
-                if !message.displayBody.isEmpty {
-                    Text(message.styledBody)
-                        .font(.body)
-                        .lineSpacing(usesOperationalLayout ? 3 : 0)
-                        .multilineTextAlignment(message.isOutgoing ? .trailing : .leading)
-                        .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 1) {
+                if let senderName = message.replyToSenderName, !senderName.isEmpty {
+                    Text(senderName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(WaddleTheme.accent)
                 }
-
-                inlineImagesView(for: message, maxWidth: 320)
-                downloadableFilesView(for: message)
-            }
-
-            if let reactions = message.reactions, !reactions.isEmpty {
-                HStack(spacing: 8) {
-                    ForEach(reactions.keys.sorted(), id: \.self) { emoji in
-                        let count = reactions[emoji]?.count ?? 0
-                        Text("\(emoji) \(count)")
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.quaternary.opacity(0.6), in: Capsule())
-                    }
-                }
-            }
-
-            if message.deliveryState != .sent || message.isOutgoing {
-                HStack(spacing: 6) {
-                    Image(systemName: deliverySymbolName(for: message.deliveryState))
-                        .font(.caption2)
-                    Text(message.deliveryState.label)
-                        .font(.caption2)
-                }
-                .foregroundStyle(.secondary)
+                Text(message.replyToBody ?? "Original message")
+                    .font(.caption2)
+                    .foregroundStyle(WaddleTheme.textMuted)
+                    .lineLimit(1)
             }
         }
-        .padding(.horizontal, horizontalPadding)
-        .padding(.vertical, verticalPadding)
-        .frame(maxWidth: maxWidth, alignment: message.isOutgoing ? .trailing : .leading)
-        .background {
-            if applyBackground {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(message.isOutgoing ? Color.accentColor.opacity(0.11) : Color.secondary.opacity(0.08))
-            }
-        }
-        .contextMenu {
-            if !message.isAction, !message.isRetracted {
-                if onReply != nil {
-                    Button {
-                        onReply?(message)
-                    } label: {
-                        Label("Reply", systemImage: "arrowshape.turn.up.left")
-                    }
-                }
-                if message.isOutgoing, onRetract != nil {
-                    Button(role: .destructive) {
-                        onRetract?(message)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                }
-            }
-        }
+        .padding(.leading, 8)
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -669,164 +602,10 @@ struct ChatMessageRowView: View {
         return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
     }
 
-    @ViewBuilder
-    private var replyIndicator: some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color.accentColor.opacity(0.5))
-                .frame(width: 3)
-
-            VStack(alignment: .leading, spacing: 2) {
-                if let senderName = message.replyToSenderName, !senderName.isEmpty {
-                    Text(senderName)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-                Text(message.replyToBody ?? "Original message")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private var compactMessageCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let replyToID = message.replyToID, !replyToID.isEmpty {
-                replyIndicator
-            }
-
-            if message.isRetracted {
-                Text("Message removed")
-                    .font(.subheadline)
-                    .italic()
-                    .foregroundStyle(.secondary)
-            } else {
-                if !message.displayBody.isEmpty {
-                    Text(message.styledBody)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .lineSpacing(3)
-                        .multilineTextAlignment(.leading)
-                        .textSelection(.enabled)
-                }
-
-                inlineImagesView(for: message, maxWidth: 280)
-                downloadableFilesView(for: message)
-            }
-
-            if let reactions = message.reactions, !reactions.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(reactions.keys.sorted(), id: \.self) { emoji in
-                        let count = reactions[emoji]?.count ?? 0
-                        Text("\(emoji) \(count)")
-                            .font(.caption.weight(.medium))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.secondary.opacity(0.10), in: Capsule())
-                    }
-                }
-            }
-
-            if shouldShowCompactDelivery {
-                HStack(spacing: 6) {
-                    Image(systemName: deliverySymbolName(for: message.deliveryState))
-                        .font(.caption2)
-                    Text(message.deliveryState.label)
-                        .font(.caption2.weight(.medium))
-                }
-                .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 560, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(compactCardFill)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(compactCardStroke, lineWidth: 1)
-        }
-        .contextMenu {
-            if !message.isAction, !message.isRetracted {
-                if onReply != nil {
-                    Button {
-                        onReply?(message)
-                    } label: {
-                        Label("Reply", systemImage: "arrowshape.turn.up.left")
-                    }
-                }
-                if message.isOutgoing, onRetract != nil {
-                    Button(role: .destructive) {
-                        onRetract?(message)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                }
-            }
-        }
-    }
-
-    private var showsCompactAvatar: Bool {
-        !message.formsCompactCluster(with: previousMessage)
-    }
-
-    private var showsCompactMetadata: Bool {
-        !message.formsCompactCluster(with: previousMessage)
-    }
-
-    private var endsCompactCluster: Bool {
-        nextMessage?.formsCompactCluster(with: message) != true
-    }
-
-    private var shouldShowCompactDelivery: Bool {
-        (message.deliveryState != .sent || message.isOutgoing) && endsCompactCluster
-    }
-
-    private var compactCardFill: Color {
-#if os(iOS)
-        if message.isOutgoing {
-            return Color.accentColor.opacity(0.12)
-        }
-        return Color(.secondarySystemGroupedBackground)
-#else
-        return message.isOutgoing ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.08)
-#endif
-    }
-
-    private var compactCardStroke: Color {
-        if message.isOutgoing {
-            return Color.accentColor.opacity(0.14)
-        }
-        return Color.secondary.opacity(0.10)
-    }
-
     private func initials(from value: String) -> String {
         let parts = value.split(separator: " ").prefix(2)
         let letters = parts.compactMap { $0.first }.map(String.init)
         return letters.isEmpty ? "?" : letters.joined().uppercased()
-    }
-
-    private func deliverySymbolName(for state: ChatDeliveryState) -> String {
-        switch state {
-        case .pending:
-            return "clock"
-        case .sending:
-            return "arrow.up.circle"
-        case .sent:
-            return "checkmark"
-        case .delivered:
-            return "checkmark.circle"
-        case .read:
-            return "eye"
-        case .failed:
-            return "exclamationmark.circle"
-        }
     }
 }
 

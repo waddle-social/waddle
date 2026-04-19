@@ -42,6 +42,8 @@
 		FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
 		FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
 		FEDC185BF46637465D5E47AD /* XMPPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C171856D11E83233F15879 /* XMPPTypes.swift */; };
+		A1B2C3D4E5F60718A9B0C1D2 /* WaddleTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3E4F5A6B7C8091A2B3C4D5E /* WaddleTheme.swift */; };
+		E5F6A7B8C9D0E1F2A3B4C5D6 /* WaddleTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3E4F5A6B7C8091A2B3C4D5E /* WaddleTheme.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -65,6 +67,7 @@
 		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		FA49C7EBB1F4B7819123A37B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		D3E4F5A6B7C8091A2B3C4D5E /* WaddleTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleTheme.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -138,6 +141,7 @@
 				22F6B3902108DE9EA61D159F /* ChatStore.swift */,
 				BF071F2F5CDF86AFDE28A7D2 /* ChatViews.swift */,
 				52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */,
+				D3E4F5A6B7C8091A2B3C4D5E /* WaddleTheme.swift */,
 			);
 			path = Chat;
 			sourceTree = "<group>";
@@ -261,6 +265,7 @@
 				FEDC185BF46637465D5E47AD /* XMPPTypes.swift in Sources */,
 				B54E886C56CC736830552F1F /* XMPPWebSocketTransport.swift in Sources */,
 				91C3C8B4FDE545DFD743A653 /* XMPPXML.swift in Sources */,
+				A1B2C3D4E5F60718A9B0C1D2 /* WaddleTheme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -284,6 +289,7 @@
 				45AC51B21194DC6C805BF2A3 /* XMPPTypes.swift in Sources */,
 				4F096895A60967A26D428F9C /* XMPPWebSocketTransport.swift in Sources */,
 				2FA79D5E58CB238C0844490E /* XMPPXML.swift in Sources */,
+				E5F6A7B8C9D0E1F2A3B4C5D6 /* WaddleTheme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -360,6 +366,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 6KXCJGJ45W;
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -398,6 +405,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 6KXCJGJ45W;
 				INFOPLIST_KEY_CFBundleDisplayName = Waddle;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
