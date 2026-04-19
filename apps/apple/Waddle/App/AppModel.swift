@@ -1335,7 +1335,8 @@ final class AppModel: ObservableObject {
             mentionURIs: event.mentionURIs.isEmpty ? nil : event.mentionURIs,
             forumPostKind: event.forumPostKind,
             forumTitle: event.forumTitle,
-            threadID: event.threadID
+            threadID: event.threadID,
+            parentThreadID: event.parentThreadID
         )
     }
 

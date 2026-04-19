@@ -94,6 +94,8 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var forumTitle: String?
     var threadID: String?
 
+    var parentThreadID: String?
+
     var isForumTopic: Bool { forumPostKind == "topic" }
     var isForumReply: Bool { forumPostKind == "reply" }
 
@@ -360,7 +362,8 @@ extension ChatTimelineMessage {
             mentionURIs: other.mentionURIs ?? mentionURIs,
             forumPostKind: other.forumPostKind ?? forumPostKind,
             forumTitle: other.forumTitle ?? forumTitle,
-            threadID: other.threadID ?? threadID
+            threadID: other.threadID ?? threadID,
+            parentThreadID: other.parentThreadID ?? parentThreadID
         )
     }
 

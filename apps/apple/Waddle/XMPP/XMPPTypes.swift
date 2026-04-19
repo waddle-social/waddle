@@ -136,6 +136,7 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let forumPostKind: String?
     let forumTitle: String?
     let threadID: String?
+    let parentThreadID: String?
 }
 
 struct XMPPPresenceHat: Sendable, Equatable, Hashable {

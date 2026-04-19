@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 10, items 2.1-2.5)
+> Last updated: 2026-04-19 (loop 11, items 3.4/5.2/9.3)
 
 ## Legend
 
@@ -48,7 +48,7 @@
 | 3.1 | Forum channel topic creation | CRITICAL | [x] | XEP-0508 | Parse <thread-create> with title, send topic messages, create topic UI with title/body form |
 | 3.2 | Forum thread replies | CRITICAL | [x] | XEP-0508, XEP-0201 | Parse <thread-reply thread-id> + <thread>, send thread replies, thread reply composer |
 | 3.3 | Thread panel / viewer | HIGH | [x] | - | Forum topic list view, thread detail view with back navigation, topic/reply count |
-| 3.4 | Nested thread navigation | MEDIUM | [ ] | - | Web supports thread stack via URL query params |
+| 3.4 | Nested thread navigation | MEDIUM | [x] | - | Parse <parent-thread> element, track parentThreadID on messages for sub-thread hierarchy |
 
 ## 4. Media & Files
 
@@ -66,7 +66,7 @@
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 5.1 | Emoji picker UI | HIGH | [x] | - | Emoji picker popover with categorized grid (smileys, reactions, objects, nature), search field, inserts into composer |
-| 5.2 | Emoji autocomplete in composer | MEDIUM | [ ] | - | Web has `:emoji_name:` autocomplete |
+| 5.2 | Emoji autocomplete in composer | MEDIUM | [x] | - | Detect `:name` in composer, show matching emoji suggestions (60+ shortcodes), insert on tap |
 
 ## 6. Channel & Waddle Management
 
@@ -99,7 +99,7 @@
 |---|-----|----------|--------|-----|-------|
 | 9.1 | Rich text composer (not plain text) | HIGH | [ ] | - | Web uses TipTap/ProseMirror editor |
 | 9.2 | Link auto-detection | MEDIUM | [x] | - | NSDataDetector auto-detects URLs in message body, renders as tappable links in AttributedString |
-| 9.3 | Code block syntax highlighting | LOW | [ ] | - | Web uses Shiki for code coloring |
+| 9.3 | Code block syntax highlighting | LOW | [x] | - | XEP-0394 code/code-block spans rendered with monospaced font + background via AttributedString |
 
 ## 10. Connection & Reliability
 

@@ -871,6 +871,7 @@ struct ChatComposerView: View {
 
     @ViewBuilder
     private var mentionSuggestionList: some View {
+        let emojis = emojiSuggestions
         if !mentionSuggestions.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -883,6 +884,29 @@ struct ChatComposerView: View {
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
                                 .background(Color.accentColor.opacity(0.1), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+        } else if !emojis.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(emojis, id: \.name) { item in
+                        Button {
+                            insertEmoji(item.emoji)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(item.emoji)
+                                Text(":\(item.name):")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.secondary.opacity(0.08), in: Capsule())
                         }
                         .buttonStyle(.plain)
                     }
@@ -912,6 +936,39 @@ struct ChatComposerView: View {
         text = String(text[text.startIndex..<atIndex]) + "@\(username) "
         onMentionQueryChanged?(nil)
     }
+
+    private var emojiSuggestions: [(name: String, emoji: String)] {
+        guard let colonIndex = text.lastIndex(of: ":") else { return [] }
+        let afterColon = text[text.index(after: colonIndex)...]
+        if afterColon.contains(" ") || afterColon.contains("\n") || afterColon.contains(":") { return [] }
+        let query = String(afterColon).lowercased()
+        guard query.count >= 2 else { return [] }
+        return Self.emojiShortcodes.filter { $0.name.contains(query) }.prefix(8).map { $0 }
+    }
+
+    private func insertEmoji(_ emoji: String) {
+        guard let colonIndex = text.lastIndex(of: ":") else { return }
+        text = String(text[text.startIndex..<colonIndex]) + emoji
+    }
+
+    private static let emojiShortcodes: [(name: String, emoji: String)] = [
+        ("thumbsup", "👍"), ("thumbsdown", "👎"), ("heart", "❤️"), ("fire", "🔥"),
+        ("smile", "😊"), ("laugh", "😂"), ("cry", "😢"), ("angry", "😤"),
+        ("think", "🤔"), ("cool", "😎"), ("love", "😍"), ("wink", "😉"),
+        ("clap", "👏"), ("pray", "🙏"), ("wave", "👋"), ("muscle", "💪"),
+        ("rocket", "🚀"), ("star", "⭐"), ("check", "✅"), ("cross", "❌"),
+        ("100", "💯"), ("eyes", "👀"), ("party", "🎉"), ("tada", "🎉"),
+        ("sparkles", "✨"), ("warning", "⚠️"), ("bug", "🐛"), ("bulb", "💡"),
+        ("pin", "📌"), ("link", "🔗"), ("lock", "🔒"), ("key", "🔑"),
+        ("bell", "🔔"), ("memo", "📝"), ("gear", "⚙️"), ("hammer", "🔨"),
+        ("package", "📦"), ("truck", "🚚"), ("calendar", "📅"), ("clock", "⏰"),
+        ("sun", "☀️"), ("moon", "🌙"), ("rainbow", "🌈"), ("umbrella", "☂️"),
+        ("coffee", "☕"), ("pizza", "🍕"), ("beer", "🍺"), ("cake", "🎂"),
+        ("penguin", "🐧"), ("duck", "🦆"), ("dog", "🐶"), ("cat", "🐱"),
+        ("skull", "💀"), ("ghost", "👻"), ("robot", "🤖"), ("alien", "👽"),
+        ("confused", "😕"), ("shrug", "🤷"), ("facepalm", "🤦"), ("salute", "🫡"),
+        ("ok", "👌"), ("point_up", "☝️"), ("point_down", "👇"), ("raised_hands", "🙌"),
+    ]
 
     private var standardComposer: some View {
         VStack(spacing: usesOperationalChrome ? 10 : 12) {

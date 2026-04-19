@@ -460,7 +460,8 @@ enum XMPPXML {
             mentionURIs: parseMentionURIs(from: element),
             forumPostKind: parseForumPostKind(from: element),
             forumTitle: element.firstChild(named: "thread-create")?.attribute("title"),
-            threadID: parseThreadID(from: element)
+            threadID: parseThreadID(from: element),
+            parentThreadID: element.firstChild(named: "parent-thread")?.text
         )
     }
 
