@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { Hash, MessagesSquare, Plus, Settings, Users, ChevronDown } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
@@ -12,6 +13,7 @@ const props = defineProps<{
   isLoading: boolean;
   memberCount: number;
   activeChannelJids: Set<string>;
+  channelUnreadMap?: Record<string, { unread: number; mentions: number }>;
   roomAvatarHashes?: Record<string, string>;
 }>();
 
@@ -23,6 +25,13 @@ function hasActivity(channelId: string): boolean {
   }
   return false;
 }
+
+const channelsWithUnread = computed(() =>
+  props.channels.map((channel) => ({
+    channel,
+    unread: props.channelUnreadMap?.[channel.id] ?? { unread: 0, mentions: 0 },
+  }))
+);
 
 function channelIcon(channel: ChannelSummary) {
   return detectForumChannel(channel) ? MessagesSquare : Hash;
@@ -86,7 +95,7 @@ const emit = defineEmits<{
 
       <div v-else class="space-y-0.5">
         <button
-          v-for="channel in channels"
+          v-for="{ channel, unread } in channelsWithUnread"
           :key="channel.id"
           class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-200 text-left group"
           :class="activeChannelId === channel.id
@@ -103,7 +112,7 @@ const emit = defineEmits<{
             class="text-[13px] truncate flex-1"
             :class="[
               activeChannelId === channel.id ? 'font-medium' : '',
-              hasActivity(channel.id) && activeChannelId !== channel.id ? 'font-semibold text-sidebar-foreground' : '',
+              (unread.unread > 0 || hasActivity(channel.id)) && activeChannelId !== channel.id ? 'font-semibold text-sidebar-foreground' : '',
             ]"
           >{{ channel.name }}</span>
           <span
@@ -113,8 +122,19 @@ const emit = defineEmits<{
             Forum
           </span>
           <span
-            v-if="hasActivity(channel.id) && activeChannelId !== channel.id"
+            v-if="unread.mentions > 0 && activeChannelId !== channel.id"
+            class="inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full text-[10px] font-semibold bg-destructive text-destructive-foreground"
+            aria-hidden="true"
+          >{{ unread.mentions }}</span>
+          <span
+            v-else-if="unread.unread > 0 && activeChannelId !== channel.id"
+            class="inline-flex min-w-[18px] h-[18px] px-1 items-center justify-center rounded-full text-[10px] font-semibold bg-primary text-primary-foreground"
+            aria-hidden="true"
+          >{{ unread.unread }}</span>
+          <span
+            v-else-if="hasActivity(channel.id) && activeChannelId !== channel.id"
             class="w-2 h-2 bg-primary rounded-full flex-shrink-0 shadow-[0_0_6px_var(--glow-strong)]"
+            aria-hidden="true"
           />
         </button>
       </div>

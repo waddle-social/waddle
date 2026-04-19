@@ -70,8 +70,8 @@ use waddle_xmpp::xep::xep0363::{
     parse_upload_request, sanitize_filename, UploadError, UploadSlot,
 };
 use waddle_xmpp::xep::xep0430::{
-    build_inbox_query_result, build_mark_read_result, is_inbox_iq, parse_inbox_query,
-    parse_mark_read,
+    build_inbox_push, build_inbox_query_result, build_mark_read_result, is_inbox_iq,
+    parse_inbox_query, parse_mark_read,
 };
 
 /// WebSocket state containing all necessary registries for message routing
@@ -2326,12 +2326,15 @@ async fn handle_message(
                     continue;
                 }
                 let occupant_bare = occupant_jid.to_bare();
-                if let Err(error) = state
+                match state
                     .inbox_storage
                     .upsert(&occupant_bare, entry.clone(), true)
                     .await
                 {
-                    warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
+                    Ok(updated) => push_inbox_update(state, &occupant_bare, &updated).await,
+                    Err(error) => {
+                        warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
+                    }
                 }
             }
         }
@@ -2412,7 +2415,7 @@ async fn handle_message(
                 }
 
                 if recipient_bare.domain() == sender_bare.domain() {
-                    if let Err(error) = state
+                    match state
                         .inbox_storage
                         .upsert(
                             &recipient_bare,
@@ -2421,7 +2424,10 @@ async fn handle_message(
                         )
                         .await
                     {
-                        warn!(jid = %recipient_bare, partner = %sender_bare, error = %error, "Failed to update recipient inbox for direct message");
+                        Ok(updated) => push_inbox_update(state, &recipient_bare, &updated).await,
+                        Err(error) => {
+                            warn!(jid = %recipient_bare, partner = %sender_bare, error = %error, "Failed to update recipient inbox for direct message");
+                        }
                     }
                 }
             }
@@ -2463,6 +2469,22 @@ async fn handle_message(
 
     debug!(msg_type = ?incoming.type_, "Message stanza received");
     vec![]
+}
+
+/// Push an inbox update headline to all connected sessions of a user.
+async fn push_inbox_update(
+    state: &WebSocketState,
+    user: &BareJid,
+    entry: &waddle_xmpp::inbox::InboxEntry,
+) {
+    let resources = state.connection_registry.get_resources_for_user(user);
+    for resource_jid in resources {
+        let msg = build_inbox_push(jid::Jid::from(resource_jid.clone()), entry);
+        let _ = state
+            .connection_registry
+            .send_to(&resource_jid, Stanza::Message(msg))
+            .await;
+    }
 }
 
 async fn archive_groupchat_message(
@@ -3921,20 +3943,26 @@ mod tests {
             "sender echo should include GitHub payload: {sender_echo}"
         );
 
-        let routed = recipient_rx
-            .recv()
-            .await
-            .expect("recipient should receive routed stanza");
-        let routed_xml = stanza_to_xml(&routed.stanza);
-        assert!(
-            routed_xml.contains("to=\"bob@example.com/mobile\"")
-                || routed_xml.contains("to='bob@example.com/mobile'"),
-            "routed stanza should target recipient resource: {routed_xml}"
-        );
-        assert!(
-            routed_xml.contains("urn:waddle:github:0"),
-            "routed stanza should preserve GitHub payload: {routed_xml}"
-        );
+        // Recipient may receive an inbox push headline before the routed
+        // chat message.  Drain until we find the chat stanza.
+        let mut found_chat = false;
+        while let Ok(routed) = recipient_rx.try_recv() {
+            let routed_xml = stanza_to_xml(&routed.stanza);
+            if routed_xml.contains("type=\"chat\"") || routed_xml.contains("type='chat'") {
+                assert!(
+                    routed_xml.contains("to=\"bob@example.com/mobile\"")
+                        || routed_xml.contains("to='bob@example.com/mobile'"),
+                    "routed stanza should target recipient resource: {routed_xml}"
+                );
+                assert!(
+                    routed_xml.contains("urn:waddle:github:0"),
+                    "routed stanza should preserve GitHub payload: {routed_xml}"
+                );
+                found_chat = true;
+                break;
+            }
+        }
+        assert!(found_chat, "recipient should receive the chat message");
     }
 
     #[tokio::test]

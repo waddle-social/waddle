@@ -65,7 +65,10 @@ const definitions: DefinitionOptions[] = [
     namespace: NS_INBOX_0,
   },
   {
-    aliases: [{ path: "iq.inbox.conversations", multiple: true }],
+    aliases: [
+      { path: "iq.inbox.conversations", multiple: true },
+      { path: "message.inboxPush", multiple: false },
+    ],
     element: "conversation",
     fields: {
       partner: attribute("partner"),

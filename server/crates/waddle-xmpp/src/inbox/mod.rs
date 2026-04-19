@@ -100,7 +100,7 @@ impl InboxView {
     /// unread counter ticks by one (for a fresh entry, that means the first
     /// observed message counts as one unread); when false the entry is
     /// refreshed without touching the counter.
-    pub fn observe_message(&mut self, entry: InboxEntry, increment_unread: bool) {
+    pub fn observe_message(&mut self, entry: InboxEntry, increment_unread: bool) -> InboxEntry {
         let partner = entry.partner.clone();
         let next = match self.by_partner.remove(&partner) {
             Some(mut prev) => {
@@ -118,7 +118,8 @@ impl InboxView {
                 fresh
             }
         };
-        self.by_partner.insert(partner, next);
+        self.by_partner.insert(partner, next.clone());
+        next
     }
 
     pub fn mark_read(&mut self, partner: &BareJid) {

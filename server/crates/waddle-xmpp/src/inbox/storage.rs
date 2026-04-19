@@ -26,13 +26,13 @@ pub trait InboxStorage: Send + Sync {
     async fn list(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError>;
 
     /// Upsert an entry, incrementing unread unless `increment_unread` is
-    /// false.
+    /// false.  Returns the post-upsert state of the entry.
     async fn upsert(
         &self,
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
-    ) -> Result<(), InboxStorageError>;
+    ) -> Result<InboxEntry, InboxStorageError>;
 
     /// Mark the conversation with `partner` as read.
     async fn mark_read(&self, user: &BareJid, partner: &BareJid) -> Result<(), InboxStorageError>;
@@ -69,14 +69,13 @@ impl InboxStorage for InMemoryInboxStorage {
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
-    ) -> Result<(), InboxStorageError> {
+    ) -> Result<InboxEntry, InboxStorageError> {
         let mut guard = self
             .per_user
             .lock()
             .map_err(|e| InboxStorageError::Other(e.to_string()))?;
         let view = guard.entry(user.clone()).or_default();
-        view.observe_message(entry, increment_unread);
-        Ok(())
+        Ok(view.observe_message(entry, increment_unread))
     }
 
     async fn mark_read(&self, user: &BareJid, partner: &BareJid) -> Result<(), InboxStorageError> {

@@ -14,6 +14,8 @@ const props = defineProps<{
   session: WaddleSession | null;
   notificationPermission?: NotificationPermission;
   notificationsEnabled?: boolean;
+  totalUnreadCount?: number;
+  totalMentionCount?: number;
   horizontal?: boolean;
   webCommitSha?: string;
   serverVersion?: ServerVersion | null;
@@ -182,6 +184,8 @@ function waddleColor(waddle: WaddleSummary): string {
       :session="session"
       :notification-permission="notificationPermission"
       :notifications-enabled="notificationsEnabled"
+      :total-unread-count="totalUnreadCount"
+      :total-mention-count="totalMentionCount"
       :web-commit-sha="webCommitSha"
       :server-version="serverVersion"
       compact

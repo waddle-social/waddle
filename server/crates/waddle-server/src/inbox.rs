@@ -168,36 +168,68 @@ impl InboxStorage for LibSqlInboxStorage {
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
-    ) -> Result<(), InboxStorageError> {
+    ) -> Result<InboxEntry, InboxStorageError> {
         let increment = i64::from(u8::from(increment_unread));
-        self.execute(
-            r#"
-            INSERT INTO inbox_entries (
-                user_jid, partner_jid, kind, last_stanza_id, last_updated, unread, preview
-            ) VALUES (?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?)
-            ON CONFLICT(user_jid, partner_jid) DO UPDATE SET
-                kind = excluded.kind,
-                last_stanza_id = excluded.last_stanza_id,
-                last_updated = excluded.last_updated,
-                preview = excluded.preview,
-                unread = CASE
-                    WHEN ? != 0 THEN inbox_entries.unread + 1
-                    ELSE inbox_entries.unread
-                END
-            "#,
-            libsql::params![
-                user.to_string(),
-                entry.partner.to_string(),
-                encode_kind(entry.kind),
-                entry.last_stanza_id,
-                entry.last_updated,
-                increment,
-                entry.preview,
-                increment,
-            ],
-        )
-        .await?;
-        Ok(())
+        let mut rows = self
+            .query(
+                r#"
+                INSERT INTO inbox_entries (
+                    user_jid, partner_jid, kind, last_stanza_id, last_updated, unread, preview
+                ) VALUES (?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?)
+                ON CONFLICT(user_jid, partner_jid) DO UPDATE SET
+                    kind = excluded.kind,
+                    last_stanza_id = excluded.last_stanza_id,
+                    last_updated = excluded.last_updated,
+                    preview = excluded.preview,
+                    unread = CASE
+                        WHEN ? != 0 THEN inbox_entries.unread + 1
+                        ELSE inbox_entries.unread
+                    END
+                RETURNING kind, last_stanza_id, last_updated, unread, preview
+                "#,
+                libsql::params![
+                    user.to_string(),
+                    entry.partner.to_string(),
+                    encode_kind(entry.kind),
+                    entry.last_stanza_id,
+                    entry.last_updated,
+                    increment,
+                    entry.preview,
+                    increment,
+                ],
+            )
+            .await?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+            .ok_or_else(|| InboxStorageError::Other("RETURNING produced no row".to_string()))?;
+
+        let kind_raw: String = row
+            .get(0)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        let last_stanza_id: String = row
+            .get(1)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        let last_updated: i64 = row
+            .get(2)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        let unread: i64 = row
+            .get(3)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        let preview: Option<String> = row
+            .get(4)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+
+        Ok(InboxEntry {
+            partner: entry.partner,
+            kind: decode_kind(&kind_raw)?,
+            last_stanza_id,
+            last_updated,
+            unread: unread.max(0) as u32,
+            preview,
+        })
     }
 
     #[instrument(skip(self), fields(user = %user, partner = %partner))]
