@@ -840,6 +840,8 @@ struct ChatComposerView: View {
     var onCancelReply: (() -> Void)? = nil
     var onFileSelected: ((_ data: Data, _ fileName: String, _ mediaType: String) -> Void)? = nil
     var isUploadingFile: Bool = false
+    var mentionSuggestions: [ChatRoomMember] = []
+    var onMentionQueryChanged: ((String?) -> Void)? = nil
     var usesOperationalChrome: Bool = false
     var usesCompactConversationChrome: Bool = false
     var onSend: () -> Void
@@ -851,13 +853,64 @@ struct ChatComposerView: View {
     }
 
     var body: some View {
-        Group {
-            if usesCompactConversationChrome {
-                compactConversationComposer
-            } else {
-                standardComposer
+        VStack(spacing: 0) {
+            mentionSuggestionList
+
+            Group {
+                if usesCompactConversationChrome {
+                    compactConversationComposer
+                } else {
+                    standardComposer
+                }
             }
         }
+        .onChange(of: text) { _, newValue in
+            updateMentionQuery(newValue)
+        }
+    }
+
+    @ViewBuilder
+    private var mentionSuggestionList: some View {
+        if !mentionSuggestions.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(mentionSuggestions.prefix(8)) { member in
+                        Button {
+                            insertMention(member.displayName)
+                        } label: {
+                            Text("@\(member.displayName)")
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.accentColor.opacity(0.1), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private func updateMentionQuery(_ text: String) {
+        guard let atIndex = text.lastIndex(of: "@") else {
+            onMentionQueryChanged?(nil)
+            return
+        }
+        let afterAt = text[text.index(after: atIndex)...]
+        if afterAt.contains(" ") || afterAt.contains("\n") {
+            onMentionQueryChanged?(nil)
+            return
+        }
+        let query = String(afterAt)
+        onMentionQueryChanged?(query)
+    }
+
+    private func insertMention(_ username: String) {
+        guard let atIndex = text.lastIndex(of: "@") else { return }
+        text = String(text[text.startIndex..<atIndex]) + "@\(username) "
+        onMentionQueryChanged?(nil)
     }
 
     private var standardComposer: some View {

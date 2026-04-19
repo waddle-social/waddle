@@ -202,10 +202,23 @@ enum XMPPXML {
     }
 
     static func groupchatMessage(to roomJID: String, body: String, thread: String? = nil) -> String {
+        let mentions = mentionReferences(in: body)
         var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
         payload += "<body>\(escape(body))</body>"
         if let thread, !thread.isEmpty {
             payload += "<thread>\(escape(thread))</thread>"
+        }
+        payload += referenceElements(for: mentions)
+        if body.range(of: "(?:^|\\s)@everyone(?:\\s|$)", options: .regularExpression, range: nil, locale: nil) != nil ||
+           body.range(of: "(?:^|\\s)@here(?:\\s|$)", options: .regularExpression, range: nil, locale: nil) != nil {
+            var mentionTypes: [String] = []
+            if body.range(of: "(?:^|\\s)@everyone(?:\\s|$)", options: .regularExpression) != nil { mentionTypes.append("everyone") }
+            if body.range(of: "(?:^|\\s)@here(?:\\s|$)", options: .regularExpression) != nil { mentionTypes.append("here") }
+            payload += "<mentions xmlns='urn:xmpp:emn:0'>"
+            for type in mentionTypes {
+                payload += "<mention type='\(type)'/>"
+            }
+            payload += "</mentions>"
         }
         payload += "</message>"
         return payload
@@ -416,7 +429,8 @@ enum XMPPXML {
             chatState: chatState,
             displayedMarkerID: displayedMarkerID,
             sharedFiles: sharedFiles,
-            broadcastMention: broadcastMention
+            broadcastMention: broadcastMention,
+            mentionURIs: parseMentionURIs(from: element)
         )
     }
 
@@ -448,6 +462,33 @@ enum XMPPXML {
             ))
         }
         return files
+    }
+
+    private static func parseMentionURIs(from element: XMPPElement) -> [String] {
+        element.children(named: "reference")
+            .filter { $0.attribute("type") == "mention" }
+            .compactMap { $0.attribute("uri")?.replacingOccurrences(of: "xmpp:", with: "") }
+    }
+
+    static func mentionReferences(in body: String) -> [(nick: String, begin: Int, end: Int)] {
+        var results: [(nick: String, begin: Int, end: Int)] = []
+        let pattern = try! NSRegularExpression(pattern: "(?:^|\\s)@(\\S+)", options: [])
+        let nsBody = body as NSString
+        pattern.enumerateMatches(in: body, range: NSRange(location: 0, length: nsBody.length)) { match, _, _ in
+            guard let match, let nickRange = Range(match.range(at: 1), in: body) else { return }
+            let nick = String(body[nickRange])
+            let fullMatchRange = Range(match.range, in: body)!
+            let begin = body[body.startIndex..<fullMatchRange.lowerBound].utf8.count + (body[fullMatchRange].first == " " || body[fullMatchRange].first == "\n" ? 1 : 0)
+            let end = begin + "@\(nick)".utf8.count
+            results.append((nick, begin, end))
+        }
+        return results
+    }
+
+    static func referenceElements(for mentions: [(nick: String, begin: Int, end: Int)]) -> String {
+        mentions.map { mention in
+            "<reference xmlns='urn:xmpp:reference:0' type='mention' begin='\(mention.begin)' end='\(mention.end)' uri='xmpp:\(escape(mention.nick))'/>"
+        }.joined()
     }
 
     private static func parseBroadcastMention(from element: XMPPElement) -> String? {

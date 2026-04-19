@@ -132,6 +132,7 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let displayedMarkerID: String?
     let sharedFiles: [XMPPSharedFile]
     let broadcastMention: String?
+    let mentionURIs: [String]
 }
 
 struct XMPPPresenceHat: Sendable, Equatable, Hashable {

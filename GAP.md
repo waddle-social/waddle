@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 7, items 1.8/8.2/9.2/11.1)
+> Last updated: 2026-04-19 (loop 8, items 1.3)
 
 ## Legend
 
@@ -24,7 +24,7 @@
 |---|-----|----------|--------|-----|-------|
 | 1.1 | Message replies (quote-reply) | CRITICAL | [x] | XEP-0461, XEP-0428 | Reply stanza construction/parsing, fallback stripping, reply indicator UI, context menu reply action, composer reply preview |
 | 1.2 | Rich text markup (bold, italic, code, etc.) | CRITICAL | [x] | XEP-0394 | Parse markup spans from stanzas, render with AttributedString (bold, italic, strikethrough, code, links), rebase offsets for reply fallback |
-| 1.3 | @mentions with autocomplete | CRITICAL | [ ] | XEP-0372 | Web has inline autocomplete in editor |
+| 1.3 | @mentions with autocomplete | CRITICAL | [x] | XEP-0372 | Parse reference elements, highlight @mentions in body, member autocomplete on @, construct XEP-0372 references + XEP-0513 broadcast mentions on send |
 | 1.4 | Broadcast mentions (@everyone, @here) | HIGH | [x] | XEP-0513 | Parse <mentions> element, display @everyone/@here badge on messages |
 | 1.5 | Read receipts / chat markers | HIGH | [x] | XEP-0333 | Send displayed markers for incoming messages, parse displayed marker stanzas |
 | 1.6 | Typing indicators (chat state) | HIGH | [x] | XEP-0085 | Send composing/paused on text input, parse incoming chat state, typing indicator UI with auto-expiry |

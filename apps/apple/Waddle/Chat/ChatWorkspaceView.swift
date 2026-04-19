@@ -5,6 +5,12 @@ struct WaddleChatWorkspaceView: View {
     @ObservedObject var store: ChatSurfaceStore
     let waddle: WaddleSummary
     @State private var showMembersSheet = false
+    private var mentionSuggestions: [ChatRoomMember] {
+        guard let query = store.mentionQuery else { return [] }
+        if query.isEmpty { return model.chatMembers.filter { !$0.isSelf } }
+        return model.chatMembers.filter { !$0.isSelf && $0.displayName.localizedCaseInsensitiveContains(query) }
+    }
+
     @State private var showCreateChannelSheet = false
     @State private var newChannelName = ""
     @State private var newChannelDescription = ""
@@ -553,6 +559,8 @@ struct WaddleChatWorkspaceView: View {
                         Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
                     },
                     isUploadingFile: model.isUploadingFile,
+                    mentionSuggestions: mentionSuggestions,
+                    onMentionQueryChanged: { query in store.mentionQuery = query },
                     usesOperationalChrome: true
                 ) {
                     Task { await store.sendComposerMessage() }
@@ -613,6 +621,8 @@ struct WaddleChatWorkspaceView: View {
                             Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
                         },
                         isUploadingFile: model.isUploadingFile,
+                        mentionSuggestions: mentionSuggestions,
+                        onMentionQueryChanged: { query in store.mentionQuery = query },
                         usesCompactConversationChrome: compactStyle
                     ) {
                         Task { await store.sendComposerMessage() }

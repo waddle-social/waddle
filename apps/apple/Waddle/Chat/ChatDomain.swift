@@ -89,6 +89,7 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var sharedFiles: [XMPPSharedFile]?
     var broadcastMention: String?
     var hatTitles: [String]?
+    var mentionURIs: [String]?
 
     var inlineImages: [XMPPSharedFile] {
         sharedFiles?.filter(\.isInlineImage) ?? []
@@ -263,7 +264,21 @@ extension ChatTimelineMessage {
         }
 
         autoDetectLinks(in: &attributed, text: text)
+        highlightMentions(in: &attributed, text: text)
         return attributed
+    }
+
+    private func highlightMentions(in attributed: inout AttributedString, text: String) {
+        guard let pattern = try? NSRegularExpression(pattern: "(?:^|(?<=\\s))@(\\S+)", options: []) else { return }
+        let nsRange = NSRange(text.startIndex..., in: text)
+        for match in pattern.matches(in: text, range: nsRange) {
+            guard let range = Range(match.range, in: text) else { continue }
+            let startAttr = AttributedString.Index(range.lowerBound, within: attributed)
+            let endAttr = AttributedString.Index(range.upperBound, within: attributed)
+            guard let startAttr, let endAttr, startAttr < endAttr else { continue }
+            attributed[startAttr..<endAttr].foregroundColor = .accentColor
+            attributed[startAttr..<endAttr].inlinePresentationIntent = .stronglyEmphasized
+        }
     }
 
     private func autoDetectLinks(in attributed: inout AttributedString, text: String) {
@@ -335,7 +350,8 @@ extension ChatTimelineMessage {
             markupSpans: other.markupSpans ?? markupSpans,
             sharedFiles: other.sharedFiles ?? sharedFiles,
             broadcastMention: other.broadcastMention ?? broadcastMention,
-            hatTitles: other.hatTitles ?? hatTitles
+            hatTitles: other.hatTitles ?? hatTitles,
+            mentionURIs: other.mentionURIs ?? mentionURIs
         )
     }
 

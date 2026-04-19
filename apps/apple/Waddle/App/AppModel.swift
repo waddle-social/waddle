@@ -1124,7 +1124,8 @@ final class AppModel: ObservableObject {
             markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans,
             sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles,
             broadcastMention: event.broadcastMention,
-            hatTitles: hatsByRoomJID[roomJID]?[senderName]?.map(\.title)
+            hatTitles: hatsByRoomJID[roomJID]?[senderName]?.map(\.title),
+            mentionURIs: event.mentionURIs.isEmpty ? nil : event.mentionURIs
         )
     }
 
