@@ -485,14 +485,16 @@ struct ChatMessageRowView: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(WaddleTheme.accent)
                 }
-                Text(message.replyToBody ?? "Original message")
+                Text(message.replyToBody ?? "View original message")
                     .font(.caption2)
-                    .foregroundStyle(WaddleTheme.textMuted)
-                    .lineLimit(1)
+                    .foregroundStyle(WaddleTheme.textSecondary)
+                    .lineLimit(2)
             }
         }
         .padding(.leading, 8)
+        .padding(.trailing, 12)
         .padding(.vertical, 4)
+        .background(WaddleTheme.surfaceRaised.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
     }
 
     @ViewBuilder
