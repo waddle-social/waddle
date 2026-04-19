@@ -1199,6 +1199,9 @@ final class AppModel: ObservableObject {
 
         let mergedMessages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
         messagesByRoomJID[roomJID] = mergedMessages
+        if roomJID == currentRoomJID {
+            syncChatMessages()
+        }
         logger.info("[WADDLE] loadRoomHistory: roomJID=\(roomJID) archive=\(archivePage.messages.count) delta=\(deltaMessages.count) merged=\(mergedMessages.count)")
 
         let nextBeforeCursor = archivePage.pageInfo.first ?? archivePage.messages.first?.mamID ?? archivePage.messages.first?.stanzaID
