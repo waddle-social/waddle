@@ -28,30 +28,29 @@ const tooltip = computed(
     class="flex flex-col gap-2 text-[11px] leading-tight text-muted-foreground/75 select-text"
     :title="tooltip"
   >
-    <div class="flex items-center justify-between gap-3">
-      <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">Build</span>
-      <span class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
-        <span>Made proudly in</span>
-        <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
-      </span>
-    </div>
-    <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5">
+    <div class="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1">
       <span class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">Web</span>
       <span class="font-mono text-foreground/80">{{ webShortSha }}</span>
       <span class="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/60">Server</span>
       <span class="font-mono text-foreground/80">{{ serverShortSha }}</span>
     </div>
+    <div class="flex items-center justify-center gap-1 border-t border-border/50 pt-2 text-[10px] text-muted-foreground/70">
+      <span>Made proudly in</span>
+      <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
+    </div>
   </div>
   <div
     v-else
-    class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] leading-tight text-muted-foreground/70 select-text"
+    class="flex flex-col gap-1 text-[10px] leading-tight text-muted-foreground/70 select-text"
     :title="tooltip"
   >
-    <span class="font-mono">web {{ webShortSha }}</span>
-    <span class="font-mono">srv {{ serverShortSha }}</span>
-    <span class="flex items-center gap-1">
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono">
+      <span>web {{ webShortSha }}</span>
+      <span>srv {{ serverShortSha }}</span>
+    </div>
+    <div class="flex items-center gap-1">
       <span>Made proudly in</span>
       <span role="img" aria-label="Germany, Norway, and Scotland">🇩🇪🇳🇴🏴</span>
-    </span>
+    </div>
   </div>
 </template>
