@@ -66,17 +66,28 @@ impl AsyncQuery<Vec<Migration>> for LibsqlConnection<'_> {
         while let Some(row) = rows.next().await? {
             let version: i64 = row.get(0)?;
             let name: String = row.get(1)?;
-            let applied_on: String = row.get(2)?;
-            let checksum: String = row.get(3)?;
-            let applied_on = OffsetDateTime::parse(&applied_on, &Rfc3339)
-                .expect("applied_on stored in refinery_schema_history must be valid RFC 3339");
+            let applied_on_str: String = row.get(2)?;
+            let checksum_str: String = row.get(3)?;
+
+            let applied_on = OffsetDateTime::parse(&applied_on_str, &Rfc3339).map_err(|e| {
+                libsql::Error::Misuse(format!(
+                    "refinery_schema_history.applied_on is not valid RFC 3339 \
+                     (value={applied_on_str:?}): {e}"
+                ))
+            })?;
+
+            let checksum = checksum_str.parse::<u64>().map_err(|e| {
+                libsql::Error::Misuse(format!(
+                    "refinery_schema_history.checksum is not a valid u64 \
+                     (value={checksum_str:?}): {e}"
+                ))
+            })?;
+
             applied.push(Migration::applied(
                 version as refinery_core::SchemaVersion,
                 name,
                 applied_on,
-                checksum
-                    .parse::<u64>()
-                    .expect("checksum stored in refinery_schema_history must be a valid u64"),
+                checksum,
             ));
         }
         Ok(applied)
@@ -98,9 +109,7 @@ pub struct MigrationRunner {
 }
 
 impl MigrationRunner {
-    /// Create a runner for global database migrations.
-    pub fn global() -> Self {
-        let runner = global_migrations::migrations::runner();
+    fn from_runner(runner: refinery::Runner) -> Self {
         let total_migrations = runner.get_migrations().len();
         Self {
             runner,
@@ -108,14 +117,14 @@ impl MigrationRunner {
         }
     }
 
+    /// Create a runner for global database migrations.
+    pub fn global() -> Self {
+        Self::from_runner(global_migrations::migrations::runner())
+    }
+
     /// Create a runner for per-waddle database migrations.
     pub fn waddle() -> Self {
-        let runner = waddle_migrations::migrations::runner();
-        let total_migrations = runner.get_migrations().len();
-        Self {
-            runner,
-            total_migrations,
-        }
+        Self::from_runner(waddle_migrations::migrations::runner())
     }
 
     /// Apply all pending migrations and return the versions that were applied.
