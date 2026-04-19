@@ -247,7 +247,7 @@ struct WaddleChatWorkspaceView: View {
 
                 compactSidebar
                     .frame(width: WaddleTheme.sidebarWidth)
-                    .glassEffect(in: .rect)
+                    .compactChrome(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .transition(.move(edge: .leading))
             }
         }
@@ -301,7 +301,9 @@ struct WaddleChatWorkspaceView: View {
                     .font(.body.weight(.medium))
                     .frame(width: 36, height: 36)
             }
-            .glassEffect(.regular.interactive(), in: .circle)
+            .buttonStyle(.plain)
+            .foregroundStyle(WaddleTheme.textSecondary)
+            .compactChrome(in: Circle())
 
             HStack(spacing: 5) {
                 Image(systemName: "number")
@@ -318,7 +320,7 @@ struct WaddleChatWorkspaceView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .glassEffect(in: .capsule)
+            .compactChrome(in: Capsule())
 
             Spacer()
 
@@ -327,7 +329,9 @@ struct WaddleChatWorkspaceView: View {
                     .font(.body)
                     .frame(width: 36, height: 36)
             }
-            .glassEffect(.regular.interactive(), in: .circle)
+            .buttonStyle(.plain)
+            .foregroundStyle(WaddleTheme.textSecondary)
+            .compactChrome(in: Circle())
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1039,6 +1043,19 @@ struct WaddleChatWorkspaceView: View {
         case .offline, .unknown:
             return false
         }
+    }
+}
+
+private extension View {
+    func compactChrome<S: Shape>(in shape: S) -> some View {
+        background {
+            shape
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    shape.stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
+        }
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
     }
 }
 
