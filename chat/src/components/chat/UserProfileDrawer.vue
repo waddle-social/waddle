@@ -16,6 +16,7 @@ const props = defineProps<{
   presence?: OccupantPresence;
   presenceText?: string;
   hats?: OccupantHat[];
+  isSelf?: boolean;
   xmppClient?: BrowserXmppClient | null;
 }>();
 
@@ -116,8 +117,9 @@ watch(
         </section>
       </template>
 
-      <!-- Message button -->
+      <!-- Message button (hidden for own profile) -->
       <button
+        v-if="!isSelf"
         class="flex w-full items-center justify-center gap-2 h-9 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold hover:shadow-[0_0_16px_var(--glow-strong)] transition-all duration-200"
         @click="emit('message')"
       >

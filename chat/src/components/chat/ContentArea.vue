@@ -348,7 +348,6 @@ function presenceTextForAuthor(username: string): string {
 }
 
 function onAvatarClick(author: string) {
-  if (author === props.currentUser) return;
   const authorJid = props.authorJidByNick?.[author]
     ?? (props.selfDomain ? `${author}@${props.selfDomain}` : null);
   if (!authorJid) return;
@@ -790,6 +789,7 @@ function showDividerAfter(messageId: string): boolean {
       :presence="popoverAuthor ? roomPresence[popoverAuthor.username] : undefined"
       :presence-text="popoverAuthor ? presenceTextForAuthor(popoverAuthor.username) : undefined"
       :hats="popoverAuthor ? roomHats[popoverAuthor.username] : undefined"
+      :is-self="popoverAuthor?.username === currentUser"
       :xmpp-client="xmppClient"
       @message="openPopoverDm"
     />
