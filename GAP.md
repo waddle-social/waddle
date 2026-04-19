@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 15 — ALL GAPS CLOSED)
+> Last updated: 2026-04-19 (web: Inbox 0430, PEP Mood 0107, Activity 0108, Tune 0118, Encrypted SFS 0448)
 
 ## Legend
 
@@ -114,6 +114,19 @@
 |---|-----|----------|--------|-------|
 | 11.1 | XML string concatenation | CRITICAL | [~] | Apple `XMPPXML.swift` legacy builders still string-concat. Typed `OutboundXMLElement` is the target — migrate the remaining MUC builders. |
 
+## 12. Social / PEP Parity (server-backed)
+
+Feature parity for XEPs that already have a server-side implementation with
+dedicated Rust test suites. Web client coverage is tracked per-platform.
+
+| # | Gap | Priority | Status (web) | Status (Apple) | XEP | Notes |
+|---|-----|----------|--------------|----------------|-----|-------|
+| 12.1 | Unified inbox (conversation list + unread counts) | HIGH | [x] | [ ] | XEP-0430 | Web: `fetchInbox`, `markInboxRead`, typed `<query xmlns='urn:xmpp:inbox:0'>` jxt extension |
+| 12.2 | User Mood publication | MEDIUM | [x] | [ ] | XEP-0107 | Web: `publishMood({ kind, text? })` / `retractMood()` with closed 82-keyword enum |
+| 12.3 | User Activity publication | MEDIUM | [x] | [ ] | XEP-0108 | Web: `publishActivity({ general, specific?, text? })` / `retractActivity()` with 12-category general enum |
+| 12.4 | User Tune publication | LOW | [x] | [ ] | XEP-0118 | Web: `publishTune({ artist?, title?, source?, length?, rating?, track?, uri? })` / `retractTune()` |
+| 12.5 | Encrypted stateless file sharing | MEDIUM | [x] | [ ] | XEP-0448 | Web: `WaddleEncryptedFile` jxt extension aliased at `message.encryptedFiles` with closed AES-128/256-GCM cipher enum |
+
 ---
 
 ## Summary
@@ -121,10 +134,10 @@
 | Priority | Count | Description |
 |----------|-------|-------------|
 | CRITICAL | 9 | Core messaging gaps that block feature parity |
-| HIGH | 15 | Important UX gaps |
-| MEDIUM | 11 | Enhancement gaps |
-| LOW | 4 | Polish gaps |
-| **Total** | **39** | |
+| HIGH | 16 | Important UX gaps |
+| MEDIUM | 14 | Enhancement gaps |
+| LOW | 5 | Polish gaps |
+| **Total** | **44** | |
 
 ## Recommended Priority Order
 

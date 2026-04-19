@@ -8,6 +8,31 @@ export {
   roomBareJidForAccountJid,
 } from "./jid";
 export type { OutboundFileAttachment } from "./messaging";
+export { fetchInbox, markInboxRead } from "./inbox";
+export type {
+  FetchInboxOptions,
+  InboxConversationKind,
+  InboxEntry,
+  InboxResult,
+} from "./inbox";
+export {
+  publishActivity, publishMood, publishTune,
+  retractActivity, retractMood, retractTune,
+} from "./pep-publications";
+export type {
+  ActivityPublication,
+  GeneralActivity,
+  MoodKind,
+  MoodPublication,
+  TunePublication,
+} from "./pep-publications";
+export { NS_ESFS_0 } from "./extensions/encrypted-file";
+export type {
+  EncryptedFileCipher,
+  EncryptedFileHash,
+  WaddleEncryptedFile,
+} from "./extensions/encrypted-file";
+export { NS_INBOX_0 } from "./extensions/inbox";
 export type {
   ChatStateEvent,
   ChatStateType,
