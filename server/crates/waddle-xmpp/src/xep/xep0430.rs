@@ -64,7 +64,7 @@ pub struct InboxMarkRead {
     pub thread_id: Option<String>,
 }
 
-fn iq_payload<'a>(iq: &'a Iq, want_set: bool) -> Result<&'a Element, InboxError> {
+fn iq_payload(iq: &Iq, want_set: bool) -> Result<&Element, InboxError> {
     match &iq.payload {
         IqType::Get(e) if !want_set => Ok(e),
         IqType::Set(e) if want_set => Ok(e),
@@ -394,7 +394,7 @@ mod tests {
             "alice@example.com".parse().unwrap(),
             ConversationKind::Direct,
             "sid-42",
-            1700_000,
+            1_700_000,
         )
         .with_unread(3)
         .with_preview("hi there");

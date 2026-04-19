@@ -273,7 +273,7 @@ impl InboxView {
             .filter(|e| e.thread_id.is_none())
             .cloned()
             .collect();
-        v.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+        v.sort_by_key(|b| std::cmp::Reverse(b.last_updated));
         v
     }
 
@@ -285,7 +285,7 @@ impl InboxView {
             .filter(|e| e.thread_id.is_some() && &e.partner == room)
             .cloned()
             .collect();
-        v.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+        v.sort_by_key(|b| std::cmp::Reverse(b.last_updated));
         v
     }
 

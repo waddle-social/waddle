@@ -1518,7 +1518,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return Vec::new();
         }
 
-        available.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        available.sort_by_key(|a| a.0.to_string());
 
         match delivery {
             BareMessageDelivery::AllNonNegative => {
