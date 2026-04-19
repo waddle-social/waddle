@@ -145,7 +145,7 @@ export interface OutboundSendResult {
 }
 
 export class BrowserXmppClient {
-  private readonly session: WaddleSession;
+  private session: WaddleSession;
   private get queueScope() { return barePeerJid(this.session.jid); }
   private readonly resource = createXmppResource();
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
@@ -219,9 +219,35 @@ export class BrowserXmppClient {
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHandler = h; }
   setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
 
+  private updateSession(session: WaddleSession, xmpp: Agent | null = this.xmpp) {
+    this.session = session;
+    if (!xmpp) return;
+    (xmpp.config as any).jid = session.jid;
+    (xmpp.config as any).credentials = { token: session.session_id };
+    (xmpp.config as any).transports = { websocket: session.xmpp_websocket_url, bosh: false };
+  }
+
+  private discardDisconnectedAgent(xmpp: Agent) {
+    if (this.xmpp === xmpp) {
+      this.connected = false;
+      this.connectPromise = null;
+      this.stopSelfPing();
+      this.stopKeepAlive();
+      this.roomSwitchPromise = null;
+      this.roomSwitchTarget = null;
+      this.uploadServiceJid = null;
+      this.roomHats = {};
+      this.hatsHandler?.({});
+      this.roomPresence = {};
+      this.presenceHandler?.({});
+      this.xmpp = null;
+    }
+    try { xmpp.disconnect(); } catch { /* ignore stale client */ }
+  }
+
   // -- Connection lifecycle --
 
-  async connect() {
+  async connect(): Promise<void> {
     if (this.xmpp && this.connected) return;
     if (this.connectPromise) return this.connectPromise;
 
@@ -233,7 +259,7 @@ export class BrowserXmppClient {
     // because feature negotiation is short-circuited.
     if (this.xmpp && !this.destroying) {
       const xmpp = this.xmpp;
-      this.connectPromise = new Promise<void>((resolve, reject) => {
+      const reconnectPromise = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           cleanup();
           this.connectPromise = null;
@@ -261,6 +287,18 @@ export class BrowserXmppClient {
         xmpp.on("stream:management:resumed", onReady);
         xmpp.on("disconnected", onDisconnected);
       });
+      this.connectPromise = reconnectPromise.catch(async (error): Promise<void> => {
+        if (
+          error instanceof Error
+          && error.message === "Reconnection timed out"
+          && !this.destroying
+          && this.xmpp === xmpp
+        ) {
+          this.discardDisconnectedAgent(xmpp);
+          return this.connect();
+        }
+        throw error;
+      });
       if (Date.now() - this.lastStanzaKickAt > 2_000) {
         this.lastStanzaKickAt = Date.now();
         try { xmpp.connect(); } catch { /* stanza may be mid-handshake */ }
@@ -274,7 +312,6 @@ export class BrowserXmppClient {
       this.xmpp = null;
     }
     this.destroying = false;
-    this.currentRoom = null;
     this.roomSwitchPromise = null;
     this.roomSwitchTarget = null;
     this.roomHats = {};
@@ -1170,7 +1207,7 @@ export class BrowserXmppClient {
       try {
         const refreshed = await this.refreshSession();
         if (refreshed) {
-          (xmpp.config as any).credentials = { token: refreshed.session_id };
+          this.updateSession(refreshed, xmpp);
         } else {
           this.destroying = true;
           this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
