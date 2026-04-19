@@ -35,6 +35,7 @@ tui-textarea = "0.7"
 # Database
 libsql = "0.9"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+refinery = "0.9"
 
 # Actor Framework
 kameo = "0.15"

@@ -1,568 +1,183 @@
 //! Database migration system for Waddle Server
 //!
-//! This module provides:
-//! - Compile-time embedded SQL migrations
-//! - Version tracking via a migrations table
-//! - Automatic migration on database initialization
+//! Uses [refinery] for battle-tested, checksum-verified SQL migrations.
 //!
-//! # Migration Naming Convention
+//! SQL migration files live alongside this crate under:
+//! - `migrations/global/`  – global database (auth, users, roster, etc.)
+//! - `migrations/waddle/`  – per-Waddle databases (channels, messages, etc.)
 //!
-//! Migration files should be named: `NNNN_description.sql`
-//! Where NNNN is a zero-padded version number (e.g., 0001, 0002).
+//! File naming follows refinery's convention: `V{version}__{description}.sql`
+//! (e.g. `V001__auth_broker_schema.sql`).
+//!
+//! The multi-tenant architecture is preserved: `MigrationRunner::global()` and
+//! `MigrationRunner::waddle()` each embed their own migration set at compile
+//! time and run against the corresponding database independently.
 
 use super::Database;
 use super::DatabaseError;
-use std::collections::HashMap;
+use async_trait::async_trait;
+use refinery_core::traits::r#async::{AsyncMigrate, AsyncQuery, AsyncTransaction};
+use refinery_core::Migration;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tracing::{debug, info, instrument};
 
-/// Represents a single database migration
-#[derive(Debug, Clone)]
-pub struct Migration {
-    /// Version number (must be unique and incrementing)
-    pub version: i64,
-    /// Description of what this migration does
-    pub description: String,
-    /// SQL to execute for the migration
-    pub sql: &'static str,
+// Compile-time embedding of SQL migration files.
+mod global_migrations {
+    refinery::embed_migrations!("migrations/global");
 }
 
-impl Migration {
-    /// Create a new migration
-    /// Note: description parameter is unused in const fn as String::new() is const but
-    /// String::from() is not. The description is set at runtime in the all() functions.
-    #[allow(dead_code)]
-    pub const fn new(version: i64, _description: &'static str, sql: &'static str) -> Self {
-        Self {
-            version,
-            description: String::new(), // Will be set at runtime
-            sql,
+mod waddle_migrations {
+    refinery::embed_migrations!("migrations/waddle");
+}
+
+/// Thin adapter that implements refinery's async traits on top of a libsql connection.
+///
+/// `libsql::Connection` uses interior mutability (`Arc` internally), so the
+/// underlying async methods only require `&self`; the `&mut self` bounds here
+/// satisfy the refinery trait contracts.
+struct LibsqlConnection<'a>(&'a libsql::Connection);
+
+#[async_trait]
+impl AsyncTransaction for LibsqlConnection<'_> {
+    type Error = libsql::Error;
+
+    async fn execute<'a, T: Iterator<Item = &'a str> + Send>(
+        &mut self,
+        queries: T,
+    ) -> Result<usize, Self::Error> {
+        let mut count = 0;
+        for query in queries {
+            self.0.execute_batch(query).await?;
+            count += 1;
         }
+        Ok(count)
     }
 }
 
-/// Global database migrations (auth broker, users, permissions, and XMPP data)
-pub mod global {
-    use super::Migration;
-
-    /// Hard-cut schema reset for native OIDC/OAuth auth broker.
-    pub const V0001_AUTH_BROKER_SCHEMA: &str = r#"
-PRAGMA foreign_keys = OFF;
-
-DROP TABLE IF EXISTS auth_identities;
-DROP TABLE IF EXISTS sessions;
-DROP TABLE IF EXISTS waddle_members;
-DROP TABLE IF EXISTS waddles;
-DROP TABLE IF EXISTS permission_tuples;
-DROP TABLE IF EXISTS users;
-DROP TABLE IF EXISTS native_users;
-DROP TABLE IF EXISTS vcard_storage;
-DROP TABLE IF EXISTS upload_slots;
-DROP TABLE IF EXISTS roster_items;
-DROP TABLE IF EXISTS roster_versions;
-DROP TABLE IF EXISTS blocking_list;
-DROP TABLE IF EXISTS private_xml_storage;
-
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    xmpp_localpart TEXT NOT NULL UNIQUE,
-    display_name TEXT,
-    avatar_url TEXT,
-    primary_email TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE auth_identities (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    provider_id TEXT NOT NULL,
-    issuer TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    email TEXT,
-    email_verified INTEGER,
-    raw_claims_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    last_login_at TEXT NOT NULL,
-    UNIQUE(issuer, subject),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_auth_identities_user_id ON auth_identities(user_id);
-
-CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE,
-    expires_at TEXT,
-    created_at TEXT NOT NULL,
-    last_used_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
-
-CREATE TABLE waddles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    owner_id TEXT NOT NULL,
-    icon_url TEXT,
-    is_public INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_waddles_owner_id ON waddles(owner_id);
-CREATE INDEX idx_waddles_is_public ON waddles(is_public);
-
-CREATE TABLE waddle_members (
-    waddle_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',
-    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (waddle_id, user_id),
-    FOREIGN KEY (waddle_id) REFERENCES waddles(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_waddle_members_user_id ON waddle_members(user_id);
-
-CREATE TABLE permission_tuples (
-    id TEXT PRIMARY KEY,
-    object_type TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    relation TEXT NOT NULL,
-    subject_type TEXT NOT NULL,
-    subject_id TEXT NOT NULL,
-    subject_relation TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(object_type, object_id, relation, subject_type, subject_id, subject_relation)
-);
-
-CREATE INDEX idx_tuples_object ON permission_tuples(object_type, object_id);
-CREATE INDEX idx_tuples_subject ON permission_tuples(subject_type, subject_id);
-CREATE INDEX idx_tuples_relation ON permission_tuples(object_type, relation);
-CREATE INDEX idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
-
-CREATE TABLE native_users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL,
-    domain TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    salt TEXT NOT NULL,
-    iterations INTEGER NOT NULL DEFAULT 4096,
-    stored_key BLOB NOT NULL,
-    server_key BLOB NOT NULL,
-    email TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(username, domain)
-);
-
-CREATE INDEX idx_native_users_username_domain ON native_users(username, domain);
-CREATE INDEX idx_native_users_email ON native_users(email) WHERE email IS NOT NULL;
-
-CREATE TABLE vcard_storage (
-    jid TEXT PRIMARY KEY,
-    vcard_xml TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE upload_slots (
-    id TEXT PRIMARY KEY,
-    requester_jid TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    content_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    storage_key TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL,
-    uploaded_at TEXT
-);
-
-CREATE INDEX idx_upload_slots_requester ON upload_slots(requester_jid);
-CREATE INDEX idx_upload_slots_expires ON upload_slots(expires_at) WHERE status = 'pending';
-CREATE INDEX idx_upload_slots_status ON upload_slots(status);
-
-CREATE TABLE roster_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_jid TEXT NOT NULL,
-    contact_jid TEXT NOT NULL,
-    name TEXT,
-    subscription TEXT NOT NULL DEFAULT 'none',
-    ask TEXT,
-    groups TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_jid, contact_jid)
-);
-
-CREATE INDEX idx_roster_items_user ON roster_items(user_jid);
-CREATE INDEX idx_roster_items_contact ON roster_items(contact_jid);
-CREATE INDEX idx_roster_items_subscription ON roster_items(user_jid, subscription);
-
-CREATE TABLE roster_versions (
-    user_jid TEXT PRIMARY KEY,
-    version TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE blocking_list (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_jid TEXT NOT NULL,
-    blocked_jid TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_jid, blocked_jid)
-);
-
-CREATE INDEX idx_blocking_list_user ON blocking_list(user_jid);
-CREATE INDEX idx_blocking_list_blocked ON blocking_list(blocked_jid);
-
-CREATE TABLE private_xml_storage (
-    jid TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    xml_content TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (jid, namespace)
-);
-
-PRAGMA foreign_keys = ON;
-"#;
-
-    /// Get all global migrations in order
-    pub fn all() -> Vec<Migration> {
-        vec![Migration {
-            version: 1,
-            description: "Hard-cut auth broker schema (issuer+subject identity key)".to_string(),
-            sql: V0001_AUTH_BROKER_SCHEMA,
-        }]
+#[async_trait]
+impl AsyncQuery<Vec<Migration>> for LibsqlConnection<'_> {
+    async fn query(
+        &mut self,
+        query: &str,
+    ) -> Result<Vec<Migration>, <Self as AsyncTransaction>::Error> {
+        let mut rows = self.0.query(query, ()).await?;
+        let mut applied = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let version: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let applied_on: String = row.get(2)?;
+            let checksum: String = row.get(3)?;
+            let applied_on = OffsetDateTime::parse(&applied_on, &Rfc3339)
+                .expect("applied_on stored in refinery_schema_history must be valid RFC 3339");
+            applied.push(Migration::applied(
+                version as refinery_core::SchemaVersion,
+                name,
+                applied_on,
+                checksum
+                    .parse::<u64>()
+                    .expect("checksum stored in refinery_schema_history must be a valid u64"),
+            ));
+        }
+        Ok(applied)
     }
 }
 
-/// Per-Waddle database migrations (channels, messages)
-pub mod waddle {
-    use super::Migration;
+impl AsyncMigrate for LibsqlConnection<'_> {}
 
-    /// Hard-cut per-waddle schema with UUID user principals.
-    pub const V0001_SCHEMA: &str = r#"
-PRAGMA foreign_keys = OFF;
-
-DROP TABLE IF EXISTS attachments;
-DROP TABLE IF EXISTS reactions;
-DROP TABLE IF EXISTS messages;
-DROP TABLE IF EXISTS channels;
-
-CREATE TABLE channels (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    channel_type TEXT NOT NULL DEFAULT 'text',
-    position INTEGER NOT NULL DEFAULT 0,
-    is_default INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX idx_channels_position ON channels(position);
-
-CREATE TABLE messages (
-    id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    author_user_id TEXT NOT NULL,
-    content TEXT,
-    reply_to_id TEXT,
-    thread_id TEXT,
-    flags INTEGER NOT NULL DEFAULT 0,
-    edited_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT,
-    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_messages_channel_id ON messages(channel_id);
-CREATE INDEX idx_messages_author_user_id ON messages(author_user_id);
-CREATE INDEX idx_messages_created_at ON messages(created_at);
-CREATE INDEX idx_messages_reply_to_id ON messages(reply_to_id);
-CREATE INDEX idx_messages_thread ON messages(thread_id, created_at);
-CREATE INDEX idx_messages_channel_created ON messages(channel_id, created_at DESC);
-CREATE INDEX idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL;
-
-CREATE TABLE reactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    emoji TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(message_id, user_id, emoji),
-    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_reactions_message_id ON reactions(message_id);
-
-CREATE TABLE attachments (
-    id TEXT PRIMARY KEY,
-    message_id TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    storage_key TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_attachments_message_id ON attachments(message_id);
-
-PRAGMA foreign_keys = ON;
-"#;
-
-    /// Get all per-waddle migrations in order
-    pub fn all() -> Vec<Migration> {
-        vec![Migration {
-            version: 1,
-            description: "Hard-cut per-waddle schema with user_id principals".to_string(),
-            sql: V0001_SCHEMA,
-        }]
-    }
-}
-
-/// Migration runner for applying migrations to a database
+/// Runs refinery-managed migrations against a [`Database`].
+///
+/// Use [`MigrationRunner::global`] for the global database and
+/// [`MigrationRunner::waddle`] for per-Waddle databases.  Each instance
+/// embeds its migration set at compile time, so no SQL is loaded from disk at
+/// runtime.
 pub struct MigrationRunner {
-    migrations: Vec<Migration>,
+    runner: refinery::Runner,
+    /// Total number of migrations in this set; used by [`has_pending`].
+    total_migrations: usize,
 }
 
 impl MigrationRunner {
-    /// Create a new migration runner with the given migrations
-    pub fn new(migrations: Vec<Migration>) -> Self {
-        let mut sorted = migrations;
-        sorted.sort_by_key(|m| m.version);
-        Self { migrations: sorted }
-    }
-
-    /// Create a runner for global database migrations
+    /// Create a runner for global database migrations.
     pub fn global() -> Self {
-        Self::new(global::all())
+        let runner = global_migrations::migrations::runner();
+        let total_migrations = runner.get_migrations().len();
+        Self {
+            runner,
+            total_migrations,
+        }
     }
 
-    /// Create a runner for per-waddle database migrations
+    /// Create a runner for per-waddle database migrations.
     pub fn waddle() -> Self {
-        Self::new(waddle::all())
+        let runner = waddle_migrations::migrations::runner();
+        let total_migrations = runner.get_migrations().len();
+        Self {
+            runner,
+            total_migrations,
+        }
     }
 
-    /// Run all pending migrations on the database
+    /// Apply all pending migrations and return the versions that were applied.
+    ///
+    /// Refinery verifies checksums of previously applied migrations; if a
+    /// migration file has been modified after it was applied the runner will
+    /// return an error instead of silently re-applying.
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn run(&self, db: &Database) -> Result<Vec<i64>, DatabaseError> {
         let conn = db.guard().await?;
-        self.run_with_connection(&conn).await
-    }
-
-    /// Internal method to run migrations with a given connection
-    async fn run_with_connection(
-        &self,
-        conn: &libsql::Connection,
-    ) -> Result<Vec<i64>, DatabaseError> {
-        // Ensure migrations table exists
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS _migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            "#,
-            (),
-        )
-        .await
-        .map_err(|e| {
-            DatabaseError::MigrationFailed(format!("Failed to create migrations table: {}", e))
-        })?;
-
-        // Get applied migrations (version + description).
-        let mut applied_rows: Vec<(i64, String)> = Vec::new();
-        let mut rows = conn
-            .query(
-                "SELECT version, description FROM _migrations ORDER BY version",
-                (),
-            )
+        let mut adapter = LibsqlConnection(&*conn);
+        let report = self
+            .runner
+            .run_async(&mut adapter)
             .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to query migrations: {}", e))
-            })?;
+            .map_err(|e| DatabaseError::MigrationFailed(e.to_string()))?;
 
-        while let Some(row) = rows.next().await.map_err(|e| {
-            DatabaseError::MigrationFailed(format!("Failed to read migration row: {}", e))
-        })? {
-            let version: i64 = row.get(0).map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to get version from row: {}", e))
-            })?;
-            let description: String = row.get(1).map_err(|e| {
-                DatabaseError::MigrationFailed(format!("Failed to get description from row: {}", e))
-            })?;
-            applied_rows.push((version, description));
-        }
-
-        // Hard-cut protection: if the migration history doesn't match this binary's
-        // migration set (unknown versions or differing descriptions), reset migration
-        // tracking and re-apply current migrations from scratch.
-        let expected: HashMap<i64, &str> = self
-            .migrations
+        let applied: Vec<i64> = report
+            .applied_migrations()
             .iter()
-            .map(|m| (m.version, m.description.as_str()))
+            .map(|m| m.version() as i64)
             .collect();
-        let has_incompatible_history = applied_rows.iter().any(|(version, description)| {
-            expected
-                .get(version)
-                .map(|expected_desc| *expected_desc != description.as_str())
-                .unwrap_or(true)
-        });
 
-        let applied: Vec<i64> = if has_incompatible_history {
-            info!("Incompatible migration history detected, resetting migration tracking");
-            conn.execute_batch("DROP TABLE IF EXISTS _migrations;")
-                .await
-                .map_err(|e| {
-                    DatabaseError::MigrationFailed(format!(
-                        "Failed to reset migration tracking table: {}",
-                        e
-                    ))
-                })?;
-            conn.execute(
-                r#"
-                CREATE TABLE IF NOT EXISTS _migrations (
-                    version INTEGER PRIMARY KEY,
-                    description TEXT NOT NULL,
-                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-                )
-                "#,
-                (),
-            )
-            .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!(
-                    "Failed to recreate migrations table: {}",
-                    e
-                ))
-            })?;
-            Vec::new()
-        } else {
-            applied_rows.iter().map(|(version, _)| *version).collect()
-        };
-
-        debug!("Already applied migrations: {:?}", applied);
-
-        // Apply pending migrations
-        let mut newly_applied = Vec::new();
-        for migration in &self.migrations {
-            if applied.contains(&migration.version) {
-                debug!("Skipping already applied migration v{}", migration.version);
-                continue;
-            }
-
-            info!(
-                "Applying migration v{}: {}",
-                migration.version, migration.description
-            );
-
-            // Execute migration SQL using batch execution
-            conn.execute_batch(migration.sql).await.map_err(|e| {
-                DatabaseError::MigrationFailed(format!(
-                    "Migration v{} failed: {}",
-                    migration.version, e
-                ))
-            })?;
-
-            // Record the migration
-            conn.execute(
-                "INSERT INTO _migrations (version, description) VALUES (?, ?)",
-                (migration.version, migration.description.as_str()),
-            )
-            .await
-            .map_err(|e| {
-                DatabaseError::MigrationFailed(format!(
-                    "Failed to record migration v{}: {}",
-                    migration.version, e
-                ))
-            })?;
-
-            newly_applied.push(migration.version);
-            info!("Applied migration v{}", migration.version);
-        }
-
-        if newly_applied.is_empty() {
+        if applied.is_empty() {
             debug!("No new migrations to apply");
         } else {
-            info!("Applied {} new migrations", newly_applied.len());
+            info!("Applied {} new migration(s): {:?}", applied.len(), applied);
         }
 
-        Ok(newly_applied)
+        Ok(applied)
     }
 
-    /// Get the current schema version
+    /// Return `true` if there are migrations that have not yet been applied.
+    #[allow(dead_code)]
+    #[instrument(skip_all, fields(db_name = %db.name()))]
+    pub async fn has_pending(&self, db: &Database) -> Result<bool, DatabaseError> {
+        let conn = db.guard().await?;
+        let mut adapter = LibsqlConnection(&*conn);
+        match self.runner.get_applied_migrations_async(&mut adapter).await {
+            Ok(applied) => Ok(applied.len() < self.total_migrations),
+            // If the schema history table does not exist yet all migrations are pending.
+            Err(_) => Ok(true),
+        }
+    }
+
+    /// Return the version of the last applied migration, or `None` if no
+    /// migrations have been applied.
     #[allow(dead_code)]
     #[instrument(skip_all, fields(db_name = %db.name()))]
     pub async fn current_version(&self, db: &Database) -> Result<Option<i64>, DatabaseError> {
         let conn = db.guard().await?;
-        self.current_version_with_connection(&conn).await
-    }
-
-    /// Internal method to get current version with a given connection
-    #[allow(dead_code)]
-    async fn current_version_with_connection(
-        &self,
-        conn: &libsql::Connection,
-    ) -> Result<Option<i64>, DatabaseError> {
-        // Check if migrations table exists
-        let mut rows = conn
-            .query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'",
-                (),
-            )
+        let mut adapter = LibsqlConnection(&*conn);
+        match self
+            .runner
+            .get_last_applied_migration_async(&mut adapter)
             .await
-            .map_err(|e| {
-                DatabaseError::QueryFailed(format!("Failed to check migrations table: {}", e))
-            })?;
-
-        if rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to read result: {}", e)))?
-            .is_none()
         {
-            return Ok(None);
+            Ok(Some(m)) => Ok(Some(m.version() as i64)),
+            Ok(None) => Ok(None),
+            // Schema history table does not exist yet.
+            Err(_) => Ok(None),
         }
-
-        // Get the latest version
-        let mut rows = conn
-            .query("SELECT MAX(version) FROM _migrations", ())
-            .await
-            .map_err(|e| {
-                DatabaseError::QueryFailed(format!("Failed to query max version: {}", e))
-            })?;
-
-        match rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(format!("Failed to read max version: {}", e)))?
-        {
-            Some(row) => {
-                let version: Option<i64> = row.get(0).ok();
-                Ok(version)
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Check if there are pending migrations
-    #[allow(dead_code)]
-    pub async fn has_pending(&self, db: &Database) -> Result<bool, DatabaseError> {
-        let current = self.current_version(db).await?.unwrap_or(0);
-        let latest = self.migrations.last().map(|m| m.version).unwrap_or(0);
-        Ok(current < latest)
     }
 }
 
@@ -579,7 +194,7 @@ mod tests {
         let applied = runner.run(&db).await.unwrap();
         assert!(!applied.is_empty());
 
-        // Running again should apply nothing
+        // Running again should apply nothing (idempotent)
         let applied_again = runner.run(&db).await.unwrap();
         assert!(applied_again.is_empty());
 
@@ -624,7 +239,7 @@ mod tests {
         let db = Database::in_memory("test-pending").await.unwrap();
         let runner = MigrationRunner::global();
 
-        // Should have pending migrations on fresh DB
+        // Should have pending migrations on a fresh database
         assert!(runner.has_pending(&db).await.unwrap());
 
         // Run migrations
@@ -635,40 +250,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_incompatible_history_forces_hard_cut_reapply() {
-        let db = Database::in_memory("test-incompatible-history")
-            .await
-            .unwrap();
-        let conn = db.guard().await.unwrap();
+    async fn test_divergent_migration_is_rejected() {
+        let db = Database::in_memory("test-divergent").await.unwrap();
 
-        conn.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS _migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            "#,
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "INSERT INTO _migrations (version, description) VALUES (1, 'legacy initial schema')",
-            (),
-        )
-        .await
-        .unwrap();
-        drop(conn);
-
+        // Apply the real global migrations first.
         let runner = MigrationRunner::global();
-        let applied = runner.run(&db).await.unwrap();
-        assert_eq!(applied, vec![1]);
+        runner.run(&db).await.unwrap();
 
-        let applied_again = runner.run(&db).await.unwrap();
-        assert!(applied_again.is_empty());
+        // Build a runner whose V1 migration has different SQL (different checksum).
+        let divergent = refinery::Runner::new(&[refinery_core::Migration::unapplied(
+            "V001__auth_broker_schema",
+            "SELECT 1;",
+        )
+        .unwrap()]);
+        let conn = db.guard().await.unwrap();
+        let mut adapter = LibsqlConnection(&*conn);
+        let result = divergent.run_async(&mut adapter).await;
 
-        let version = runner.current_version(&db).await.unwrap();
-        assert_eq!(version, Some(1));
+        // refinery must reject the divergent migration with an error.
+        assert!(
+            result.is_err(),
+            "expected an error for divergent migration, got Ok"
+        );
     }
 }

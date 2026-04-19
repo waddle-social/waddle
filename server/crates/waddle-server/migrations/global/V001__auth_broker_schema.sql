@@ -1,0 +1,187 @@
+PRAGMA foreign_keys = OFF;
+
+DROP TABLE IF EXISTS auth_identities;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS waddle_members;
+DROP TABLE IF EXISTS waddles;
+DROP TABLE IF EXISTS permission_tuples;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS native_users;
+DROP TABLE IF EXISTS vcard_storage;
+DROP TABLE IF EXISTS upload_slots;
+DROP TABLE IF EXISTS roster_items;
+DROP TABLE IF EXISTS roster_versions;
+DROP TABLE IF EXISTS blocking_list;
+DROP TABLE IF EXISTS private_xml_storage;
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    xmpp_localpart TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    avatar_url TEXT,
+    primary_email TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE auth_identities (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    email TEXT,
+    email_verified INTEGER,
+    raw_claims_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT NOT NULL,
+    UNIQUE(issuer, subject),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_auth_identities_user_id ON auth_identities(user_id);
+
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
+
+CREATE TABLE waddles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    owner_id TEXT NOT NULL,
+    icon_url TEXT,
+    is_public INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_waddles_owner_id ON waddles(owner_id);
+CREATE INDEX idx_waddles_is_public ON waddles(is_public);
+
+CREATE TABLE waddle_members (
+    waddle_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (waddle_id, user_id),
+    FOREIGN KEY (waddle_id) REFERENCES waddles(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_waddle_members_user_id ON waddle_members(user_id);
+
+CREATE TABLE permission_tuples (
+    id TEXT PRIMARY KEY,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    subject_type TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    subject_relation TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(object_type, object_id, relation, subject_type, subject_id, subject_relation)
+);
+
+CREATE INDEX idx_tuples_object ON permission_tuples(object_type, object_id);
+CREATE INDEX idx_tuples_subject ON permission_tuples(subject_type, subject_id);
+CREATE INDEX idx_tuples_relation ON permission_tuples(object_type, relation);
+CREATE INDEX idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
+
+CREATE TABLE native_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    iterations INTEGER NOT NULL DEFAULT 4096,
+    stored_key BLOB NOT NULL,
+    server_key BLOB NOT NULL,
+    email TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(username, domain)
+);
+
+CREATE INDEX idx_native_users_username_domain ON native_users(username, domain);
+CREATE INDEX idx_native_users_email ON native_users(email) WHERE email IS NOT NULL;
+
+CREATE TABLE vcard_storage (
+    jid TEXT PRIMARY KEY,
+    vcard_xml TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE upload_slots (
+    id TEXT PRIMARY KEY,
+    requester_jid TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    storage_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    uploaded_at TEXT
+);
+
+CREATE INDEX idx_upload_slots_requester ON upload_slots(requester_jid);
+CREATE INDEX idx_upload_slots_expires ON upload_slots(expires_at) WHERE status = 'pending';
+CREATE INDEX idx_upload_slots_status ON upload_slots(status);
+
+CREATE TABLE roster_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_jid TEXT NOT NULL,
+    contact_jid TEXT NOT NULL,
+    name TEXT,
+    subscription TEXT NOT NULL DEFAULT 'none',
+    ask TEXT,
+    groups TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_jid, contact_jid)
+);
+
+CREATE INDEX idx_roster_items_user ON roster_items(user_jid);
+CREATE INDEX idx_roster_items_contact ON roster_items(contact_jid);
+CREATE INDEX idx_roster_items_subscription ON roster_items(user_jid, subscription);
+
+CREATE TABLE roster_versions (
+    user_jid TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE blocking_list (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_jid TEXT NOT NULL,
+    blocked_jid TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_jid, blocked_jid)
+);
+
+CREATE INDEX idx_blocking_list_user ON blocking_list(user_jid);
+CREATE INDEX idx_blocking_list_blocked ON blocking_list(blocked_jid);
+
+CREATE TABLE private_xml_storage (
+    jid TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    xml_content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (jid, namespace)
+);
+
+PRAGMA foreign_keys = ON;
