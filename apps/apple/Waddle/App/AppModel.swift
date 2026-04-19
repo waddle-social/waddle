@@ -336,6 +336,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published var selectedForumThreadID: String?
+
+    func sendForumTopic(title: String, body: String) async {
+        guard let roomJID = currentRoomJID, let xmppService else { return }
+        do {
+            try await xmppService.sendForumTopic(roomJID: roomJID, body: body, title: title)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sendForumReply(body: String, threadID: String) async {
+        guard let roomJID = currentRoomJID, let xmppService else { return }
+        do {
+            try await xmppService.sendForumReply(roomJID: roomJID, body: body, threadID: threadID)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    var forumTopics: [ChatTimelineMessage] {
+        chatStore.messages.filter { $0.isForumTopic }
+    }
+
+    func threadReplies(for threadID: String) -> [ChatTimelineMessage] {
+        chatStore.messages.filter { $0.threadID == threadID && $0.isForumReply }
+    }
+
     @Published var isCreatingChannel = false
     @Published var isUploadingFile = false
 
@@ -1125,7 +1153,10 @@ final class AppModel: ObservableObject {
             sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles,
             broadcastMention: event.broadcastMention,
             hatTitles: hatsByRoomJID[roomJID]?[senderName]?.map(\.title),
-            mentionURIs: event.mentionURIs.isEmpty ? nil : event.mentionURIs
+            mentionURIs: event.mentionURIs.isEmpty ? nil : event.mentionURIs,
+            forumPostKind: event.forumPostKind,
+            forumTitle: event.forumTitle,
+            threadID: event.threadID
         )
     }
 

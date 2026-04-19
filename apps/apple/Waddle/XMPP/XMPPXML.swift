@@ -430,7 +430,10 @@ enum XMPPXML {
             displayedMarkerID: displayedMarkerID,
             sharedFiles: sharedFiles,
             broadcastMention: broadcastMention,
-            mentionURIs: parseMentionURIs(from: element)
+            mentionURIs: parseMentionURIs(from: element),
+            forumPostKind: parseForumPostKind(from: element),
+            forumTitle: element.firstChild(named: "thread-create")?.attribute("title"),
+            threadID: parseThreadID(from: element)
         )
     }
 
@@ -462,6 +465,39 @@ enum XMPPXML {
             ))
         }
         return files
+    }
+
+    private static func parseForumPostKind(from element: XMPPElement) -> String? {
+        if element.firstChild(named: "thread-create") != nil { return "topic" }
+        if element.firstChild(named: "thread-reply") != nil { return "reply" }
+        return nil
+    }
+
+    private static func parseThreadID(from element: XMPPElement) -> String? {
+        if element.firstChild(named: "thread-create") != nil {
+            return element.attribute("id")
+        }
+        if let threadReply = element.firstChild(named: "thread-reply") {
+            return threadReply.attribute("thread-id") ?? element.firstChild(named: "thread")?.text
+        }
+        return element.firstChild(named: "thread")?.text
+    }
+
+    static func forumTopicMessage(to roomJID: String, body: String, title: String) -> String {
+        var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
+        payload += "<body>\(escape(body))</body>"
+        payload += "<thread-create xmlns='urn:xmpp:forums:0' title='\(escape(title))'/>"
+        payload += "</message>"
+        return payload
+    }
+
+    static func forumReplyMessage(to roomJID: String, body: String, threadID: String) -> String {
+        var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
+        payload += "<body>\(escape(body))</body>"
+        payload += "<thread>\(escape(threadID))</thread>"
+        payload += "<thread-reply xmlns='urn:xmpp:forums:0' thread-id='\(escape(threadID))'/>"
+        payload += "</message>"
+        return payload
     }
 
     private static func parseMentionURIs(from element: XMPPElement) -> [String] {

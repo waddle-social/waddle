@@ -133,6 +133,9 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let sharedFiles: [XMPPSharedFile]
     let broadcastMention: String?
     let mentionURIs: [String]
+    let forumPostKind: String?
+    let forumTitle: String?
+    let threadID: String?
 }
 
 struct XMPPPresenceHat: Sendable, Equatable, Hashable {

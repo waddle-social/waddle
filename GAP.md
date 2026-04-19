@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 8, items 1.3)
+> Last updated: 2026-04-19 (loop 9, items 3.1/3.2/3.3)
 
 ## Legend
 
@@ -45,9 +45,9 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 3.1 | Forum channel topic creation | CRITICAL | [ ] | XEP-0508 | Web creates topics with threadCreate element |
-| 3.2 | Forum thread replies | CRITICAL | [ ] | XEP-0508, XEP-0201 | Web has full thread reply composition |
-| 3.3 | Thread panel / viewer | HIGH | [ ] | - | Web has ThreadPanel with breadcrumb navigation |
+| 3.1 | Forum channel topic creation | CRITICAL | [x] | XEP-0508 | Parse <thread-create> with title, send topic messages, create topic UI with title/body form |
+| 3.2 | Forum thread replies | CRITICAL | [x] | XEP-0508, XEP-0201 | Parse <thread-reply thread-id> + <thread>, send thread replies, thread reply composer |
+| 3.3 | Thread panel / viewer | HIGH | [x] | - | Forum topic list view, thread detail view with back navigation, topic/reply count |
 | 3.4 | Nested thread navigation | MEDIUM | [ ] | - | Web supports thread stack via URL query params |
 
 ## 4. Media & Files

@@ -132,6 +132,16 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.displayedMarker(to: roomJID, messageID: messageID))
     }
 
+    func sendForumTopic(roomJID: String, body: String, title: String) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.forumTopicMessage(to: roomJID, body: body, title: title))
+    }
+
+    func sendForumReply(roomJID: String, body: String, threadID: String) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.forumReplyMessage(to: roomJID, body: body, threadID: threadID))
+    }
+
     func retractMessage(roomJID: String, messageID: String) async throws {
         try ensureReady()
         try await transport.send(XMPPXML.retractMessage(to: roomJID, retractsID: messageID))

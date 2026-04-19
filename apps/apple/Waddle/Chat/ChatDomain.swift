@@ -90,6 +90,12 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var broadcastMention: String?
     var hatTitles: [String]?
     var mentionURIs: [String]?
+    var forumPostKind: String?
+    var forumTitle: String?
+    var threadID: String?
+
+    var isForumTopic: Bool { forumPostKind == "topic" }
+    var isForumReply: Bool { forumPostKind == "reply" }
 
     var inlineImages: [XMPPSharedFile] {
         sharedFiles?.filter(\.isInlineImage) ?? []
@@ -351,7 +357,10 @@ extension ChatTimelineMessage {
             sharedFiles: other.sharedFiles ?? sharedFiles,
             broadcastMention: other.broadcastMention ?? broadcastMention,
             hatTitles: other.hatTitles ?? hatTitles,
-            mentionURIs: other.mentionURIs ?? mentionURIs
+            mentionURIs: other.mentionURIs ?? mentionURIs,
+            forumPostKind: other.forumPostKind ?? forumPostKind,
+            forumTitle: other.forumTitle ?? forumTitle,
+            threadID: other.threadID ?? threadID
         )
     }
 
