@@ -137,6 +137,92 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.retractMessage(to: roomJID, retractsID: messageID))
     }
 
+    func discoverUploadService() async throws -> String? {
+        try ensureReady()
+        guard let credentials else { return nil }
+        let domain = jidDomain(credentials.jid)
+
+        let itemsID = nextIQID(prefix: "upload-disco")
+        let itemsElement = try await sendIQ(
+            XMPPXML.discoItems(id: itemsID, to: domain),
+            id: itemsID
+        )
+
+        for item in XMPPXML.parseDiscoItems(from: itemsElement) {
+            guard let jid = item.jid else { continue }
+            do {
+                let infoID = nextIQID(prefix: "upload-info")
+                let infoElement = try await sendIQ(
+                    XMPPXML.discoInfo(id: infoID, to: jid),
+                    id: infoID
+                )
+                let features = XMPPXML.discoFeatures(from: infoElement)
+                if features.contains("urn:xmpp:http:upload:0") {
+                    return jid
+                }
+            } catch {
+                continue
+            }
+        }
+
+        let fallbackJID = "upload.\(domain)"
+        do {
+            let infoID = nextIQID(prefix: "upload-fallback")
+            let infoElement = try await sendIQ(
+                XMPPXML.discoInfo(id: infoID, to: fallbackJID),
+                id: infoID
+            )
+            let features = XMPPXML.discoFeatures(from: infoElement)
+            if features.contains("urn:xmpp:http:upload:0") {
+                return fallbackJID
+            }
+        } catch {}
+
+        return nil
+    }
+
+    func requestUploadSlot(
+        serviceJID: String,
+        filename: String,
+        size: Int,
+        contentType: String
+    ) async throws -> (putURL: String, getURL: String, putHeaders: [(String, String)]) {
+        try ensureReady()
+        let id = nextIQID(prefix: "upload-slot")
+        let response = try await sendIQ(
+            XMPPXML.httpUploadSlotRequest(id: id, to: serviceJID, filename: filename, size: size, contentType: contentType),
+            id: id
+        )
+        guard let slot = XMPPXML.parseUploadSlot(from: response) else {
+            throw XMPPServiceError.iqError("Failed to parse upload slot response.")
+        }
+        return slot
+    }
+
+    func sendGroupchatFileMessage(
+        roomJID: String,
+        fileURL: String,
+        fileName: String,
+        mediaType: String,
+        size: Int,
+        width: Int? = nil,
+        height: Int? = nil
+    ) async throws {
+        try ensureReady()
+        try await transport.send(
+            XMPPXML.groupchatFileMessage(
+                to: roomJID,
+                body: fileURL,
+                fileURL: fileURL,
+                fileName: fileName,
+                mediaType: mediaType,
+                size: size,
+                width: width,
+                height: height
+            )
+        )
+    }
+
     func sendGroupchatReplyMessage(
         roomJID: String,
         body: String,

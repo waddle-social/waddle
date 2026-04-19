@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 5, items 1.7/4.3/7.4)
+> Last updated: 2026-04-19 (loop 6, items 4.1/10.2)
 
 ## Legend
 
@@ -54,7 +54,7 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 4.1 | File upload (images, documents) | CRITICAL | [ ] | XEP-0363, XEP-0447 | Web has drag-drop, paste, file picker (10MB max) |
+| 4.1 | File upload (images, documents) | CRITICAL | [x] | XEP-0363, XEP-0447 | Discover upload service, request slot, HTTP PUT, send file-sharing message, PhotosPicker in composer |
 | 4.2 | Inline image display | CRITICAL | [x] | XEP-0446 | Parse XEP-0447/0446 file-sharing stanzas, render inline images with AsyncImage, show file download links with metadata |
 | 4.3 | Image lightbox viewer | HIGH | [x] | - | Full-screen image viewer on tap with dismiss button and filename overlay |
 | 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Web has trending + search GIF integration |
@@ -106,7 +106,7 @@
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 10.1 | Stream Management (session resumption) | HIGH | [ ] | XEP-0198 | Web resumes sessions, detects fresh-bind for re-sync |
-| 10.2 | Auto-reconnect with state recovery | HIGH | [ ] | - | Web handles reconnection with MAM re-sync |
+| 10.2 | Auto-reconnect with state recovery | HIGH | [x] | - | Already implemented upstream: reconnectTask with 1.5s delay, re-joins rooms on session ready |
 
 ## 11. Code Quality / CLAUDE.md Compliance
 

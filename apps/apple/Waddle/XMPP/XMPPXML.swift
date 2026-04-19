@@ -124,6 +124,53 @@ enum XMPPXML {
         "<presence to='\(escape(roomJID))/\(escape(nick))'><x xmlns='http://jabber.org/protocol/muc'/></presence>"
     }
 
+    static func httpUploadSlotRequest(id: String, to: String, filename: String, size: Int, contentType: String) -> String {
+        "<iq type='get' id='\(escape(id))' to='\(escape(to))'>" +
+        "<request xmlns='urn:xmpp:http:upload:0' filename='\(escape(filename))' size='\(size)' content-type='\(escape(contentType))'/>" +
+        "</iq>"
+    }
+
+    static func parseUploadSlot(from element: XMPPElement) -> (putURL: String, getURL: String, putHeaders: [(String, String)])? {
+        guard let slot = element.firstChild(named: "slot") else { return nil }
+        guard let putElement = slot.firstChild(named: "put"),
+              let putURL = putElement.attribute("url"),
+              let getElement = slot.firstChild(named: "get"),
+              let getURL = getElement.attribute("url") else { return nil }
+        let headers = putElement.children(named: "header").compactMap { header -> (String, String)? in
+            guard let name = header.attribute("name") else { return nil }
+            return (name, header.text)
+        }
+        return (putURL, getURL, headers)
+    }
+
+    static func groupchatFileMessage(
+        to roomJID: String,
+        body: String,
+        fileURL: String,
+        fileName: String,
+        mediaType: String,
+        size: Int,
+        width: Int? = nil,
+        height: Int? = nil
+    ) -> String {
+        var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
+        payload += "<body>\(escape(body))</body>"
+        payload += "<file-sharing xmlns='urn:xmpp:sfs:0' disposition='inline'>"
+        payload += "<file xmlns='urn:xmpp:file:metadata:0'>"
+        payload += "<name>\(escape(fileName))</name>"
+        payload += "<media-type>\(escape(mediaType))</media-type>"
+        payload += "<size>\(size)</size>"
+        if let width { payload += "<width>\(width)</width>" }
+        if let height { payload += "<height>\(height)</height>" }
+        payload += "</file>"
+        payload += "<sources>"
+        payload += "<url-data xmlns='http://jabber.org/protocol/url-data' target='\(escape(fileURL))'/>"
+        payload += "</sources>"
+        payload += "</file-sharing>"
+        payload += "</message>"
+        return payload
+    }
+
     static func chatStateMessage(to roomJID: String, state: String) -> String {
         "<message to='\(escape(roomJID))' type='groupchat'><\(escape(state)) xmlns='http://jabber.org/protocol/chatstates'/></message>"
     }

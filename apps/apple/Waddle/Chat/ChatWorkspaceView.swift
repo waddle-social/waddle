@@ -540,6 +540,10 @@ struct WaddleChatWorkspaceView: View {
                     canSend: model.selectedChannel != nil,
                     replyingToMessage: store.replyingToMessage,
                     onCancelReply: { store.setReplyingTo(nil) },
+                    onFileSelected: { data, name, type in
+                        Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+                    },
+                    isUploadingFile: model.isUploadingFile,
                     usesOperationalChrome: true
                 ) {
                     Task { await store.sendComposerMessage() }
@@ -596,6 +600,10 @@ struct WaddleChatWorkspaceView: View {
                         channelName: model.selectedChannel?.name,
                         replyingToMessage: store.replyingToMessage,
                         onCancelReply: { store.setReplyingTo(nil) },
+                        onFileSelected: { data, name, type in
+                            Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+                        },
+                        isUploadingFile: model.isUploadingFile,
                         usesCompactConversationChrome: compactStyle
                     ) {
                         Task { await store.sendComposerMessage() }

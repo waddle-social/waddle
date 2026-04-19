@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 struct ChatConversationHeaderView: View {
     let room: ChatRoomSelection?
@@ -837,10 +838,13 @@ struct ChatComposerView: View {
     var channelName: String? = nil
     var replyingToMessage: ChatTimelineMessage? = nil
     var onCancelReply: (() -> Void)? = nil
+    var onFileSelected: ((_ data: Data, _ fileName: String, _ mediaType: String) -> Void)? = nil
+    var isUploadingFile: Bool = false
     var usesOperationalChrome: Bool = false
     var usesCompactConversationChrome: Bool = false
     var onSend: () -> Void
     @State private var showEmojiPicker = false
+    @State private var selectedPhoto: PhotosPickerItem?
 
     private var hasSendableText: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -876,6 +880,7 @@ struct ChatComposerView: View {
                 editor(minHeight: usesOperationalChrome ? 56 : 44, maxHeight: 140)
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
+                attachmentPickerButton
                 emojiPickerButton
 
                 sendButton
@@ -916,6 +921,7 @@ struct ChatComposerView: View {
                             .strokeBorder(Color.secondary.opacity(0.10), lineWidth: 1)
                     }
 
+                attachmentPickerButton
                 emojiPickerButton
 
                 sendButton
@@ -979,6 +985,32 @@ struct ChatComposerView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private var attachmentPickerButton: some View {
+        Group {
+            if isUploadingFile {
+                ProgressView()
+                    .frame(width: 20, height: 20)
+            } else {
+                PhotosPicker(selection: $selectedPhoto, matching: .any(of: [.images, .videos])) {
+                    Image(systemName: "paperclip")
+                        .font(usesCompactConversationChrome ? .title3 : .body)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .onChange(of: selectedPhoto) { _, newValue in
+                    guard let newValue else { return }
+                    Task {
+                        guard let data = try? await newValue.loadTransferable(type: Data.self) else { return }
+                        let mediaType = newValue.supportedContentTypes.first?.preferredMIMEType ?? "application/octet-stream"
+                        let fileName = "upload.\(newValue.supportedContentTypes.first?.preferredFilenameExtension ?? "bin")"
+                        onFileSelected?(data, fileName, mediaType)
+                        selectedPhoto = nil
+                    }
+                }
+            }
         }
     }
 

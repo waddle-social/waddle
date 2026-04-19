@@ -63,6 +63,7 @@ final class AppModel: ObservableObject {
     private var devicePollTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var uploadServiceJID: String?
     private var xmppService: XMPPService?
     private var xmppEventsTask: Task<Void, Never>?
     private var messagesByRoomJID: [String: [ChatTimelineMessage]] = [:]
@@ -336,6 +337,58 @@ final class AppModel: ObservableObject {
     }
 
     @Published var isCreatingChannel = false
+    @Published var isUploadingFile = false
+
+    func uploadAndSendFile(data: Data, fileName: String, mediaType: String) async {
+        guard let roomJID = currentRoomJID, let xmppService else {
+            errorMessage = "Select a channel before uploading."
+            return
+        }
+
+        isUploadingFile = true
+        defer { isUploadingFile = false }
+
+        do {
+            if uploadServiceJID == nil {
+                uploadServiceJID = try await xmppService.discoverUploadService()
+            }
+            guard let serviceJID = uploadServiceJID else {
+                errorMessage = "File upload is not available on this server."
+                return
+            }
+
+            let slot = try await xmppService.requestUploadSlot(
+                serviceJID: serviceJID,
+                filename: fileName,
+                size: data.count,
+                contentType: mediaType
+            )
+
+            var request = URLRequest(url: URL(string: slot.putURL)!)
+            request.httpMethod = "PUT"
+            request.setValue(mediaType, forHTTPHeaderField: "Content-Type")
+            for (name, value) in slot.putHeaders {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+
+            let (_, response) = try await URLSession.shared.upload(for: request, from: data)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else {
+                errorMessage = "File upload failed."
+                return
+            }
+
+            try await xmppService.sendGroupchatFileMessage(
+                roomJID: roomJID,
+                fileURL: slot.getURL,
+                fileName: fileName,
+                mediaType: mediaType,
+                size: data.count
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 
     func retractMessage(_ message: ChatTimelineMessage) async {
         guard let roomJID = currentRoomJID, let xmppService else { return }
