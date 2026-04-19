@@ -40,7 +40,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
     </div>
 
     <!-- Search -->
-    <div v-if="canManageMembers" class="px-6 py-3 border-b border-border space-y-3">
+    <div v-if="canManageMembers" class="px-6 py-4 border-b border-border space-y-3">
       <div class="relative">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
         <input
@@ -51,12 +51,14 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         />
       </div>
 
-      <div class="flex gap-1">
+      <div class="flex gap-1.5">
         <button
           v-for="role in roles"
           :key="role"
-          class="text-[11px] font-medium py-1 px-2.5 rounded-xl capitalize transition-all duration-200 border"
-          :class="newMemberRole === role ? 'border-primary bg-primary/5 text-foreground' : 'border-border hover:bg-muted'"
+          class="text-[12px] font-medium py-1.5 px-3 rounded-xl capitalize transition-all duration-200 border"
+          :class="newMemberRole === role
+            ? 'border-primary/30 bg-primary/8 text-foreground shadow-[0_0_12px_var(--glow)]'
+            : 'border-border bg-muted/40 hover:bg-muted'"
           @click="$emit('update:newMemberRole', role)"
         >
           {{ role }}
@@ -64,11 +66,11 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
       </div>
 
       <!-- Search results -->
-      <div v-if="searchResults.length > 0" class="space-y-px">
+      <div v-if="searchResults.length > 0" class="space-y-1">
         <button
           v-for="user in searchResults"
           :key="user.id"
-          class="w-full flex items-center gap-2.5 p-2.5 rounded-xl bg-surface hover:bg-muted transition-all duration-200 text-left border border-border"
+          class="w-full flex items-center gap-2.5 p-2.5 rounded-xl bg-muted/40 hover:bg-muted transition-all duration-200 text-left border border-border"
           @click="emit('addMember', user.id)"
         >
           <AppAvatar :name="user.display_name || user.username" :src="user.avatar_url" size="sm" />
@@ -91,7 +93,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
     </div>
 
     <!-- Member list -->
-    <div class="px-6 py-3 max-h-80 overflow-auto space-y-px">
+    <div class="px-6 py-4 max-h-96 overflow-auto space-y-0.5">
       <div
         v-for="member in members"
         :key="member.user_id"
@@ -107,16 +109,16 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         <div v-if="canManageMembers && member.role !== 'owner'" class="flex items-center gap-1.5">
           <select
             :value="member.role"
-            class="text-[11px] rounded-xl bg-muted px-2 py-1 capitalize focus:outline-none focus:ring-2 focus:ring-primary/20"
+            class="appearance-none text-[11px] font-medium rounded-xl bg-muted/60 border border-border px-2.5 py-1.5 capitalize focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all duration-200"
             @change="emit('updateRole', member, ($event.target as HTMLSelectElement).value as EditableRole)"
           >
             <option v-for="role in roles" :key="role" :value="role">{{ role }}</option>
           </select>
           <button
-            class="p-1 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
+            class="p-1.5 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
             @click="emit('removeMember', member)"
           >
-            <X class="w-3 h-3" />
+            <X class="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
