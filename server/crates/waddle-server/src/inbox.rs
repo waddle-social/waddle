@@ -37,26 +37,59 @@ impl LibSqlInboxStorage {
     }
 
     async fn initialize(&self) -> Result<(), InboxStorageError> {
-        self.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS inbox_entries (
-                user_jid TEXT NOT NULL,
-                partner_jid TEXT NOT NULL,
-                thread_id TEXT NOT NULL DEFAULT '',
-                kind TEXT NOT NULL,
-                last_stanza_id TEXT NOT NULL,
-                last_updated INTEGER NOT NULL,
-                unread INTEGER NOT NULL DEFAULT 0,
-                preview TEXT,
-                thread_title TEXT,
-                reply_count INTEGER NOT NULL DEFAULT 0,
-                author TEXT,
-                PRIMARY KEY (user_jid, partner_jid, thread_id)
-            );
-            "#,
-            (),
-        )
-        .await?;
+        // Check if the table already exists with the old schema (missing thread_id column).
+        let needs_migration = self.needs_thread_migration().await?;
+
+        if needs_migration {
+            info!("Migrating inbox_entries to thread-aware schema");
+            self.execute_batch(
+                r#"
+                CREATE TABLE inbox_entries_new (
+                    user_jid TEXT NOT NULL,
+                    partner_jid TEXT NOT NULL,
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    last_stanza_id TEXT NOT NULL,
+                    last_updated INTEGER NOT NULL,
+                    unread INTEGER NOT NULL DEFAULT 0,
+                    preview TEXT,
+                    thread_title TEXT,
+                    reply_count INTEGER NOT NULL DEFAULT 0,
+                    author TEXT,
+                    PRIMARY KEY (user_jid, partner_jid, thread_id)
+                );
+                INSERT INTO inbox_entries_new (user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview)
+                    SELECT user_jid, partner_jid, '', kind, last_stanza_id, last_updated, unread, preview
+                    FROM inbox_entries;
+                DROP TABLE inbox_entries;
+                ALTER TABLE inbox_entries_new RENAME TO inbox_entries;
+                "#,
+            )
+            .await?;
+            info!("Inbox migration complete");
+        } else {
+            self.execute(
+                r#"
+                CREATE TABLE IF NOT EXISTS inbox_entries (
+                    user_jid TEXT NOT NULL,
+                    partner_jid TEXT NOT NULL,
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    last_stanza_id TEXT NOT NULL,
+                    last_updated INTEGER NOT NULL,
+                    unread INTEGER NOT NULL DEFAULT 0,
+                    preview TEXT,
+                    thread_title TEXT,
+                    reply_count INTEGER NOT NULL DEFAULT 0,
+                    author TEXT,
+                    PRIMARY KEY (user_jid, partner_jid, thread_id)
+                );
+                "#,
+                (),
+            )
+            .await?;
+        }
+
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_inbox_entries_user_updated ON inbox_entries (user_jid, last_updated DESC)",
             (),
@@ -68,6 +101,47 @@ impl LibSqlInboxStorage {
         )
         .await?;
         Ok(())
+    }
+
+    /// Returns true if inbox_entries exists but lacks the thread_id column.
+    async fn needs_thread_migration(&self) -> Result<bool, InboxStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='inbox_entries'",
+                (),
+            )
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+
+        let table_exists = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+            .is_some();
+
+        if !table_exists {
+            return Ok(false);
+        }
+
+        let mut cols = self
+            .query("PRAGMA table_info(inbox_entries)", ())
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+
+        while let Some(row) = cols
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        {
+            let col_name: String = row
+                .get(1)
+                .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+            if col_name == "thread_id" {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     async fn query(
@@ -94,6 +168,18 @@ impl LibSqlInboxStorage {
         conn.execute(sql, params)
             .await
             .map_err(|error| InboxStorageError::Other(error.to_string()))
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<(), InboxStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        conn.execute_batch(sql)
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        Ok(())
     }
 
     fn decode_row(row: &libsql::Row) -> Result<InboxEntry, InboxStorageError> {
