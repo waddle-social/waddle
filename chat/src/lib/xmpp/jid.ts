@@ -42,3 +42,19 @@ export function roomBareJidForAccountJid(
 ): string {
   return `${waddleId}_${channelId}@muc.${jidDomain(jid)}`;
 }
+
+export function mixChannelBareJidFor(
+  session: WaddleSession,
+  waddleId: string,
+  channelId: string,
+): string {
+  return mixChannelBareJidForAccountJid(session.jid, waddleId, channelId);
+}
+
+export function mixChannelBareJidForAccountJid(
+  jid: string,
+  waddleId: string,
+  channelId: string,
+): string {
+  return `${waddleId}_${channelId}@mix.${jidDomain(jid)}`;
+}
