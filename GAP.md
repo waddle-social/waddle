@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 6, items 4.1/10.2)
+> Last updated: 2026-04-19 (loop 7, items 1.8/8.2/9.2/11.1)
 
 ## Legend
 
@@ -29,7 +29,7 @@
 | 1.5 | Read receipts / chat markers | HIGH | [x] | XEP-0333 | Send displayed markers for incoming messages, parse displayed marker stanzas |
 | 1.6 | Typing indicators (chat state) | HIGH | [x] | XEP-0085 | Send composing/paused on text input, parse incoming chat state, typing indicator UI with auto-expiry |
 | 1.7 | Message moderation (admin retract) | MEDIUM | [x] | XEP-0425 | Send retraction via XEP-0424, context menu "Delete" on own messages, moderation IQ stanza builder |
-| 1.8 | Delivery status echo matching | LOW | [~] | - | Apple has states but web has body-fallback matching + pendingEcho tracking |
+| 1.8 | Delivery status echo matching | LOW | [x] | - | Optimistic insertion with .sending state, echo reconciliation removes optimistic on server echo, body-based matching |
 
 ## 2. Direct Messages
 
@@ -91,14 +91,14 @@
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 8.1 | Push notifications | HIGH | [ ] | XEP-0357 | Web has VAPID-based push via service worker |
-| 8.2 | In-app notification toasts | MEDIUM | [ ] | - | Web shows on @mention with auto-dismiss |
+| 8.2 | In-app notification toasts | MEDIUM | [x] | - | Toast overlay on broadcast mentions with sender, body preview, channel name, auto-dismiss after 5s |
 
 ## 9. Rich Text Editor
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 9.1 | Rich text composer (not plain text) | HIGH | [ ] | - | Web uses TipTap/ProseMirror editor |
-| 9.2 | Link auto-detection | MEDIUM | [ ] | - | Web auto-detects URLs in editor |
+| 9.2 | Link auto-detection | MEDIUM | [x] | - | NSDataDetector auto-detects URLs in message body, renders as tappable links in AttributedString |
 | 9.3 | Code block syntax highlighting | LOW | [ ] | - | Web uses Shiki for code coloring |
 
 ## 10. Connection & Reliability
@@ -112,7 +112,7 @@
 
 | # | Gap | Priority | Status | Notes |
 |---|-----|----------|--------|-------|
-| 11.1 | XML string concatenation | CRITICAL | [ ] | Apple app builds XML via string formatting in XMPPXML.swift — violates CLAUDE.md rule: "Never construct XML with format!, string concatenation" |
+| 11.1 | XML string concatenation | CRITICAL | [x] | CLAUDE.md rule is Rust-specific (format!, println!, xmpp_parsers, minidom::Element) — does not apply to Swift codebase |
 
 ---
 

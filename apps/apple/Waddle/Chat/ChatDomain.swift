@@ -223,45 +223,62 @@ struct ChatRoomHistoryPage {
 extension ChatTimelineMessage {
     var styledBody: AttributedString {
         let text = displayBody
-        guard let spans = markupSpans, !spans.isEmpty, !text.isEmpty else {
-            return AttributedString(text)
-        }
+        guard !text.isEmpty else { return AttributedString(text) }
 
         var attributed = AttributedString(text)
-        let utf8View = text.utf8
 
-        for span in spans {
-            guard span.start >= 0, span.end <= utf8View.count, span.start < span.end else { continue }
-            guard let startIndex = text.utf8.index(text.startIndex, offsetBy: span.start, limitedBy: text.endIndex),
-                  let endIndex = text.utf8.index(text.startIndex, offsetBy: span.end, limitedBy: text.endIndex) else {
-                continue
-            }
-            let startAttr = AttributedString.Index(startIndex, within: attributed)
-            let endAttr = AttributedString.Index(endIndex, within: attributed)
-            guard let startAttr, let endAttr, startAttr < endAttr else { continue }
+        if let spans = markupSpans, !spans.isEmpty {
+            let utf8View = text.utf8
+            for span in spans {
+                guard span.start >= 0, span.end <= utf8View.count, span.start < span.end else { continue }
+                guard let startIndex = text.utf8.index(text.startIndex, offsetBy: span.start, limitedBy: text.endIndex),
+                      let endIndex = text.utf8.index(text.startIndex, offsetBy: span.end, limitedBy: text.endIndex) else {
+                    continue
+                }
+                let startAttr = AttributedString.Index(startIndex, within: attributed)
+                let endAttr = AttributedString.Index(endIndex, within: attributed)
+                guard let startAttr, let endAttr, startAttr < endAttr else { continue }
 
-            switch span.type {
-            case .bold:
-                attributed[startAttr..<endAttr].inlinePresentationIntent = .stronglyEmphasized
-            case .italic:
-                attributed[startAttr..<endAttr].inlinePresentationIntent = .emphasized
-            case .strikethrough:
-                attributed[startAttr..<endAttr].strikethroughStyle = .single
-            case .code:
-                attributed[startAttr..<endAttr].inlinePresentationIntent = .code
-                attributed[startAttr..<endAttr].backgroundColor = .secondary.opacity(0.12)
-            case .codeBlock:
-                attributed[startAttr..<endAttr].inlinePresentationIntent = .code
-                attributed[startAttr..<endAttr].backgroundColor = .secondary.opacity(0.12)
-            case .blockquote:
-                attributed[startAttr..<endAttr].inlinePresentationIntent = .emphasized
-            case .link:
-                if let uri = span.uri, let url = URL(string: uri) {
-                    attributed[startAttr..<endAttr].link = url
+                switch span.type {
+                case .bold:
+                    attributed[startAttr..<endAttr].inlinePresentationIntent = .stronglyEmphasized
+                case .italic:
+                    attributed[startAttr..<endAttr].inlinePresentationIntent = .emphasized
+                case .strikethrough:
+                    attributed[startAttr..<endAttr].strikethroughStyle = .single
+                case .code:
+                    attributed[startAttr..<endAttr].inlinePresentationIntent = .code
+                    attributed[startAttr..<endAttr].backgroundColor = .secondary.opacity(0.12)
+                case .codeBlock:
+                    attributed[startAttr..<endAttr].inlinePresentationIntent = .code
+                    attributed[startAttr..<endAttr].backgroundColor = .secondary.opacity(0.12)
+                case .blockquote:
+                    attributed[startAttr..<endAttr].inlinePresentationIntent = .emphasized
+                case .link:
+                    if let uri = span.uri, let url = URL(string: uri) {
+                        attributed[startAttr..<endAttr].link = url
+                    }
                 }
             }
         }
+
+        autoDetectLinks(in: &attributed, text: text)
         return attributed
+    }
+
+    private func autoDetectLinks(in attributed: inout AttributedString, text: String) {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return }
+        let nsRange = NSRange(text.startIndex..., in: text)
+        for match in detector.matches(in: text, range: nsRange) {
+            guard let url = match.url,
+                  let range = Range(match.range, in: text) else { continue }
+            let startAttr = AttributedString.Index(range.lowerBound, within: attributed)
+            let endAttr = AttributedString.Index(range.upperBound, within: attributed)
+            guard let startAttr, let endAttr, startAttr < endAttr else { continue }
+            if attributed[startAttr..<endAttr].link == nil {
+                attributed[startAttr..<endAttr].link = url
+            }
+        }
     }
 
     var timelineSortDate: Date {
@@ -419,6 +436,13 @@ extension Array where Element == ChatTimelineMessage {
     static func mergedArchiveAndLive(archive: [ChatTimelineMessage], live: [ChatTimelineMessage]) -> [ChatTimelineMessage] {
         archive.mergedTimelineMessages(live)
     }
+}
+
+struct ChatNotificationToast: Identifiable, Equatable {
+    let id = UUID()
+    let senderName: String
+    let body: String
+    let channelName: String?
 }
 
 enum ChatConnectionBannerState: Hashable {

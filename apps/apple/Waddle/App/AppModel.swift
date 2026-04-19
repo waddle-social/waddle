@@ -716,6 +716,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var pendingEchoBodies: Set<String> = []
+
     private func sendMessage(_ text: String, room: ChatRoomSelection?, replyTo: ChatTimelineMessage? = nil) async throws {
         guard let session else {
             throw ChatSendError.noSession
@@ -734,6 +736,34 @@ final class AppModel: ObservableObject {
         }
 
         let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+
+        let optimisticID = UUID().uuidString
+        let optimistic = ChatTimelineMessage(
+            id: optimisticID,
+            roomID: roomJID,
+            senderID: session.username.lowercased(),
+            senderDisplayName: session.username,
+            body: text,
+            sentAt: Date(),
+            editedAt: nil,
+            deliveryState: .sending,
+            isOutgoing: true,
+            isAction: false,
+            senderInitials: initials(from: session.username),
+            reactions: nil,
+            isRetracted: false,
+            replyToID: replyTo?.id,
+            replyToSenderName: replyTo?.senderDisplayName,
+            replyToBody: replyTo?.body
+        )
+
+        let messages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages([optimistic])
+        messagesByRoomJID[roomJID] = messages
+        pendingEchoBodies.insert(text)
+
+        if roomJID == currentRoomJID {
+            syncChatMessages()
+        }
 
         if let replyTo {
             try await xmppService.sendGroupchatReplyMessage(
@@ -824,7 +854,18 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let messages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
+        var existing = messagesByRoomJID[roomJID] ?? []
+
+        if senderNick == session.username {
+            for delta in deltaMessages {
+                if pendingEchoBodies.contains(delta.body) {
+                    pendingEchoBodies.remove(delta.body)
+                    existing.removeAll { $0.isOutgoing && $0.deliveryState == .sending && $0.body == delta.body }
+                }
+            }
+        }
+
+        let messages = existing.appendingTimelineMessages(deltaMessages)
         messagesByRoomJID[roomJID] = messages
 
         if senderNick != session.username, roomJID == currentRoomJID {
@@ -840,6 +881,33 @@ final class AppModel: ObservableObject {
         if roomJID == currentRoomJID, !deltaMessages.isEmpty,
            let lastMessage = deltaMessages.last, !lastMessage.isOutgoing {
             sendDisplayedMarkerForCurrentRoom(messageID: lastMessage.id)
+        }
+
+        for message in deltaMessages where !message.isOutgoing {
+            if message.broadcastMention != nil {
+                let incomingRoomJID = roomJID
+                let channelName = channels.first(where: { self.roomJID(for: $0.id) == incomingRoomJID })?.name
+                showNotificationToast(sender: message.senderDisplayName, body: message.body, channelName: channelName)
+            }
+        }
+    }
+
+    private var toastDismissTask: Task<Void, Never>?
+
+    private func showNotificationToast(sender: String, body: String, channelName: String?) {
+        let toast = ChatNotificationToast(
+            senderName: sender,
+            body: String(body.prefix(100)),
+            channelName: channelName
+        )
+        chatStore.notificationToast = toast
+        toastDismissTask?.cancel()
+        toastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            if self?.chatStore.notificationToast?.id == toast.id {
+                self?.chatStore.notificationToast = nil
+            }
         }
     }
 

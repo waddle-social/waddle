@@ -23,6 +23,15 @@ struct WaddleChatWorkspaceView: View {
                 }
             }
             .background(workspaceBackground.ignoresSafeArea())
+            .overlay(alignment: .top) {
+                if let toast = store.notificationToast {
+                    ChatNotificationToastView(toast: toast) {
+                        withAnimation { store.notificationToast = nil }
+                    }
+                    .padding(.top, 8)
+                    .animation(.spring(duration: 0.3), value: store.notificationToast?.id)
+                }
+            }
         }
         .sheet(isPresented: $showMembersSheet) {
             NavigationStack {
