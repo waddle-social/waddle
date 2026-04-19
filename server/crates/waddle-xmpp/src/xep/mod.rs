@@ -137,7 +137,10 @@ pub mod xep0084;
 pub mod xep0085;
 pub mod xep0092;
 pub mod xep0106;
+pub mod xep0107;
+pub mod xep0108;
 pub mod xep0115;
+pub mod xep0118;
 pub mod xep0153;
 pub mod xep0172;
 pub mod xep0184;
@@ -160,6 +163,7 @@ pub mod xep0352;
 pub mod xep0357;
 pub mod xep0359;
 pub mod xep0363;
+pub mod xep0369;
 pub mod xep0372;
 pub mod xep0377;
 pub mod xep0392;
@@ -167,11 +171,14 @@ pub mod xep0393;
 pub mod xep0398;
 pub mod xep0401;
 pub mod xep0402;
+pub mod xep0405;
+pub mod xep0407;
 pub mod xep0410;
 pub mod xep0421;
 pub mod xep0424;
 pub mod xep0425;
 pub mod xep0428;
+pub mod xep0430;
 pub mod xep0431;
 pub mod xep0433;
 pub mod xep0437;
@@ -179,6 +186,7 @@ pub mod xep0444;
 pub mod xep0445;
 pub mod xep0446;
 pub mod xep0447;
+pub mod xep0448;
 pub mod xep0449;
 pub mod xep0452;
 pub mod xep0461;
@@ -287,6 +295,21 @@ pub use xep0092::{
 
 pub use xep0106::{escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping};
 
+pub use xep0107::{
+    build_mood_element, build_mood_retraction, is_mood_element, parse_mood_element, Mood,
+    MoodError, MoodKind, NS_MOOD, PEP_NODE_MOOD,
+};
+
+pub use xep0108::{
+    build_activity_element, build_activity_retraction, is_activity_element, parse_activity_element,
+    Activity, ActivityError, GeneralActivity, SpecificActivity, NS_ACTIVITY, PEP_NODE_ACTIVITY,
+};
+
+pub use xep0118::{
+    build_tune_element, build_tune_retraction, is_tune_element, parse_tune_element, Tune,
+    TuneError, NS_TUNE, PEP_NODE_TUNE,
+};
+
 pub use xep0172::{
     build_nick_element, extract_nickname_from_message, extract_nickname_from_presence, has_nick,
     is_nick_element, set_nickname, strip_nickname, Nickname, NicknameCarrier, NS_NICK,
@@ -392,6 +415,19 @@ pub use xep0410::{
     FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
 };
 
+pub use xep0369::is_mix_core_iq;
+
+pub use xep0405::{
+    build_client_join_result, build_client_leave_result, is_mix_pam_iq, parse_client_join,
+    parse_client_leave, ClientJoin, ClientLeave, PamError,
+};
+
+pub use xep0407::{
+    build_invitation_element, build_invite_result, is_mix_misc_iq, mix_disco_features,
+    parse_invitation, parse_invite_request, set_invitation_on_message, Invitation, InviteRequest,
+    MiscError, NS_MIX_MISC,
+};
+
 pub use xep0401::{AccountInvite, InviteRedeemError, InviteStore, COMMAND_NODE_INVITE};
 
 pub use xep0421::{
@@ -425,6 +461,12 @@ pub use xep0444::{
 pub use xep0428::{
     build_fallback_element, is_fallback_element, parse_fallbacks_from_message,
     set_fallback_payloads, strip_fallback_ranges, FallbackIndication, FallbackRange, NS_FALLBACK,
+};
+
+pub use xep0430::{
+    build_entry_element, build_inbox_query_result, build_mark_read_result, is_inbox_iq,
+    parse_entry_element, parse_inbox_query, parse_mark_read, InboxError, InboxMarkRead, InboxQuery,
+    NS_INBOX,
 };
 
 pub use xep0402::{
@@ -475,6 +517,12 @@ pub use xep0446::{
     build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
     is_file_metadata_element, parse_file_metadata_element, set_file_metadata, strip_file_metadata,
     FileMetadata, FileMetadataCarrier, FileMetadataError, NS_FILE_METADATA,
+};
+
+pub use xep0448::{
+    build_encrypted_element, extract_encrypted_file, is_encrypted_file_element,
+    parse_encrypted_element, set_encrypted_file, Cipher, EncryptedFile, EncryptedFileError,
+    EncryptedHash, NS_ESFS,
 };
 
 pub use xep0461::{
@@ -548,8 +596,9 @@ pub use xep0501::{
 };
 
 pub use xep0502::{
-    build_activity_notification, build_subscribe_element, is_activity_element,
-    parse_activity_notifications, ActivityTracker, RoomActivity, NS_MUC_ACTIVITY,
+    build_activity_notification, build_subscribe_element,
+    is_activity_element as is_muc_activity_element, parse_activity_notifications, ActivityTracker,
+    RoomActivity, NS_MUC_ACTIVITY,
 };
 
 pub use xep0500::{

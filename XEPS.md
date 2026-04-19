@@ -114,12 +114,12 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0306 | Extensible Status Conditions for MUC | Deferred | Custom room status |
 | 0307 | Unique Room Names for MUC | Deferred | Prevent room name collisions |
 | **0317** | **Hats** | Experimental | Roles/badges (admin, mod, etc.) | Implemented | Chat ✓ |
-| **0369** | **MIX (Mediated Information eXchange)** | Experimental | Next-gen group chat (MUC successor) |
+| **0369** | **MIX (Mediated Information eXchange)** | Experimental | Next-gen group chat (MUC successor) | Implemented | Chat N/A |
 | 0403 | MIX: Presence Support | Deferred | MIX presence |
 | 0404 | MIX: JID Hidden Channels | Deferred | Anonymous channels |
-| 0405 | MIX: Participant Server Requirements | Experimental | MIX server-side |
+| 0405 | MIX: Participant Server Requirements | Experimental | MIX server-side | Implemented | Chat N/A |
 | 0406 | MIX: Administration | Deferred | MIX admin |
-| 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras |
+| 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras | Implemented | Chat N/A |
 | 0408 | MIX: Co-existence with MUC | Deferred | MIX/MUC bridge |
 | **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms | Implemented | Chat ✓ |
 | **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented | Chat N/A |
@@ -146,8 +146,9 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0054** | **vcard-temp** | Active | User profiles (legacy) |
 | **0084** | **User Avatar** | Draft | Profile pictures |
 | **0092** | **Software Version** | Draft | Client identification | Implemented | Chat ✓ |
-| 0107 | User Mood | Draft | Status moods |
-| 0108 | User Activity | Draft | Custom activity status |
+| 0107 | User Mood | Draft | Status moods | Implemented | Chat N/A |
+| 0108 | User Activity | Draft | Custom activity status | Implemented | Chat N/A |
+| 0118 | User Tune | Draft | "Now playing" music status | Implemented | Chat N/A |
 | **0153** | **vCard-Based Avatars** | Active | Avatar via vCard |
 | **0172** | **User Nickname** | Draft | Display names | Implemented | Chat N/A |
 | **0292** | **vCard4 Over XMPP** | Experimental | Modern user profiles | Implemented | Chat N/A |
@@ -172,7 +173,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | **0363** | **HTTP File Upload** | Draft | File uploads |
 | **0446** | **File Metadata Element** | Experimental | File metadata (size, type, etc.) | Implemented | Chat ✓ |
 | **0447** | **Stateless File Sharing** | Experimental | Share files without state | Implemented | Chat ✓ |
-| 0448 | Encryption for Stateless File Sharing | Experimental | Encrypted file sharing |
+| 0448 | Encryption for Stateless File Sharing | Experimental | Encrypted file sharing | Implemented | Chat N/A |
 | **0449** | **Stickers** | Experimental | Sticker packs | Implemented | Chat ✓ |
 | 0498 | Pubsub File Sharing | Experimental | Shared file repositories |
 | 0264 | Jingle Content Thumbnails | Experimental | Image thumbnails |
@@ -184,7 +185,7 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | XEP | Title | Status | Why Evaluate |
 |-----|-------|--------|--------------|
 | **0357** | **Push Notifications** | Deferred | Mobile push (APNs/FCM) |
-| **0430** | **Inbox** | Deferred | Unified inbox / unread counts |
+| **0430** | **Inbox** | Deferred | Unified inbox / unread counts | Implemented | Chat N/A |
 
 ---
 
