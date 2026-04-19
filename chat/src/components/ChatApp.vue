@@ -1100,7 +1100,8 @@ onUnmounted(() => {
         </div>
 
         <!-- Parent thread pane: desktop-only context when depth >= 2.
-             Shows the parent thread in read-only mode (no composer). -->
+             Shows the stack up to (but not including) the current active thread,
+             rendered in read-only mode (no composer, no sub-thread navigation). -->
         <div
           v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2"
           class="hidden lg:flex lg:flex-col lg:flex-1 min-w-0 min-h-0"

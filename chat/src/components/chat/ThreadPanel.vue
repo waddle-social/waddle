@@ -161,6 +161,7 @@ function startSubThread(message: TimelineMessage) {
 }
 
 function onOpenThreadFromCard(threadId: string) {
+  if (props.readOnly) return;
   // Already-open thread id is a no-op; otherwise push it onto the stack.
   if (threadId === activeThreadId.value) return;
   emit("pushThread", threadId);
@@ -238,7 +239,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
           @reply="beginReplyInThread"
-          @open-thread="!readOnly ? onOpenThreadFromCard($event) : undefined"
+          @open-thread="onOpenThreadFromCard"
         />
 
         <div
@@ -260,7 +261,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReplyInThread"
-            @open-thread="!readOnly ? onOpenThreadFromCard($event) : undefined"
+            @open-thread="onOpenThreadFromCard"
           />
           <div v-if="!readOnly" class="flex flex-wrap items-center gap-2 pl-12 pb-1.5 -mt-0.5">
             <button
