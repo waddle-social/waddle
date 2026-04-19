@@ -12,9 +12,8 @@ use xmpp_parsers::message::Message;
 use crate::actor::WasmExtensionActor;
 use crate::config::ExtensionConfig;
 use crate::oci::OciExtensionPuller;
-use crate::types::{
-    message_has_embed_for_namespaces, DetectedLink, ExtensionInfo, FeatureAdvertisement,
-};
+use crate::runtime::{LoadedExtension, WasmRuntime};
+use crate::types::{message_has_embed_for_namespaces, DetectedLink};
 
 const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,7 +25,11 @@ pub struct ExtensionManager {
 }
 
 impl ExtensionManager {
-    pub fn from_config(config: ExtensionConfig) -> Result<Self> {
+    /// Build an `ExtensionManager` from the given configuration.
+    ///
+    /// Failures to load an individual extension are logged (fail-open) and do not
+    /// prevent the remaining extensions from loading.
+    pub async fn from_config(config: ExtensionConfig) -> Result<Self> {
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
@@ -34,31 +37,64 @@ impl ExtensionManager {
             });
         }
 
+        let runtime = WasmRuntime::new()?;
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
         let mut feature_namespaces = Vec::new();
 
         for module in &config.modules {
-            if let Err(error) = puller.pull_module(module) {
-                warn!(module = %module.name, error = %error, "failed to pull extension module; continuing fail-open");
-            }
+            let wasm_path = match puller.resolve_wasm_path(module) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "failed to resolve extension WASM path; skipping extension"
+                    );
+                    continue;
+                }
+            };
 
+            let loaded = match LoadedExtension::load(&runtime, &wasm_path) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "failed to compile extension component; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let config_json = module.config.to_string();
+            let actor = match WasmExtensionActor::initialize(loaded, &config_json).await {
+                Ok(actor) => actor,
+                Err(error) => {
+                    warn!(
+                        extension = %module.name,
+                        %error,
+                        "extension init() failed; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let info = actor.info();
             let namespace = if module.namespace.is_empty() {
-                format!("urn:waddle:extension:{}", module.name)
+                info.namespace.clone()
             } else {
                 module.namespace.clone()
             };
-            let info = ExtensionInfo {
-                name: module.name.clone(),
-                namespace: namespace.clone(),
-                version: module.tag.clone(),
-                features: vec![FeatureAdvertisement {
-                    namespace: namespace.clone(),
-                }],
-            };
 
             feature_namespaces.push(namespace);
-            actors.push(Arc::new(WasmExtensionActor::new(info)));
+            for feature in &info.features {
+                if !feature_namespaces.contains(&feature.namespace) {
+                    feature_namespaces.push(feature.namespace.clone());
+                }
+            }
+
+            actors.push(Arc::new(actor));
         }
 
         Ok(Self {
@@ -67,8 +103,9 @@ impl ExtensionManager {
         })
     }
 
-    pub fn from_env() -> Result<Self> {
-        Self::from_config(ExtensionConfig::from_env().map_err(anyhow::Error::msg)?)
+    pub async fn from_env() -> Result<Self> {
+        let config = ExtensionConfig::from_env().map_err(anyhow::Error::msg)?;
+        Self::from_config(config).await
     }
 
     pub fn feature_namespaces(&self) -> &[String] {
@@ -101,24 +138,25 @@ impl ExtensionManager {
             return 0;
         }
 
-        let enrich_futures = self
-            .actors
-            .iter()
-            .map(|actor| {
-                let actor_name = actor.info().name;
-                let actor = Arc::clone(actor);
-                let body = body.clone();
-                let links = links.clone();
-                async move {
-                    match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await {
-                        Ok(embeds) => embeds,
-                        Err(_) => {
-                            warn!(extension = %actor_name, timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(), "extension enrichment timed out; continuing fail-open");
-                            Vec::new()
-                        }
+        let enrich_futures = self.actors.iter().map(|actor| {
+            let actor_name = actor.info().name;
+            let actor = Arc::clone(actor);
+            let body = body.clone();
+            let links = links.clone();
+            async move {
+                match timeout(EXTENSION_ENRICH_TIMEOUT, actor.enrich_message(body, links)).await {
+                    Ok(embeds) => embeds,
+                    Err(_) => {
+                        warn!(
+                            extension = %actor_name,
+                            timeout_secs = EXTENSION_ENRICH_TIMEOUT.as_secs(),
+                            "extension enrichment timed out; continuing fail-open"
+                        );
+                        Vec::new()
                     }
                 }
-            });
+            }
+        });
         let results = join_all(enrich_futures).await;
 
         let mut count = 0usize;

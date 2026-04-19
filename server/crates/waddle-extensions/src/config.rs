@@ -10,6 +10,10 @@ pub struct ExtensionModuleConfig {
     pub namespace: String,
     #[serde(default)]
     pub config: Value,
+    /// If set, load the WASM component from this filesystem path directly,
+    /// bypassing the OCI puller. Intended for development and tests.
+    #[serde(default)]
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +35,7 @@ impl Default for ExtensionConfig {
                 tag: "latest".to_string(),
                 namespace: "urn:waddle:github:0".to_string(),
                 config: Value::Object(Default::default()),
+                local_path: None,
             }],
         }
     }
