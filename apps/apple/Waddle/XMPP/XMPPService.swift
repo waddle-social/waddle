@@ -40,6 +40,11 @@ final class XMPPService: ObservableObject {
     private var pendingRequest: PendingRequest?
     private var pendingIQResponses: [String: CheckedContinuation<XMPPElement, Error>] = [:]
     private var pendingArchiveQuery: PendingArchiveQuery?
+    private var smEnabled = false
+    private var smInboundCount: UInt32 = 0
+    private var smOutboundCount: UInt32 = 0
+    private var smResumeID: String?
+    private var smLastAckedH: UInt32 = 0
 
     private enum PendingRequest {
         case bind(id: String)
@@ -262,6 +267,11 @@ final class XMPPService: ObservableObject {
                 height: height
             )
         )
+    }
+
+    func sendGroupchatMessageWithMarkup(roomJID: String, body: String, spans: [XMPPMarkupSpan]) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.groupchatMessageWithMarkup(to: roomJID, body: body, spans: spans))
     }
 
     func sendGroupchatReplyMessage(
@@ -549,9 +559,37 @@ final class XMPPService: ObservableObject {
             if handleArchiveMessage(element) {
                 return
             }
+            if smEnabled { smInboundCount &+= 1 }
             continuation.yield(.message(XMPPXML.parseMessage(from: element)))
         case "presence":
+            if smEnabled { smInboundCount &+= 1 }
             continuation.yield(.presence(XMPPXML.parsePresence(from: element)))
+        case "r":
+            Task { try? await transport.send(XMPPXML.smAck(h: smInboundCount)) }
+        case "a":
+            if let hStr = element.attribute("h"), let h = UInt32(hStr) {
+                smLastAckedH = h
+            }
+        case "enabled":
+            smEnabled = true
+            smInboundCount = 0
+            smOutboundCount = 0
+            smResumeID = element.attribute("id")
+        case "resumed":
+            smEnabled = true
+            if let hStr = element.attribute("h"), let h = UInt32(hStr) {
+                smLastAckedH = h
+            }
+            connectionState = .ready
+            continuation.yield(.sessionReady)
+        case "failed":
+            smEnabled = false
+            smResumeID = nil
+            smInboundCount = 0
+            smOutboundCount = 0
+            if authenticated, let credentials {
+                Task { try? await transport.send(XMPPXML.openStream(to: credentials.domain)) }
+            }
         case "error":
             if let streamError = XMPPXML.streamError(from: element) {
                 continuation.yield(.streamError(name: streamError.name, text: streamError.text))
@@ -619,6 +657,7 @@ final class XMPPService: ObservableObject {
                     return
                 case .session(let id) where element.attribute("id") == id:
                     self.pendingRequest = nil
+                    enableStreamManagementIfSupported()
                     connectionState = .ready
                     continuation.yield(.sessionReady)
                     return
@@ -674,6 +713,11 @@ final class XMPPService: ObservableObject {
         Task {
             try? await transport.send(XMPPXML.requestSession(id: id))
         }
+    }
+
+    private func enableStreamManagementIfSupported() {
+        guard streamFeatures?.supportsSM3 == true, !smEnabled else { return }
+        Task { try? await transport.send(XMPPXML.smEnable(resume: true)) }
     }
 
     private func fail(_ message: String) {

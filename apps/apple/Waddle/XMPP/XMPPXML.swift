@@ -198,6 +198,93 @@ enum XMPPXML {
         return "<iq type='set' id='\(escape(id))'>\(query)</iq>"
     }
 
+    static func parseMarkdownToMarkupSpans(_ text: String) -> (plainText: String, spans: [XMPPMarkupSpan]) {
+        var spans: [XMPPMarkupSpan] = []
+        var result = ""
+        var i = text.startIndex
+
+        let patterns: [(marker: String, type: XMPPMarkupSpan.SpanType)] = [
+            ("```", .codeBlock),
+            ("`", .code),
+            ("*", .bold),
+            ("_", .italic),
+            ("~", .strikethrough),
+        ]
+
+        while i < text.endIndex {
+            var matched = false
+            for (marker, spanType) in patterns {
+                guard text[i...].hasPrefix(marker) else { continue }
+                let afterOpen = text.index(i, offsetBy: marker.count)
+                guard afterOpen < text.endIndex else { continue }
+                guard let closeRange = text[afterOpen...].range(of: marker) else { continue }
+                let content = String(text[afterOpen..<closeRange.lowerBound])
+                guard !content.isEmpty else { continue }
+                let start = result.utf8.count
+                result += content
+                let end = result.utf8.count
+                spans.append(XMPPMarkupSpan(type: spanType, start: start, end: end, uri: nil))
+                i = text.index(closeRange.lowerBound, offsetBy: marker.count)
+                matched = true
+                break
+            }
+            if !matched {
+                result.append(text[i])
+                i = text.index(after: i)
+            }
+        }
+        return (result, spans)
+    }
+
+    static func markupElement(for spans: [XMPPMarkupSpan]) -> String {
+        guard !spans.isEmpty else { return "" }
+        var markup = "<markup xmlns='urn:xmpp:markup:0'>"
+        for span in spans {
+            var attrs = "start='\(span.start)' end='\(span.end)'"
+            if span.type == .link, let uri = span.uri {
+                attrs += " uri='\(escape(uri))'"
+            }
+            markup += "<\(span.type.rawValue) \(attrs)/>"
+        }
+        markup += "</markup>"
+        return markup
+    }
+
+    static func groupchatMessageWithMarkup(to roomJID: String, body: String, spans: [XMPPMarkupSpan]) -> String {
+        let mentions = mentionReferences(in: body)
+        var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
+        payload += "<body>\(escape(body))</body>"
+        payload += markupElement(for: spans)
+        payload += referenceElements(for: mentions)
+        if body.range(of: "(?:^|\\s)@everyone(?:\\s|$)", options: .regularExpression) != nil ||
+           body.range(of: "(?:^|\\s)@here(?:\\s|$)", options: .regularExpression) != nil {
+            var mentionTypes: [String] = []
+            if body.range(of: "(?:^|\\s)@everyone(?:\\s|$)", options: .regularExpression) != nil { mentionTypes.append("everyone") }
+            if body.range(of: "(?:^|\\s)@here(?:\\s|$)", options: .regularExpression) != nil { mentionTypes.append("here") }
+            payload += "<mentions xmlns='urn:xmpp:emn:0'>"
+            for type in mentionTypes { payload += "<mention type='\(type)'/>" }
+            payload += "</mentions>"
+        }
+        payload += "</message>"
+        return payload
+    }
+
+    static func smEnable(resume: Bool = true) -> String {
+        "<enable xmlns='urn:xmpp:sm:3'\(resume ? " resume='true'" : "")/>"
+    }
+
+    static func smResume(h: UInt32, previd: String) -> String {
+        "<resume xmlns='urn:xmpp:sm:3' h='\(h)' previd='\(escape(previd))'/>"
+    }
+
+    static func smAck(h: UInt32) -> String {
+        "<a xmlns='urn:xmpp:sm:3' h='\(h)'/>"
+    }
+
+    static func smRequest() -> String {
+        "<r xmlns='urn:xmpp:sm:3'/>"
+    }
+
     static func chatStateMessage(to roomJID: String, state: String) -> String {
         "<message to='\(escape(roomJID))' type='groupchat'><\(escape(state)) xmlns='http://jabber.org/protocol/chatstates'/></message>"
     }
@@ -413,6 +500,8 @@ enum XMPPXML {
                 features.supportsBind = true
             case "session":
                 features.supportsSession = true
+            case "sm":
+                features.supportsSM3 = true
             default:
                 break
             }

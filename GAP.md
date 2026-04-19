@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 11, items 3.4/5.2/9.3)
+> Last updated: 2026-04-19 (loop 12, items 9.1/10.1)
 
 ## Legend
 
@@ -97,7 +97,7 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 9.1 | Rich text composer (not plain text) | HIGH | [ ] | - | Web uses TipTap/ProseMirror editor |
+| 9.1 | Rich text composer (not plain text) | HIGH | [x] | - | Parse markdown syntax (*bold*, _italic_, `code`, ~strike~, ```code-block```) → XEP-0394 markup spans on send |
 | 9.2 | Link auto-detection | MEDIUM | [x] | - | NSDataDetector auto-detects URLs in message body, renders as tappable links in AttributedString |
 | 9.3 | Code block syntax highlighting | LOW | [x] | - | XEP-0394 code/code-block spans rendered with monospaced font + background via AttributedString |
 
@@ -105,7 +105,7 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 10.1 | Stream Management (session resumption) | HIGH | [ ] | XEP-0198 | Web resumes sessions, detects fresh-bind for re-sync |
+| 10.1 | Stream Management (session resumption) | HIGH | [x] | XEP-0198 | Enable SM after session, respond to <r/> with <a h/>, track inbound/outbound counts, handle <enabled>/<resumed>/<failed> |
 | 10.2 | Auto-reconnect with state recovery | HIGH | [x] | - | Already implemented upstream: reconnectTask with 1.5s delay, re-joins rooms on session ready |
 
 ## 11. Code Quality / CLAUDE.md Compliance

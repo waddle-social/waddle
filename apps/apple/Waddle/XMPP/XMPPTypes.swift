@@ -73,6 +73,7 @@ struct XMPPStreamFeatures: Sendable, Equatable {
     var mechanisms: Set<String> = []
     var supportsBind = false
     var supportsSession = false
+    var supportsSM3 = false
 
     var supportsOAUTHBearer: Bool {
         mechanisms.contains("OAUTHBEARER")

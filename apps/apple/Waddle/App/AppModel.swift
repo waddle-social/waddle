@@ -966,13 +966,21 @@ final class AppModel: ObservableObject {
             syncChatMessages()
         }
 
+        let (plainText, markupSpans) = XMPPXML.parseMarkdownToMarkupSpans(text)
+
         if let replyTo {
             try await xmppService.sendGroupchatReplyMessage(
                 roomJID: roomJID,
-                body: text,
+                body: plainText,
                 replyToID: replyTo.id,
                 replyToSender: replyTo.senderID,
                 replyToBody: replyTo.body
+            )
+        } else if !markupSpans.isEmpty {
+            try await xmppService.sendGroupchatMessageWithMarkup(
+                roomJID: roomJID,
+                body: plainText,
+                spans: markupSpans
             )
         } else {
             try await xmppService.sendGroupchatMessage(roomJID: roomJID, body: text)
