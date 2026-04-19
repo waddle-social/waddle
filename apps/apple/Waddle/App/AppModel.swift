@@ -1197,7 +1197,18 @@ final class AppModel: ObservableObject {
             session: session
         )
 
-        let mergedMessages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
+        var mergedMessages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages(deltaMessages)
+
+        // Back-fill reply previews for messages whose parent wasn't loaded yet
+        for i in mergedMessages.indices {
+            if mergedMessages[i].replyToID != nil && mergedMessages[i].replyToBody == nil {
+                if let parent = mergedMessages.first(where: { $0.id == mergedMessages[i].replyToID }) {
+                    mergedMessages[i].replyToSenderName = parent.senderDisplayName
+                    mergedMessages[i].replyToBody = String(parent.body.prefix(100))
+                }
+            }
+        }
+
         messagesByRoomJID[roomJID] = mergedMessages
         if roomJID == currentRoomJID {
             syncChatMessages()
@@ -1773,6 +1784,22 @@ final class AppModel: ObservableObject {
         chatStore.replaceMessages([])
         chatStore.setBannerState(.hidden)
         chatStore.setSurfaceState(.empty(title: "Select a waddle", message: "Sign in to browse and join live rooms."))
+    }
+
+    func handleAppBecameActive() {
+        guard let session else { return }
+        guard let xmppService else {
+            Task { await connectXMPP(using: session) }
+            return
+        }
+        switch xmppService.connectionState {
+        case .ready:
+            break
+        case .connecting, .negotiating, .authenticating, .binding:
+            break
+        case .disconnected, .failed, .disconnecting:
+            Task { await connectXMPP(using: session) }
+        }
     }
 
     private func scheduleReconnectIfNeeded() {

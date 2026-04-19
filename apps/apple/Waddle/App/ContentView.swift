@@ -5,6 +5,7 @@ struct ContentView: View {
     @State private var showCreateSheet = false
     @State private var showSettings = false
     @AppStorage(AppConfig.themePreferenceKey) private var themePreferenceRaw = AppThemePreference.system.rawValue
+    @Environment(\.scenePhase) private var scenePhase
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 #endif
@@ -18,6 +19,11 @@ struct ContentView: View {
             .preferredColorScheme(themePreference.preferredColorScheme)
             .sheet(isPresented: $showSettings) {
                 AppSettingsPanel()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    model.handleAppBecameActive()
+                }
             }
     }
 
