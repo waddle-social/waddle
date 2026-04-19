@@ -28,6 +28,8 @@ export interface TimelineSharedFile {
 
 export interface TimelineMessage {
   id: string;
+  /** Equivalent wire-level ids (XEP-0359 stanza/origin ids, echoed ids). */
+  wireIds?: string[];
   author: string;
   /** Actual JID / occupant JID for the author when known. */
   authorJid?: string;

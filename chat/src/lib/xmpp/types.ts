@@ -27,6 +27,7 @@ export interface ReplyPreview {
 
 export interface LiveRoomMessage {
   id: string;
+  wireIds?: string[];
   roomJid: string;
   nick: string;
   body: string;
@@ -62,6 +63,7 @@ export interface LiveRoomMessage {
 /** A direct message received/sent via type:"chat" stanzas */
 export interface LiveDmMessage {
   id: string;
+  wireIds?: string[];
   peerJid: string;
   fromJid: string;
   nick: string;

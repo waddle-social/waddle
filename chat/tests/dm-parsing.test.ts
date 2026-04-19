@@ -171,6 +171,23 @@ describe("dispatchChat", () => {
     expect(h.reactions[0].emojis).toEqual(["👍", "❤️"]);
   });
 
+  test("prefers stable stanza ids for direct messages and keeps wire aliases", () => {
+    const h = makeHandlers();
+    dispatchChat(
+      makeMsg({
+        id: "echo-1",
+        body: "hey",
+        originId: { id: "client-1" },
+        stanzaIds: [{ id: "stable-1", by: "example.com" }],
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].id).toBe("stable-1");
+    expect(h.messages[0].wireIds).toEqual(["echo-1", "client-1"]);
+  });
+
   test("dispatches message corrections", () => {
     const h = makeHandlers();
     dispatchChat(

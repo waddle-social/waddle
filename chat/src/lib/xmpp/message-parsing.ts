@@ -1,6 +1,7 @@
 /** Inbound message parsing — extracts XEP extension data from stanza messages. */
 import type { ReceivedMessage } from "stanza/protocol";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import { splitMessageIds } from "@/lib/message-ids";
 import { stripMarkupRange } from "./extensions/markup";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
@@ -9,6 +10,8 @@ import type {
 
 type MessageExtensionsTarget = Pick<
   LiveRoomMessage,
+  | "id"
+  | "wireIds"
   | "body"
   | "mentions"
   | "broadcastMention"
@@ -33,6 +36,37 @@ const encoder = new TextEncoder();
 
 function byteLen(text: string): number {
   return encoder.encode(text).byteLength;
+}
+
+interface OriginIdPayload {
+  id?: string;
+}
+
+interface StanzaIdPayload {
+  id?: string;
+  by?: string;
+}
+
+function asArray<T>(value: T | T[] | undefined): T[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+export function resolveMessageIds(
+  msg: ReceivedMessage,
+  preferredStanzaBy?: string,
+): { id: string; wireIds?: string[] } {
+  const extMsg = ext(msg);
+  const originId = extMsg.originId as OriginIdPayload | undefined;
+  const stanzaIds = asArray(extMsg.stanzaIds as StanzaIdPayload | StanzaIdPayload[] | undefined);
+  const preferredStanzaId = preferredStanzaBy
+    ? stanzaIds.find((candidate) => candidate.by === preferredStanzaBy)?.id
+    : undefined;
+
+  return splitMessageIds(
+    preferredStanzaId ?? stanzaIds[0]?.id ?? originId?.id ?? msg.id,
+    [msg.id, originId?.id, ...stanzaIds.map((candidate) => candidate.id)],
+  );
 }
 
 /** Populate a LiveRoomMessage with data from XEP extensions on the stanza. */
@@ -71,7 +105,7 @@ function extractReplyAndThread(msg: ReceivedMessage, base: MessageExtensionsTarg
     base.forumPostKind = "topic";
     base.forumTitle = threadCreate.title.trim();
     base.forumThreadTitle = threadCreate.title.trim();
-    if (!base.threadId && msg.id) base.threadId = msg.id;
+    if (!base.threadId && base.id) base.threadId = base.id;
   }
   const threadReply = ext(msg).threadReply as { threadId?: string } | undefined;
   if (threadReply?.threadId) {
@@ -172,15 +206,36 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     h.onChatState?.({ roomJid, nick, state: msg.chatState as ChatStateType });
   }
 
+  const messageIds = resolveMessageIds(msg, roomJid);
   const applyTo = ext(msg).applyTo as { id?: string; moderated?: { retract?: boolean } } | undefined;
   if (applyTo?.id && applyTo.moderated) {
-    h.onMessage?.({ id: msg.id ?? crypto.randomUUID(), roomJid, nick, body: "", createdAt: new Date().toISOString(), type: "message", retractsId: applyTo.id });
+    const moderationMessage: LiveRoomMessage = {
+      id: messageIds.id,
+      roomJid,
+      nick,
+      body: "",
+      createdAt: new Date().toISOString(),
+      type: "message",
+      retractsId: applyTo.id,
+    };
+    if (messageIds.wireIds?.length) moderationMessage.wireIds = messageIds.wireIds;
+    h.onMessage?.(moderationMessage);
     return;
   }
 
   const retract = ext(msg).retract as { id?: string } | undefined;
   if (retract?.id) {
-    h.onMessage?.({ id: msg.id ?? crypto.randomUUID(), roomJid, nick, body: "", createdAt: new Date().toISOString(), type: "message", retractsId: retract.id });
+    const retractionMessage: LiveRoomMessage = {
+      id: messageIds.id,
+      roomJid,
+      nick,
+      body: "",
+      createdAt: new Date().toISOString(),
+      type: "message",
+      retractsId: retract.id,
+    };
+    if (messageIds.wireIds?.length) retractionMessage.wireIds = messageIds.wireIds;
+    h.onMessage?.(retractionMessage);
     return;
   }
 
@@ -198,11 +253,12 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
   if (!msg.body && !msg.subject) return;
 
   const liveMsg: LiveRoomMessage = {
-    id: msg.id ?? crypto.randomUUID(), roomJid, nick,
+    id: messageIds.id, roomJid, nick,
     body: msg.body ?? msg.subject ?? "",
     createdAt: new Date().toISOString(),
     type: msg.body ? "message" : "subject",
   };
+  if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;
   extractMessageExtensions(msg, liveMsg);
   h.onMessage?.(liveMsg);
 }

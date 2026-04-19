@@ -7,7 +7,7 @@ import type {
   LiveDmMessage,
 } from "./types";
 import { barePeerJid } from "./jid";
-import { ext, extractMessageExtensions } from "./message-parsing";
+import { ext, extractMessageExtensions, resolveMessageIds } from "./message-parsing";
 
 function localpart(jid: string): string {
   return barePeerJid(jid).split("@")[0] ?? "unknown";
@@ -36,6 +36,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
   const isSelf = fromBare === h.selfBareJid;
   const peerJid = isSelf ? toBare : fromBare;
   const nick = localpart(fromBare);
+  const messageIds = resolveMessageIds(msg);
 
   if (!isSelf && msg.chatState) {
     h.onChatState?.({ peerJid, state: msg.chatState as ChatStateType });
@@ -43,8 +44,8 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
 
   const retract = ext(msg).retract as { id?: string } | undefined;
   if (retract?.id) {
-    h.onMessage?.({
-      id: msg.id ?? crypto.randomUUID(),
+    const retractionMessage: LiveDmMessage = {
+      id: messageIds.id,
       peerJid,
       fromJid: msg.from ?? fromBare,
       nick,
@@ -52,7 +53,9 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
       createdAt: new Date().toISOString(),
       type: "message",
       retractsId: retract.id,
-    });
+    };
+    if (messageIds.wireIds?.length) retractionMessage.wireIds = messageIds.wireIds;
+    h.onMessage?.(retractionMessage);
     return;
   }
 
@@ -70,7 +73,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
   if (!msg.body && !msg.subject && !msg.replace) return;
 
   const liveMsg: LiveDmMessage = {
-    id: msg.id ?? crypto.randomUUID(),
+    id: messageIds.id,
     peerJid,
     fromJid: msg.from ?? fromBare,
     nick,
@@ -78,6 +81,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
     createdAt: new Date().toISOString(),
     type: "message",
   };
+  if (messageIds.wireIds?.length) liveMsg.wireIds = messageIds.wireIds;
   if (msg.replace) {
     liveMsg.replacesId = msg.replace;
   }

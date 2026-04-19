@@ -248,6 +248,57 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].reactions).toEqual({ "👍": ["alice"] });
   });
 
+  test("applies archived room updates when reactions target an alternate wire id", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+      domain: "example.com",
+    } as never);
+    const xmppClient = ref({
+      queryMam: mock(async () => [
+        {
+          id: "stable-msg-1",
+          wireIds: ["echo-msg-1", "client-msg-1"],
+          roomJid: "general@muc.example.com",
+          nick: "bob",
+          body: "hello",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+        },
+        {
+          id: "reaction-1",
+          roomJid: "general@muc.example.com",
+          nick: "alice",
+          body: "",
+          createdAt: "2024-01-01T00:02:00Z",
+          type: "subject",
+          _reactionTarget: "client-msg-1",
+          _reactionEmojis: ["👍"],
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useMessaging(
+      session,
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("w1", "c1");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].id).toBe("stable-msg-1");
+    expect(messaging.messages.value[0].reactions).toEqual({ "👍": ["alice"] });
+  });
+
   test("applies archived DM updates onto the original timeline message", async () => {
     const session = ref({
       username: "alice",
@@ -316,6 +367,55 @@ describe("MAM history application", () => {
     expect(messaging.messages.value[0].body).toBe("");
     expect(messaging.messages.value[0].isEdited).toBe(true);
     expect(messaging.messages.value[0].isRetracted).toBe(true);
+    expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["bob"] });
+  });
+
+  test("applies archived DM updates when reactions target an alternate wire id", async () => {
+    const session = ref({
+      username: "alice",
+      jid: "alice@example.com/desktop",
+    } as never);
+    const xmppClient = ref({
+      queryPersonalMam: mock(async () => [
+        {
+          id: "stable-msg-1",
+          wireIds: ["echo-msg-1", "client-msg-1"],
+          peerJid: "bob@example.com",
+          fromJid: "bob@example.com",
+          nick: "bob",
+          body: "hey",
+          createdAt: "2024-01-01T00:00:00Z",
+          type: "message",
+        },
+        {
+          id: "reaction-1",
+          peerJid: "bob@example.com",
+          fromJid: "bob@example.com",
+          nick: "bob",
+          body: "",
+          createdAt: "2024-01-01T00:02:00Z",
+          type: "message",
+          _reactionTarget: "client-msg-1",
+          _reactionEmojis: ["🔥"],
+        },
+      ]),
+    } as never);
+    const actionError = ref("");
+    const messaging = useDmMessaging(
+      session,
+      xmppClient,
+      ref("bob@example.com"),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    await messaging.loadMessages("bob@example.com");
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].id).toBe("stable-msg-1");
     expect(messaging.messages.value[0].reactions).toEqual({ "🔥": ["bob"] });
   });
 });

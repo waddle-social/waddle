@@ -13,6 +13,12 @@ import { barePeerJid } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
+import {
+  findMessageById,
+  indexMessageByIds,
+  matchMessageId,
+  mergeMessageIds,
+} from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
 import { dmKey, getLastSeen, setLastSeen } from "@/lib/last-seen-store";
@@ -35,6 +41,7 @@ function fromLiveDmMessage(
     createdAt: msg.createdAt,
     isSelf: barePeerJid(msg.fromJid) === barePeerJid(session.jid),
   };
+  if (msg.wireIds?.length) tm.wireIds = msg.wireIds;
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
@@ -129,8 +136,7 @@ export function useDmMessaging(
   }
 
   function appendQueuedMessages(timeline: TimelineMessage[], peerJid: string): TimelineMessage[] {
-    const existingIds = new Set(timeline.map((message) => message.id));
-    const queued = queuedMessagesForPeer(peerJid).filter((message) => !existingIds.has(message.id));
+    const queued = queuedMessagesForPeer(peerJid).filter((message) => !findMessageById(timeline, message.id));
     return queued.length > 0 ? [...timeline, ...queued] : timeline;
   }
 
@@ -227,7 +233,7 @@ export function useDmMessaging(
 
   function applyDisplayed(messageId: string, nick: string) {
     messages.value = messages.value.map((m): TimelineMessage => {
-      if (m.id !== messageId) return m;
+      if (!matchMessageId(m, messageId)) return m;
       const existing = m.readBy ? [...m.readBy] : [];
       if (!existing.includes(nick)) existing.push(nick);
       return { ...m, readBy: existing };
@@ -236,7 +242,7 @@ export function useDmMessaging(
 
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
     messages.value = messages.value.map((m): TimelineMessage => {
-      if (m.id !== messageId) return m;
+      if (!matchMessageId(m, messageId)) return m;
       const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
       for (const key of Object.keys(existing)) {
         existing[key] = (existing[key] ?? []).filter((n) => n !== nick);
@@ -254,12 +260,12 @@ export function useDmMessaging(
   }
 
   function applyRetraction(retractsId: string) {
-    messages.value = messages.value.map((m) => (m.id === retractsId ? { ...m, body: "", isRetracted: true } : m));
+    messages.value = messages.value.map((m) => (matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m));
   }
 
   function applyCorrection(replacesId: string, newBody: string, markup?: LiveDmMessage["markup"]) {
     messages.value = messages.value.map((m) => {
-      if (m.id !== replacesId) return m;
+      if (!matchMessageId(m, replacesId)) return m;
       const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
       if (markup && markup.length > 0) {
         updated.markup = markup;
@@ -274,7 +280,9 @@ export function useDmMessaging(
     // Self-echo reconciliation: match by id first; otherwise body-match only
     // against messages still awaiting reconciliation so duplicates don't
     // retarget already-reconciled entries. Echo = authoritative → delivered.
-    const existingById = messages.value.find((m) => m.id === msg.id);
+    const existingById = [msg.id, ...(msg.wireIds ?? [])]
+      .map((id) => findMessageById(messages.value, id))
+      .find((message): message is TimelineMessage => !!message);
     const pendingSelfEcho = messages.value.find(
       (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
     );
@@ -293,7 +301,10 @@ export function useDmMessaging(
         messages.value = messages.value.map((m) =>
           m.id !== existing.id
             ? m
-            : { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus },
+            : {
+                ...mergeMessageIds(m, msg.id, msg.wireIds),
+                deliveryStatus: "delivered" as DeliveryStatus,
+              },
         );
       }
       if (wasPending) pendingEchoClientIds.delete(existing.id);
@@ -354,8 +365,7 @@ export function useDmMessaging(
     void (async () => {
       await loadMessages(peerJid);
       if (preserved.length === 0 || activePeerJid.value !== peerJid) return;
-      const existingIds = new Set(messages.value.map((m) => m.id));
-      const toAppend = preserved.filter((m) => !existingIds.has(m.id));
+      const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
   }
@@ -397,11 +407,11 @@ export function useDmMessaging(
       const byId = new Map<string, TimelineMessage>();
       const timeline = regular.map((m) => {
         const tm = fromLiveDmMessage(session.value!, m, (id) => byId.get(id));
-        byId.set(tm.id, tm);
+        indexMessageByIds(byId, tm);
         return tm;
       });
       for (const update of correctionUpdates) {
-        const target = timeline.find((m) => m.id === update.targetId);
+        const target = findMessageById(timeline, update.targetId);
         if (!target) continue;
         target.body = update.body.trim();
         target.isEdited = true;
@@ -412,13 +422,13 @@ export function useDmMessaging(
         }
       }
       for (const retractsId of retractionUpdates) {
-        const target = timeline.find((m) => m.id === retractsId);
+        const target = findMessageById(timeline, retractsId);
         if (!target) continue;
         target.body = "";
         target.isRetracted = true;
       }
       for (const update of reactionUpdates) {
-        const target = timeline.find((m) => m.id === update.targetId);
+        const target = findMessageById(timeline, update.targetId);
         if (!target) continue;
         const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
         for (const emoji of update.emojis) {
@@ -437,7 +447,7 @@ export function useDmMessaging(
       const key = dmKey(barePeerJid(peerJid));
       const lastSeenId = getLastSeen(key);
       const lastSeenIdx = lastSeenId
-        ? timelineWithQueue.findIndex((m) => m.id === lastSeenId)
+        ? timelineWithQueue.findIndex((m) => matchMessageId(m, lastSeenId))
         : -1;
       const firstUnseen =
         lastSeenIdx !== -1 && lastSeenIdx < timelineWithQueue.length - 1
@@ -501,15 +511,15 @@ export function useDmMessaging(
         });
       }
 
-      const parent = replyTo ? messages.value.find((m) => m.id === replyTo.id) : undefined;
+      const parent = replyTo ? findMessageById(messages.value, replyTo.id) : undefined;
       const wireReplyTo = replyTo && parent
         ? {
-            id: replyTo.id,
+            id: parent.id,
             author: parent.authorJid ?? replyTo.author,
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
         : undefined;
-      const threadId = parent ? (parent.threadId ?? replyTo?.id) : undefined;
+      const threadId = parent ? (parent.threadId ?? parent.id) : undefined;
       const result = await client.sendDirectMessage(peerJid, bodyText, {
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
@@ -531,7 +541,7 @@ export function useDmMessaging(
           };
           if (replyTo && parent) {
             optimistic.replyTo = {
-              id: replyTo.id,
+              id: parent.id,
               author: replyTo.author,
               ...(replyTo.body ? { preview: replyTo.body } : {}),
             };
@@ -572,7 +582,8 @@ export function useDmMessaging(
 
   async function toggleReaction(messageId: string, emoji: string) {
     if (!xmppClient.value || !activePeerJid.value || !session.value) return;
-    const msg = messages.value.find((m) => m.id === messageId);
+    const msg = findMessageById(messages.value, messageId);
+    const targetId = msg?.id ?? messageId;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
     const myEmojis = new Set<string>();
@@ -582,7 +593,7 @@ export function useDmMessaging(
     if (myEmojis.has(emoji)) myEmojis.delete(emoji);
     else myEmojis.add(emoji);
     try {
-      await xmppClient.value.sendDmReaction(activePeerJid.value, messageId, [...myEmojis]);
+      await xmppClient.value.sendDmReaction(activePeerJid.value, targetId, [...myEmojis]);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
@@ -590,9 +601,10 @@ export function useDmMessaging(
 
   async function retractMessage(messageId: string) {
     if (!xmppClient.value || !activePeerJid.value) return;
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
     clearActionError();
     try {
-      await xmppClient.value.sendDmRetraction(activePeerJid.value, messageId);
+      await xmppClient.value.sendDmRetraction(activePeerJid.value, targetId);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
@@ -600,9 +612,10 @@ export function useDmMessaging(
 
   async function editMessage(messageId: string, newBody: string) {
     if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
     clearActionError();
     try {
-      await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, messageId);
+      await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, targetId);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
@@ -610,7 +623,8 @@ export function useDmMessaging(
 
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activePeerJid.value) return;
-    void xmppClient.value.sendDmDisplayed(activePeerJid.value, messageId).catch(() => undefined);
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    void xmppClient.value.sendDmDisplayed(activePeerJid.value, targetId).catch(() => undefined);
   }
 
   function notifyComposing() {
@@ -690,7 +704,7 @@ export function useDmMessaging(
       return;
     }
     mergeLiveMessage(
-      fromLiveDmMessage(session.value, msg, (id) => messages.value.find((m) => m.id === id)),
+      fromLiveDmMessage(session.value, msg, (id) => findMessageById(messages.value, id)),
     );
   }
 

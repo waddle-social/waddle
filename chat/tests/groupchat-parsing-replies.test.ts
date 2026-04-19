@@ -172,6 +172,26 @@ describe("groupchat reply + thread parsing", () => {
     ]);
   });
 
+  test("prefers stable stanza ids for rendered messages and keeps wire aliases", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "echo-1",
+        body: "stable target",
+        originId: { id: "client-1" },
+        stanzaIds: [
+          { id: "stable-1", by: "general@muc.waddle.social" },
+          { id: "server-1", by: "waddle.social" },
+        ],
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].id).toBe("stable-1");
+    expect(h.messages[0].wireIds).toEqual(["echo-1", "client-1", "server-1"]);
+  });
+
   test("leaves replyTo undefined when no reply element is present", () => {
     const h = makeHandlers();
     dispatchGroupchat(makeMsg({ id: "msg-4", body: "plain" }), h);

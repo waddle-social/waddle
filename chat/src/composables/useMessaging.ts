@@ -18,6 +18,12 @@ import {
 import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
+import {
+  findMessageById,
+  indexMessageByIds,
+  matchMessageId,
+  mergeMessageIds,
+} from "@/lib/message-ids";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
 import { getLastSeen, roomKey, setLastSeen } from "@/lib/last-seen-store";
@@ -40,6 +46,9 @@ export function fromLiveMessage(
     createdAt: msg.createdAt,
     isSelf: msg.nick === session.username,
   };
+  if (msg.wireIds && msg.wireIds.length > 0) {
+    tm.wireIds = msg.wireIds;
+  }
   if (msg.mentions && msg.mentions.length > 0) {
     tm.mentions = msg.mentions;
   }
@@ -231,8 +240,7 @@ export function useMessaging(
   }
 
   function appendQueuedMessages(timeline: TimelineMessage[], roomJid: string): TimelineMessage[] {
-    const existingIds = new Set(timeline.map((message) => message.id));
-    const queued = queuedMessagesForRoom(roomJid).filter((message) => !existingIds.has(message.id));
+    const queued = queuedMessagesForRoom(roomJid).filter((message) => !findMessageById(timeline, message.id));
     return queued.length > 0 ? applyForumContext([...timeline, ...queued]) : timeline;
   }
 
@@ -261,7 +269,7 @@ export function useMessaging(
         }
 
         mergeLiveMessage(
-          fromLiveMessage(session.value!, msg, (id) => messages.value.find((m) => m.id === id)),
+          fromLiveMessage(session.value!, msg, (id) => findMessageById(messages.value, id)),
         );
 
         // Trigger notification for mentions when tab is unfocused
@@ -469,7 +477,7 @@ export function useMessaging(
 
   function applyDisplayed(messageId: string, nick: string) {
     messages.value = messages.value.map((m): TimelineMessage => {
-      if (m.id !== messageId) return m;
+      if (!matchMessageId(m, messageId)) return m;
       const existing = m.readBy ? [...m.readBy] : [];
       if (!existing.includes(nick)) {
         existing.push(nick);
@@ -480,13 +488,14 @@ export function useMessaging(
 
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
-    void xmppClient.value.sendDisplayed(activeWaddleId.value, activeChannelId.value, messageId)
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
+    void xmppClient.value.sendDisplayed(activeWaddleId.value, activeChannelId.value, targetId)
       .catch(() => undefined);
   }
 
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
     messages.value = messages.value.map((m): TimelineMessage => {
-      if (m.id !== messageId) return m;
+      if (!matchMessageId(m, messageId)) return m;
       const existing: Record<string, string[]> = m.reactions ? { ...m.reactions } : {};
       // Remove this nick from all existing emoji lists
       for (const key of Object.keys(existing)) {
@@ -510,15 +519,15 @@ export function useMessaging(
 
   function applyRetraction(retractsId: string) {
     messages.value = messages.value.map((m) =>
-      m.id === retractsId ? { ...m, body: "", isRetracted: true } : m,
+      matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m,
     );
   }
 
   function applyCorrection(replacesId: string, newBody: string, markup?: MarkupSpan[]) {
-    const idx = messages.value.findIndex((m) => m.id === replacesId);
+    const idx = messages.value.findIndex((m) => matchMessageId(m, replacesId));
     if (idx === -1) return;
     messages.value = messages.value.map((m) => {
-      if (m.id !== replacesId) return m;
+      if (!matchMessageId(m, replacesId)) return m;
       const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
       if (markup && markup.length > 0) {
         updated.markup = markup;
@@ -536,7 +545,9 @@ export function useMessaging(
     // reconciliation (tracked via pendingEchoClientIds). Without that
     // constraint, sending the same text twice would let the second echo
     // re-target the already-reconciled first message.
-    const existingById = messages.value.find((m) => m.id === msg.id);
+    const existingById = [msg.id, ...(msg.wireIds ?? [])]
+      .map((id) => findMessageById(messages.value, id))
+      .find((message): message is TimelineMessage => !!message);
     const pendingSelfEcho = messages.value.find(
       (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
     );
@@ -559,7 +570,10 @@ export function useMessaging(
         messages.value = messages.value.map((m) =>
           m.id !== existing.id
             ? m
-            : { ...m, id: msg.id, deliveryStatus: "delivered" as DeliveryStatus },
+            : {
+                ...mergeMessageIds(m, msg.id, msg.wireIds),
+                deliveryStatus: "delivered" as DeliveryStatus,
+              },
         );
         messages.value = applyForumContext(messages.value);
       }
@@ -645,8 +659,7 @@ export function useMessaging(
         activeChannelId.value !== channelId
       )
         return;
-      const existingIds = new Set(messages.value.map((m) => m.id));
-      const toAppend = preserved.filter((m) => !existingIds.has(m.id));
+      const toAppend = preserved.filter((m) => !findMessageById(messages.value, m.id));
       if (toAppend.length > 0) messages.value = [...messages.value, ...toAppend];
     })();
   }
@@ -717,12 +730,12 @@ export function useMessaging(
       const byId = new Map<string, TimelineMessage>();
       const timeline = regularMessages.map((m) => {
         const tm = fromLiveMessage(session.value!, m, (id) => byId.get(id));
-        byId.set(tm.id, tm);
+        indexMessageByIds(byId, tm);
         return tm;
       });
 
       for (const update of correctionUpdates) {
-        const target = timeline.find((m) => m.id === update.targetId);
+        const target = findMessageById(timeline, update.targetId);
         if (!target) continue;
         target.body = update.body.trim();
         target.isEdited = true;
@@ -734,7 +747,7 @@ export function useMessaging(
       }
 
       for (const retractsId of retractionUpdates) {
-        const target = timeline.find((m) => m.id === retractsId);
+        const target = findMessageById(timeline, retractsId);
         if (!target) continue;
         target.body = "";
         target.isRetracted = true;
@@ -742,7 +755,7 @@ export function useMessaging(
 
       // Apply reactions from MAM history
       for (const update of reactionUpdates) {
-        const target = timeline.find((m) => m.id === update.targetId);
+        const target = findMessageById(timeline, update.targetId);
         if (target) {
           const reactions: Record<string, string[]> = target.reactions ? { ...target.reactions } : {};
           for (const emoji of update.emojis) {
@@ -769,7 +782,7 @@ export function useMessaging(
       // scroll to bottom and track the newest feed message as last-seen.
       const lastSeenId = getLastSeen(roomKey(waddleId, channelId));
       const lastSeenIdx = lastSeenId
-        ? timelineWithQueue.findIndex((m) => m.id === lastSeenId)
+        ? timelineWithQueue.findIndex((m) => matchMessageId(m, lastSeenId))
         : -1;
       const firstUnseen =
         lastSeenIdx !== -1 && lastSeenIdx < timelineWithQueue.length - 1
@@ -814,13 +827,15 @@ export function useMessaging(
     ) {
       return;
     }
-    const existingIds = new Set(messages.value.map((m) => m.id));
     const appended: TimelineMessage[] = [];
-    const localById = new Map<string, TimelineMessage>(messages.value.map((m) => [m.id, m]));
+    const localById = new Map<string, TimelineMessage>();
+    for (const message of messages.value) {
+      indexMessageByIds(localById, message);
+    }
     for (const raw of results) {
-      if (existingIds.has(raw.id)) continue;
+      if (findMessageById(messages.value, raw.id)) continue;
       const tm = fromLiveMessage(session.value, raw, (id) => localById.get(id));
-      localById.set(tm.id, tm);
+      indexMessageByIds(localById, tm);
       appended.push(tm);
     }
     if (appended.length === 0) return;
@@ -892,10 +907,10 @@ export function useMessaging(
         });
       }
 
-      const parent = replyTo ? messages.value.find((m) => m.id === replyTo.id) : undefined;
+      const parent = replyTo ? findMessageById(messages.value, replyTo.id) : undefined;
       const wireReplyTo = replyTo && parent
         ? {
-            id: replyTo.id,
+            id: parent.id,
             author: parent.authorJid ?? replyTo.author,
             ...(replyTo.body ? { body: replyTo.body } : {}),
           }
@@ -903,7 +918,7 @@ export function useMessaging(
       // Thread membership is explicit via threadOverride, except forum replies,
       // which derive their thread from the replied-to topic/message.
       const threadId = threadOverride?.threadId
-        ?? (channelIsForum.value && parent ? (parent.threadId ?? replyTo?.id) : undefined);
+        ?? (channelIsForum.value && parent ? (parent.threadId ?? parent.id) : undefined);
       const parentThreadId = threadOverride?.parentThreadId;
       const threadCreate = isForumPost ? { title: resolvedForumTitle } : undefined;
       const threadReply = channelIsForum.value && replyTo && threadId
@@ -938,7 +953,7 @@ export function useMessaging(
         };
         if (replyTo && parent) {
           optimistic.replyTo = {
-            id: replyTo.id,
+            id: parent.id,
             author: replyTo.author,
             ...(replyTo.body ? { preview: replyTo.body } : {}),
           };
@@ -1001,7 +1016,8 @@ export function useMessaging(
       return;
 
     // Compute the new reaction set for this user
-    const msg = messages.value.find((m) => m.id === messageId);
+    const msg = findMessageById(messages.value, messageId);
+    const targetId = msg?.id ?? messageId;
     const myNick = session.value.username;
     const currentReactions = msg?.reactions ?? {};
 
@@ -1022,7 +1038,7 @@ export function useMessaging(
       await xmppClient.value.sendReaction(
         activeWaddleId.value,
         activeChannelId.value,
-        messageId,
+        targetId,
         [...myEmojis],
       );
     } catch (e) {
@@ -1032,6 +1048,7 @@ export function useMessaging(
 
   async function retractMessage(messageId: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
@@ -1039,7 +1056,7 @@ export function useMessaging(
       await xmppClient.value.sendRetraction(
         activeWaddleId.value,
         activeChannelId.value,
-        messageId,
+        targetId,
       );
     } catch (e) {
       actionError.value = normalizeError(e);
@@ -1048,6 +1065,7 @@ export function useMessaging(
 
   async function moderateMessage(messageId: string, reason?: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
@@ -1055,7 +1073,7 @@ export function useMessaging(
       await xmppClient.value.sendModeration(
         activeWaddleId.value,
         activeChannelId.value,
-        messageId,
+        targetId,
         reason,
       );
     } catch (e) {
@@ -1066,6 +1084,7 @@ export function useMessaging(
   async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[]) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !newBody.trim())
       return;
+    const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
 
     clearActionError();
 
@@ -1074,7 +1093,7 @@ export function useMessaging(
         activeWaddleId.value,
         activeChannelId.value,
         newBody,
-        messageId,
+        targetId,
         markup,
       );
     } catch (e) {
