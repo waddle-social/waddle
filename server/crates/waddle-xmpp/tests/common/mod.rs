@@ -496,7 +496,7 @@ impl AppState for MockAppState {
         partner_jid: &jid::BareJid,
     ) -> Result<(), XmppError> {
         self.inbox_storage
-            .mark_read(user_jid, partner_jid)
+            .mark_read(user_jid, partner_jid, None)
             .await
             .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
     }

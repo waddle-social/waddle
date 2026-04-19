@@ -240,7 +240,10 @@ async fn inbox_in_memory_storage_end_to_end() {
     assert_eq!(snapshot[0].last_stanza_id, "s2");
     assert_eq!(store.total_unread(&user).await.unwrap(), 2);
 
-    store.mark_read(&user, &jid("a@example.com")).await.unwrap();
+    store
+        .mark_read(&user, &jid("a@example.com"), None)
+        .await
+        .unwrap();
     assert_eq!(store.total_unread(&user).await.unwrap(), 1);
 }
 

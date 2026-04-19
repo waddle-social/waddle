@@ -1,6 +1,14 @@
 import { computed, ref, type Ref } from "vue";
 import type { BrowserXmppClient, InboxEntry } from "@/lib/xmpp-client";
 import { parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import {
+  createInboxState,
+  applyEntry,
+  applyEntries,
+  markReadInState,
+  threadsForRoom,
+  type InboxState,
+} from "@/services/inbox";
 
 export interface ChannelUnreadEntry {
   roomJid: string;
@@ -9,22 +17,35 @@ export interface ChannelUnreadEntry {
   mentionCount: number;
 }
 
+export interface ThreadInboxEntry {
+  roomJid: string;
+  threadId: string;
+  title?: string;
+  lastUpdated: number;
+  unread: number;
+  replyCount: number;
+  author?: string;
+  preview?: string;
+}
+
 export function useChannelUnread(
   xmppClient: Ref<BrowserXmppClient | null>,
 ) {
-  const channelUnreads = ref<Map<string, ChannelUnreadEntry>>(new Map());
+  const inboxState = ref<InboxState>(createInboxState());
   let hydrateRequestId = 0;
 
   const totalUnreadCount = computed(() => {
     let total = 0;
-    for (const entry of channelUnreads.value.values()) total += entry.unreadCount;
+    for (const entry of inboxState.value.channels.values()) {
+      if (entry.kind !== "muc") continue;
+      total += entry.unread;
+    }
     return total;
   });
 
   const totalMentionCount = computed(() => {
-    let total = 0;
-    for (const entry of channelUnreads.value.values()) total += entry.mentionCount;
-    return total;
+    // Server doesn't track mentions separately yet — return 0
+    return 0;
   });
 
   async function hydrateFromInbox() {
@@ -36,20 +57,7 @@ export function useChannelUnread(
       const inbox = await client.fetchInbox();
       if (requestId !== hydrateRequestId || client !== xmppClient.value) return;
 
-      const next = new Map<string, ChannelUnreadEntry>();
-      for (const entry of inbox.conversations) {
-        if (entry.kind !== "muc") continue;
-        const parsed = parseManagedRoomBareJid(entry.partner);
-        if (!parsed) continue;
-        next.set(entry.partner, {
-          roomJid: entry.partner,
-          channelId: parsed.channelId,
-          unreadCount: entry.unread,
-          mentionCount: 0,
-        });
-      }
-
-      channelUnreads.value = next;
+      inboxState.value = applyEntries(createInboxState(), inbox.conversations);
     } catch {
       // best-effort
     }
@@ -57,29 +65,11 @@ export function useChannelUnread(
 
   /** Handle a server-pushed inbox entry (headline message with absolute unread count). */
   function onInboxPush(entry: InboxEntry) {
-    if (entry.kind !== "muc") return;
-    const parsed = parseManagedRoomBareJid(entry.partner);
-    if (!parsed) return;
-
-    const next = new Map(channelUnreads.value);
-    const existing = next.get(entry.partner);
-    next.set(entry.partner, {
-      roomJid: entry.partner,
-      channelId: parsed.channelId,
-      unreadCount: entry.unread,
-      // Server doesn't track mentions separately — preserve local mention count
-      // and bump by 1 if the unread count increased (heuristic: new message arrived).
-      mentionCount: existing?.mentionCount ?? 0,
-    });
-    channelUnreads.value = next;
+    inboxState.value = applyEntry(inboxState.value, entry);
   }
 
   function clearUnread(roomJid: string) {
-    const existing = channelUnreads.value.get(roomJid);
-    if (!existing || (existing.unreadCount === 0 && existing.mentionCount === 0)) return;
-    const next = new Map(channelUnreads.value);
-    next.set(roomJid, { ...existing, unreadCount: 0, mentionCount: 0 });
-    channelUnreads.value = next;
+    inboxState.value = markReadInState(inboxState.value, roomJid);
   }
 
   function markRead(roomJid: string) {
@@ -90,22 +80,48 @@ export function useChannelUnread(
     }
   }
 
+  function markThreadRead(roomJid: string, threadId: string) {
+    inboxState.value = markReadInState(inboxState.value, roomJid, threadId);
+    const client = xmppClient.value;
+    if (client) {
+      void client.markInboxRead(roomJid, threadId).catch(() => {});
+    }
+  }
+
   function channelUnreadMap(): Record<string, { unread: number; mentions: number }> {
     const map: Record<string, { unread: number; mentions: number }> = {};
-    for (const entry of channelUnreads.value.values()) {
-      map[entry.channelId] = { unread: entry.unreadCount, mentions: entry.mentionCount };
+    for (const entry of inboxState.value.channels.values()) {
+      if (entry.kind !== "muc") continue;
+      const parsed = parseManagedRoomBareJid(entry.partner);
+      if (!parsed) continue;
+      map[parsed.channelId] = { unread: entry.unread, mentions: 0 };
     }
     return map;
   }
 
+  function threadEntries(roomJid: string): ThreadInboxEntry[] {
+    return threadsForRoom(inboxState.value, roomJid).map((entry) => ({
+      roomJid: entry.partner,
+      threadId: entry.thread!,
+      title: entry.threadTitle ?? entry.preview,
+      lastUpdated: entry.lastUpdated,
+      unread: entry.unread,
+      replyCount: entry.replyCount ?? 0,
+      author: entry.author,
+      preview: entry.preview,
+    }));
+  }
+
   return {
-    channelUnreads,
+    inboxState,
     totalUnreadCount,
     totalMentionCount,
     hydrateFromInbox,
     onInboxPush,
     clearUnread,
     markRead,
+    markThreadRead,
     channelUnreadMap,
+    threadEntries,
   };
 }

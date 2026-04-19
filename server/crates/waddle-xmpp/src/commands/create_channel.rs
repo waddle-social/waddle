@@ -177,7 +177,7 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                         form: Some(result_form),
                         notes: vec![Note::new(
                             NoteType::Info,
-                            &format!("Channel created successfully: {}", result.channel_jid),
+                            format!("Channel created successfully: {}", result.channel_jid),
                         )],
                     }
                 }

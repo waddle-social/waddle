@@ -706,7 +706,7 @@ mod tests {
         assert!(registry.update_presence(&jid2, true, -1));
 
         let mut resources = registry.get_available_resources_for_user(&bare);
-        resources.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        resources.sort_by_key(|a| a.0.to_string());
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0].0, jid1);
         assert_eq!(resources[0].1, 5);

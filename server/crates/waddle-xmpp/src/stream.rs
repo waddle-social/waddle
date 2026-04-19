@@ -972,17 +972,17 @@ impl XmppStream {
                         debug!(jid = %full_jid, "Resource bound");
                         return Ok(full_jid);
                     }
-                    ParsedStanza::Message(element) | ParsedStanza::Presence(element) => {
+                    ParsedStanza::Message(element) | ParsedStanza::Presence(element)
                         if pre_bind_target_is_unauthorized(
                             element.attr("to"),
                             bare_jid,
                             &self.domain,
-                        ) {
-                            self.send_stream_not_authorized_and_close().await?;
-                            return Err(XmppError::stream(
-                                "Stanza to unauthorized entity before resource binding",
-                            ));
-                        }
+                        ) =>
+                    {
+                        self.send_stream_not_authorized_and_close().await?;
+                        return Err(XmppError::stream(
+                            "Stanza to unauthorized entity before resource binding",
+                        ));
                     }
                     _ => {}
                 }

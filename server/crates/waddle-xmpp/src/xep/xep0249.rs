@@ -425,7 +425,7 @@ mod tests {
         let original = DirectInvite::with_password(
             jid,
             Some("Test roundtrip".to_string()),
-            &format!("test-{}", uuid::Uuid::new_v4()),
+            format!("test-{}", uuid::Uuid::new_v4()),
         );
 
         // Build the element

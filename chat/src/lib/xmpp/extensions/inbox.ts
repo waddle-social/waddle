@@ -40,17 +40,24 @@ export interface WaddleInboxConversation {
   lastUpdated: number;
   unread: number;
   preview?: string;
+  thread?: string;
+  threadTitle?: string;
+  replyCount?: number;
+  author?: string;
 }
 
 export interface WaddleInboxQuery {
   since?: number;
   onlyUnread?: boolean;
+  room?: string;
+  threads?: boolean;
   totalUnread?: number;
   conversations?: WaddleInboxConversation[];
 }
 
 export interface WaddleInboxMarkRead {
   partner: string;
+  thread?: string;
 }
 
 const definitions: DefinitionOptions[] = [
@@ -60,6 +67,8 @@ const definitions: DefinitionOptions[] = [
     fields: {
       since: integerAttribute("since"),
       onlyUnread: booleanAttribute("only-unread"),
+      room: attribute("room"),
+      threads: booleanAttribute("threads"),
       totalUnread: integerAttribute("total-unread"),
     },
     namespace: NS_INBOX_0,
@@ -77,6 +86,10 @@ const definitions: DefinitionOptions[] = [
       lastUpdated: integerAttribute("last-updated"),
       unread: integerAttribute("unread"),
       preview: childText(NS_INBOX_0, "preview"),
+      thread: attribute("thread"),
+      threadTitle: attribute("thread-title"),
+      replyCount: integerAttribute("reply-count"),
+      author: attribute("author"),
     },
     namespace: NS_INBOX_0,
   },
@@ -85,6 +98,7 @@ const definitions: DefinitionOptions[] = [
     element: "mark-read",
     fields: {
       partner: attribute("partner"),
+      thread: attribute("thread"),
     },
     namespace: NS_INBOX_0,
   },
