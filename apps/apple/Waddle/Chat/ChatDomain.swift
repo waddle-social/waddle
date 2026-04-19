@@ -86,6 +86,26 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var replyToSenderName: String?
     var replyToBody: String?
     var markupSpans: [XMPPMarkupSpan]?
+    var sharedFiles: [XMPPSharedFile]?
+    var broadcastMention: String?
+
+    var inlineImages: [XMPPSharedFile] {
+        sharedFiles?.filter(\.isInlineImage) ?? []
+    }
+
+    var downloadableFiles: [XMPPSharedFile] {
+        sharedFiles?.filter { !$0.isInlineImage } ?? []
+    }
+
+    var displayBody: String {
+        if let files = sharedFiles, !files.isEmpty {
+            let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            if files.contains(where: { $0.url == trimmed }) {
+                return ""
+            }
+        }
+        return body
+    }
 }
 
 struct ChatRoomHistoryState: Hashable {
@@ -201,17 +221,18 @@ struct ChatRoomHistoryPage {
 
 extension ChatTimelineMessage {
     var styledBody: AttributedString {
-        guard let spans = markupSpans, !spans.isEmpty, !body.isEmpty else {
-            return AttributedString(body)
+        let text = displayBody
+        guard let spans = markupSpans, !spans.isEmpty, !text.isEmpty else {
+            return AttributedString(text)
         }
 
-        var attributed = AttributedString(body)
-        let utf8View = body.utf8
+        var attributed = AttributedString(text)
+        let utf8View = text.utf8
 
         for span in spans {
             guard span.start >= 0, span.end <= utf8View.count, span.start < span.end else { continue }
-            guard let startIndex = body.utf8.index(body.startIndex, offsetBy: span.start, limitedBy: body.endIndex),
-                  let endIndex = body.utf8.index(body.startIndex, offsetBy: span.end, limitedBy: body.endIndex) else {
+            guard let startIndex = text.utf8.index(text.startIndex, offsetBy: span.start, limitedBy: text.endIndex),
+                  let endIndex = text.utf8.index(text.startIndex, offsetBy: span.end, limitedBy: text.endIndex) else {
                 continue
             }
             let startAttr = AttributedString.Index(startIndex, within: attributed)
@@ -293,7 +314,9 @@ extension ChatTimelineMessage {
             replyToID: other.replyToID ?? replyToID,
             replyToSenderName: other.replyToSenderName ?? replyToSenderName,
             replyToBody: other.replyToBody ?? replyToBody,
-            markupSpans: other.markupSpans ?? markupSpans
+            markupSpans: other.markupSpans ?? markupSpans,
+            sharedFiles: other.sharedFiles ?? sharedFiles,
+            broadcastMention: other.broadcastMention ?? broadcastMention
         )
     }
 

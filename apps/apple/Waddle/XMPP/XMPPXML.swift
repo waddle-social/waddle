@@ -324,6 +324,8 @@ enum XMPPXML {
         let markupSpans = parseMarkupSpans(from: element, strippedBody: strippedBody, rawBody: rawBody)
         let chatState = parseChatState(from: element)
         let displayedMarkerID = element.firstChild(named: "displayed")?.attribute("id")
+        let sharedFiles = parseSharedFiles(from: element)
+        let broadcastMention = parseBroadcastMention(from: element)
         return XMPPMessageEvent(
             from: element.attribute("from"),
             to: element.attribute("to"),
@@ -343,8 +345,50 @@ enum XMPPXML {
             replyToSender: replyElement?.attribute("to"),
             markupSpans: markupSpans,
             chatState: chatState,
-            displayedMarkerID: displayedMarkerID
+            displayedMarkerID: displayedMarkerID,
+            sharedFiles: sharedFiles,
+            broadcastMention: broadcastMention
         )
+    }
+
+    private static func parseSharedFiles(from element: XMPPElement) -> [XMPPSharedFile] {
+        var files: [XMPPSharedFile] = []
+        for fs in element.children(named: "file-sharing") {
+            let disposition = fs.attribute("disposition") ?? "inline"
+            let file = fs.firstChild(named: "file")
+            let name = file?.firstChild(named: "name")?.text
+            let mediaType = file?.firstChild(named: "media-type")?.text
+            let sizeText = file?.firstChild(named: "size")?.text
+            let size = sizeText.flatMap { Int($0) }
+            let widthText = file?.firstChild(named: "width")?.text
+            let width = widthText.flatMap { Int($0) }
+            let heightText = file?.firstChild(named: "height")?.text
+            let height = heightText.flatMap { Int($0) }
+            let url = fs.firstChild(named: "sources")?
+                .firstChild(named: "url-data")?
+                .attribute("target")
+            guard let url, !url.isEmpty else { continue }
+            files.append(XMPPSharedFile(
+                url: url,
+                name: name,
+                mediaType: mediaType,
+                size: size,
+                width: width,
+                height: height,
+                disposition: disposition
+            ))
+        }
+        return files
+    }
+
+    private static func parseBroadcastMention(from element: XMPPElement) -> String? {
+        guard let mentions = element.firstChild(named: "mentions") else { return nil }
+        for mention in mentions.children(named: "mention") {
+            if let type = mention.attribute("type"), (type == "everyone" || type == "here") {
+                return type
+            }
+        }
+        return nil
     }
 
     private static func parseChatState(from element: XMPPElement) -> String? {

@@ -467,6 +467,14 @@ struct ChatMessageRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let mention = message.broadcastMention {
+                    Text("@\(mention)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange, in: Capsule())
+                }
             }
 
             if let replyToID = message.replyToID, !replyToID.isEmpty {
@@ -479,11 +487,16 @@ struct ChatMessageRowView: View {
                     .italic()
                     .foregroundStyle(.secondary)
             } else {
-                Text(message.styledBody)
-                    .font(.body)
-                    .lineSpacing(usesOperationalLayout ? 3 : 0)
-                    .multilineTextAlignment(message.isOutgoing ? .trailing : .leading)
-                    .textSelection(.enabled)
+                if !message.displayBody.isEmpty {
+                    Text(message.styledBody)
+                        .font(.body)
+                        .lineSpacing(usesOperationalLayout ? 3 : 0)
+                        .multilineTextAlignment(message.isOutgoing ? .trailing : .leading)
+                        .textSelection(.enabled)
+                }
+
+                inlineImagesView(for: message, maxWidth: 320)
+                downloadableFilesView(for: message)
             }
 
             if let reactions = message.reactions, !reactions.isEmpty {
@@ -530,6 +543,83 @@ struct ChatMessageRowView: View {
     }
 
     @ViewBuilder
+    private func inlineImagesView(for message: ChatTimelineMessage, maxWidth: CGFloat) -> some View {
+        let images = message.inlineImages
+        if !images.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(images, id: \.url) { file in
+                    AsyncImage(url: URL(string: file.url)) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: maxWidth, maxHeight: 240)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        case .failure:
+                            Label(file.name ?? "Image", systemImage: "photo")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(8)
+                                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        case .empty:
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.secondary.opacity(0.08))
+                                .frame(width: min(CGFloat(file.width ?? 200), maxWidth), height: min(CGFloat(file.height ?? 150), 240))
+                                .overlay { ProgressView() }
+                        @unknown default:
+                            EmptyView()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func downloadableFilesView(for message: ChatTimelineMessage) -> some View {
+        let files = message.downloadableFiles
+        if !files.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(files, id: \.url) { file in
+                    if let url = URL(string: file.url) {
+                        Link(destination: url) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.subheadline)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(file.name ?? "File")
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                    HStack(spacing: 4) {
+                                        Text(file.mediaType ?? "file")
+                                            .font(.caption2)
+                                        if let size = file.size {
+                                            Text("·")
+                                            Text(formatFileSize(size))
+                                                .font(.caption2)
+                                        }
+                                    }
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func formatFileSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
+
+    @ViewBuilder
     private var replyIndicator: some View {
         HStack(spacing: 6) {
             RoundedRectangle(cornerRadius: 2)
@@ -565,12 +655,17 @@ struct ChatMessageRowView: View {
                     .italic()
                     .foregroundStyle(.secondary)
             } else {
-                Text(message.styledBody)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
-                    .lineSpacing(3)
-                    .multilineTextAlignment(.leading)
-                    .textSelection(.enabled)
+                if !message.displayBody.isEmpty {
+                    Text(message.styledBody)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                        .lineSpacing(3)
+                        .multilineTextAlignment(.leading)
+                        .textSelection(.enabled)
+                }
+
+                inlineImagesView(for: message, maxWidth: 280)
+                downloadableFilesView(for: message)
             }
 
             if let reactions = message.reactions, !reactions.isEmpty {

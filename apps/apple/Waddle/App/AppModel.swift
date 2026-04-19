@@ -990,7 +990,9 @@ final class AppModel: ObservableObject {
             replyToID: event.replyToID,
             replyToSenderName: replyToSenderName,
             replyToBody: replyToBody,
-            markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans
+            markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans,
+            sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles,
+            broadcastMention: event.broadcastMention
         )
     }
 

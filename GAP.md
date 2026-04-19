@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 3, items 5.1/6.1)
+> Last updated: 2026-04-19 (loop 4, items 1.4/4.2/4.6)
 
 ## Legend
 
@@ -25,7 +25,7 @@
 | 1.1 | Message replies (quote-reply) | CRITICAL | [x] | XEP-0461, XEP-0428 | Reply stanza construction/parsing, fallback stripping, reply indicator UI, context menu reply action, composer reply preview |
 | 1.2 | Rich text markup (bold, italic, code, etc.) | CRITICAL | [x] | XEP-0394 | Parse markup spans from stanzas, render with AttributedString (bold, italic, strikethrough, code, links), rebase offsets for reply fallback |
 | 1.3 | @mentions with autocomplete | CRITICAL | [ ] | XEP-0372 | Web has inline autocomplete in editor |
-| 1.4 | Broadcast mentions (@everyone, @here) | HIGH | [ ] | XEP-0513 | Web supports both broadcast types |
+| 1.4 | Broadcast mentions (@everyone, @here) | HIGH | [x] | XEP-0513 | Parse <mentions> element, display @everyone/@here badge on messages |
 | 1.5 | Read receipts / chat markers | HIGH | [x] | XEP-0333 | Send displayed markers for incoming messages, parse displayed marker stanzas |
 | 1.6 | Typing indicators (chat state) | HIGH | [x] | XEP-0085 | Send composing/paused on text input, parse incoming chat state, typing indicator UI with auto-expiry |
 | 1.7 | Message moderation (admin retract) | MEDIUM | [ ] | XEP-0425 | Web supports moderation with reason field |
@@ -55,11 +55,11 @@
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 4.1 | File upload (images, documents) | CRITICAL | [ ] | XEP-0363, XEP-0447 | Web has drag-drop, paste, file picker (10MB max) |
-| 4.2 | Inline image display | CRITICAL | [ ] | XEP-0446 | Web renders images inline with dimensions |
+| 4.2 | Inline image display | CRITICAL | [x] | XEP-0446 | Parse XEP-0447/0446 file-sharing stanzas, render inline images with AsyncImage, show file download links with metadata |
 | 4.3 | Image lightbox viewer | HIGH | [ ] | - | Web has full-screen image viewer |
 | 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Web has trending + search GIF integration |
 | 4.5 | Sticker support | LOW | [ ] | XEP-0449 | Web supports sticker packs |
-| 4.6 | File download | HIGH | [ ] | - | Web has download button for non-image attachments |
+| 4.6 | File download | HIGH | [x] | - | Downloadable file links with name, media type, and size shown inline |
 
 ## 5. Emoji
 

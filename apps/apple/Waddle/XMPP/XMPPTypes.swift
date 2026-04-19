@@ -96,6 +96,20 @@ struct XMPPMarkupSpan: Sendable, Equatable, Hashable {
     let uri: String?
 }
 
+struct XMPPSharedFile: Sendable, Equatable, Hashable {
+    let url: String
+    let name: String?
+    let mediaType: String?
+    let size: Int?
+    let width: Int?
+    let height: Int?
+    let disposition: String
+
+    var isInlineImage: Bool {
+        disposition == "inline" && (mediaType?.hasPrefix("image/") == true)
+    }
+}
+
 struct XMPPMessageEvent: Sendable, Equatable {
     let from: String?
     let to: String?
@@ -115,6 +129,8 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let markupSpans: [XMPPMarkupSpan]
     let chatState: String?
     let displayedMarkerID: String?
+    let sharedFiles: [XMPPSharedFile]
+    let broadcastMention: String?
 }
 
 struct XMPPPresenceEvent: Sendable, Equatable {
