@@ -295,36 +295,42 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var compactChatHeader: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 8) {
             Button { showChannelSidebar.toggle() } label: {
                 Image(systemName: "line.3.horizontal")
-                    .font(.title3)
-                    .foregroundStyle(WaddleTheme.textSecondary)
+                    .font(.body.weight(.medium))
+                    .frame(width: 36, height: 36)
             }
-            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: .circle)
 
             HStack(spacing: 5) {
-                Text("#")
-                    .font(.headline.weight(.bold))
+                Image(systemName: "number")
+                    .font(.caption.weight(.bold))
                     .foregroundStyle(WaddleTheme.textMuted)
-                Text(store.selectedRoom?.title ?? "Select channel")
-                    .font(.headline)
-                    .foregroundStyle(WaddleTheme.textPrimary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(store.selectedRoom?.title ?? "Select channel")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text("\(model.chatMembers.count) members")
+                        .font(.caption2)
+                        .foregroundStyle(WaddleTheme.textMuted)
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .glassEffect(in: .capsule)
 
             Spacer()
 
             Button { showMembersSheet = true } label: {
                 Image(systemName: "person.2")
-                    .font(.title3)
-                    .foregroundStyle(WaddleTheme.textSecondary)
+                    .font(.body)
+                    .frame(width: 36, height: 36)
             }
-            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: .circle)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .glassEffect(.regular, in: .rect(cornerRadius: 0))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var joinButton: some View {
