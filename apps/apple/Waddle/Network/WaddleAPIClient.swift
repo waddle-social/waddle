@@ -175,6 +175,46 @@ final class WaddleAPIClient {
         return try decoder.decode(MembersResponse.self, from: data).members
     }
 
+    func addMember(sessionID: String, waddleID: String, userID: String, role: String = "member") async throws {
+        let body = try JSONEncoder().encode(["user_id": userID, "role": role])
+        let _ = try await send(
+            path: "/v1/waddles/\(waddleID)/members",
+            method: "POST",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            body: body
+        )
+    }
+
+    func removeMember(sessionID: String, waddleID: String, userID: String) async throws {
+        let _ = try await send(
+            path: "/v1/waddles/\(waddleID)/members/\(userID)",
+            method: "DELETE",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            treatStatusesAsNil: [204]
+        )
+    }
+
+    func updateMemberRole(sessionID: String, waddleID: String, userID: String, role: String) async throws {
+        let body = try JSONEncoder().encode(["role": role])
+        let _ = try await send(
+            path: "/v1/waddles/\(waddleID)/members/\(userID)",
+            method: "PATCH",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            body: body
+        )
+    }
+
+    func searchUsers(sessionID: String, query: String) async throws -> [MemberSummary] {
+        let (data, _) = try await send(
+            path: "/api/users/search",
+            queryItems: [
+                URLQueryItem(name: "session_id", value: sessionID),
+                URLQueryItem(name: "q", value: query),
+            ]
+        )
+        return try decoder.decode([MemberSummary].self, from: data)
+    }
+
     private func send(
         path: String,
         method: String = "GET",

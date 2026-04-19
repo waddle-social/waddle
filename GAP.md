@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 12, items 9.1/10.1)
+> Last updated: 2026-04-19 (loop 13, items 4.5/7.1/7.2/7.3)
 
 ## Legend
 
@@ -58,7 +58,7 @@
 | 4.2 | Inline image display | CRITICAL | [x] | XEP-0446 | Parse XEP-0447/0446 file-sharing stanzas, render inline images with AsyncImage, show file download links with metadata |
 | 4.3 | Image lightbox viewer | HIGH | [x] | - | Full-screen image viewer on tap with dismiss button and filename overlay |
 | 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Web has trending + search GIF integration |
-| 4.5 | Sticker support | LOW | [ ] | XEP-0449 | Web supports sticker packs |
+| 4.5 | Sticker support | LOW | [x] | XEP-0449 | Parse <sticker> element, isSticker flag on messages, sticker images displayed via existing file-sharing renderer |
 | 4.6 | File download | HIGH | [x] | - | Downloadable file links with name, media type, and size shown inline |
 
 ## 5. Emoji
@@ -81,9 +81,9 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 7.1 | Add member to waddle | HIGH | [ ] | - | Web has member search + add via REST API |
-| 7.2 | Remove member from waddle | HIGH | [ ] | - | Web has remove via REST API |
-| 7.3 | Change member role | MEDIUM | [ ] | - | Web supports owner/admin/moderator/member roles |
+| 7.1 | Add member to waddle | HIGH | [x] | - | REST API addMember with user_id and role, reloads structure after |
+| 7.2 | Remove member from waddle | HIGH | [x] | - | REST API removeMember with DELETE, context menu on member rows |
+| 7.3 | Change member role | MEDIUM | [x] | - | REST API updateMemberRole, context menu with member/moderator/admin options |
 | 7.4 | Hat/badge display (role badges) | MEDIUM | [x] | XEP-0317 | Parse hats from presence, display colored role badges (owner/admin/mod/bot/verified) on messages |
 
 ## 8. Notifications

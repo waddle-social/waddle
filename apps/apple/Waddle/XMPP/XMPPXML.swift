@@ -550,7 +550,8 @@ enum XMPPXML {
             forumPostKind: parseForumPostKind(from: element),
             forumTitle: element.firstChild(named: "thread-create")?.attribute("title"),
             threadID: parseThreadID(from: element),
-            parentThreadID: element.firstChild(named: "parent-thread")?.text
+            parentThreadID: element.firstChild(named: "parent-thread")?.text,
+            isSticker: element.firstChild(named: "sticker") != nil
         )
     }
 

@@ -138,6 +138,7 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let forumTitle: String?
     let threadID: String?
     let parentThreadID: String?
+    let isSticker: Bool
 }
 
 struct XMPPPresenceHat: Sendable, Equatable, Hashable {

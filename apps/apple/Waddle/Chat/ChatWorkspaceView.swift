@@ -885,6 +885,32 @@ struct WaddleChatWorkspaceView: View {
             VStack(spacing: 6) {
                 ForEach(members) { member in
                     ChatDesktopMemberRowView(member: member)
+                        .contextMenu {
+                            if !member.isSelf {
+                                Button {
+                                    let peerJID = "\(member.displayName.lowercased())@\(jidDomain(model.session?.jid ?? ""))"
+                                    Task { await model.openDm(peerJID: peerJID, peerUsername: member.displayName) }
+                                } label: {
+                                    Label("Message", systemImage: "bubble.left")
+                                }
+
+                                Menu("Change Role") {
+                                    ForEach(["member", "moderator", "admin"], id: \.self) { role in
+                                        Button(role.capitalized) {
+                                            Task { await model.changeMemberRole(userID: member.id, role: role) }
+                                        }
+                                    }
+                                }
+
+                                Divider()
+
+                                Button(role: .destructive) {
+                                    Task { await model.removeMember(userID: member.id) }
+                                } label: {
+                                    Label("Remove", systemImage: "person.badge.minus")
+                                }
+                            }
+                        }
                 }
             }
         }

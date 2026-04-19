@@ -537,6 +537,36 @@ final class AppModel: ObservableObject {
         chatStore.messages.filter { $0.threadID == threadID && $0.isForumReply }
     }
 
+    func addMember(userID: String, role: String = "member") async {
+        guard let session, let waddleID = selectedWaddleID else { return }
+        do {
+            try await client.addMember(sessionID: session.sessionID, waddleID: waddleID, userID: userID, role: role)
+            await reloadSelectedWaddleStructure()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeMember(userID: String) async {
+        guard let session, let waddleID = selectedWaddleID else { return }
+        do {
+            try await client.removeMember(sessionID: session.sessionID, waddleID: waddleID, userID: userID)
+            await reloadSelectedWaddleStructure()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func changeMemberRole(userID: String, role: String) async {
+        guard let session, let waddleID = selectedWaddleID else { return }
+        do {
+            try await client.updateMemberRole(sessionID: session.sessionID, waddleID: waddleID, userID: userID, role: role)
+            await reloadSelectedWaddleStructure()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     @Published var isCreatingChannel = false
     @Published var isUploadingFile = false
 
@@ -1344,7 +1374,8 @@ final class AppModel: ObservableObject {
             forumPostKind: event.forumPostKind,
             forumTitle: event.forumTitle,
             threadID: event.threadID,
-            parentThreadID: event.parentThreadID
+            parentThreadID: event.parentThreadID,
+            isSticker: event.isSticker ? true : nil
         )
     }
 
