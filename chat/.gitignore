@@ -3,6 +3,10 @@ dist/
 # generated types
 .astro/
 worker-configuration.d.ts
+# generated icons
+public/icons/
+# generated service worker
+public/sw.js
 
 # dependencies
 node_modules/
