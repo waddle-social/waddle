@@ -783,6 +783,15 @@ watch(
       >
         <Reply class="w-3.5 h-3.5" aria-hidden="true" />
       </button>
+      <button
+        type="button"
+        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        :title="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
+        :aria-label="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
+        @click="startReplyInThreadFromMenu"
+      >
+        <MessageSquare class="w-3.5 h-3.5" aria-hidden="true" />
+      </button>
       <template v-if="message.isSelf">
         <div class="w-px h-4 bg-border mx-0.5" />
         <button
