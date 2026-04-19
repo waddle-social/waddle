@@ -43,8 +43,10 @@ use waddle_xmpp::{
     },
     registry::{ConnectionRegistry, OutboundStanza},
     xep::{
-        build_command_items, build_command_result, build_spaces_metadata_form,
-        parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS, NS_REPLY,
+        build_command_items, build_command_result, build_spaces_metadata_form, has_file_sharing,
+        is_moderation_request_message, is_moderation_result_message, is_reaction_message,
+        is_retraction_message, is_sticker_message, parse_command_from_iq, should_skip_storage,
+        Command, CommandStatus, NODE_COMMANDS, NS_REPLY,
     },
     Affiliation, Role, StanzaErrorCondition, StanzaErrorType, WaddleDetails, XmppError,
 };
@@ -2487,14 +2489,42 @@ async fn push_inbox_update(
     }
 }
 
+/// Returns true if this groupchat message should be written to the MAM archive.
+///
+/// Mirrors the `should_archive_timeline_message` predicate in `connection.rs`:
+/// body/subject-bearing messages are always archived; body-less protocol
+/// events (reactions, retractions, moderation, file-shares, stickers) are
+/// archived too so that MAM replay faithfully reproduces the room timeline.
+/// Error messages and messages carrying a `<no-store/>` hint are excluded.
+fn should_archive_groupchat_message(msg: &xmpp_parsers::message::Message) -> bool {
+    if matches!(msg.type_, XmppMessageType::Error) || should_skip_storage(msg) {
+        return false;
+    }
+
+    if !msg.bodies.is_empty() || !msg.subjects.is_empty() {
+        return true;
+    }
+
+    is_reaction_message(msg)
+        || is_retraction_message(msg)
+        || is_moderation_request_message(msg)
+        || is_moderation_result_message(msg)
+        || has_file_sharing(msg)
+        || is_sticker_message(msg)
+}
+
 async fn archive_groupchat_message(
     state: &WebSocketState,
     room_jid: &BareJid,
     message: &xmpp_parsers::message::Message,
 ) -> Option<String> {
+    if !should_archive_groupchat_message(message) {
+        return None;
+    }
+
     let body = prototype_body(message)
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())?;
+        .unwrap_or_default();
 
     let (reply_to_id, reply_to_jid) = extract_reply_reference(message);
     let origin_id = extract_origin_id(message);
