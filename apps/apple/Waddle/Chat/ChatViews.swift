@@ -280,6 +280,7 @@ struct ChatTimelineView: View {
             .padding(.vertical, verticalPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(WaddleTheme.chatBackground)
     }
 
     @ViewBuilder
@@ -308,23 +309,18 @@ struct ChatTimelineDayDividerView: View {
     let date: Date
 
     var body: some View {
-        HStack(spacing: 10) {
-            Rectangle()
-                .fill(Color.secondary.opacity(0.14))
-                .frame(height: 1)
-
+        HStack(spacing: 12) {
+            Rectangle().fill(WaddleTheme.divider).frame(height: 1)
             Text(date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Color.secondary.opacity(0.08), in: Capsule())
-
-            Rectangle()
-                .fill(Color.secondary.opacity(0.14))
-                .frame(height: 1)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(WaddleTheme.textMuted)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(WaddleTheme.surfaceRaised, in: Capsule())
+            Rectangle().fill(WaddleTheme.divider).frame(height: 1)
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
     }
 }
 
@@ -637,13 +633,44 @@ struct ChatComposerView: View {
         VStack(spacing: 0) {
             mentionSuggestionList
 
-            Group {
-                if usesCompactConversationChrome {
-                    compactConversationComposer
-                } else {
-                    standardComposer
+            composerReplyPreview
+
+            HStack(alignment: .bottom, spacing: 8) {
+                HStack(spacing: 4) {
+                    attachmentPickerButton
+                    gifPickerButton
+                    emojiPickerButton
                 }
+
+                ZStack(alignment: .topLeading) {
+                    if !hasSendableText {
+                        Text(placeholder)
+                            .foregroundStyle(WaddleTheme.textMuted)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                    }
+
+                    TextEditor(text: $text)
+                        .scrollContentBackground(.hidden)
+                        .foregroundStyle(WaddleTheme.textPrimary)
+                        .font(WaddleTheme.bodyFont)
+                        .frame(minHeight: 36, maxHeight: 120)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                }
+                .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WaddleTheme.divider))
+
+                Button(action: onSend) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.body)
+                        .foregroundStyle(canSend && hasSendableText ? WaddleTheme.accent : WaddleTheme.textMuted)
+                }
+                .disabled(!canSend || isSending || !hasSendableText)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(WaddleTheme.composerBackground)
         }
         .onChange(of: text) { _, newValue in
             updateMentionQuery(newValue)
@@ -751,132 +778,34 @@ struct ChatComposerView: View {
         ("ok", "👌"), ("point_up", "☝️"), ("point_down", "👇"), ("raised_hands", "🙌"),
     ]
 
-    private var standardComposer: some View {
-        VStack(spacing: usesOperationalChrome ? 10 : 12) {
-            if usesOperationalChrome {
-                HStack {
-                    Label("Compose", systemImage: "square.and.pencil")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Text("Clear, durable conversation")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            composerReplyPreview
-
-            HStack(alignment: .bottom, spacing: 12) {
-                editor(minHeight: usesOperationalChrome ? 56 : 44, maxHeight: 140)
-                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                attachmentPickerButton
-                gifPickerButton
-                emojiPickerButton
-
-                sendButton
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(usesOperationalChrome ? 14 : 12)
-        .background(standardComposerBackground)
-    }
-
-    private var compactConversationComposer: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                if let channelName, canSend {
-                    Label("#\(channelName)", systemImage: "number")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Label("Choose a channel", systemImage: "bubble.left.and.bubble.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 0)
-
-                Text("Tap send")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.tertiary)
-            }
-
-            composerReplyPreview
-
-            HStack(alignment: .bottom, spacing: 10) {
-                editor(minHeight: 52, maxHeight: 120)
-                    .background(compactComposerFieldFill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(Color.secondary.opacity(0.10), lineWidth: 1)
-                    }
-
-                attachmentPickerButton
-                emojiPickerButton
-
-                sendButton
-                    .buttonStyle(.plain)
-                    .frame(width: 44, height: 44)
-                    .background(sendButtonFill, in: Circle())
-                    .foregroundStyle(sendButtonForeground)
-            }
-        }
-        .padding(14)
-        .background(compactComposerBackground)
-    }
-
-    private func editor(minHeight: CGFloat, maxHeight: CGFloat) -> some View {
-        ZStack(alignment: .topLeading) {
-            if !hasSendableText {
-                Text(placeholder)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, usesCompactConversationChrome ? 12 : 14)
-                    .padding(.vertical, 14)
-            }
-
-            TextEditor(text: $text)
-                .scrollContentBackground(.hidden)
-                .frame(minHeight: minHeight, maxHeight: maxHeight)
-                .padding(.horizontal, usesCompactConversationChrome ? 8 : 10)
-                .padding(.vertical, usesCompactConversationChrome ? 6 : 8)
-        }
-    }
 
     @ViewBuilder
     private var composerReplyPreview: some View {
         if let reply = replyingToMessage {
             HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.accentColor)
-                    .frame(width: 3)
-
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(WaddleTheme.accent)
+                    .frame(width: 2)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Replying to \(reply.senderDisplayName)")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
-
+                        .foregroundStyle(WaddleTheme.accent)
                     Text(reply.body)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .foregroundStyle(WaddleTheme.textSecondary)
+                        .lineLimit(1)
                 }
-
-                Spacer(minLength: 0)
-
-                Button {
-                    onCancelReply?()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
+                Spacer()
+                Button { onCancelReply?() } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(WaddleTheme.textMuted)
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(WaddleTheme.surfaceRaised)
         }
     }
 
@@ -888,8 +817,8 @@ struct ChatComposerView: View {
             } else {
                 PhotosPicker(selection: $selectedPhoto, matching: .any(of: [.images, .videos])) {
                     Image(systemName: "paperclip")
-                        .font(usesCompactConversationChrome ? .title3 : .body)
-                        .foregroundStyle(.secondary)
+                        .font(.body)
+                        .foregroundStyle(WaddleTheme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .onChange(of: selectedPhoto) { _, newValue in
@@ -910,12 +839,9 @@ struct ChatComposerView: View {
         Button {
             showGifPicker.toggle()
         } label: {
-            Text("GIF")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+            Image(systemName: "play.rectangle")
+                .font(.body)
+                .foregroundStyle(WaddleTheme.textSecondary)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showGifPicker) {
@@ -931,8 +857,8 @@ struct ChatComposerView: View {
             showEmojiPicker.toggle()
         } label: {
             Image(systemName: "face.smiling")
-                .font(usesCompactConversationChrome ? .title3 : .body)
-                .foregroundStyle(.secondary)
+                .font(.body)
+                .foregroundStyle(WaddleTheme.textSecondary)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showEmojiPicker) {
@@ -943,60 +869,6 @@ struct ChatComposerView: View {
         }
     }
 
-    private var sendButton: some View {
-        Button(action: onSend) {
-            if isSending {
-                ProgressView()
-                    .frame(width: 18, height: 18)
-            } else {
-                Image(systemName: usesCompactConversationChrome ? "paperplane.circle.fill" : "paperplane.fill")
-                    .font(usesCompactConversationChrome ? .title3 : .body)
-            }
-        }
-        .disabled(!canSend || isSending || !hasSendableText)
-    }
-
-    @ViewBuilder
-    private var standardComposerBackground: some View {
-        if usesOperationalChrome {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.primary.opacity(0.04))
-        } else {
-            Color.clear
-        }
-    }
-
-    private var compactComposerBackground: some View {
-#if os(iOS)
-        Color(.secondarySystemGroupedBackground)
-#else
-        Color.secondary.opacity(0.08)
-#endif
-    }
-
-    private var compactComposerFieldFill: Color {
-#if os(iOS)
-        Color(.systemBackground)
-#else
-        Color(nsColor: .windowBackgroundColor)
-#endif
-    }
-
-    private var sendButtonFill: Color {
-        canSend && hasSendableText && !isSending ? Color.accentColor : Color.secondary.opacity(0.12)
-    }
-
-    private var sendButtonForeground: Color {
-        canSend && hasSendableText && !isSending ? enabledSendButtonForeground : .secondary
-    }
-
-    private var enabledSendButtonForeground: Color {
-#if os(iOS)
-        Color(.systemBackground)
-#else
-        Color(nsColor: .windowBackgroundColor)
-#endif
-    }
 }
 
 struct ChatMemberListSection: View {
@@ -1089,17 +961,15 @@ struct ChatTypingIndicatorView: View {
     var body: some View {
         if !typingUsers.isEmpty {
             HStack(spacing: 6) {
-                Image(systemName: "ellipsis.bubble")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .symbolEffect(.pulse)
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .tint(WaddleTheme.textMuted)
                 Text(typingLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.caption2)
+                    .foregroundStyle(WaddleTheme.textMuted)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -1146,17 +1016,36 @@ struct ChatGifPickerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TextField("Search GIFs", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .padding(10)
-                .onChange(of: searchText) { _, query in
-                    searchTask?.cancel()
-                    searchTask = Task {
-                        try? await Task.sleep(nanoseconds: 300_000_000)
-                        guard !Task.isCancelled else { return }
-                        await fetchGifs(query: query)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(WaddleTheme.textMuted)
+                TextField("Search GIFs", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .foregroundStyle(WaddleTheme.textPrimary)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(WaddleTheme.textMuted)
                     }
+                    .buttonStyle(.plain)
                 }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
+            .padding(10)
+            .onChange(of: searchText) { _, query in
+                searchTask?.cancel()
+                searchTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    guard !Task.isCancelled else { return }
+                    await fetchGifs(query: query)
+                }
+            }
 
             if isLoading {
                 ProgressView()
@@ -1164,7 +1053,7 @@ struct ChatGifPickerView: View {
             } else if results.isEmpty {
                 Text("No GIFs found")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(WaddleTheme.textMuted)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -1182,11 +1071,11 @@ struct ChatGifPickerView: View {
                                             .frame(height: 80)
                                             .clipped()
                                     case .empty:
-                                        Color.secondary.opacity(0.1)
+                                        WaddleTheme.surfaceRaised
                                             .frame(height: 80)
                                             .overlay { ProgressView() }
                                     default:
-                                        Color.secondary.opacity(0.1)
+                                        WaddleTheme.surfaceRaised
                                             .frame(height: 80)
                                     }
                                 }
@@ -1200,6 +1089,7 @@ struct ChatGifPickerView: View {
             }
         }
         .frame(width: 360, height: 340)
+        .background(WaddleTheme.sidebarBackground)
         .task {
             await fetchGifs(query: "")
         }
@@ -1706,7 +1596,7 @@ struct ChatLoadingStateView: View {
         VStack(spacing: 12) {
             ProgressView()
             Text(title)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1727,12 +1617,13 @@ struct ChatEmptyStateView: View {
         VStack(spacing: 12) {
             Image(systemName: systemImage)
                 .font(.title2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textMuted)
             Text(title)
                 .font(.headline)
+                .foregroundStyle(WaddleTheme.textSecondary)
             if let message {
                 Text(message)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(WaddleTheme.textMuted)
                     .multilineTextAlignment(.center)
             }
         }
@@ -1751,11 +1642,11 @@ struct ChatErrorStateView: View {
         VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.title2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textMuted)
             Text(title)
                 .font(.headline)
             Text(message)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textSecondary)
                 .multilineTextAlignment(.center)
             if let onRetry {
                 Button(retryTitle, action: onRetry)
