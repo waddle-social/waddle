@@ -535,11 +535,19 @@ export function useMessaging(
     // reconciliation (tracked via pendingEchoClientIds). Without that
     // constraint, sending the same text twice would let the second echo
     // re-target the already-reconciled first message.
-    const existing = messages.value.find(
-      (m) =>
-        m.id === msg.id ||
-        (pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body),
+    const existingById = messages.value.find((m) => m.id === msg.id);
+    const pendingSelfEcho = messages.value.find(
+      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
     );
+    const preservedSelfEcho = [...messages.value].reverse().find(
+      (m) =>
+        m.isSelf
+        && msg.isSelf
+        && m.body === msg.body
+        && !!m.deliveryStatus
+        && m.deliveryStatus !== "delivered",
+    );
+    const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
       const wasPending = existing.id !== msg.id;
       if (wasPending || (existing.deliveryStatus && existing.deliveryStatus !== "delivered")) {

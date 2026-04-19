@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { LiveDmMessage, LiveRoomMessage } from "../src/lib/xmpp-client";
+import { roomBareJidFor, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
 
@@ -417,4 +417,107 @@ describe("XEP-0198 self-echo reconciliation (group chat)", () => {
     expect(ids).toContain("server-old");
     expect(ids).toContain("client-unsent");
   });
+
+  test("fresh room session self-echo reconciles preserved sending entries", async () => {
+    const currentSession = session();
+    const roomJid = roomBareJidFor(currentSession, "w1", "c1");
+    const queryMam = mock(async () => []);
+    const sendGroupMessage = mock(async () => ({ id: "client-room", state: "sending" as const }));
+    const sendChatState = mock(async () => undefined);
+    let onMessage: ((msg: LiveRoomMessage) => void) | null = null;
+    const actionError = ref("");
+    const xmppClient = ref(null as never);
+    const messaging = useMessaging(
+      ref(currentSession),
+      ref(null),
+      xmppClient,
+      ref("w1"),
+      ref("c1"),
+      ref({ id: "c1", name: "general", channel_type: "text" }),
+      String,
+      actionError,
+      () => {
+        actionError.value = "";
+      },
+    );
+
+    xmppClient.value = {
+      queryMam,
+      sendGroupMessage,
+      sendChatState,
+      setMessageHandler(handler: (msg: LiveRoomMessage) => void) {
+        onMessage = handler;
+      },
+      setStatusHandler() {},
+      setChatStateHandler() {},
+      setReactionHandler() {},
+      setDisplayedHandler() {},
+      setHatsHandler() {},
+      setPresenceHandler() {},
+      setLastSeenHandler() {},
+      setActivityHandler() {},
+      setRoomAvatarHandler() {},
+      setSlowModeHandler() {},
+    } as never;
+    await nextTick();
+
+    await messaging.sendMessage("hello room");
+    expect(messaging.messages.value[0]?.deliveryStatus).toBe("sending");
+
+    messaging.onSessionLifecycle({ type: "fresh" });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await nextTick();
+
+    onMessage?.({
+      id: "server-room",
+      roomJid,
+      nick: "alice",
+      body: "hello room",
+      createdAt: "2024-01-01T00:00:03Z",
+      type: "message",
+    });
+
+    expect(messaging.messages.value).toHaveLength(1);
+    expect(messaging.messages.value[0].id).toBe("server-room");
+    expect(messaging.messages.value[0].deliveryStatus).toBe("delivered");
+  });
+});
+
+test("fresh DM session self-echo reconciles preserved sending entries", async () => {
+  const client = makeDmClient([]);
+  const { dm } = makeDmMessaging(client);
+
+  const sendDirectMessage = mock(async (_peer: string, _body: string) => ({
+    id: "client-dm",
+    state: "sending" as const,
+  }));
+  const sendDmChatState = mock(async () => undefined);
+  (client as unknown as { value: Record<string, unknown> }).value = {
+    ...(client as unknown as { value: Record<string, unknown> }).value,
+    sendDirectMessage,
+    sendDmChatState,
+  };
+
+  await dm.sendMessage("hello dm");
+  expect(dm.messages.value[0]?.deliveryStatus).toBe("sending");
+
+  dm.onSessionLifecycle({ type: "fresh" });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  await nextTick();
+
+  dm.onIncomingMessage({
+    id: "server-dm",
+    peerJid: "bob@example.com",
+    fromJid: "alice@example.com/desktop",
+    nick: "alice",
+    body: "hello dm",
+    createdAt: "2024-01-01T00:00:04Z",
+    type: "message",
+  });
+
+  expect(dm.messages.value).toHaveLength(1);
+  expect(dm.messages.value[0].id).toBe("server-dm");
+  expect(dm.messages.value[0].deliveryStatus).toBe("delivered");
 });

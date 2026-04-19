@@ -273,11 +273,19 @@ export function useDmMessaging(
     // Self-echo reconciliation: match by id first; otherwise body-match only
     // against messages still awaiting reconciliation so duplicates don't
     // retarget already-reconciled entries. Echo = authoritative → delivered.
-    const existing = messages.value.find(
-      (m) =>
-        m.id === msg.id ||
-        (pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body),
+    const existingById = messages.value.find((m) => m.id === msg.id);
+    const pendingSelfEcho = messages.value.find(
+      (m) => pendingEchoClientIds.has(m.id) && m.isSelf && msg.isSelf && m.body === msg.body,
     );
+    const preservedSelfEcho = [...messages.value].reverse().find(
+      (m) =>
+        m.isSelf
+        && msg.isSelf
+        && m.body === msg.body
+        && !!m.deliveryStatus
+        && m.deliveryStatus !== "delivered",
+    );
+    const existing = existingById ?? pendingSelfEcho ?? preservedSelfEcho;
     if (existing) {
       const wasPending = existing.id !== msg.id;
       if (wasPending || (existing.deliveryStatus && existing.deliveryStatus !== "delivered")) {
