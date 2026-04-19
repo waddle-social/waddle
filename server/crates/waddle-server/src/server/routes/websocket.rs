@@ -61,6 +61,10 @@ use crate::server::routes::waddles::{
 };
 use crate::server::AppState;
 use waddle_xmpp::auth::ScramServer;
+use waddle_xmpp::pubsub::{
+    build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
+    build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubRequest, PubSubStorage,
+};
 use waddle_xmpp::xep::xep0363::{
     build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
     parse_upload_request, sanitize_filename, UploadError, UploadSlot,
@@ -92,6 +96,8 @@ pub struct WebSocketState {
     /// roster, carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
     pub dispatcher: Arc<StanzaDispatcher>,
+    /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).
+    pub pubsub_storage: Arc<dyn PubSubStorage>,
 }
 
 /// In-progress SCRAM-SHA-256 authentication state between challenge and response.
@@ -2000,6 +2006,203 @@ async fn handle_iq_with_conn_state(
         }
     }
 
+    // PubSub / PEP (XEP-0060, XEP-0163)
+    if let Some(ref iq) = parsed_iq {
+        if is_pubsub_iq(iq) {
+            if !authenticated || !resource_bound {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "auth",
+                    "not-authorized",
+                )];
+            }
+
+            let user_jid = match session_jid {
+                Some(jid) => jid.to_bare(),
+                None => {
+                    return vec![build_iq_error_xml_with_addresses(
+                        &id,
+                        response_from,
+                        response_to,
+                        "auth",
+                        "not-authorized",
+                    )];
+                }
+            };
+
+            let target_jid = match &iq.to {
+                Some(to_jid) => to_jid.to_bare(),
+                None => user_jid.clone(),
+            };
+
+            let request = match parse_pubsub_iq(iq) {
+                Ok(req) => req,
+                Err(e) => {
+                    warn!("Failed to parse PubSub request: {}", e);
+                    let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                    return vec![iq_to_xml(error)];
+                }
+            };
+
+            debug!(?request, "Handling PubSub request via WebSocket");
+
+            match request {
+                PubSubRequest::Publish { node, item } => {
+                    let result = state
+                        .pubsub_storage
+                        .publish_item(&target_jid, &node, &item, Some(&user_jid), true)
+                        .await;
+
+                    match result {
+                        Ok(publish_result) => {
+                            debug!(
+                                node = %node,
+                                item_id = %publish_result.item_id,
+                                created = publish_result.node_created,
+                                "PubSub item published via WebSocket"
+                            );
+                            let response =
+                                build_pubsub_publish_result(iq, &node, &publish_result.item_id);
+                            return vec![iq_to_xml(response)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub publish failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                }
+
+                PubSubRequest::Items {
+                    node,
+                    max_items,
+                    item_ids,
+                } => {
+                    let result = state
+                        .pubsub_storage
+                        .get_items(&target_jid, &node, max_items, &item_ids)
+                        .await;
+
+                    match result {
+                        Ok(stored_items) => {
+                            let items: Vec<_> =
+                                stored_items.iter().map(|si| si.to_pubsub_item()).collect();
+                            debug!(
+                                node = %node,
+                                count = items.len(),
+                                "PubSub items retrieved via WebSocket"
+                            );
+                            let response = build_pubsub_items_result(iq, &node, &items);
+                            return vec![iq_to_xml(response)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub items retrieval failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                }
+
+                PubSubRequest::Retract {
+                    node,
+                    item_id,
+                    notify: _,
+                } => {
+                    if target_jid != user_jid {
+                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+
+                    let result = state
+                        .pubsub_storage
+                        .retract_item(&target_jid, &node, &item_id)
+                        .await;
+
+                    match result {
+                        Ok(retracted) => {
+                            if retracted {
+                                debug!(node = %node, item_id = %item_id, "PubSub item retracted via WebSocket");
+                                let response = build_pubsub_success(iq);
+                                return vec![iq_to_xml(response)];
+                            } else {
+                                let error = build_pubsub_error(iq, PubSubError::ItemNotFound);
+                                return vec![iq_to_xml(error)];
+                            }
+                        }
+                        Err(e) => {
+                            warn!("PubSub retract failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                }
+
+                PubSubRequest::CreateNode { node } => {
+                    if target_jid != user_jid {
+                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+
+                    let result = state
+                        .pubsub_storage
+                        .get_or_create_node(&target_jid, &node)
+                        .await;
+
+                    match result {
+                        Ok((_, created)) => {
+                            if created {
+                                debug!(node = %node, "PubSub node created via WebSocket");
+                            } else {
+                                debug!(node = %node, "PubSub node already exists");
+                            }
+                            let response = build_pubsub_success(iq);
+                            return vec![iq_to_xml(response)];
+                        }
+                        Err(e) => {
+                            warn!("PubSub node creation failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                }
+
+                PubSubRequest::DeleteNode { node } => {
+                    if target_jid != user_jid {
+                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
+
+                    let result = state.pubsub_storage.delete_node(&target_jid, &node).await;
+
+                    match result {
+                        Ok(deleted) => {
+                            if deleted {
+                                debug!(node = %node, "PubSub node deleted via WebSocket");
+                                let response = build_pubsub_success(iq);
+                                return vec![iq_to_xml(response)];
+                            } else {
+                                let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
+                                return vec![iq_to_xml(error)];
+                            }
+                        }
+                        Err(e) => {
+                            warn!("PubSub node deletion failed: {}", e);
+                            let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                            return vec![iq_to_xml(error)];
+                        }
+                    }
+                }
+
+                PubSubRequest::Subscribe { .. } | PubSubRequest::Unsubscribe { .. } => {
+                    let response = build_pubsub_success(iq);
+                    return vec![iq_to_xml(response)];
+                }
+            }
+        }
+    }
+
     // Unknown IQ - log a compact summary and return an error.
     let payload_ns = parsed_iq.as_ref().and_then(|iq| match &iq.payload {
         xmpp_parsers::iq::IqType::Get(payload) | xmpp_parsers::iq::IqType::Set(payload) => {
@@ -2864,6 +3067,7 @@ mod tests {
             command_registry: Arc::new(CommandRegistry::new()),
             extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
             dispatcher: Arc::new(dispatcher),
+            pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
         })
     }
 
@@ -4119,5 +4323,53 @@ mod tests {
         let xml = "<message type='chat'><body>Hi</body></message>";
         let patched = add_default_namespace_if_missing(xml, "jabber:client");
         assert!(patched.contains("xmlns='jabber:client'"));
+    }
+
+    #[tokio::test]
+    async fn handle_iq_pubsub_publish_returns_result() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let frame = r#"<iq xmlns="jabber:client" id="pub-1" type="set"><pubsub xmlns="http://jabber.org/protocol/pubsub"><publish node="http://jabber.org/protocol/mood"><item id="current"><mood xmlns="http://jabber.org/protocol/mood"><happy/></mood></item></publish></pubsub></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        let element = Element::from_str(&responses[0]).expect("valid XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+        assert_eq!(iq.id, "pub-1");
+        match iq.payload {
+            xmpp_parsers::iq::IqType::Result(Some(payload)) => {
+                assert_eq!(payload.ns(), "http://jabber.org/protocol/pubsub");
+            }
+            other => panic!("expected pubsub result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_iq_pubsub_items_empty_node_returns_result() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let frame = r#"<iq xmlns="jabber:client" id="items-1" type="get"><pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="http://jabber.org/protocol/mood"/></pubsub></iq>"#;
+        let responses = handle_iq(
+            frame,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        let element = Element::from_str(&responses[0]).expect("valid XML");
+        let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
+        assert_eq!(iq.id, "items-1");
     }
 }

@@ -948,6 +948,10 @@ async fn create_router(
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut stanza_dispatcher);
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
 
+    // Shared PubSub/PEP storage for the WebSocket transport (XEP-0060/0163).
+    let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
+        Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         app_state: state.clone(),
@@ -959,6 +963,7 @@ async fn create_router(
         command_registry: websocket_command_registry,
         extension_manager,
         dispatcher: stanza_dispatcher,
+        pubsub_storage,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 
