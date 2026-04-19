@@ -1180,3 +1180,155 @@ enum XMPPXML {
         return string[next]
     }
 }
+
+// MARK: - Typed XML builder (CLAUDE.md XML rule-compliant)
+//
+// New outbound stanzas must be composed with `OutboundXMLElement`, which
+// mirrors the `minidom::Element::builder` pattern used on the Rust side.
+// The existing string-concat builders above are tracked for refactor in
+// GAP.md item 11.1 — do not add new string-concat builders.
+
+struct OutboundXMLElement: Sendable {
+    let name: String
+    let xmlns: String?
+    let attributes: [(String, String)]
+    let children: [OutboundXMLNode]
+
+    init(
+        _ name: String,
+        xmlns: String? = nil,
+        attributes: [(String, String)] = [],
+        children: [OutboundXMLNode] = []
+    ) {
+        self.name = name
+        self.xmlns = xmlns
+        self.attributes = attributes
+        self.children = children
+    }
+
+    func serialize() -> String {
+        var out = "<" + name
+        if let xmlns {
+            out += " xmlns='" + XMPPXML.escape(xmlns) + "'"
+        }
+        for (key, value) in attributes {
+            out += " " + key + "='" + XMPPXML.escape(value) + "'"
+        }
+        if children.isEmpty {
+            out += "/>"
+            return out
+        }
+        out += ">"
+        for child in children {
+            switch child {
+            case .element(let element):
+                out += element.serialize()
+            case .text(let text):
+                out += XMPPXML.escape(text)
+            }
+        }
+        out += "</" + name + ">"
+        return out
+    }
+}
+
+enum OutboundXMLNode: Sendable {
+    case element(OutboundXMLElement)
+    case text(String)
+}
+
+// MARK: - MIX (XEP-0369, XEP-0405, XEP-0407) namespaces and builders
+
+enum XMPPMIX {
+    static let coreNS = "urn:xmpp:mix:core:1"
+    static let pamNS = "urn:xmpp:mix:pam:2"
+    static let miscNS = "urn:xmpp:mix:misc:0"
+
+    static let nodeMessages = "urn:xmpp:mix:nodes:messages"
+    static let nodeParticipants = "urn:xmpp:mix:nodes:participants"
+    static let nodeInfo = "urn:xmpp:mix:nodes:info"
+
+    /// XEP-0405 §3.1 — client-side MIX-PAM `client-join` wrapping a core `<join>`.
+    static func clientJoinIQ(
+        id: String,
+        channelJID: String,
+        nick: String,
+        nodes: [String] = [nodeMessages, nodeParticipants]
+    ) -> String {
+        let subscribes = nodes.map { node in
+            OutboundXMLNode.element(
+                OutboundXMLElement("subscribe", attributes: [("node", node)])
+            )
+        }
+        let nickChild = OutboundXMLNode.element(
+            OutboundXMLElement("nick", children: [.text(nick)])
+        )
+        let join = OutboundXMLElement(
+            "join",
+            xmlns: coreNS,
+            children: subscribes + [nickChild]
+        )
+        let wrapper = OutboundXMLElement(
+            "client-join",
+            xmlns: pamNS,
+            attributes: [("channel", channelJID)],
+            children: [.element(join)]
+        )
+        let iq = OutboundXMLElement(
+            "iq",
+            attributes: [("type", "set"), ("id", id)],
+            children: [.element(wrapper)]
+        )
+        return iq.serialize()
+    }
+
+    /// XEP-0405 §3.3 — client-side MIX-PAM `client-leave`.
+    static func clientLeaveIQ(id: String, channelJID: String) -> String {
+        let leave = OutboundXMLElement("leave", xmlns: coreNS)
+        let wrapper = OutboundXMLElement(
+            "client-leave",
+            xmlns: pamNS,
+            attributes: [("channel", channelJID)],
+            children: [.element(leave)]
+        )
+        let iq = OutboundXMLElement(
+            "iq",
+            attributes: [("type", "set"), ("id", id)],
+            children: [.element(wrapper)]
+        )
+        return iq.serialize()
+    }
+
+    /// XEP-0369 §7.1 — submit a message to a MIX channel. The JID is
+    /// `<channel>@mix.<domain>` and the stanza carries `type='groupchat'`
+    /// like MUC; the distinguishing signal is the destination domain.
+    static func mixMessage(to channelJID: String, body: String, thread: String? = nil) -> String {
+        var children: [OutboundXMLNode] = [
+            .element(OutboundXMLElement("body", children: [.text(body)])),
+        ]
+        if let thread, !thread.isEmpty {
+            children.append(.element(OutboundXMLElement("thread", children: [.text(thread)])))
+        }
+        let message = OutboundXMLElement(
+            "message",
+            attributes: [("to", channelJID), ("type", "groupchat")],
+            children: children
+        )
+        return message.serialize()
+    }
+
+    /// XEP-0369 §6.1 — `setnick` IQ to change the caller's channel nick.
+    static func setNickIQ(id: String, channelJID: String, nick: String) -> String {
+        let setnick = OutboundXMLElement(
+            "setnick",
+            xmlns: coreNS,
+            children: [.element(OutboundXMLElement("nick", children: [.text(nick)]))]
+        )
+        let iq = OutboundXMLElement(
+            "iq",
+            attributes: [("type", "set"), ("id", id), ("to", channelJID)],
+            children: [.element(setnick)]
+        )
+        return iq.serialize()
+    }
+}

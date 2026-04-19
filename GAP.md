@@ -112,7 +112,16 @@
 
 | # | Gap | Priority | Status | Notes |
 |---|-----|----------|--------|-------|
-| 11.1 | XML string concatenation | CRITICAL | [x] | CLAUDE.md rule is Rust-specific (format!, println!, xmpp_parsers, minidom::Element) — does not apply to Swift codebase |
+| 11.1 | XML string concatenation | CRITICAL | [~] | Apple `XMPPXML.swift` legacy builders still string-concat; new MIX builders go through typed `OutboundXMLElement`. Migrate remaining MUC builders to the typed builder. |
+
+## 12. MIX Migration (XEP-0369 / XEP-0405 / XEP-0407)
+
+| # | Gap | Priority | Status | XEP | Notes |
+|---|-----|----------|--------|-----|-------|
+| 12.1 | Apple MIX builders + service methods | HIGH | [~] | XEP-0369, 0405 | `XMPPMIX.clientJoinIQ/clientLeaveIQ/mixMessage/setNickIQ` landed on typed `OutboundXMLElement`; `XMPPService.joinMixChannel/leaveMixChannel/sendMixMessage/setMixNick` expose them. Callers still default to MUC until server dispatch is wired. |
+| 12.2 | Apple client migration from MUC to MIX JIDs | HIGH | [ ] | XEP-0369 | `mixChannelBareJID()` helper present; UI still resolves channels via `roomBareJID()`. Switch once server routes `mix.<domain>`. |
+| 12.3 | Web MIX builders + join flow | HIGH | [ ] | XEP-0369, 0405 | Pending — next phase in this PR stack. |
+| 12.4 | Web client migration from MUC to MIX JIDs | HIGH | [ ] | XEP-0369 | Pending. |
 
 ---
 
