@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { X, CornerDownRight, MessageSquarePlus, ChevronRight } from "lucide-vue-next";
-import AppDrawer from "@/components/ui/AppDrawer.vue";
+import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
@@ -31,6 +30,11 @@ const props = defineProps<{
   isSending: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
+  /**
+   * When true, the composer is hidden and sub-thread navigation is suppressed.
+   * Used to render the parent context pane in the accordion layout.
+   */
+  readOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -54,7 +58,6 @@ const emit = defineEmits<{
 
 const { mode: scrollDirectionMode } = useScrollDirection();
 
-const open = computed(() => props.threadStack.length > 0);
 const activeThreadId = computed(() => props.threadStack[props.threadStack.length - 1] ?? null);
 const parentThreadId = computed(() =>
   props.threadStack.length >= 2 ? props.threadStack[props.threadStack.length - 2] : undefined,
@@ -69,6 +72,15 @@ const orderedChildren = computed(() => {
 });
 
 const scrollContainerRef = ref<HTMLElement | null>(null);
+const draft = ref("");
+const replyingTo = ref<{ id: string; author: string; body?: string } | null>(null);
+
+type ComposerHandle = { focus: () => void };
+const composerRef = ref<ComposerHandle | null>(null);
+
+function setComposerRef(el: ComposerHandle | null) {
+  composerRef.value = el;
+}
 
 async function scrollToPinnedEdge() {
   // Two ticks: first lets Vue flush the DOM update, second gives the browser
@@ -110,6 +122,20 @@ function presenceFor(author: string): OccupantPresence {
   return props.roomPresence[author] ?? "offline";
 }
 
+function beginReplyInThread(message: TimelineMessage) {
+  if (props.readOnly) return;
+  replyingTo.value = {
+    id: message.id,
+    author: message.author,
+    ...(message.body ? { body: message.body } : {}),
+  };
+  void nextTick(() => composerRef.value?.focus());
+}
+
+function cancelReplyInThread() {
+  replyingTo.value = null;
+}
+
 function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) {
   const threadId = activeThreadId.value;
   if (!threadId) return;
@@ -147,136 +173,151 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 </script>
 
 <template>
-  <AppDrawer
-    :open="open"
-    side="right"
-    width-class="w-[min(92vw,28rem)]"
-    @update:open="(v: boolean) => { if (!v) emit('close') }"
-  >
-    <template #title>
+  <div class="flex flex-col flex-1 min-h-0 bg-background border-l border-border">
+    <!-- Header: breadcrumb trail + close / back button -->
+    <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border glass-panel">
       <div class="flex items-center gap-1 text-[13px] font-semibold truncate flex-wrap">
         <span class="text-muted-foreground">Thread</span>
         <template v-for="(label, i) in breadcrumbLabels" :key="i">
           <ChevronRight class="w-3 h-3 text-muted-foreground/60 flex-shrink-0" />
           <button
+            v-if="!readOnly"
             type="button"
             class="truncate max-w-40 text-left hover:text-primary transition-colors"
             :class="i === breadcrumbLabels.length - 1 ? 'text-foreground' : 'text-muted-foreground'"
             :title="label"
             @click="emit('popTo', i)"
           >{{ label }}</button>
+          <span
+            v-else
+            class="truncate max-w-40 text-muted-foreground"
+            :title="label"
+          >{{ label }}</span>
         </template>
       </div>
-    </template>
+      <!-- Mobile back button: goes up one level in the thread stack (hidden on desktop) -->
+      <button
+        v-if="!readOnly && threadStack.length > 1"
+        type="button"
+        class="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-all duration-200 lg:hidden"
+        title="Go back"
+        @click="emit('popTo', threadStack.length - 2)"
+      >
+        <ChevronLeft class="w-4 h-4" />
+      </button>
+      <!-- Close button: closes the entire thread panel -->
+      <button
+        v-if="!readOnly"
+        type="button"
+        class="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-all duration-200"
+        title="Close thread"
+        @click="emit('close')"
+      >
+        <X class="w-4 h-4" />
+      </button>
+    </div>
 
-    <div class="flex flex-col h-full">
-      <div ref="scrollContainerRef" class="flex-1 min-h-0 overflow-auto px-3 py-3">
-        <template v-if="activeEntry">
-          <div v-if="!activeEntry.root" class="text-[12px] text-muted-foreground px-3 py-2 rounded-xl bg-muted/40 mb-2">
-            Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
-          </div>
+    <!-- Messages scroll area -->
+    <div ref="scrollContainerRef" class="flex-1 min-h-0 overflow-auto px-3 py-3">
+      <template v-if="activeEntry">
+        <div v-if="!activeEntry.root" class="text-[12px] text-muted-foreground px-3 py-2 rounded-xl bg-muted/40 mb-2">
+          Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
+        </div>
+        <MessageCard
+          v-if="activeEntry.root"
+          :message="activeEntry.root"
+          :current-user="currentUser"
+          :avatar-url="avatarUrlByAuthor[activeEntry.root.author] ?? null"
+          :hats="hatsFor(activeEntry.root.author)"
+          :presence="presenceFor(activeEntry.root.author)"
+          :last-seen="roomLastSeen[activeEntry.root.author]"
+          :author-jid="authorJidByNick?.[activeEntry.root.author]"
+          :thread-reply-count="activeEntry.count"
+          hide-thread-chip
+          @edit="(id, body, m) => emit('editMessage', id, body, m)"
+          @retract="(id) => emit('retractMessage', id)"
+          @react="(id, emoji) => emit('reactMessage', id, emoji)"
+          @reply="beginReplyInThread"
+          @open-thread="!readOnly ? onOpenThreadFromCard($event) : undefined"
+        />
+
+        <div
+          v-for="child in orderedChildren"
+          :key="child.id"
+          class="relative group/thread-child"
+        >
           <MessageCard
-            v-if="activeEntry.root"
-            :message="activeEntry.root"
+            :message="child"
             :current-user="currentUser"
-            :avatar-url="avatarUrlByAuthor[activeEntry.root.author] ?? null"
-            :hats="hatsFor(activeEntry.root.author)"
-            :presence="presenceFor(activeEntry.root.author)"
-            :last-seen="roomLastSeen[activeEntry.root.author]"
-            :author-jid="authorJidByNick?.[activeEntry.root.author]"
-            :thread-reply-count="activeEntry.count"
+            :avatar-url="avatarUrlByAuthor[child.author] ?? null"
+            :hats="hatsFor(child.author)"
+            :presence="presenceFor(child.author)"
+            :last-seen="roomLastSeen[child.author]"
+            :author-jid="authorJidByNick?.[child.author]"
+            :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
             hide-thread-chip
             @edit="(id, body, m) => emit('editMessage', id, body, m)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReplyInThread"
-            @open-thread="onOpenThreadFromCard"
+            @open-thread="!readOnly ? onOpenThreadFromCard($event) : undefined"
           />
-
-          <div
-            v-for="child in orderedChildren"
-            :key="child.id"
-            class="relative group/thread-child"
-          >
-            <MessageCard
-              :message="child"
-              :current-user="currentUser"
-              :avatar-url="avatarUrlByAuthor[child.author] ?? null"
-              :hats="hatsFor(child.author)"
-              :presence="presenceFor(child.author)"
-              :last-seen="roomLastSeen[child.author]"
-              :author-jid="authorJidByNick?.[child.author]"
-              :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
-              hide-thread-chip
-              @edit="(id, body, m) => emit('editMessage', id, body, m)"
-              @retract="(id) => emit('retractMessage', id)"
-              @react="(id, emoji) => emit('reactMessage', id, emoji)"
-              @reply="beginReplyInThread"
-              @open-thread="onOpenThreadFromCard"
-            />
-            <div class="flex flex-wrap items-center gap-2 pl-12 pb-1.5 -mt-0.5">
-              <button
-                v-if="replyChildHasNestedThread(child)"
-                type="button"
-                class="inline-flex items-center gap-1 text-[11px] text-primary/80 hover:text-primary transition-colors"
-                @click="onOpenThreadFromCard(child.id)"
-              >
-                <CornerDownRight class="w-3 h-3" />
-                <span>{{ threadIndex.get(child.id)?.count ?? 0 }} in sub-thread</span>
-              </button>
-              <button
-                v-else
-                type="button"
-                class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
-                title="Start sub-thread"
-                @click="startSubThread(child)"
-              >
-                <MessageSquarePlus class="w-3 h-3" />
-                <span>Start sub-thread</span>
-              </button>
-            </div>
+          <div v-if="!readOnly" class="flex flex-wrap items-center gap-2 pl-12 pb-1.5 -mt-0.5">
+            <button
+              v-if="replyChildHasNestedThread(child)"
+              type="button"
+              class="inline-flex items-center gap-1 text-[11px] text-primary/80 hover:text-primary transition-colors"
+              @click="onOpenThreadFromCard(child.id)"
+            >
+              <CornerDownRight class="w-3 h-3" />
+              <span>{{ threadIndex.get(child.id)?.count ?? 0 }} in sub-thread</span>
+            </button>
+            <button
+              v-else
+              type="button"
+              class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors opacity-60 group-hover/thread-child:opacity-100 focus-visible:opacity-100"
+              title="Start sub-thread"
+              @click="startSubThread(child)"
+            >
+              <MessageSquarePlus class="w-3 h-3" />
+              <span>Start sub-thread</span>
+            </button>
           </div>
-
-          <div
-            v-if="activeEntry.directChildren.length === 0"
-            class="text-center py-8 text-[12px] text-muted-foreground"
-          >
-            No replies yet. Start the conversation.
-          </div>
-        </template>
-        <div
-          v-else
-          class="text-center py-10 text-[13px] text-muted-foreground"
-        >
-          Loading thread...
         </div>
-      </div>
 
-      <div class="border-t border-border flex-shrink-0">
-        <MessageComposer
-          :ref="setComposerRef"
-          v-model:draft="draft"
-          :channel-name="`thread in ${channelName}`"
-          :is-sending="isSending"
-          :disabled="false"
-          :tenor-api-key="tenorApiKey"
-          :member-names="memberNames"
-          :slow-mode-cooldown="slowModeCooldown"
-          :upload-progress="uploadProgress"
-          :replying-to="replyingTo"
-          @send="onSend"
-          @cancel-reply="cancelReplyInThread"
-          @typing="emit('typing')"
-          @select-gif="(url: string) => emit('selectGif', url)"
-        />
+        <div
+          v-if="activeEntry.directChildren.length === 0 && !readOnly"
+          class="text-center py-8 text-[12px] text-muted-foreground"
+        >
+          No replies yet. Start the conversation.
+        </div>
+      </template>
+      <div
+        v-else
+        class="text-center py-10 text-[13px] text-muted-foreground"
+      >
+        Loading thread...
       </div>
     </div>
 
-    <div class="absolute top-2 right-12 flex items-center gap-1 pointer-events-none">
-      <!-- Kept for a11y parity; AppDrawer already has a close button. -->
-      <span class="sr-only">
-        <button type="button" @click="emit('close')"><X class="w-4 h-4" /></button>
-      </span>
+    <!-- Composer: hidden in readOnly (parent context) mode -->
+    <div v-if="!readOnly" class="border-t border-border flex-shrink-0">
+      <MessageComposer
+        :ref="setComposerRef"
+        v-model:draft="draft"
+        :channel-name="`thread in ${channelName}`"
+        :is-sending="isSending"
+        :disabled="false"
+        :tenor-api-key="tenorApiKey"
+        :member-names="memberNames"
+        :slow-mode-cooldown="slowModeCooldown"
+        :upload-progress="uploadProgress"
+        :replying-to="replyingTo"
+        @send="onSend"
+        @cancel-reply="cancelReplyInThread"
+        @typing="emit('typing')"
+        @select-gif="(url: string) => emit('selectGif', url)"
+      />
     </div>
-  </AppDrawer>
+  </div>
 </template>
