@@ -15,6 +15,7 @@
 use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::iq::{Iq, IqType};
+use xmpp_parsers::message::{Message, MessageType};
 
 use crate::inbox::{ConversationKind, InboxEntry};
 
@@ -191,6 +192,19 @@ pub fn build_mark_read_result(original: &Iq) -> Iq {
         id: original.id.clone(),
         payload: IqType::Result(None),
     }
+}
+
+/// Build a headline message that pushes an updated inbox entry to a user.
+///
+/// The stanza carries a single `<conversation>` child in the inbox namespace,
+/// identical to what `build_inbox_query_result` emits for each entry.  Clients
+/// that understand `urn:xmpp:inbox:0` can parse this the same way they parse
+/// query results and update their local unread state in real time.
+pub fn build_inbox_push(to: jid::Jid, entry: &InboxEntry) -> Message {
+    let mut msg = Message::new(Some(to));
+    msg.type_ = MessageType::Headline;
+    msg.payloads.push(build_entry_element(entry));
+    msg
 }
 
 pub fn is_inbox_iq(iq: &Iq) -> bool {

@@ -1008,6 +1008,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         storage
             .upsert(user_jid, entry, increment_unread)
             .await
+            .map(|_| ())
             .map_err(|error| {
                 warn!(jid = %user_jid, error = %error, "Failed to upsert inbox entry");
                 XmppError::internal(format!("Inbox error: {}", error))

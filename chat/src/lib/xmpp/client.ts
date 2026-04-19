@@ -163,6 +163,7 @@ export class BrowserXmppClient {
   private hatsHandler: ((hats: RoomHats) => void) | null = null;
   private slowModeHandler: ((seconds: number) => void) | null = null;
   private activityHandler: ((event: RoomActivityEvent) => void) | null = null;
+  private inboxPushHandler: ((entry: inboxApi.InboxEntry) => void) | null = null;
   private roomAvatarHandler: ((roomJid: string, hash: string) => void) | null = null;
   private roomDisconnectHandler: (() => void) | null = null;
   private presenceHandler: ((presence: RoomPresence) => void) | null = null;
@@ -208,6 +209,7 @@ export class BrowserXmppClient {
   setHatsHandler(h: (hats: RoomHats) => void) { this.hatsHandler = h; }
   setSlowModeHandler(h: (seconds: number) => void) { this.slowModeHandler = h; }
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.activityHandler = h; }
+  setInboxPushHandler(h: (entry: inboxApi.InboxEntry) => void) { this.inboxPushHandler = h; }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.roomAvatarHandler = h; }
   setRoomDisconnectHandler(h: () => void) { this.roomDisconnectHandler = h; }
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.presenceHandler = h; }
@@ -1295,6 +1297,19 @@ export class BrowserXmppClient {
         onChatState: this.dmChatStateHandler,
         onDisplayed: this.dmDisplayedHandler,
         onReaction: this.dmReactionHandler,
+      });
+    });
+
+    xmpp.on("message", (msg: ReceivedMessage) => {
+      const push = (msg as ReceivedMessage & { inboxPush?: { partner?: string; kind?: string; lastStanzaId?: string; lastUpdated?: number; unread?: number; preview?: string } }).inboxPush;
+      if (!push?.partner) return;
+      this.inboxPushHandler?.({
+        partner: push.partner,
+        kind: push.kind === "muc" ? "muc" : "direct",
+        lastStanzaId: push.lastStanzaId ?? "",
+        lastUpdated: typeof push.lastUpdated === "number" ? push.lastUpdated : 0,
+        unread: typeof push.unread === "number" ? push.unread : 0,
+        preview: push.preview || undefined,
       });
     });
 

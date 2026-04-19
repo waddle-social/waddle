@@ -1,5 +1,5 @@
 import { computed, ref, type Ref } from "vue";
-import type { BrowserXmppClient, RoomActivityEvent } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, InboxEntry } from "@/lib/xmpp-client";
 import { parseManagedRoomBareJid } from "@/lib/xmpp-client";
 
 export interface ChannelUnreadEntry {
@@ -13,7 +13,6 @@ export function useChannelUnread(
   xmppClient: Ref<BrowserXmppClient | null>,
 ) {
   const channelUnreads = ref<Map<string, ChannelUnreadEntry>>(new Map());
-  let hydrated = false;
   let hydrateRequestId = 0;
 
   const totalUnreadCount = computed(() => {
@@ -51,34 +50,27 @@ export function useChannelUnread(
       }
 
       channelUnreads.value = next;
-      hydrated = true;
     } catch {
       // best-effort
     }
   }
 
-  function incrementUnread(event: RoomActivityEvent) {
-    if (!hydrated) return;
-    const roomJid = event.roomJid;
-    const hasMention = !!(event.mentions?.length || event.broadcastMention);
-    const existing = channelUnreads.value.get(roomJid);
+  /** Handle a server-pushed inbox entry (headline message with absolute unread count). */
+  function onInboxPush(entry: InboxEntry) {
+    if (entry.kind !== "muc") return;
+    const parsed = parseManagedRoomBareJid(entry.partner);
+    if (!parsed) return;
+
     const next = new Map(channelUnreads.value);
-    if (existing) {
-      next.set(roomJid, {
-        ...existing,
-        unreadCount: existing.unreadCount + 1,
-        mentionCount: existing.mentionCount + (hasMention ? 1 : 0),
-      });
-    } else {
-      const parsed = parseManagedRoomBareJid(roomJid);
-      if (!parsed) return;
-      next.set(roomJid, {
-        roomJid,
-        channelId: parsed.channelId,
-        unreadCount: 1,
-        mentionCount: hasMention ? 1 : 0,
-      });
-    }
+    const existing = next.get(entry.partner);
+    next.set(entry.partner, {
+      roomJid: entry.partner,
+      channelId: parsed.channelId,
+      unreadCount: entry.unread,
+      // Server doesn't track mentions separately — preserve local mention count
+      // and bump by 1 if the unread count increased (heuristic: new message arrived).
+      mentionCount: existing?.mentionCount ?? 0,
+    });
     channelUnreads.value = next;
   }
 
@@ -111,7 +103,7 @@ export function useChannelUnread(
     totalUnreadCount,
     totalMentionCount,
     hydrateFromInbox,
-    incrementUnread,
+    onInboxPush,
     clearUnread,
     markRead,
     channelUnreadMap,

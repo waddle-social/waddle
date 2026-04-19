@@ -486,6 +486,7 @@ impl AppState for MockAppState {
         self.inbox_storage
             .upsert(user_jid, entry, increment_unread)
             .await
+            .map(|_| ())
             .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
     }
 

@@ -226,12 +226,6 @@ watch(() => messaging.lastMentionActivity.value, (event) => {
   messaging.lastMentionActivity.value = null;
 });
 
-watch(() => messaging.lastBackgroundActivity.value, (event) => {
-  if (!event) return;
-  channelUnread.incrementUnread(event);
-  messaging.lastBackgroundActivity.value = null;
-});
-
 watch(xmppClient, (client) => {
   if (!client || !session.value) return;
   client.setDirectMessageHandler((msg) => {
@@ -272,6 +266,9 @@ watch(xmppClient, (client) => {
   client.setQueuedMessageStatusHandler((id, status) => {
     messaging.onMessageQueueStatus(id, status);
     dmMessaging.onMessageQueueStatus(id, status);
+  });
+  client.setInboxPushHandler((entry) => {
+    channelUnread.onInboxPush(entry);
   });
   client.setSessionLifecycleHandler((event) => {
     messaging.onSessionLifecycle(event);
