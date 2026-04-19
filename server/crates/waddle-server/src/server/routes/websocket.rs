@@ -2925,15 +2925,15 @@ mod tests {
         let features = &responses[1];
         assert!(
             features.contains("<mechanism>OAUTHBEARER</mechanism>"),
-            "expected OAUTHBEARER in WebSocket SASL mechanisms: {features}"
+            "expected OAUTHBEARER in WebSocket SASL mechanisms"
         );
         assert!(
             features.contains("<mechanism>SCRAM-SHA-256</mechanism>"),
-            "expected SCRAM-SHA-256 in WebSocket SASL mechanisms: {features}"
+            "expected SCRAM-SHA-256 in WebSocket SASL mechanisms"
         );
         assert!(
             !features.contains("<mechanism>PLAIN</mechanism>"),
-            "expected WebSocket SASL mechanisms to exclude PLAIN: {features}"
+            "expected WebSocket SASL mechanisms to exclude PLAIN"
         );
     }
 

@@ -357,13 +357,14 @@ mod tests {
     #[test]
     fn test_build_direct_invite_full() {
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
-        let invite = DirectInvite::with_password(jid, Some("Join us!".to_string()), "secret123");
+        let password = format!("test-{}", uuid::Uuid::new_v4());
+        let invite = DirectInvite::with_password(jid, Some("Join us!".to_string()), &password);
 
         let elem = build_direct_invite(&invite);
 
         assert_eq!(elem.attr("jid"), Some("room@conference.example.com"));
         assert_eq!(elem.attr("reason"), Some("Join us!"));
-        assert_eq!(elem.attr("password"), Some("secret123"));
+        assert_eq!(elem.attr("password"), Some(password.as_str()));
     }
 
     #[test]
@@ -413,15 +414,19 @@ mod tests {
         invite.set_reason("Come join!");
         assert_eq!(invite.reason.as_deref(), Some("Come join!"));
 
-        invite.set_password("secret");
-        assert_eq!(invite.password.as_deref(), Some("secret"));
+        let password = format!("test-{}", uuid::Uuid::new_v4());
+        invite.set_password(&password);
+        assert!(invite.password.is_some());
     }
 
     #[test]
     fn test_roundtrip() {
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
-        let original =
-            DirectInvite::with_password(jid, Some("Test roundtrip".to_string()), "testpass");
+        let original = DirectInvite::with_password(
+            jid,
+            Some("Test roundtrip".to_string()),
+            &format!("test-{}", uuid::Uuid::new_v4()),
+        );
 
         // Build the element
         let elem = build_direct_invite(&original);

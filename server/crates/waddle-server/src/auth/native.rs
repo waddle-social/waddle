@@ -296,10 +296,7 @@ impl NativeUserStore {
 
 /// Generate a random SCRAM salt (16 bytes).
 fn generate_scram_salt() -> Vec<u8> {
-    use rand::Rng;
-    let mut salt = vec![0u8; 16];
-    rand::rng().fill(&mut salt[..]);
-    salt
+    rand::random::<[u8; 16]>().to_vec()
 }
 
 /// Helper to convert libsql errors to AuthError.
@@ -352,6 +349,10 @@ mod tests {
     use super::*;
     use crate::db::MigrationRunner;
 
+    fn test_password(label: &str) -> String {
+        format!("{}-{}", label, uuid::Uuid::new_v4())
+    }
+
     async fn create_test_db() -> Arc<Database> {
         let db = Database::in_memory("test-native-users")
             .await
@@ -373,7 +374,7 @@ mod tests {
         let request = RegisterRequest {
             username: "alice".to_string(),
             domain: "example.com".to_string(),
-            password: "secret123".to_string(),
+            password: test_password("reg"),
             email: Some("alice@email.com".to_string()),
         };
 
@@ -396,7 +397,7 @@ mod tests {
         let request = RegisterRequest {
             username: "bob".to_string(),
             domain: "example.com".to_string(),
-            password: "secret123".to_string(),
+            password: test_password("reg"),
             email: None,
         };
 
@@ -418,7 +419,7 @@ mod tests {
         let request = RegisterRequest {
             username: "charlie".to_string(),
             domain: "example.com".to_string(),
-            password: "testpassword".to_string(),
+            password: test_password("scram"),
             email: None,
         };
 
@@ -444,10 +445,11 @@ mod tests {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
 
+        let correct_pw = test_password("correct");
         let request = RegisterRequest {
             username: "dave".to_string(),
             domain: "example.com".to_string(),
-            password: "correctpassword".to_string(),
+            password: correct_pw.clone(),
             email: None,
         };
 
@@ -455,21 +457,21 @@ mod tests {
 
         // Correct password should verify
         let verified = store
-            .verify_password("dave", "example.com", "correctpassword")
+            .verify_password("dave", "example.com", &correct_pw)
             .await
             .unwrap();
         assert!(verified);
 
         // Wrong password should not verify
         let verified = store
-            .verify_password("dave", "example.com", "wrongpassword")
+            .verify_password("dave", "example.com", &test_password("wrong"))
             .await
             .unwrap();
         assert!(!verified);
 
         // Non-existent user should not verify
         let verified = store
-            .verify_password("nonexistent", "example.com", "anypassword")
+            .verify_password("nonexistent", "example.com", &test_password("any"))
             .await
             .unwrap();
         assert!(!verified);
@@ -480,10 +482,12 @@ mod tests {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
 
+        let old_pw = test_password("old");
+        let new_pw = test_password("new");
         let request = RegisterRequest {
             username: "eve".to_string(),
             domain: "example.com".to_string(),
-            password: "oldpassword".to_string(),
+            password: old_pw.clone(),
             email: None,
         };
 
@@ -491,20 +495,20 @@ mod tests {
 
         // Update password
         store
-            .update_password("eve", "example.com", "newpassword")
+            .update_password("eve", "example.com", &new_pw)
             .await
             .unwrap();
 
         // Old password should not work
         let verified = store
-            .verify_password("eve", "example.com", "oldpassword")
+            .verify_password("eve", "example.com", &old_pw)
             .await
             .unwrap();
         assert!(!verified);
 
         // New password should work
         let verified = store
-            .verify_password("eve", "example.com", "newpassword")
+            .verify_password("eve", "example.com", &new_pw)
             .await
             .unwrap();
         assert!(verified);
@@ -518,7 +522,7 @@ mod tests {
         let request = RegisterRequest {
             username: "frank".to_string(),
             domain: "example.com".to_string(),
-            password: "password".to_string(),
+            password: test_password("delete"),
             email: None,
         };
 

@@ -526,13 +526,8 @@ async fn main() -> Result<()> {
 
 async fn run_status() -> Result<()> {
     match login::load_credentials() {
-        Ok(creds) => {
-            println!("Logged in as: @{}", creds.username);
-            println!("User ID: {}", creds.user_id);
-            println!("Provider: {}", creds.provider_id);
-            println!("JID: {}", creds.jid);
-            println!("XMPP: {}:{}", creds.xmpp_host, creds.xmpp_port);
-            println!("API: {}", creds.server_url);
+        Ok(_) => {
+            println!("Logged in.");
         }
         Err(_) => {
             println!("Not logged in.");

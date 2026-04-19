@@ -358,11 +358,12 @@ mod tests {
     #[test]
     fn test_bookmark_round_trip() {
         let jid: BareJid = "room@conference.example.com".parse().expect("valid jid");
+        let password = format!("test-{}", uuid::Uuid::new_v4());
         let original = Bookmark::new(jid.clone())
             .with_name("Test Room")
             .with_autojoin(true)
             .with_nick("TestNick")
-            .with_password("secret123");
+            .with_password(&password);
 
         let elem = build_bookmark_element(&original);
         let parsed = parse_bookmark(&jid.to_string(), &elem).expect("should parse");

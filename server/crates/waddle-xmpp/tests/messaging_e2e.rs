@@ -13,7 +13,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{encode_sasl_plain, extract_bound_jid, RawXmppClient, TestServer, DEFAULT_TIMEOUT};
+use common::{
+    encode_sasl_plain, extract_bound_jid, test_secret, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
+};
 
 /// Initialize tracing and crypto provider for tests.
 fn init_test() {
@@ -83,7 +85,7 @@ async fn establish_session(
     client.clear();
 
     // SASL PLAIN auth
-    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), "token123");
+    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

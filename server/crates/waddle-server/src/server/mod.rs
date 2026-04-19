@@ -766,8 +766,8 @@ async fn ensure_fixed_test_account(
         anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_USERNAME cannot be empty");
     }
 
-    let password =
-        std::env::var("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD").unwrap_or_else(|_| "admin".to_string());
+    let password = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD")
+        .map_err(|_| anyhow::anyhow!("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD must be set when WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true"))?;
     if password.is_empty() {
         anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD cannot be empty");
     }
@@ -1486,7 +1486,7 @@ mod tests {
         let state = create_test_state().await;
         let config = FixedTestAccountConfig {
             username: "admin".to_string(),
-            password: "admin".to_string(),
+            password: uuid::Uuid::new_v4().to_string(),
             domain: "localhost".to_string(),
             email: Some("admin@localhost".to_string()),
         };
@@ -1511,11 +1511,13 @@ mod tests {
         let state = create_test_state().await;
         let native_user_store = NativeUserStore::new(Arc::new(state.db_pool.global().clone()));
 
+        let old_pass = uuid::Uuid::new_v4().to_string();
+        let new_pass = uuid::Uuid::new_v4().to_string();
         native_user_store
             .register(RegisterRequest {
                 username: "admin".to_string(),
                 domain: "localhost".to_string(),
-                password: "old-password".to_string(),
+                password: old_pass.clone(),
                 email: None,
             })
             .await
@@ -1523,7 +1525,7 @@ mod tests {
 
         let config = FixedTestAccountConfig {
             username: "admin".to_string(),
-            password: "new-password".to_string(),
+            password: new_pass.clone(),
             domain: "localhost".to_string(),
             email: None,
         };
@@ -1536,7 +1538,7 @@ mod tests {
             .await
             .unwrap());
         assert!(!native_user_store
-            .verify_password(&config.username, &config.domain, "old-password")
+            .verify_password(&config.username, &config.domain, &old_pass)
             .await
             .unwrap());
 

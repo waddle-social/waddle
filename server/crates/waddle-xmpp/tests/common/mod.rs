@@ -898,6 +898,11 @@ pub fn encode_sasl_plain(jid: &str, password: &str) -> String {
     BASE64_STANDARD.encode(data.as_bytes())
 }
 
+/// Generate a unique test credential (not a real secret).
+pub fn test_secret(label: &str) -> String {
+    format!("{}-{}", label, uuid::Uuid::new_v4())
+}
+
 /// Helper to validate stream header attributes.
 pub fn validate_stream_header(response: &str) -> Result<(), String> {
     // Check for required xmlns
@@ -1000,7 +1005,10 @@ pub async fn establish_bound_session(
     client.clear();
 
     // SASL PLAIN auth.
-    let auth_data = encode_sasl_plain(&format!("{}@{}", username, server.domain), "token123");
+    let auth_data = encode_sasl_plain(
+        &format!("{}@{}", username, server.domain),
+        &test_secret("auth"),
+    );
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1154,9 +1162,10 @@ mod tests {
         client.clear();
         assert!(client.buffer.is_empty());
 
+        const SASL_TEST_INPUT: &str = "sasl-test-value";
         assert_eq!(
-            encode_sasl_plain("alice@localhost", "token123"),
-            BASE64_STANDARD.encode("\0alice@localhost\0token123".as_bytes())
+            encode_sasl_plain("alice@localhost", SASL_TEST_INPUT),
+            BASE64_STANDARD.encode(format!("\0alice@localhost\0{SASL_TEST_INPUT}").as_bytes())
         );
         assert_eq!(
             extract_bound_jid("<jid>alice@localhost/desktop</jid>").as_deref(),

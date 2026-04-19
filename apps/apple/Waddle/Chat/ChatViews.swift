@@ -983,133 +983,13 @@ struct ChatTypingIndicatorView: View {
 
 struct ChatGifPickerView: View {
     var onSelect: (String) -> Void
-    @State private var searchText = ""
-    @State private var results: [GiphyGif] = []
-    @State private var isLoading = false
-    @State private var searchTask: Task<Void, Never>?
-
-    private let apiKey = "dc6zaTOxFJmzC"
-
-    struct GiphyGif: Identifiable, Decodable {
-        let id: String
-        let images: GiphyImages
-
-        struct GiphyImages: Decodable {
-            let fixed_height_small: GiphyImage
-            let original: GiphyImage
-        }
-
-        struct GiphyImage: Decodable {
-            let url: String
-            let width: String?
-            let height: String?
-        }
-    }
-
-    struct GiphyResponse: Decodable {
-        let data: [GiphyGif]
-    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.caption)
-                    .foregroundStyle(WaddleTheme.textMuted)
-                TextField("Search GIFs", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(WaddleTheme.textPrimary)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(WaddleTheme.textMuted)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
-            .padding(10)
-            .onChange(of: searchText) { _, query in
-                searchTask?.cancel()
-                searchTask = Task {
-                    try? await Task.sleep(nanoseconds: 300_000_000)
-                    guard !Task.isCancelled else { return }
-                    await fetchGifs(query: query)
-                }
-            }
-
-            if isLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if results.isEmpty {
-                Text("No GIFs found")
-                    .font(.caption)
-                    .foregroundStyle(WaddleTheme.textMuted)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 4)], spacing: 4) {
-                        ForEach(results) { gif in
-                            Button {
-                                onSelect(gif.images.original.url)
-                            } label: {
-                                AsyncImage(url: URL(string: gif.images.fixed_height_small.url)) { phase in
-                                    switch phase {
-                                    case .success(let image):
-                                        image
-                                            .resizable()
-                                            .aspectRatio(contentMode: .fill)
-                                            .frame(height: 80)
-                                            .clipped()
-                                    case .empty:
-                                        WaddleTheme.surfaceRaised
-                                            .frame(height: 80)
-                                            .overlay { ProgressView() }
-                                    default:
-                                        WaddleTheme.surfaceRaised
-                                            .frame(height: 80)
-                                    }
-                                }
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(8)
-                }
-            }
-        }
-        .frame(width: 360, height: 340)
-        .background(WaddleTheme.sidebarBackground)
-        .task {
-            await fetchGifs(query: "")
-        }
-    }
-
-    private func fetchGifs(query: String) async {
-        isLoading = true
-        defer { isLoading = false }
-
-        let endpoint: String
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            endpoint = "https://api.giphy.com/v1/gifs/trending?api_key=\(apiKey)&limit=24&rating=g"
-        } else {
-            let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-            endpoint = "https://api.giphy.com/v1/gifs/search?q=\(encoded)&api_key=\(apiKey)&limit=24&rating=g"
-        }
-
-        guard let url = URL(string: endpoint) else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let response = try JSONDecoder().decode(GiphyResponse.self, from: data)
-            results = response.data
-        } catch {
-            results = []
+        VStack {
+            Spacer()
+            Text("GIF search not configured.")
+                .foregroundStyle(.secondary)
+            Spacer()
         }
     }
 }

@@ -8,14 +8,14 @@ use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
-const PASSWORD: &str = "admin";
 
 /// Start an isolated server and connect an authenticated client.
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
+    let password = server.fixed_account_password().to_string();
     let resource = format!("test-{}", uuid::Uuid::new_v4());
     let client =
-        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, PASSWORD, &resource)
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, &resource)
             .await
             .expect("Failed to connect and authenticate");
     (server, client)

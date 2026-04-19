@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    encode_sasl_plain, extract_bound_jid, validate_stream_header, MockAppState, RawXmppClient,
-    TestServer, DEFAULT_TIMEOUT,
+    encode_sasl_plain, extract_bound_jid, test_secret, validate_stream_header, MockAppState,
+    RawXmppClient, TestServer, DEFAULT_TIMEOUT,
 };
 
 /// Initialize tracing and crypto provider for tests (only once).
@@ -405,7 +405,7 @@ async fn test_sasl_plain_auth_success() {
     client.clear();
 
     // Send SASL PLAIN auth
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -482,7 +482,7 @@ async fn test_sasl_auth_failure() {
     client.clear();
 
     // Send SASL auth (will be rejected by MockAppState)
-    let auth_data = encode_sasl_plain("baduser@localhost", "badtoken");
+    let auth_data = encode_sasl_plain("baduser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -588,7 +588,7 @@ async fn test_bind_feature_advertised() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -676,7 +676,7 @@ async fn test_resource_binding_returns_full_jid() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -793,7 +793,7 @@ async fn test_resource_binding_with_requested_resource() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -926,7 +926,7 @@ async fn test_feature_negotiation_order() {
     client.clear();
 
     // After SASL, should have bind
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1018,7 +1018,7 @@ async fn test_graceful_stream_close() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1161,7 +1161,7 @@ async fn test_disco_info_server() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1303,7 +1303,7 @@ async fn test_disco_items_server() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1421,7 +1421,7 @@ async fn test_disco_info_muc_service() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", "testtoken");
+    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1565,7 +1565,7 @@ async fn test_complete_session_establishment() {
     client.clear();
 
     // Step 5: SASL authentication
-    let auth_data = encode_sasl_plain("user@localhost", "token123");
+    let auth_data = encode_sasl_plain("user@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1690,7 +1690,7 @@ async fn establish_session(
     client.clear();
 
     // SASL PLAIN auth
-    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), "token123");
+    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

@@ -1345,10 +1345,6 @@ func phaseVerify(ctx context.Context, op *operation.Operation, cfg *config.Confi
 	}
 
 	fmt.Printf("\nCluster %q created successfully!\n", cfg.Environment)
-	fmt.Printf("  Node:       %s\n", nodeName)
-	fmt.Printf("  Public IP:  %s\n", op.GetContextString("publicIP"))
-	fmt.Printf("  Ingress IP: %s\n", op.GetContextString(opContextIngressPublicIPv4))
-	fmt.Printf("  Server ID:  %s\n", op.GetContextString("serverId"))
 
 	return nil
 }

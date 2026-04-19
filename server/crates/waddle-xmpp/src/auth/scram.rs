@@ -332,9 +332,7 @@ pub fn generate_scram_keys(password: &str, salt: &[u8], iterations: u32) -> (Vec
 
 /// Generate a random salt for SCRAM.
 pub fn generate_salt() -> Vec<u8> {
-    let mut salt = vec![0u8; 16];
-    rand::rng().fill(&mut salt[..]);
-    salt
+    rand::random::<[u8; 16]>().to_vec()
 }
 
 /// Generate a random nonce string.
@@ -515,18 +513,18 @@ mod tests {
     /// Test basic SCRAM key generation.
     #[test]
     fn test_generate_scram_keys() {
-        let password = "password";
-        let salt = b"salt1234salt1234"; // 16 bytes
+        let password = format!("test-{}", uuid::Uuid::new_v4());
+        let salt = generate_salt();
         let iterations = 4096;
 
-        let (stored_key, server_key) = generate_scram_keys(password, salt, iterations);
+        let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
 
         // Keys should be 32 bytes (SHA-256 output)
         assert_eq!(stored_key.len(), 32);
         assert_eq!(server_key.len(), 32);
 
         // Keys should be deterministic
-        let (stored_key2, server_key2) = generate_scram_keys(password, salt, iterations);
+        let (stored_key2, server_key2) = generate_scram_keys(&password, &salt, iterations);
         assert_eq!(stored_key, stored_key2);
         assert_eq!(server_key, server_key2);
     }
@@ -535,10 +533,10 @@ mod tests {
     #[test]
     fn test_scram_full_exchange() {
         // Setup: generate keys for a known password
-        let password = "test-password";
+        let password = format!("test-{}", uuid::Uuid::new_v4());
         let salt = generate_salt();
         let iterations = 4096;
-        let (stored_key, server_key) = generate_scram_keys(password, &salt, iterations);
+        let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
 
         // Create server instance with the same salt
         let mut server = ScramServer::with_salt(salt.clone(), iterations);
@@ -675,18 +673,18 @@ mod tests {
     #[test]
     fn test_rfc_structure() {
         // This tests that our implementation follows the RFC structure
-        let password = "pencil";
+        let password = format!("test-{}", uuid::Uuid::new_v4());
         let salt = BASE64_STANDARD.decode("QSXCR+Q6sek8bf92").unwrap();
         let iterations = 4096;
 
-        let (stored_key, server_key) = generate_scram_keys(password, &salt, iterations);
+        let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
 
         // StoredKey and ServerKey should be 32 bytes for SHA-256
         assert_eq!(stored_key.len(), 32);
         assert_eq!(server_key.len(), 32);
 
         // Verify keys are deterministic
-        let (stored_key2, server_key2) = generate_scram_keys(password, &salt, iterations);
+        let (stored_key2, server_key2) = generate_scram_keys(&password, &salt, iterations);
         assert_eq!(stored_key, stored_key2);
         assert_eq!(server_key, server_key2);
     }
@@ -720,16 +718,16 @@ mod tests {
     /// Test authentication failure with wrong password.
     #[test]
     fn test_wrong_password() {
-        let correct_password = "correct-password";
-        let wrong_password = "wrong-password";
+        let correct_password = format!("correct-{}", uuid::Uuid::new_v4());
+        let wrong_password = format!("wrong-{}", uuid::Uuid::new_v4());
         let salt = generate_salt();
         let iterations = 4096;
 
         // Generate keys for correct password
-        let (stored_key, server_key) = generate_scram_keys(correct_password, &salt, iterations);
+        let (stored_key, server_key) = generate_scram_keys(&correct_password, &salt, iterations);
 
         // Generate keys for wrong password (simulating what client would compute)
-        let (_, _) = generate_scram_keys(wrong_password, &salt, iterations);
+        let (_, _) = generate_scram_keys(&wrong_password, &salt, iterations);
 
         // Start SCRAM exchange
         let mut server = ScramServer::with_salt(salt.clone(), iterations);

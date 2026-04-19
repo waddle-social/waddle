@@ -10,7 +10,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{encode_sasl_plain, extract_bound_jid, RawXmppClient, TestServer, DEFAULT_TIMEOUT};
+use common::{
+    encode_sasl_plain, extract_bound_jid, test_secret, RawXmppClient, TestServer, DEFAULT_TIMEOUT,
+};
 
 fn init_test() {
     use std::sync::Once;
@@ -85,7 +87,7 @@ async fn establish_authenticated_session(
     );
     client.clear();
 
-    let auth_data = encode_sasl_plain(&format!("{username}@localhost"), "token123");
+    let auth_data = encode_sasl_plain(&format!("{username}@localhost"), &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -237,7 +239,7 @@ async fn test_starttls_auth_bind_regression_guard() {
     );
     client.clear();
 
-    let auth_data = encode_sasl_plain("startup@localhost", "token123");
+    let auth_data = encode_sasl_plain("startup@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

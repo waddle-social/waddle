@@ -33,6 +33,7 @@ pub struct TestServer {
     process: Child,
     http_port: u16,
     port_file: std::path::PathBuf,
+    fixed_account_password: String,
 }
 
 impl TestServer {
@@ -44,9 +45,15 @@ impl TestServer {
         let port_file =
             std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
 
+        let fixed_account_password = format!("test-{}", uuid::Uuid::new_v4());
+
         let child = Command::new(bin)
             .env("WADDLE_CERTS_EPHEMERAL", "true")
             .env("WADDLE_TEST_FIXED_ACCOUNT_ENABLED", "true")
+            .env(
+                "WADDLE_TEST_FIXED_ACCOUNT_PASSWORD",
+                &fixed_account_password,
+            )
             .env("WADDLE_HTTP_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_C2S_ADDR", "127.0.0.1:0")
             .env("WADDLE_XMPP_DOMAIN", "localhost")
@@ -89,12 +96,18 @@ impl TestServer {
             process: child,
             http_port,
             port_file,
+            fixed_account_password,
         }
     }
 
     /// WebSocket URL for the XMPP endpoint.
     pub fn ws_url(&self) -> String {
         format!("ws://127.0.0.1:{}/xmpp-websocket", self.http_port)
+    }
+
+    /// The password for the fixed test account (username: "admin").
+    pub fn fixed_account_password(&self) -> &str {
+        &self.fixed_account_password
     }
 }
 

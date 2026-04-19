@@ -187,7 +187,7 @@ pub async fn run_login(provider: &str, server_url: &str) -> Result<()> {
 
                     save_credentials(&creds)?;
 
-                    println!("  Success! Logged in as @{}", complete.username);
+                    println!("  Success! Login complete.");
                     println!();
                     println!("  You can now run 'waddle' to start the TUI.");
                     println!();

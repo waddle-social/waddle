@@ -19,6 +19,9 @@ on:
       - '.github/workflows/xmpp-compliance.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

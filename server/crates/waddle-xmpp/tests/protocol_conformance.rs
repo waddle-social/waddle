@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use common::{
     disco_info_query, encode_sasl_plain, establish_bound_session, extract_bound_jid, init_test_env,
-    join_muc_room, ping_query, validate_stream_header, MockAppState, RawXmppClient, TestServer,
-    DEFAULT_TIMEOUT,
+    join_muc_room, ping_query, test_secret, validate_stream_header, MockAppState, RawXmppClient,
+    TestServer, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -147,7 +147,7 @@ async fn rfc6120_sasl_plain_auth_succeeds() {
     client.clear();
 
     // Auth
-    let auth_data = encode_sasl_plain("user@localhost", "token123");
+    let auth_data = encode_sasl_plain("user@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -214,7 +214,7 @@ async fn rfc6120_sasl_auth_failure_returns_not_authorized() {
         .expect("features");
     client.clear();
 
-    let auth_data = encode_sasl_plain("user@localhost", "wrong");
+    let auth_data = encode_sasl_plain("user@localhost", &test_secret("invalid"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -306,7 +306,7 @@ async fn rfc6120_server_assigned_resource_when_none_requested() {
         .expect("features");
     client.clear();
 
-    let auth_data = encode_sasl_plain("norc@localhost", "token");
+    let auth_data = encode_sasl_plain("norc@localhost", &test_secret("auth"));
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
