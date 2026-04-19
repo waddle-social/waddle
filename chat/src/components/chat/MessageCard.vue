@@ -324,7 +324,7 @@ function submitEditFromEditor(doc: Record<string, unknown>) {
 }
 
 function emitAvatarClick() {
-  if (props.authorJid && !props.message.isSelf) {
+  if (!props.message.isSelf) {
     emit("avatarClick", props.message.author);
   }
 }
