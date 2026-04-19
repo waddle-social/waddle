@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
-import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare } from "lucide-vue-next";
+import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
-import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan } from "@/lib/chat-ui";
+import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan, type TimelineSharedFile } from "@/lib/chat-ui";
 import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
 import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
+import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 import { useLongPress } from "@/composables/useLongPress";
@@ -78,19 +79,130 @@ const displayBody = computed(() => {
 
 const lightboxOpen = ref(false);
 const lightboxIndex = ref(0);
+const decryptedAttachmentUrls = ref<Record<string, string>>({});
+const decryptedAttachmentErrors = ref<Record<string, string>>({});
+const decryptingAttachmentKeys = ref<Record<string, boolean>>({});
+
+function attachmentKey(file: TimelineSharedFile): string {
+  return hasEncryptedAttachmentMetadata(file) ? encryptedAttachmentKey(file) : file.url;
+}
+
+function setAttachmentFlag(state: typeof decryptingAttachmentKeys, key: string, value: boolean) {
+  const next = { ...state.value };
+  if (value) next[key] = true;
+  else delete next[key];
+  state.value = next;
+}
+
+function setAttachmentError(key: string, value?: string) {
+  const next = { ...decryptedAttachmentErrors.value };
+  if (value) next[key] = value;
+  else delete next[key];
+  decryptedAttachmentErrors.value = next;
+}
+
+function revokeAttachmentUrl(key: string) {
+  const current = decryptedAttachmentUrls.value[key];
+  if (!current) return;
+  URL.revokeObjectURL(current);
+  const next = { ...decryptedAttachmentUrls.value };
+  delete next[key];
+  decryptedAttachmentUrls.value = next;
+}
+
+function resolvedAttachmentUrl(file: TimelineSharedFile): string | null {
+  if (!hasEncryptedAttachmentMetadata(file)) return file.url;
+  return decryptedAttachmentUrls.value[attachmentKey(file)] ?? null;
+}
+
+function attachmentError(file: TimelineSharedFile): string | null {
+  return decryptedAttachmentErrors.value[attachmentKey(file)] ?? null;
+}
+
+function isDecryptingAttachment(file: TimelineSharedFile): boolean {
+  return !!decryptingAttachmentKeys.value[attachmentKey(file)];
+}
+
+async function ensureAttachmentReady(file: TimelineSharedFile, persist = false): Promise<string | null> {
+  if (!hasEncryptedAttachmentMetadata(file)) return file.url;
+  if (typeof window === "undefined" || typeof URL === "undefined") return null;
+  const key = attachmentKey(file);
+  const existing = decryptedAttachmentUrls.value[key];
+  if (existing) return existing;
+  if (decryptingAttachmentKeys.value[key]) return null;
+
+  setAttachmentFlag(decryptingAttachmentKeys, key, true);
+  setAttachmentError(key);
+  try {
+    const blob = await decryptEncryptedAttachment(file);
+    const objectUrl = URL.createObjectURL(blob);
+    if (!persist) return objectUrl;
+    const stillVisible = imageAttachments.value.some((attachment) => attachmentKey(attachment) === key);
+    if (!stillVisible) {
+      URL.revokeObjectURL(objectUrl);
+      return null;
+    }
+    decryptedAttachmentUrls.value = { ...decryptedAttachmentUrls.value, [key]: objectUrl };
+    return objectUrl;
+  } catch (error) {
+    setAttachmentError(key, error instanceof Error ? error.message : "Couldn't decrypt attachment.");
+    return null;
+  } finally {
+    setAttachmentFlag(decryptingAttachmentKeys, key, false);
+  }
+}
+
+watch(
+  imageAttachments,
+  (attachments) => {
+    if (typeof window === "undefined") return;
+    const activeKeys = new Set(attachments.map((attachment) => attachmentKey(attachment)));
+    for (const key of Object.keys(decryptedAttachmentUrls.value)) {
+      if (!activeKeys.has(key)) revokeAttachmentUrl(key);
+    }
+    for (const attachment of attachments) {
+      if (hasEncryptedAttachmentMetadata(attachment)) {
+        void ensureAttachmentReady(attachment, true);
+      }
+    }
+  },
+  { immediate: true },
+);
+
 const lightboxImages = computed(() =>
-  imageAttachments.value.map((f) => {
-    const img: { url: string; name?: string; width?: number; height?: number } = { url: f.url };
+  imageAttachments.value.flatMap((f) => {
+    const resolvedUrl = resolvedAttachmentUrl(f);
+    if (!resolvedUrl) return [];
+    const img: { url: string; name?: string; width?: number; height?: number } = { url: resolvedUrl };
     if (f.name) img.name = f.name;
     if (f.width) img.width = f.width;
     if (f.height) img.height = f.height;
-    return img;
+    return [img];
   }),
 );
 
-function openLightbox(index: number) {
+function openLightbox(file: TimelineSharedFile) {
+  const resolvedUrl = resolvedAttachmentUrl(file);
+  if (!resolvedUrl) return;
+  const index = lightboxImages.value.findIndex((image) => image.url === resolvedUrl);
+  if (index < 0) return;
   lightboxIndex.value = index;
   lightboxOpen.value = true;
+}
+
+async function downloadAttachment(file: TimelineSharedFile) {
+  const downloadUrl = await ensureAttachmentReady(file);
+  if (!downloadUrl || typeof document === "undefined") return;
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = file.name ?? "attachment";
+  link.rel = "noopener noreferrer";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  if (hasEncryptedAttachmentMetadata(file) && !decryptedAttachmentUrls.value[attachmentKey(file)]) {
+    setTimeout(() => URL.revokeObjectURL(downloadUrl), 60_000);
+  }
 }
 
 async function highlightMessageCodeBlocks() {
@@ -311,6 +423,11 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  if (typeof URL !== "undefined") {
+    for (const key of Object.keys(decryptedAttachmentUrls.value)) {
+      revokeAttachmentUrl(key);
+    }
+  }
   if (typeof window === "undefined") return;
   window.removeEventListener("pointerdown", onWindowPointerDown, true);
   window.removeEventListener("keydown", onWindowKeydown);
@@ -498,42 +615,92 @@ watch(
 
       <!-- Image attachments gallery -->
       <div v-if="imageAttachments.length > 0" class="mt-2 flex flex-wrap gap-2">
-        <button
-          v-for="(img, idx) in imageAttachments"
-          :key="img.url"
-          type="button"
-          class="rounded-xl border border-border overflow-hidden hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-primary"
-          :title="img.name ?? 'Image'"
-          @click="openLightbox(idx)"
+        <div
+          v-for="img in imageAttachments"
+          :key="attachmentKey(img)"
+          class="rounded-xl border border-border overflow-hidden bg-muted/40"
         >
-          <img
-            :src="img.url"
-            :alt="img.name ?? 'Shared image'"
-            class="max-w-xs max-h-56 object-cover"
-            loading="lazy"
-          />
-        </button>
+          <button
+            v-if="resolvedAttachmentUrl(img)"
+            type="button"
+            class="block hover:opacity-90 transition-opacity focus-visible:outline-2 focus-visible:outline-primary"
+            :title="img.name ?? 'Image'"
+            @click="openLightbox(img)"
+          >
+            <img
+              :src="resolvedAttachmentUrl(img) || ''"
+              :alt="img.name ?? 'Shared image'"
+              class="max-w-xs max-h-56 object-cover"
+              loading="lazy"
+            />
+          </button>
+          <div
+            v-else
+            class="flex h-36 w-48 flex-col items-center justify-center gap-2 px-4 text-center text-[12px] text-muted-foreground"
+          >
+            <Lock class="h-4 w-4 text-primary/70" />
+            <span>{{ attachmentError(img) ?? (isDecryptingAttachment(img) ? "Decrypting image…" : "Preparing image…") }}</span>
+            <button
+              v-if="attachmentError(img)"
+              type="button"
+              class="rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted transition-colors"
+              @click="downloadAttachment(img)"
+            >
+              Download
+            </button>
+          </div>
+          <div
+            v-if="img.encrypted"
+            class="flex items-center gap-1 border-t border-border/70 px-2 py-1 text-[10px] font-medium text-muted-foreground"
+          >
+            <Lock class="h-3 w-3 text-primary/70" />
+            <span>Encrypted</span>
+          </div>
+        </div>
       </div>
 
       <!-- Non-image attachments -->
       <div v-if="nonImageAttachments.length > 0" class="mt-2 flex flex-col gap-1.5">
-        <a
-          v-for="file in nonImageAttachments"
-          :key="file.url"
-          :href="file.url"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200 max-w-md"
-        >
-          <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-          <div class="flex-1 min-w-0">
-            <div class="text-[13px] font-medium truncate">{{ file.name ?? "File" }}</div>
-            <div class="text-[11px] text-muted-foreground">
-              {{ file.mediaType ?? "file" }}
-              <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
+        <template v-for="file in nonImageAttachments" :key="attachmentKey(file)">
+          <button
+            v-if="file.encrypted"
+            type="button"
+            class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200 max-w-md text-left"
+            @click="downloadAttachment(file)"
+          >
+            <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium truncate">{{ file.name ?? "File" }}</div>
+              <div class="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span>{{ file.mediaType ?? "file" }}</span>
+                <span v-if="file.size">· {{ formatFileSize(file.size) }}</span>
+                <span class="inline-flex items-center gap-1 rounded-full bg-primary/8 px-1.5 py-0.5 text-primary/80">
+                  <Lock class="h-3 w-3" />
+                  Encrypted
+                </span>
+              </div>
+              <div v-if="attachmentError(file)" class="mt-1 text-[11px] text-destructive">
+                {{ attachmentError(file) }}
+              </div>
             </div>
-          </div>
-        </a>
+          </button>
+          <a
+            v-else
+            :href="file.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-3 bg-muted rounded-xl p-3 hover:bg-muted/80 transition-all duration-200 max-w-md"
+          >
+            <FileDown class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium truncate">{{ file.name ?? "File" }}</div>
+              <div class="text-[11px] text-muted-foreground">
+                {{ file.mediaType ?? "file" }}
+                <span v-if="file.size"> · {{ formatFileSize(file.size) }}</span>
+              </div>
+            </div>
+          </a>
+        </template>
       </div>
     </template>
 

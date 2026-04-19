@@ -83,6 +83,7 @@ function queuedDmMessageToTimeline(
       ...(file.width ? { width: file.width } : {}),
       ...(file.height ? { height: file.height } : {}),
       disposition: "inline" as const,
+      ...(file.encrypted ? { encrypted: file.encrypted } : {}),
     }));
   }
   return message;
@@ -545,6 +546,7 @@ export function useDmMessaging(
               ...(a.width ? { width: a.width } : {}),
               ...(a.height ? { height: a.height } : {}),
               disposition: "inline" as const,
+              ...(a.encrypted ? { encrypted: a.encrypted } : {}),
             }));
           }
           messages.value = [...messages.value, optimistic];

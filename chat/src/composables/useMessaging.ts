@@ -151,6 +151,7 @@ function queuedRoomMessageToTimeline(
       ...(file.width ? { width: file.width } : {}),
       ...(file.height ? { height: file.height } : {}),
       disposition: "inline" as const,
+      ...(file.encrypted ? { encrypted: file.encrypted } : {}),
     }));
   }
   return message;
@@ -963,6 +964,7 @@ export function useMessaging(
             ...(a.width ? { width: a.width } : {}),
             ...(a.height ? { height: a.height } : {}),
             disposition: "inline" as const,
+            ...(a.encrypted ? { encrypted: a.encrypted } : {}),
           }));
         }
         pendingEchoClientIds.add(msgId);

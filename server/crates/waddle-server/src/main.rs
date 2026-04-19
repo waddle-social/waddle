@@ -6,6 +6,7 @@ use tracing::info;
 mod auth;
 mod config;
 mod db;
+mod inbox;
 mod messages;
 mod permissions;
 mod server;

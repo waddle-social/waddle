@@ -1,4 +1,5 @@
 import type { WaddleChannelType } from "@/lib/channel-types";
+import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 /** Shared types for the XMPP client layer. */
 
@@ -96,6 +97,7 @@ export interface SharedFileInfo {
   desc?: string;
   url: string;
   disposition: "inline" | "attachment";
+  encrypted?: WaddleEncryptedFile;
 }
 
 export type ChatStateType = "active" | "composing" | "paused" | "inactive" | "gone";

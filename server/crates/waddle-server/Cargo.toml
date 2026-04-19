@@ -52,6 +52,7 @@ toml = { workspace = true }
 # Error Handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = "0.1"
 
 # HTTP Client
 reqwest = { workspace = true }

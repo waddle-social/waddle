@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use tracing::{debug, warn};
+use waddle_xmpp::inbox::{storage::InboxStorage, InboxEntry};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
 use crate::auth::{
@@ -45,6 +46,8 @@ pub struct XmppAppState {
     db: Arc<Database>,
     /// Database pool for per-waddle database access (auto-join enumeration)
     db_pool: Option<Arc<DatabasePool>>,
+    /// Shared XEP-0430 inbox projection storage.
+    inbox_storage: Option<Arc<dyn InboxStorage>>,
 }
 
 impl XmppAppState {
@@ -74,6 +77,7 @@ impl XmppAppState {
             vcard_store,
             db,
             db_pool: None,
+            inbox_storage: None,
         }
     }
 
@@ -83,6 +87,12 @@ impl XmppAppState {
     /// to per-waddle SQLite databases.
     pub fn with_db_pool(mut self, db_pool: Arc<DatabasePool>) -> Self {
         self.db_pool = Some(db_pool);
+        self
+    }
+
+    /// Set the shared inbox storage used by the live XMPP runtime.
+    pub fn with_inbox_storage(mut self, inbox_storage: Arc<dyn InboxStorage>) -> Self {
+        self.inbox_storage = Some(inbox_storage);
         self
     }
 
@@ -968,6 +978,74 @@ impl waddle_xmpp::AppState for XmppAppState {
         })?;
 
         Ok(())
+    }
+
+    // =========================================================================
+    // XEP-0430 Inbox Projection Methods
+    // =========================================================================
+
+    async fn list_inbox(&self, user_jid: &jid::BareJid) -> Result<Vec<InboxEntry>, XmppError> {
+        let storage = self
+            .inbox_storage
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
+        storage.list(user_jid).await.map_err(|error| {
+            warn!(jid = %user_jid, error = %error, "Failed to list inbox");
+            XmppError::internal(format!("Inbox error: {}", error))
+        })
+    }
+
+    async fn upsert_inbox_entry(
+        &self,
+        user_jid: &jid::BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+    ) -> Result<(), XmppError> {
+        let storage = self
+            .inbox_storage
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
+        storage
+            .upsert(user_jid, entry, increment_unread)
+            .await
+            .map_err(|error| {
+                warn!(jid = %user_jid, error = %error, "Failed to upsert inbox entry");
+                XmppError::internal(format!("Inbox error: {}", error))
+            })
+    }
+
+    async fn mark_inbox_read(
+        &self,
+        user_jid: &jid::BareJid,
+        partner_jid: &jid::BareJid,
+    ) -> Result<(), XmppError> {
+        let storage = self
+            .inbox_storage
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
+        storage
+            .mark_read(user_jid, partner_jid)
+            .await
+            .map_err(|error| {
+                warn!(
+                    jid = %user_jid,
+                    partner = %partner_jid,
+                    error = %error,
+                    "Failed to mark inbox conversation read"
+                );
+                XmppError::internal(format!("Inbox error: {}", error))
+            })
+    }
+
+    async fn inbox_total_unread(&self, user_jid: &jid::BareJid) -> Result<u64, XmppError> {
+        let storage = self
+            .inbox_storage
+            .as_ref()
+            .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
+        storage.total_unread(user_jid).await.map_err(|error| {
+            warn!(jid = %user_jid, error = %error, "Failed to count inbox unread");
+            XmppError::internal(format!("Inbox error: {}", error))
+        })
     }
 
     // =========================================================================

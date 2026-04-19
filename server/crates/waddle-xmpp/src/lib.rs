@@ -374,6 +374,37 @@ pub trait AppState: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
 
     // =========================================================================
+    // XEP-0430 Inbox Projection Methods
+    // =========================================================================
+
+    /// List inbox entries for a user, newest first.
+    fn list_inbox(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Vec<inbox::InboxEntry>, XmppError>> + Send;
+
+    /// Upsert a single inbox entry for a user.
+    fn upsert_inbox_entry(
+        &self,
+        user_jid: &jid::BareJid,
+        entry: inbox::InboxEntry,
+        increment_unread: bool,
+    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
+
+    /// Mark a conversation as read in the user's inbox.
+    fn mark_inbox_read(
+        &self,
+        user_jid: &jid::BareJid,
+        partner_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
+
+    /// Compute the total unread count across the user's inbox.
+    fn inbox_total_unread(
+        &self,
+        user_jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<u64, XmppError>> + Send;
+
+    // =========================================================================
     // Auto-Join: Waddle & Channel Enumeration
     // =========================================================================
 

@@ -16,6 +16,8 @@ export type {
   InboxResult,
 } from "./inbox";
 export {
+  GENERAL_ACTIVITIES,
+  MOOD_KINDS,
   publishActivity, publishMood, publishTune,
   retractActivity, retractMood, retractTune,
 } from "./pep-publications";

@@ -3,6 +3,7 @@ import type { Agent } from "stanza";
 import type { MarkupSpan } from "@/lib/chat-ui";
 import type { WaddleFallback } from "./extensions/fallback";
 import type { WaddleThreadCreate, WaddleThreadReply } from "./extensions/forums";
+import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { shiftMarkupSpans, type WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
 
@@ -13,6 +14,7 @@ export interface OutboundFileAttachment {
   size: number;
   width?: number;
   height?: number;
+  encrypted?: WaddleEncryptedFile;
 }
 
 export interface ReplyTarget {
@@ -40,6 +42,15 @@ export function fileSharingElement(file: OutboundFileAttachment): Record<string,
     ...(file.width ? { width: String(file.width) } : {}),
     ...(file.height ? { height: String(file.height) } : {}),
     url: file.url,
+  };
+}
+
+function encryptedFileElement(file: OutboundFileAttachment): WaddleEncryptedFile | null {
+  if (!file.encrypted) return null;
+  const sources = file.encrypted.sources?.filter((value) => value.length > 0) ?? [];
+  return {
+    ...file.encrypted,
+    sources: sources.length > 0 ? sources : [file.url],
   };
 }
 
@@ -138,8 +149,8 @@ export interface SendGroupMessageOptions {
 }
 
 /**
- * Send a groupchat message. Supports XEP-0447 attachments, XEP-0461 replies with
- * XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
+ * Send a groupchat message. Supports XEP-0447/XEP-0448 attachments, XEP-0461
+ * replies with XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
  *
  * `<reply>` and `<thread>` are independent: a bare `<reply>` is a quote that
  * stays inline in the feed; a `<thread>` tags membership in a conversation
@@ -221,6 +232,12 @@ export function sendGroupMessage(
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);
     msgData.links = files!.map((f) => ({ url: f.url }));
+    const encryptedFiles = files!
+      .map(encryptedFileElement)
+      .filter((value): value is WaddleEncryptedFile => value !== null);
+    if (encryptedFiles.length > 0) {
+      msgData.encryptedFiles = encryptedFiles;
+    }
     if (!text) {
       // Body is acting as the SFS URL fallback — mark it so compliant clients skip it.
       fallbacks.push({ for: "urn:xmpp:sfs:0" });

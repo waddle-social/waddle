@@ -117,6 +117,7 @@ pub fn pep_features() -> Vec<crate::disco::Feature> {
         // XEP-0313 / MAM
         Feature::new("urn:xmpp:mam:2"),
         Feature::new("urn:xmpp:mam:2#extended"),
+        Feature::new(crate::xep::xep0430::NS_INBOX),
         // XEP-0357 Push
         Feature::new("urn:xmpp:push:0"),
         // XEP-0398 Avatar conversion

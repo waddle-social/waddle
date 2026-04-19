@@ -541,7 +541,11 @@ mod tests {
         let blob_storage: Arc<dyn crate::storage::BlobStorage> =
             Arc::new(crate::storage::LocalStorage::new(upload_dir.clone()));
 
-        let app_state = Arc::new(AppState::new_with_deps(Arc::new(db_pool), blob_storage));
+        let app_state = Arc::new(AppState::new_with_deps(
+            Arc::new(db_pool),
+            blob_storage,
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+        ));
 
         (Arc::new(UploadState::new(app_state)), upload_dir)
     }

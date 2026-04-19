@@ -133,6 +133,45 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages[0].threadId).toBe("topic-1");
   });
 
+  test("attaches encrypted file metadata to parsed shared files", () => {
+    const h = makeHandlers();
+    const encryptedUrl = "https://files.example.com/blob.enc";
+    const encrypted = {
+      cipher: "urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+      keyB64: "a2V5",
+      ivB64: "aXY=",
+      hashes: [{ algo: "sha-256", valueB64: "aGFzaA==" }],
+      sources: [encryptedUrl],
+    };
+
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-file",
+        body: encryptedUrl,
+        fileSharing: {
+          name: "photo.jpg",
+          mediaType: "image/jpeg",
+          size: "42",
+          url: encryptedUrl,
+        },
+        encryptedFiles: [encrypted],
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].sharedFiles).toEqual([
+      {
+        url: encryptedUrl,
+        name: "photo.jpg",
+        mediaType: "image/jpeg",
+        size: 42,
+        disposition: "inline",
+        encrypted,
+      },
+    ]);
+  });
+
   test("leaves replyTo undefined when no reply element is present", () => {
     const h = makeHandlers();
     dispatchGroupchat(makeMsg({ id: "msg-4", body: "plain" }), h);

@@ -1,17 +1,33 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, mock } from "bun:test";
 import { ref } from "vue";
 import { useDmConversations } from "../src/composables/useDmConversations";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { BrowserXmppClient, LiveDmMessage } from "../src/lib/xmpp-client";
+import type { BrowserXmppClient, InboxEntry, LiveDmMessage } from "../src/lib/xmpp-client";
 
 function makeSession(jid = "alice@example.com/web"): WaddleSession {
   return { jid, username: "alice", token: "tok" } as WaddleSession;
 }
 
-function makeComposable(jid = "alice@example.com/web") {
+type MockClient = BrowserXmppClient & {
+  fetchInbox: ReturnType<typeof mock>;
+  markInboxRead: ReturnType<typeof mock>;
+  subscribeToPeerPresence: ReturnType<typeof mock>;
+};
+
+function makeClient(conversations: InboxEntry[] = []): MockClient {
+  return {
+    fetchInbox: mock(() => Promise.resolve({ totalUnread: conversations.reduce((sum, conversation) => sum + conversation.unread, 0), conversations })),
+    markInboxRead: mock(() => Promise.resolve()),
+    subscribeToPeerPresence: mock(() => Promise.resolve()),
+  } as unknown as MockClient;
+}
+
+function makeComposable(
+  { jid = "alice@example.com/web", client = null }: { jid?: string; client?: MockClient | null } = {},
+) {
   const session = ref<WaddleSession | null>(makeSession(jid));
-  const client = ref<BrowserXmppClient | null>(null);
-  return { composable: useDmConversations(session, client), session, client };
+  const clientRef = ref<BrowserXmppClient | null>(client);
+  return { composable: useDmConversations(session, clientRef), session, client: clientRef };
 }
 
 function makeDmMessage(overrides: Partial<LiveDmMessage> = {}): LiveDmMessage {
@@ -25,6 +41,10 @@ function makeDmMessage(overrides: Partial<LiveDmMessage> = {}): LiveDmMessage {
     type: "message",
     ...overrides,
   };
+}
+
+function epochSeconds(value: string): number {
+  return Math.floor(new Date(value).getTime() / 1000);
 }
 
 describe("useDmConversations", () => {
@@ -64,6 +84,62 @@ describe("useDmConversations", () => {
     expect(composable.activePeerJid.value).toBeNull();
   });
 
+  test("hydrateFromInbox merges direct conversations into the DM list", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 2,
+        preview: "from inbox",
+      },
+      {
+        partner: "general@conference.example.com",
+        kind: "muc",
+        lastStanzaId: "sid-2",
+        lastUpdated: epochSeconds("2026-01-02T12:05:00Z"),
+        unread: 4,
+        preview: "ignore me",
+      },
+    ]);
+    const { composable } = makeComposable({ client });
+
+    await composable.hydrateFromInbox();
+
+    expect(composable.conversations.value).toHaveLength(1);
+    expect(composable.conversations.value[0]).toMatchObject({
+      peerJid: "bob@example.com",
+      peerUsername: "bob",
+      lastMessageBody: "from inbox",
+      unreadCount: 2,
+    });
+    expect(client.subscribeToPeerPresence).toHaveBeenCalledWith("bob@example.com");
+  });
+
+  test("hydrateFromInbox preserves newer live DM activity", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-01T00:00:00Z"),
+        unread: 0,
+        preview: "older preview",
+      },
+    ]);
+    const { composable } = makeComposable({ client });
+
+    composable.receiveIncomingDm(makeDmMessage({ createdAt: "2026-01-02T00:00:00Z", body: "newer live message" }));
+    await composable.hydrateFromInbox();
+
+    expect(composable.conversations.value[0]).toMatchObject({
+      lastMessageBody: "newer live message",
+      lastMessageAt: "2026-01-02T00:00:00Z",
+      unreadCount: 1,
+    });
+  });
+
   test("receiveIncomingDm creates conversation and increments unread", () => {
     const { composable } = makeComposable();
     composable.receiveIncomingDm(makeDmMessage());
@@ -80,12 +156,44 @@ describe("useDmConversations", () => {
     expect(composable.conversations.value[0].unreadCount).toBe(0);
   });
 
+  test("receiveIncomingDm syncs inbox read for the active conversation", async () => {
+    const client = makeClient();
+    const { composable } = makeComposable({ client });
+
+    await composable.openDm("bob@example.com");
+    composable.receiveIncomingDm(makeDmMessage());
+
+    expect(composable.conversations.value[0].unreadCount).toBe(0);
+    expect(client.markInboxRead).toHaveBeenCalledWith("bob@example.com");
+  });
+
   test("receiveIncomingDm does not increment unread for self-sent messages", () => {
     const { composable } = makeComposable();
     composable.receiveIncomingDm(
       makeDmMessage({ fromJid: "alice@example.com", peerJid: "bob@example.com" }),
     );
     expect(composable.conversations.value[0].unreadCount).toBe(0);
+  });
+
+  test("openDm clears inbox unread locally and syncs markInboxRead", async () => {
+    const client = makeClient([
+      {
+        partner: "bob@example.com",
+        kind: "direct",
+        lastStanzaId: "sid-1",
+        lastUpdated: epochSeconds("2026-01-02T12:00:00Z"),
+        unread: 3,
+        preview: "hydrate me",
+      },
+    ]);
+    const { composable } = makeComposable({ client });
+
+    await composable.hydrateFromInbox();
+    await composable.openDm("bob@example.com");
+
+    expect(composable.conversations.value[0].unreadCount).toBe(0);
+    expect(composable.hasUnread.value).toBe(false);
+    expect(client.markInboxRead).toHaveBeenCalledWith("bob@example.com");
   });
 
   test("markRead resets unread count", () => {

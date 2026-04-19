@@ -1,6 +1,7 @@
 use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::{ServerConfig, ServerInfo};
 use crate::db::{DatabasePool, PoolHealth};
+use crate::inbox::build_inbox_storage;
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -30,6 +31,7 @@ use tower_http::{
 };
 use tracing::{info, warn, Level};
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
+use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::XmppServerConfig;
 use waddle_xmpp::{mam::LibSqlMamStorage, muc::MucRoomRegistry, registry::ConnectionRegistry};
 
@@ -62,6 +64,8 @@ pub struct AppState {
     pub db_pool: Arc<DatabasePool>,
     /// Blob storage backend for file uploads (XEP-0363).
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
+    /// Shared XEP-0430 inbox projection storage.
+    pub inbox_storage: Arc<dyn InboxStorage>,
 }
 
 impl AppState {
@@ -73,16 +77,22 @@ impl AppState {
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
         let blob_storage = crate::storage::build_blob_storage()
             .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
-        Self::new_with_deps(db_pool, blob_storage)
+        Self::new_with_deps(
+            db_pool,
+            blob_storage,
+            Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+        )
     }
 
     pub fn new_with_deps(
         db_pool: Arc<DatabasePool>,
         blob_storage: Arc<dyn crate::storage::BlobStorage>,
+        inbox_storage: Arc<dyn InboxStorage>,
     ) -> Self {
         Self {
             db_pool,
             blob_storage,
+            inbox_storage,
         }
     }
 }
@@ -106,6 +116,8 @@ pub struct XmppConfig {
     pub tls_key_path: String,
     /// MAM database path (None for in-memory)
     pub mam_db_path: Option<PathBuf>,
+    /// Inbox database path (None for in-memory)
+    pub inbox_db_path: Option<PathBuf>,
     /// Whether native JID authentication is enabled (default: true)
     /// When enabled, users can authenticate with SCRAM-SHA-256 using native credentials.
     pub native_auth_enabled: bool,
@@ -137,6 +149,7 @@ impl Default for XmppConfig {
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
             mam_db_path: None,
+            inbox_db_path: None,
             native_auth_enabled: true,
             registration_enabled: false, // Disabled by default for security
             single_tenant: false,
@@ -181,6 +194,15 @@ impl XmppConfig {
                     std::env::var("WADDLE_DB_PATH")
                         .map(|db| PathBuf::from(db).with_file_name("mam.db"))
                         .unwrap_or_else(|_| PathBuf::from("mam.db"))
+                }),
+        );
+        let inbox_db_path = Some(
+            std::env::var("WADDLE_XMPP_INBOX_DB")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::env::var("WADDLE_DB_PATH")
+                        .map(|db| PathBuf::from(db).join("inbox.db"))
+                        .unwrap_or_else(|_| PathBuf::from("inbox.db"))
                 }),
         );
 
@@ -237,6 +259,7 @@ impl XmppConfig {
             tls_cert_path,
             tls_key_path,
             mam_db_path,
+            inbox_db_path,
             native_auth_enabled,
             registration_enabled,
             single_tenant,
@@ -437,6 +460,9 @@ pub async fn start_with_config(
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
+    let inbox_storage = build_inbox_storage(xmpp_config.inbox_db_path.clone())
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
 
     // Create XMPP app state
     let xmpp_app_state = if xmpp_config.enabled {
@@ -447,7 +473,8 @@ pub async fn start_with_config(
                 db_pool.global_actor().clone(),
                 encryption_key.as_ref().map(|s| s.as_bytes()),
             )
-            .with_db_pool(Arc::clone(&db_pool)),
+            .with_db_pool(Arc::clone(&db_pool))
+            .with_inbox_storage(Arc::clone(&inbox_storage)),
         ))
     } else {
         None
@@ -470,7 +497,11 @@ pub async fn start_with_config(
     // Create HTTP state (shares db_pool via Arc)
     let blob_storage = crate::storage::build_blob_storage()
         .map_err(|e| anyhow::anyhow!("Failed to initialize blob storage: {}", e))?;
-    let state = Arc::new(AppState::new_with_deps(Arc::clone(&db_pool), blob_storage));
+    let state = Arc::new(AppState::new_with_deps(
+        Arc::clone(&db_pool),
+        blob_storage,
+        Arc::clone(&inbox_storage),
+    ));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_db_path.clone()).await?;
     let xmpp_native_auth_enabled = xmpp_config.native_auth_enabled;
@@ -924,6 +955,7 @@ async fn create_router(
         connection_registry,
         muc_registry,
         mam_storage,
+        inbox_storage: Arc::clone(&state.inbox_storage),
         command_registry: websocket_command_registry,
         extension_manager,
         dispatcher: stanza_dispatcher,

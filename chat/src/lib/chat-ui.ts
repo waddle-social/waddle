@@ -1,3 +1,5 @@
+import type { WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
+
 export type AppState = "loading" | "signed-out" | "ready" | "error";
 export type AdminTab = "rooms" | "people" | "settings";
 export type EditableRole = "member" | "moderator" | "admin";
@@ -10,6 +12,18 @@ export interface MarkupSpan {
   start: number;
   end: number;
   uri?: string;
+}
+
+export interface TimelineSharedFile {
+  name?: string;
+  mediaType?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  desc?: string;
+  url: string;
+  disposition: "inline" | "attachment";
+  encrypted?: WaddleEncryptedFile;
 }
 
 export interface TimelineMessage {
@@ -37,7 +51,7 @@ export interface TimelineMessage {
   /** XEP-0449: Is this a sticker message? */
   isSticker?: boolean;
   /** XEP-0446/0447: Shared files (zero or more attachments). */
-  sharedFiles?: { name?: string; mediaType?: string; size?: number; width?: number; height?: number; desc?: string; url: string; disposition: "inline" | "attachment" }[];
+  sharedFiles?: TimelineSharedFile[];
   /** XEP-0513: Broadcast mention (everyone/here). */
   broadcastMention?: "everyone" | "here";
   /** XEP-0394: Message Markup offset-based annotations. */

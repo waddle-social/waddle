@@ -1,16 +1,32 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type { WaddleSession } from "@/lib/server-auth";
-import type { BrowserXmppClient, DmConversation, LiveDmMessage, PresenceUpdateEvent } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, DmConversation, InboxEntry, LiveDmMessage, PresenceUpdateEvent } from "@/lib/xmpp-client";
 import { barePeerJid } from "@/lib/xmpp-client";
 
 function peerUsername(peerJid: string): string {
   return barePeerJid(peerJid).split("@")[0] ?? peerJid;
 }
 
+function conversationTimestamp(value?: string): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function inboxTimestamp(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value > 1_000_000_000_000 ? value : value * 1000;
+}
+
+function inboxTimestampIso(value: number): string | undefined {
+  const timestamp = inboxTimestamp(value);
+  return timestamp > 0 ? new Date(timestamp).toISOString() : undefined;
+}
+
 function sortByRecent(conversations: DmConversation[]): DmConversation[] {
   return [...conversations].sort((a, b) => {
-    const at = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
-    const bt = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+    const at = conversationTimestamp(a.lastMessageAt);
+    const bt = conversationTimestamp(b.lastMessageAt);
     return bt - at;
   });
 }
@@ -22,9 +38,14 @@ export function useDmConversations(
   const conversations = ref<DmConversation[]>([]);
   const activePeerJid = ref<string | null>(null);
   const presenceByJid = ref<Record<string, DmConversation["presenceShow"]>>({});
+  const localReadAtByJid = ref<Record<string, number>>({});
 
   const hasUnread = computed(() => conversations.value.some((c) => c.unreadCount > 0));
   const selfBareJid = computed(() => barePeerJid(session.value?.jid ?? ""));
+
+  let inboxRequestId = 0;
+  const pendingMarkRead = new Set<string>();
+  const queuedMarkRead = new Set<string>();
 
   function storageKey() {
     const bare = session.value ? barePeerJid(session.value.jid) : "";
@@ -84,11 +105,114 @@ export function useDmConversations(
     return created;
   }
 
-  function markRead(peerJid: string) {
+  function rememberRead(peerJid: string, lastMessageAt?: string) {
     const bare = barePeerJid(peerJid);
-    conversations.value = conversations.value.map((c) => (
-      c.peerJid === bare ? { ...c, unreadCount: 0 } : c
-    ));
+    const readAt = Math.max(
+      Math.floor(Date.now() / 1000),
+      Math.floor(conversationTimestamp(lastMessageAt) / 1000),
+    );
+    localReadAtByJid.value = { ...localReadAtByJid.value, [bare]: readAt };
+  }
+
+  function syncMarkRead(peerJid: string) {
+    const bare = barePeerJid(peerJid);
+    const client = xmppClient.value;
+    if (!client) return;
+    if (pendingMarkRead.has(bare)) {
+      queuedMarkRead.add(bare);
+      return;
+    }
+    pendingMarkRead.add(bare);
+    void client.markInboxRead(bare)
+      .catch(() => undefined)
+      .finally(() => {
+        pendingMarkRead.delete(bare);
+        if (queuedMarkRead.delete(bare)) {
+          syncMarkRead(bare);
+        }
+      });
+  }
+
+  function mergeInboxEntry(existing: DmConversation | undefined, entry: InboxEntry): DmConversation {
+    const bare = barePeerJid(entry.partner);
+    const serverTimestamp = inboxTimestamp(entry.lastUpdated);
+    const serverLastMessageAt = inboxTimestampIso(entry.lastUpdated);
+    const existingTimestamp = conversationTimestamp(existing?.lastMessageAt);
+    const useServerPreview = serverTimestamp >= existingTimestamp;
+    const localReadAt = localReadAtByJid.value[bare] ?? 0;
+    const lastMessageBody = useServerPreview
+      ? entry.preview ?? existing?.lastMessageBody
+      : existing?.lastMessageBody;
+    const lastMessageAt = useServerPreview
+      ? serverLastMessageAt ?? existing?.lastMessageAt
+      : existing?.lastMessageAt;
+
+    return {
+      peerJid: bare,
+      peerUsername: existing?.peerUsername || peerUsername(bare),
+      ...(existing?.peerAvatarUrl !== undefined ? { peerAvatarUrl: existing.peerAvatarUrl } : {}),
+      ...(lastMessageBody ? { lastMessageBody } : {}),
+      ...(lastMessageAt ? { lastMessageAt } : {}),
+      unreadCount: localReadAt >= entry.lastUpdated
+        ? 0
+        : existingTimestamp >= serverTimestamp
+          ? Math.max(existing?.unreadCount ?? 0, entry.unread)
+          : entry.unread,
+      presenceShow: presenceByJid.value[bare] ?? existing?.presenceShow ?? "offline",
+    };
+  }
+
+  function mergeInboxConversations(entries: InboxEntry[]) {
+    const merged = new Map(conversations.value.map((conversation) => [conversation.peerJid, conversation]));
+
+    for (const entry of entries) {
+      if (entry.kind !== "direct") continue;
+      const bare = barePeerJid(entry.partner);
+      merged.set(bare, mergeInboxEntry(merged.get(bare), entry));
+    }
+
+    conversations.value = sortByRecent([...merged.values()]);
+  }
+
+  async function hydrateFromInbox() {
+    const currentClient = xmppClient.value;
+    const currentSessionJid = session.value?.jid ?? null;
+    if (!currentClient || !currentSessionJid) return;
+
+    const requestId = ++inboxRequestId;
+    try {
+      const inbox = await currentClient.fetchInbox();
+      if (
+        requestId !== inboxRequestId
+        || currentClient !== xmppClient.value
+        || currentSessionJid !== (session.value?.jid ?? null)
+      ) return;
+
+      const directConversations = inbox.conversations.filter((conversation) => conversation.kind === "direct");
+      mergeInboxConversations(directConversations);
+      for (const conversation of directConversations) {
+        void currentClient.subscribeToPeerPresence(barePeerJid(conversation.partner)).catch(() => undefined);
+      }
+    } catch {
+      // best-effort
+    }
+  }
+
+  function markRead(peerJid: string, opts: { forceSync?: boolean } = {}) {
+    const bare = barePeerJid(peerJid);
+    const conversation = ensureConversation(bare);
+    rememberRead(bare, conversation.lastMessageAt);
+
+    let shouldSync = !!opts.forceSync;
+    conversations.value = conversations.value.map((c) => {
+      if (c.peerJid !== bare) return c;
+      shouldSync = shouldSync || c.unreadCount > 0;
+      return c.unreadCount > 0 ? { ...c, unreadCount: 0 } : c;
+    });
+
+    if (shouldSync) {
+      syncMarkRead(bare);
+    }
   }
 
   async function openDm(peerJid: string) {
@@ -110,8 +234,10 @@ export function useDmConversations(
   function receiveIncomingDm(msg: LiveDmMessage) {
     const bare = barePeerJid(msg.peerJid);
     const existing = ensureConversation(bare);
-    const shouldIncrementUnread = barePeerJid(msg.fromJid) !== selfBareJid.value
-      && activePeerJid.value !== bare;
+    const isSelfMessage = barePeerJid(msg.fromJid) === selfBareJid.value;
+    const isActiveConversation = activePeerJid.value === bare;
+    const shouldIncrementUnread = !isSelfMessage && !isActiveConversation;
+
     conversations.value = sortByRecent(conversations.value.map((c) => (
       c.peerJid === bare
         ? {
@@ -124,6 +250,10 @@ export function useDmConversations(
           }
         : c
     )));
+
+    if (!isSelfMessage && isActiveConversation) {
+      markRead(bare, { forceSync: true });
+    }
   }
 
   function updatePresence(event: PresenceUpdateEvent) {
@@ -137,9 +267,13 @@ export function useDmConversations(
   watch(
     () => session.value?.jid,
     () => {
+      inboxRequestId += 1;
+      pendingMarkRead.clear();
+      queuedMarkRead.clear();
       conversations.value = [];
       activePeerJid.value = null;
       presenceByJid.value = {};
+      localReadAtByJid.value = {};
       restore();
       for (const c of conversations.value) {
         xmppClient.value?.subscribeToPeerPresence(c.peerJid);
@@ -156,6 +290,7 @@ export function useDmConversations(
     hasUnread,
     openDm,
     closeDm,
+    hydrateFromInbox,
     markRead,
     receiveIncomingDm,
     updatePresence,

@@ -16,22 +16,25 @@ import type { Agent } from "stanza";
 // -- Mood (XEP-0107) ----------------------------------------------------
 
 /** Closed set of mood keywords from XEP-0107 §3 (matches stanza.js USER_MOODS). */
-export type MoodKind =
-  | "afraid" | "amazed" | "amorous" | "angry" | "annoyed" | "anxious"
-  | "aroused" | "ashamed" | "bored" | "brave" | "calm" | "cautious"
-  | "cold" | "confident" | "confused" | "contemplative" | "contented"
-  | "cranky" | "crazy" | "creative" | "curious" | "dejected" | "depressed"
-  | "disappointed" | "disgusted" | "dismayed" | "distracted" | "embarrassed"
-  | "envious" | "excited" | "flirtatious" | "frustrated" | "grateful"
-  | "grieving" | "grumpy" | "guilty" | "happy" | "hopeful" | "hot"
-  | "humbled" | "humiliated" | "hungry" | "hurt" | "impressed" | "in_awe"
-  | "in_love" | "indignant" | "interested" | "intoxicated" | "invincible"
-  | "jealous" | "lonely" | "lost" | "lucky" | "mean" | "moody" | "nervous"
-  | "neutral" | "offended" | "outraged" | "playful" | "proud" | "relaxed"
-  | "relieved" | "remorseful" | "restless" | "sad" | "sarcastic"
-  | "satisfied" | "serious" | "shocked" | "shy" | "sick" | "sleepy"
-  | "spontaneous" | "stressed" | "strong" | "surprised" | "thankful"
-  | "thirsty" | "tired" | "undefined" | "weak" | "worried";
+export const MOOD_KINDS = [
+  "afraid", "amazed", "amorous", "angry", "annoyed", "anxious",
+  "aroused", "ashamed", "bored", "brave", "calm", "cautious",
+  "cold", "confident", "confused", "contemplative", "contented",
+  "cranky", "crazy", "creative", "curious", "dejected", "depressed",
+  "disappointed", "disgusted", "dismayed", "distracted", "embarrassed",
+  "envious", "excited", "flirtatious", "frustrated", "grateful",
+  "grieving", "grumpy", "guilty", "happy", "hopeful", "hot",
+  "humbled", "humiliated", "hungry", "hurt", "impressed", "in_awe",
+  "in_love", "indignant", "interested", "intoxicated", "invincible",
+  "jealous", "lonely", "lost", "lucky", "mean", "moody", "nervous",
+  "neutral", "offended", "outraged", "playful", "proud", "relaxed",
+  "relieved", "remorseful", "restless", "sad", "sarcastic",
+  "satisfied", "serious", "shocked", "shy", "sick", "sleepy",
+  "spontaneous", "stressed", "strong", "surprised", "thankful",
+  "thirsty", "tired", "undefined", "weak", "worried",
+] as const;
+
+export type MoodKind = typeof MOOD_KINDS[number];
 
 export interface MoodPublication {
   kind: MoodKind;
@@ -52,10 +55,22 @@ export async function retractMood(xmpp: Agent): Promise<void> {
 const NS_ACTIVITY = "http://jabber.org/protocol/activity";
 
 /** General activity categories from XEP-0108 §3.1 (matches USER_ACTIVITY_GENERAL). */
-export type GeneralActivity =
-  | "doing_chores" | "drinking" | "eating" | "exercising" | "grooming"
-  | "having_appointment" | "inactive" | "relaxing" | "talking"
-  | "traveling" | "working" | "undefined";
+export const GENERAL_ACTIVITIES = [
+  "doing_chores",
+  "drinking",
+  "eating",
+  "exercising",
+  "grooming",
+  "having_appointment",
+  "inactive",
+  "relaxing",
+  "talking",
+  "traveling",
+  "working",
+  "undefined",
+] as const;
+
+export type GeneralActivity = typeof GENERAL_ACTIVITIES[number];
 
 export interface ActivityPublication {
   general: GeneralActivity;

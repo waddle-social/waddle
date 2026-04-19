@@ -265,6 +265,7 @@ watch(xmppClient, (client) => {
   client.setSessionLifecycleHandler((event) => {
     messaging.onSessionLifecycle(event);
     dmMessaging.onSessionLifecycle(event);
+    void dmConversations.hydrateFromInbox();
   });
 });
 
@@ -577,6 +578,8 @@ async function onConnectionReady() {
       updateUrl();
     }
   }
+
+  void dmConversations.hydrateFromInbox();
 
   // Register service worker and sync push subscription (best-effort, non-blocking)
   void (async () => {
@@ -976,6 +979,7 @@ onUnmounted(() => {
       <UserSettingsPage
         v-if="ui.activePage.value === 'settings' && connectionStore.session"
         :session="connectionStore.session"
+        :xmpp-client="xmppClient"
         :web-commit-sha="version.webCommitSha.value"
         :server-version="version.serverVersion.value"
         @close="closeUserSettings"

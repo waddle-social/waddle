@@ -19,6 +19,7 @@ import * as history from "./history";
 import * as dmMessaging from "./dm-messaging";
 import * as dmHistory from "./dm-history";
 import * as discovery from "./discovery";
+import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import {
   countQueuedMessages,
@@ -720,7 +721,7 @@ export class BrowserXmppClient {
     }
   }
 
-  // -- File upload (XEP-0363 + XEP-0447) --
+  // -- File upload (XEP-0363 + XEP-0447/XEP-0448) --
 
   private async resolveUploadService(): Promise<string> {
     if (this.uploadServiceJid) return this.uploadServiceJid;
@@ -733,7 +734,7 @@ export class BrowserXmppClient {
     return jid;
   }
 
-  /** Upload files and return attachment metadata ready for outbound send. */
+  /** Encrypt, upload, and return attachment metadata ready for outbound send. */
   async uploadAttachments(
     files: ReadonlyArray<File | Blob>,
     onProgress?: (overall: UploadProgress, index: number) => void,
@@ -741,22 +742,27 @@ export class BrowserXmppClient {
     await this.connect();
     if (!this.xmpp) throw new Error("XMPP not connected");
     const uploadDomain = await this.resolveUploadService();
-    const totals = files.map((f) => f.size);
+    const preparedUploads = await Promise.all(files.map((file) => prepareEncryptedAttachmentUpload(file)));
+    const totals = preparedUploads.map((prepared) => prepared.uploadFile.size);
     const loaded = files.map(() => 0);
     const grandTotal = totals.reduce((a, b) => a + b, 0);
     const results: messaging.OutboundFileAttachment[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const result = await uploadFile(this.xmpp, file, uploadDomain, (p) => {
+    for (let i = 0; i < preparedUploads.length; i++) {
+      const prepared = preparedUploads[i];
+      const result = await uploadFile(this.xmpp, prepared.uploadFile, uploadDomain, (p) => {
         loaded[i] = p.loaded;
         const loadedSum = loaded.reduce((a, b) => a + b, 0);
         onProgress?.({ loaded: loadedSum, total: grandTotal }, i);
       });
       results.push({
         url: result.getUrl,
-        name: result.filename,
-        mediaType: result.contentType,
-        size: result.size,
+        name: prepared.originalName,
+        mediaType: prepared.originalMediaType,
+        size: prepared.originalSize,
+        encrypted: {
+          ...prepared.encrypted,
+          sources: [result.getUrl],
+        },
       });
     }
     return results;

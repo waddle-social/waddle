@@ -1,5 +1,6 @@
 /** Inbound message parsing — extracts XEP extension data from stanza messages. */
 import type { ReceivedMessage } from "stanza/protocol";
+import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { stripMarkupRange } from "./extensions/markup";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
@@ -213,8 +214,21 @@ function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget)
     | undefined;
   if (!raw) return;
   const entries = Array.isArray(raw) ? raw : [raw];
+  const rawEncrypted = ext(msg).encryptedFiles as WaddleEncryptedFile | WaddleEncryptedFile[] | undefined;
+  const encryptedEntries = Array.isArray(rawEncrypted)
+    ? rawEncrypted.filter((value): value is WaddleEncryptedFile => !!value)
+    : rawEncrypted
+      ? [rawEncrypted]
+      : [];
+  const encryptedBySourceUrl = new Map<string, WaddleEncryptedFile>();
+  for (const encrypted of encryptedEntries) {
+    for (const source of encrypted.sources ?? []) {
+      if (source) encryptedBySourceUrl.set(source, encrypted);
+    }
+  }
   const out: SharedFileInfo[] = [];
-  for (const fs of entries) {
+  const useIndexFallback = encryptedEntries.length === entries.length;
+  for (const [index, fs] of entries.entries()) {
     if (!fs?.url) continue;
     const info: SharedFileInfo = {
       url: fs.url,
@@ -226,6 +240,8 @@ function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget)
     if (fs.width) info.width = parseInt(fs.width, 10);
     if (fs.height) info.height = parseInt(fs.height, 10);
     if (fs.desc) info.desc = fs.desc;
+    const encrypted = encryptedBySourceUrl.get(fs.url) ?? (useIndexFallback ? encryptedEntries[index] : undefined);
+    if (encrypted) info.encrypted = encrypted;
     out.push(info);
   }
   if (out.length > 0) base.sharedFiles = out;

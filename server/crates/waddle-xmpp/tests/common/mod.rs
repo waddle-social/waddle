@@ -28,6 +28,10 @@ use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore, ServerConfig},
     TlsAcceptor, TlsConnector,
 };
+use waddle_xmpp::inbox::{
+    storage::{InMemoryInboxStorage, InboxStorage},
+    InboxEntry,
+};
 use waddle_xmpp::{roster, AppState, ScramCredentials, Session, XmppError};
 
 /// Install the ring crypto provider for rustls.
@@ -98,6 +102,7 @@ pub struct MockAppState {
     pub waddle_channels: std::collections::HashMap<String, Vec<waddle_xmpp::ChannelInfo>>,
     blocked_jids: Mutex<HashMap<String, HashSet<String>>>,
     known_users: Mutex<HashSet<String>>,
+    inbox_storage: InMemoryInboxStorage,
 }
 
 impl MockAppState {
@@ -109,6 +114,7 @@ impl MockAppState {
             waddle_channels: std::collections::HashMap::new(),
             blocked_jids: Mutex::new(HashMap::new()),
             known_users: Mutex::new(HashSet::new()),
+            inbox_storage: InMemoryInboxStorage::new(),
         }
     }
 
@@ -120,6 +126,7 @@ impl MockAppState {
             waddle_channels: std::collections::HashMap::new(),
             blocked_jids: Mutex::new(HashMap::new()),
             known_users: Mutex::new(HashSet::new()),
+            inbox_storage: InMemoryInboxStorage::new(),
         }
     }
 
@@ -461,6 +468,43 @@ impl AppState for MockAppState {
     ) -> Result<(), XmppError> {
         // Mock private XML storage always succeeds
         Ok(())
+    }
+
+    async fn list_inbox(&self, user_jid: &jid::BareJid) -> Result<Vec<InboxEntry>, XmppError> {
+        self.inbox_storage
+            .list(user_jid)
+            .await
+            .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
+    }
+
+    async fn upsert_inbox_entry(
+        &self,
+        user_jid: &jid::BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+    ) -> Result<(), XmppError> {
+        self.inbox_storage
+            .upsert(user_jid, entry, increment_unread)
+            .await
+            .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
+    }
+
+    async fn mark_inbox_read(
+        &self,
+        user_jid: &jid::BareJid,
+        partner_jid: &jid::BareJid,
+    ) -> Result<(), XmppError> {
+        self.inbox_storage
+            .mark_read(user_jid, partner_jid)
+            .await
+            .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
+    }
+
+    async fn inbox_total_unread(&self, user_jid: &jid::BareJid) -> Result<u64, XmppError> {
+        self.inbox_storage
+            .total_unread(user_jid)
+            .await
+            .map_err(|error| XmppError::internal(format!("Inbox error: {}", error)))
     }
 
     async fn list_user_waddles(

@@ -486,6 +486,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::software_version(),
         Feature::server_info(),
         Feature::csi(),
+        Feature::new(crate::xep::xep0430::NS_INBOX),
         Feature::pubsub(),
         Feature::pep(),
         Feature::pubsub_auto_create(),
@@ -685,6 +686,7 @@ mod tests {
         assert!(features.contains(&Feature::mam()));
         assert!(features.contains(&Feature::replies()));
         assert!(features.contains(&Feature::stream_management()));
+        assert!(features.contains(&Feature::new(crate::xep::xep0430::NS_INBOX)));
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   type ReplyTarget,
 } from "./messaging";
 import type { WaddleFallback } from "./extensions/fallback";
+import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 export function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state, processingHints: { noStore: true } });
@@ -59,8 +60,9 @@ export interface SendDirectMessageOptions {
 }
 
 /**
- * Send a direct (type="chat") message. Supports XEP-0447 attachments, XEP-0461
- * replies with XEP-0428 fallback prefix, and RFC 6121 / XEP-0201 threads.
+ * Send a direct (type="chat") message. Supports XEP-0447/XEP-0448 attachments,
+ * XEP-0461 replies with XEP-0428 fallback prefix, and RFC 6121 / XEP-0201
+ * threads.
  *
  * `<reply>` and `<thread>` are independent: bare replies stay inline in the
  * conversation; `<thread>` is only attached when the caller explicitly wants
@@ -110,6 +112,19 @@ export function sendDirectMessage(
   if (hasFiles) {
     msgData.fileSharing = files!.map(fileSharingElement);
     msgData.links = files!.map((f) => ({ url: f.url }));
+    const encryptedFiles: WaddleEncryptedFile[] = files!
+      .map((file): WaddleEncryptedFile | null => {
+        if (!file.encrypted) return null;
+        const sources = file.encrypted.sources?.filter((value) => value.length > 0) ?? [];
+        return {
+          ...file.encrypted,
+          sources: sources.length > 0 ? sources : [file.url],
+        };
+      })
+      .filter((value): value is WaddleEncryptedFile => value !== null);
+    if (encryptedFiles.length > 0) {
+      msgData.encryptedFiles = encryptedFiles;
+    }
     if (!text) {
       fallbacks.push({ for: "urn:xmpp:sfs:0" });
     }

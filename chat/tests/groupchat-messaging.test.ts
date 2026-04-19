@@ -178,6 +178,31 @@ describe("groupchat messaging", () => {
     expect(fs[1]).toMatchObject({ url: urls[1] });
   });
 
+  test("includes XEP-0448 metadata for encrypted attachments", () => {
+    const xmpp = makeAgent();
+    const fileUrl = "https://xmpp.waddle.social/upload/abc/photo.jpg.enc";
+    const encrypted = {
+      cipher: "urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+      keyB64: "a2V5",
+      ivB64: "aXY=",
+      hashes: [{ algo: "sha-256", valueB64: "aGFzaA==" }],
+      sources: [fileUrl],
+    } as const;
+
+    sendGroupMessage(xmpp, "general@muc.waddle.social", "", {
+      files: [{ url: fileUrl, name: "photo.jpg", mediaType: "image/jpeg", size: 12345, encrypted }],
+    });
+
+    const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
+    expect(call.fileSharing).toEqual([
+      expect.objectContaining({
+        url: fileUrl,
+        name: "photo.jpg",
+      }),
+    ]);
+    expect(call.encryptedFiles).toEqual([encrypted]);
+  });
+
   test("refuses to send a room stanza with empty body and no attachments", () => {
     const xmpp = makeAgent();
     expect(sendGroupMessage(xmpp, "general@muc.waddle.social", "")).toBeNull();

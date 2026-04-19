@@ -9,6 +9,7 @@
 //! lives in [`crate::xep::xep0430`]; the persistent projection lives in
 //! [`storage`].
 
+pub mod runtime;
 pub mod storage;
 
 use std::collections::HashMap;

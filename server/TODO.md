@@ -34,7 +34,7 @@ community consensus is MUC-with-extensions wins. Waddle stays on MUC.
 
 ## Remaining work
 
-- [ ] Wire `InboxStorage` into `AppState` with a libSQL-backed impl in
+- [x] Wire `InboxStorage` into `AppState` with a libSQL-backed impl in
       `waddle-server` so inbox state survives restarts.
 - [ ] Expand XEP-0292 (vCard4) PEP publish/retrieve integration tests
 - [ ] Add XEP-0402 (Bookmarks) PEP integration tests

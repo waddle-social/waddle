@@ -27,6 +27,9 @@ use crate::disco::{
     muc_service_features, parse_disco_info_query, parse_disco_items_query, pubsub_service_features,
     server_features, spaces_service_features, upload_service_features, DiscoItem, Identity,
 };
+use crate::inbox::runtime::{
+    direct_message_entry, filter_query, groupchat_entry, should_project_message,
+};
 use crate::isr::{
     build_isr_token_error, build_isr_token_result, is_isr_token_request, SharedIsrTokenStore,
 };
@@ -99,6 +102,10 @@ use crate::xep::xep0363::{
     UploadError, UploadSlot,
 };
 use crate::xep::xep0398::AvatarConversion;
+use crate::xep::xep0430::{
+    build_inbox_query_result, build_mark_read_result, is_inbox_iq, parse_inbox_query,
+    parse_mark_read,
+};
 use crate::xep::xep0461::{parse_reply_from_message, thread_id_from_message};
 use crate::{managed_room_jid, parse_managed_room_jid, AppState, ChannelType, Session, XmppError};
 use waddle_extensions::{message_has_embed_for_namespaces, ExtensionManager};
@@ -1708,6 +1715,36 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             None
         };
 
+        if should_project_message(&muc_msg.message) {
+            let timestamp = Utc::now().timestamp();
+            let sender_bare = sender_jid.to_bare();
+            let entry = groupchat_entry(room_jid.clone(), &muc_msg.message, timestamp);
+
+            if sender_bare.domain().as_str() == self.domain {
+                if let Err(error) = self
+                    .app_state
+                    .upsert_inbox_entry(&sender_bare, entry.clone(), false)
+                    .await
+                {
+                    warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender inbox for groupchat");
+                }
+            }
+
+            for occupant_bare in occupant_bare_jids
+                .iter()
+                .filter_map(|jid| jid.parse::<jid::BareJid>().ok())
+                .filter(|jid| jid.domain().as_str() == self.domain)
+            {
+                if let Err(error) = self
+                    .app_state
+                    .upsert_inbox_entry(&occupant_bare, entry.clone(), true)
+                    .await
+                {
+                    warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
+                }
+            }
+        }
+
         // Route local messages via ConnectionRegistry
         for mut outbound in federated_messages.local {
             // Add stanza-id if we archived successfully
@@ -1948,6 +1985,36 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 .await
             {
                 warn!(error = %e, "Failed to archive 1:1 message for recipient");
+            }
+        }
+
+        if should_project_message(&msg) {
+            let timestamp = Utc::now().timestamp();
+            let mut projected_msg = msg.clone();
+            if projected_msg.id.is_none() {
+                projected_msg.id = extract_origin_id(&projected_msg)
+                    .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+            }
+            let sender_entry =
+                direct_message_entry(recipient_bare.clone(), &projected_msg, timestamp);
+            if let Err(error) = self
+                .app_state
+                .upsert_inbox_entry(&sender_bare, sender_entry, false)
+                .await
+            {
+                warn!(jid = %sender_bare, partner = %recipient_bare, error = %error, "Failed to update sender inbox for direct message");
+            }
+
+            if recipient_bare.domain().as_str() == self.domain {
+                let recipient_entry =
+                    direct_message_entry(sender_bare.clone(), &projected_msg, timestamp);
+                if let Err(error) = self
+                    .app_state
+                    .upsert_inbox_entry(&recipient_bare, recipient_entry, true)
+                    .await
+                {
+                    warn!(jid = %recipient_bare, partner = %sender_bare, error = %error, "Failed to update recipient inbox for direct message");
+                }
             }
         }
 
@@ -3912,6 +3979,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Check if this is a MAM query
         if is_mam_query(&iq) {
             return self.handle_mam_query(iq).await;
+        }
+
+        if is_inbox_iq(&iq) {
+            return self.handle_inbox_query(iq).await;
         }
 
         // Check if this is a carbons enable request
@@ -7084,6 +7155,41 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         Ok(())
+    }
+
+    /// Handle XEP-0430 Inbox IQ requests.
+    #[instrument(skip(self, iq), fields(iq_id = %iq.id))]
+    async fn handle_inbox_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
+        let sender_jid = self.jid.clone().ok_or_else(|| {
+            XmppError::not_authorized(Some("Session not established".to_string()))
+        })?;
+        let bare_jid = sender_jid.to_bare();
+
+        match &iq.payload {
+            IqType::Get(_) => {
+                let query = parse_inbox_query(&iq)
+                    .map_err(|error| XmppError::bad_request(Some(error.to_string())))?;
+                let entries = self.app_state.list_inbox(&bare_jid).await?;
+                let total_unread = self.app_state.inbox_total_unread(&bare_jid).await?;
+                let response =
+                    build_inbox_query_result(&iq, &filter_query(entries, &query), total_unread);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                Ok(())
+            }
+            IqType::Set(_) => {
+                let mark_read = parse_mark_read(&iq)
+                    .map_err(|error| XmppError::bad_request(Some(error.to_string())))?;
+                self.app_state
+                    .mark_inbox_read(&bare_jid, &mark_read.partner)
+                    .await?;
+                let response = build_mark_read_result(&iq);
+                self.stream.write_stanza(&Stanza::Iq(response)).await?;
+                Ok(())
+            }
+            _ => Err(XmppError::bad_request(Some(
+                "Inbox IQ must be get or set".to_string(),
+            ))),
+        }
     }
 
     /// Handle XEP-0049 Private XML Storage IQ requests.

@@ -28,6 +28,10 @@ use waddle_xmpp::{
         parse_disco_items_query, spaces_service_features, upload_service_features, DiscoItem,
         Feature, Identity,
     },
+    inbox::{
+        runtime::{direct_message_entry, filter_query, groupchat_entry, should_project_message},
+        storage::InboxStorage,
+    },
     mam::{
         add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
         parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
@@ -61,6 +65,10 @@ use waddle_xmpp::xep::xep0363::{
     build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
     parse_upload_request, sanitize_filename, UploadError, UploadSlot,
 };
+use waddle_xmpp::xep::xep0430::{
+    build_inbox_query_result, build_mark_read_result, is_inbox_iq, parse_inbox_query,
+    parse_mark_read,
+};
 
 /// WebSocket state containing all necessary registries for message routing
 pub struct WebSocketState {
@@ -74,6 +82,8 @@ pub struct WebSocketState {
     pub muc_registry: Arc<MucRoomRegistry>,
     /// Shared XMPP MAM storage for archived message history.
     pub mam_storage: Arc<LibSqlMamStorage>,
+    /// Shared XEP-0430 inbox projection storage.
+    pub inbox_storage: Arc<dyn InboxStorage>,
     /// Registry for ad-hoc commands exposed over the WebSocket transport.
     pub command_registry: Arc<CommandRegistry>,
     /// Runtime extension manager for message embeds + feature advertisements
@@ -1838,6 +1848,65 @@ async fn handle_iq_with_conn_state(
         }
     }
 
+    if let Some(request_iq) = parsed_iq.as_ref() {
+        if is_inbox_iq(request_iq) {
+            let Some(user_jid) = session_jid.as_ref().map(|jid| jid.to_bare()) else {
+                return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+            };
+
+            match &request_iq.payload {
+                xmpp_parsers::iq::IqType::Get(_) => {
+                    let query = match parse_inbox_query(request_iq) {
+                        Ok(query) => query,
+                        Err(error) => {
+                            warn!(error = %error, "Invalid inbox query");
+                            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                        }
+                    };
+                    let entries = match state.inbox_storage.list(&user_jid).await {
+                        Ok(entries) => entries,
+                        Err(error) => {
+                            warn!(error = %error, jid = %user_jid, "Failed to list inbox");
+                            return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                        }
+                    };
+                    let total_unread = match state.inbox_storage.total_unread(&user_jid).await {
+                        Ok(total_unread) => total_unread,
+                        Err(error) => {
+                            warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
+                            return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                        }
+                    };
+                    let response = build_inbox_query_result(
+                        request_iq,
+                        &filter_query(entries, &query),
+                        total_unread,
+                    );
+                    return vec![iq_to_xml(response)];
+                }
+                xmpp_parsers::iq::IqType::Set(_) => {
+                    let mark_read = match parse_mark_read(request_iq) {
+                        Ok(mark_read) => mark_read,
+                        Err(error) => {
+                            warn!(error = %error, "Invalid inbox mark-read");
+                            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                        }
+                    };
+                    if let Err(error) = state
+                        .inbox_storage
+                        .mark_read(&user_jid, &mark_read.partner)
+                        .await
+                    {
+                        warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
+                        return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                    }
+                    return vec![iq_to_xml(build_mark_read_result(request_iq))];
+                }
+                _ => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+            }
+        }
+    }
+
     // urn:xmpp:carbons:2 enable/disable is now served by
     // protocol::handlers::carbons::CarbonsHandler via the short-circuit above.
 
@@ -2036,6 +2105,34 @@ async fn handle_message(
             add_mam_stanza_id(&mut prototype, archive_id.as_str(), &room_jid.to_string());
         }
 
+        if should_project_message(&prototype) {
+            let timestamp = Utc::now().timestamp();
+            let sender_bare = sender_jid.to_bare();
+            let entry = groupchat_entry(room_jid.clone(), &prototype, timestamp);
+
+            if let Err(error) = state
+                .inbox_storage
+                .upsert(&sender_bare, entry.clone(), false)
+                .await
+            {
+                warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender inbox for groupchat");
+            }
+
+            for (occupant_jid, _) in &occupants {
+                if occupant_jid == sender_jid {
+                    continue;
+                }
+                let occupant_bare = occupant_jid.to_bare();
+                if let Err(error) = state
+                    .inbox_storage
+                    .upsert(&occupant_bare, entry.clone(), true)
+                    .await
+                {
+                    warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
+                }
+            }
+        }
+
         // Send to all occupants
         let mut echo_response = None;
         for (occupant_jid, _) in &occupants {
@@ -2077,6 +2174,10 @@ async fn handle_message(
             // Build a prototype message and enrich it with embeds before routing.
             // Enrichment is fail-open: errors are logged but never block delivery.
             let mut prototype = incoming.clone();
+            if prototype.id.is_none() {
+                prototype.id = extract_origin_id(&prototype)
+                    .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+            }
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
             prototype.type_ = XmppMessageType::Chat;
 
@@ -2089,6 +2190,38 @@ async fn handle_message(
 
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
             archive_direct_message(state, sender_jid, to_jid, &prototype).await;
+
+            if should_project_message(&prototype) {
+                let timestamp = Utc::now().timestamp();
+                let sender_bare = sender_jid.to_bare();
+                let recipient_bare = to_jid.to_bare();
+
+                if let Err(error) = state
+                    .inbox_storage
+                    .upsert(
+                        &sender_bare,
+                        direct_message_entry(recipient_bare.clone(), &prototype, timestamp),
+                        false,
+                    )
+                    .await
+                {
+                    warn!(jid = %sender_bare, partner = %recipient_bare, error = %error, "Failed to update sender inbox for direct message");
+                }
+
+                if recipient_bare.domain() == sender_bare.domain() {
+                    if let Err(error) = state
+                        .inbox_storage
+                        .upsert(
+                            &recipient_bare,
+                            direct_message_entry(sender_bare.clone(), &prototype, timestamp),
+                            true,
+                        )
+                        .await
+                    {
+                        warn!(jid = %recipient_bare, partner = %sender_bare, error = %error, "Failed to update recipient inbox for direct message");
+                    }
+                }
+            }
 
             // Route the enriched message
             if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
@@ -2727,6 +2860,7 @@ mod tests {
             connection_registry: Arc::new(ConnectionRegistry::new()),
             muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
             mam_storage,
+            inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             command_registry: Arc::new(CommandRegistry::new()),
             extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
             dispatcher: Arc::new(dispatcher),
@@ -3596,6 +3730,178 @@ mod tests {
         assert!(
             routed_xml.contains("urn:waddle:github:0"),
             "routed stanza should preserve GitHub payload: {routed_xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let bob_session = create_test_session(state.as_ref(), "bob").await;
+        let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+            .parse()
+            .expect("bob jid");
+
+        let message_xml = format!(
+            "<message xmlns='jabber:client' to='{}' type='chat' id='dm-inbox-1'>\
+                <body>Hello from Alice</body>\
+             </message>",
+            bob_jid.to_bare()
+        );
+        let responses = handle_message(
+            message_xml.as_str(),
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_jid),
+            &Some(alice_session),
+        )
+        .await;
+        assert!(responses.is_empty(), "plain DM should not echo to sender");
+
+        let inbox_query = format!(
+            "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-1'>\
+                <query xmlns='urn:xmpp:inbox:0'/>\
+             </iq>",
+            bob_jid.to_bare()
+        );
+        let inbox_responses = handle_iq(
+            inbox_query.as_str(),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(bob_session.clone()),
+            &Some(bob_jid.clone()),
+        )
+        .await;
+        let inbox_xml = inbox_responses.first().expect("inbox response");
+        assert!(
+            inbox_xml.contains("partner=\"alice@example.com\""),
+            "inbox response should include Alice conversation: {inbox_xml}"
+        );
+        assert!(
+            inbox_xml.contains("unread=\"1\""),
+            "inbox response should report one unread DM: {inbox_xml}"
+        );
+        assert!(
+            inbox_xml.contains("<preview>Hello from Alice</preview>"),
+            "inbox response should include preview text: {inbox_xml}"
+        );
+
+        let mark_read = format!(
+            "<iq xmlns='jabber:client' type='set' to='{}' id='inbox-2'>\
+                <mark-read xmlns='urn:xmpp:inbox:0' partner='alice@example.com'/>\
+             </iq>",
+            bob_jid.to_bare()
+        );
+        let mark_read_responses = handle_iq(
+            mark_read.as_str(),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(bob_session.clone()),
+            &Some(bob_jid.clone()),
+        )
+        .await;
+        let mark_read_xml = mark_read_responses.first().expect("mark-read result");
+        assert!(
+            mark_read_xml.contains("type=\"result\""),
+            "mark-read should succeed: {mark_read_xml}"
+        );
+
+        let unread_only_query = format!(
+            "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-3'>\
+                <query xmlns='urn:xmpp:inbox:0' only-unread='true'/>\
+             </iq>",
+            bob_jid.to_bare()
+        );
+        let unread_only_responses = handle_iq(
+            unread_only_query.as_str(),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(bob_session),
+            &Some(bob_jid),
+        )
+        .await;
+        let unread_only_xml = unread_only_responses.first().expect("unread-only response");
+        assert!(
+            unread_only_xml.contains("total-unread=\"0\""),
+            "mark-read should clear the unread count: {unread_only_xml}"
+        );
+        assert!(
+            !unread_only_xml.contains("<conversation "),
+            "unread-only query should be empty after mark-read: {unread_only_xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_session(state.as_ref(), "alice").await;
+        let bob_session = create_test_session(state.as_ref(), "bob").await;
+        let alice_jid: FullJid = format!("{}@example.com/web", alice_session.xmpp_localpart)
+            .parse()
+            .expect("alice jid");
+        let bob_jid: FullJid = format!("{}@example.com/mobile", bob_session.xmpp_localpart)
+            .parse()
+            .expect("bob jid");
+
+        let message_xml = format!(
+            "<message xmlns='jabber:client' to='{}' type='chat' id='dm-esfs-1'>\
+                <file-sharing xmlns='urn:xmpp:sfs:0'/>\
+                <encrypted xmlns='urn:xmpp:esfs:0' cipher='urn:xmpp:ciphers:aes-256-gcm-nopadding:0'>\
+                    <key>a2V5</key>\
+                    <iv>aXY=</iv>\
+                    <sources xmlns='urn:xmpp:sfs:0'>\
+                        <url-data target='https://files.example.com/secret.enc'/>\
+                    </sources>\
+                </encrypted>\
+             </message>",
+            bob_jid.to_bare()
+        );
+        let responses = handle_message(
+            message_xml.as_str(),
+            "muc.example.com",
+            state.as_ref(),
+            &Some(alice_jid),
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "encrypted file-sharing DM should not echo to sender"
+        );
+
+        let inbox_query = format!(
+            "<iq xmlns='jabber:client' type='get' to='{}' id='inbox-esfs-1'>\
+                <query xmlns='urn:xmpp:inbox:0'/>\
+             </iq>",
+            bob_jid.to_bare()
+        );
+        let inbox_responses = handle_iq(
+            inbox_query.as_str(),
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(bob_session),
+            &Some(bob_jid),
+        )
+        .await;
+        let inbox_xml = inbox_responses.first().expect("inbox response");
+        assert!(
+            inbox_xml.contains("partner=\"alice@example.com\""),
+            "encrypted file-sharing inbox entry should target Alice: {inbox_xml}"
+        );
+        assert!(
+            inbox_xml.contains("unread=\"1\""),
+            "encrypted file-sharing inbox entry should increment unread: {inbox_xml}"
+        );
+        assert!(
+            !inbox_xml.contains("<preview>"),
+            "bodyless encrypted file-sharing message should not invent preview text: {inbox_xml}"
         );
     }
 
