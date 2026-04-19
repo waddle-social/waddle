@@ -20,6 +20,17 @@ describe("renderStyledBody", () => {
     expect(html).toContain("<strong>ss</strong>");
   });
 
+  test("renders single-newline messages as visible line breaks", () => {
+    const html = renderStyledBody("line one\nline two");
+    expect(html).toContain("line one<br>line two");
+  });
+
+  test("renders blank-line-separated messages as paragraphs", () => {
+    const html = renderStyledBody("line one\n\nline two");
+    expect(html).toContain("<p>line one</p>");
+    expect(html).toContain("<p>line two</p>");
+  });
+
   test("synthesizes styling from markup-only payloads", () => {
     const body = "Hello world";
     const markup: MarkupSpan[] = [

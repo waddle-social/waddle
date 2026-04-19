@@ -445,23 +445,25 @@ watch(
   <div
     v-if="message.isRetracted"
     :data-message-id="message.id"
-    class="flow-root px-3 py-2 opacity-30 animate-message-in"
+    class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-3 py-2 opacity-30 animate-message-in"
   >
     <AppAvatar
-      class="float-left mr-3 mt-0.5"
+      class="mt-0.5"
       :name="message.author"
       :src="avatarUrl"
       :presence="presence"
       :last-seen="lastSeen"
       size="md"
     />
-    <div class="flex items-baseline gap-2 mb-0.5">
-      <span class="font-medium text-[13px]">{{ message.author }}</span>
-      <span class="text-[11px] font-mono text-muted-foreground tabular-nums">
-        {{ formatStamp(message.createdAt) }}
-      </span>
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-2 mb-0.5">
+        <span class="font-medium text-[13px]">{{ message.author }}</span>
+        <span class="text-[11px] font-mono text-muted-foreground tabular-nums">
+          {{ formatStamp(message.createdAt) }}
+        </span>
+      </div>
+      <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
     </div>
-    <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
   </div>
 
   <!-- Normal message -->
@@ -470,7 +472,7 @@ watch(
     ref="bubbleEl"
     :data-message-id="message.id"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
-    class="group relative flow-root px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
+    class="group relative grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
     :class="[
       isMentioned
         ? 'bg-warning/5 border-l-2 border-warning/30'
@@ -490,40 +492,41 @@ watch(
     @contextmenu="onBubbleContextMenu"
   >
     <button
-      class="float-left mr-3 mt-0.5 rounded-lg"
+      class="mt-0.5 rounded-lg self-start"
       type="button"
       @click.stop="emitAvatarClick"
     >
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
     </button>
-    <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
-      <span class="font-semibold text-[13px]">{{ message.author }}</span>
-      <span
-        v-for="hat in hats"
-        :key="hat.uri"
-        class="inline-block px-1.5 py-px text-[9px] font-bold uppercase tracking-wider rounded-md leading-none"
-        :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
-        :title="hat.title"
-      >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
-      <span class="text-[11px] font-mono text-muted-foreground/60 tabular-nums">
-        {{ formatStamp(message.createdAt) }}
-      </span>
-      <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
-      <span
-        v-if="message.isSelf && deliveryStatusLabel"
-        class="text-[11px]"
-        :class="deliveryStatusClass"
-      >
-        {{ deliveryStatusLabel }}
-      </span>
-      <span
-        v-if="message.isSelf && message.readBy && message.readBy.length > 0"
-        class="text-[11px] text-muted-foreground/50"
-        :title="message.readBy.join(', ')"
-      >
-        Read by {{ message.readBy.length }}
-      </span>
-    </div>
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
+        <span class="font-semibold text-[13px]">{{ message.author }}</span>
+        <span
+          v-for="hat in hats"
+          :key="hat.uri"
+          class="inline-block px-1.5 py-px text-[9px] font-bold uppercase tracking-wider rounded-md leading-none"
+          :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
+          :title="hat.title"
+        >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
+        <span class="text-[11px] font-mono text-muted-foreground/60 tabular-nums">
+          {{ formatStamp(message.createdAt) }}
+        </span>
+        <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
+        <span
+          v-if="message.isSelf && deliveryStatusLabel"
+          class="text-[11px]"
+          :class="deliveryStatusClass"
+        >
+          {{ deliveryStatusLabel }}
+        </span>
+        <span
+          v-if="message.isSelf && message.readBy && message.readBy.length > 0"
+          class="text-[11px] text-muted-foreground/50"
+          :title="message.readBy.join(', ')"
+        >
+          Read by {{ message.readBy.length }}
+        </span>
+      </div>
 
     <div
       v-if="isForumTopic && forumThreadLabel"
@@ -735,6 +738,7 @@ watch(
         <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
       </button>
     </div>
+    </div>
 
     <!-- Floating action toolbar — desktop-only hover/focus affordance. On
          touch devices (where hover never fires) long-press opens the action
@@ -925,6 +929,14 @@ watch(
 </template>
 
 <style scoped>
+.styled-body :deep(p) {
+  margin: 0;
+}
+
+.styled-body :deep(p + p) {
+  margin-top: 0.5rem;
+}
+
 .styled-body :deep(pre.message-code-block) {
   margin: 0.5rem 0;
   padding: 0.75rem 0.9rem;

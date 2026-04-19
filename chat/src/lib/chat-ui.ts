@@ -240,7 +240,7 @@ const md = new Marked({
       return `<blockquote class="border-l-2 border-muted-foreground pl-3 my-1 text-muted-foreground">${text}</blockquote>`;
     },
     paragraph(token) {
-      return this.parser.parseInline(token.tokens);
+      return `<p>${this.parser.parseInline(token.tokens)}</p>`;
     },
     // Features not in XEP-0393 — de-style to plain text (preserve content, strip formatting)
     heading({ text }: { text: string }) { return text; },
