@@ -167,6 +167,37 @@ final class WaddleAPIClient {
         return try decoder.decode(WaddleSummary.self, from: data)
     }
 
+    func updateWaddle(sessionID: String, waddleID: String, name: String, description: String?) async throws {
+        let payload: [String: String?] = ["name": name, "description": description]
+        let body = try JSONEncoder().encode(payload)
+        let _ = try await send(
+            path: "/v1/waddles/\(waddleID)",
+            method: "POST",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            body: body
+        )
+    }
+
+    func deleteWaddle(sessionID: String, waddleID: String) async throws {
+        let _ = try await send(
+            path: "/v1/waddles/\(waddleID)",
+            method: "DELETE",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            treatStatusesAsNil: [204]
+        )
+    }
+
+    func updateChannel(sessionID: String, waddleID: String, channelID: String, name: String, description: String?, position: Int) async throws {
+        let payload: [String: Any] = ["name": name, "description": description as Any, "position": position]
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let _ = try await send(
+            path: "/v1/waddles/\(waddleID)/channels/\(channelID)",
+            method: "PATCH",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            body: body
+        )
+    }
+
     func listMembers(sessionID: String, waddleID: String) async throws -> [MemberSummary] {
         let (data, _) = try await send(
             path: "/v1/waddles/\(waddleID)/members",

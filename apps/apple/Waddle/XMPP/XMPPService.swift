@@ -137,6 +137,24 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.displayedMarker(to: roomJID, messageID: messageID))
     }
 
+    func enablePushNotifications(pushServiceJID: String, node: String, token: String) async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "push-enable")
+        let _ = try await sendIQ(
+            XMPPXML.pushEnable(id: id, pushServiceJID: pushServiceJID, node: node, token: token),
+            id: id
+        )
+    }
+
+    func disablePushNotifications(pushServiceJID: String, node: String) async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "push-disable")
+        let _ = try await sendIQ(
+            XMPPXML.pushDisable(id: id, pushServiceJID: pushServiceJID, node: node),
+            id: id
+        )
+    }
+
     func sendDirectMessage(peerJID: String, body: String) async throws {
         try ensureReady()
         try await transport.send(XMPPXML.directMessage(to: peerJID, body: body))

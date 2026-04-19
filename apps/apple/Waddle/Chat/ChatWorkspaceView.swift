@@ -17,6 +17,13 @@ struct WaddleChatWorkspaceView: View {
     @State private var newChannelType = "text"
     @State private var showNewDmSheet = false
     @State private var showCreateTopicSheet = false
+    @State private var showEditChannelSheet = false
+    @State private var editChannelName = ""
+    @State private var editChannelDescription = ""
+    @State private var showWaddleSettingsSheet = false
+    @State private var editWaddleName = ""
+    @State private var editWaddleDescription = ""
+    @State private var showDeleteWaddleConfirm = false
     @State private var newTopicTitle = ""
     @State private var newTopicBody = ""
     @State private var forumReplyText = ""
@@ -90,6 +97,90 @@ struct WaddleChatWorkspaceView: View {
                 }
             }
             .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showWaddleSettingsSheet) {
+            NavigationStack {
+                Form {
+                    Section("Waddle Details") {
+                        TextField("Name", text: $editWaddleName)
+                        TextField("Description", text: $editWaddleDescription)
+                    }
+                    Section {
+                        Button(role: .destructive) {
+                            showDeleteWaddleConfirm = true
+                        } label: {
+                            Label("Delete Waddle", systemImage: "trash")
+                        }
+                    }
+                }
+                .navigationTitle("Waddle Settings")
+#if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+#endif
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showWaddleSettingsSheet = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            Task {
+                                await model.updateWaddle(
+                                    name: editWaddleName,
+                                    description: editWaddleDescription.isEmpty ? nil : editWaddleDescription
+                                )
+                                showWaddleSettingsSheet = false
+                            }
+                        }
+                        .disabled(editWaddleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                .alert("Delete Waddle?", isPresented: $showDeleteWaddleConfirm) {
+                    Button("Delete", role: .destructive) {
+                        Task {
+                            await model.deleteWaddle()
+                            showWaddleSettingsSheet = false
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This action cannot be undone. All channels and messages will be permanently deleted.")
+                }
+            }
+            .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showEditChannelSheet) {
+            NavigationStack {
+                Form {
+                    TextField("Channel name", text: $editChannelName)
+                    TextField("Description", text: $editChannelDescription)
+                }
+                .navigationTitle("Edit Channel")
+#if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+#endif
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showEditChannelSheet = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            guard let channelID = model.selectedChannelID else { return }
+                            let idx = model.channels.firstIndex(where: { $0.id == channelID })
+                            Task {
+                                await model.updateChannel(
+                                    channelID: channelID,
+                                    name: editChannelName,
+                                    description: editChannelDescription.isEmpty ? nil : editChannelDescription,
+                                    position: idx ?? 0
+                                )
+                                showEditChannelSheet = false
+                            }
+                        }
+                        .disabled(editChannelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+            .presentationDetents([.medium])
         }
     }
 
@@ -452,6 +543,17 @@ struct WaddleChatWorkspaceView: View {
                     }
 
                     Spacer(minLength: 0)
+
+                    Button {
+                        editWaddleName = waddle.name
+                        editWaddleDescription = waddle.description ?? ""
+                        showWaddleSettingsSheet = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 HStack(spacing: 8) {
@@ -519,6 +621,16 @@ struct WaddleChatWorkspaceView: View {
                                 isSelected: model.selectedChannelID == room.id
                             ) {
                                 Task { await model.selectChannel(room.id) }
+                            }
+                            .contextMenu {
+                                Button {
+                                    editChannelName = room.title
+                                    editChannelDescription = room.subtitle ?? ""
+                                    Task { await model.selectChannel(room.id) }
+                                    showEditChannelSheet = true
+                                } label: {
+                                    Label("Edit Channel", systemImage: "pencil")
+                                }
                             }
                         }
                     }

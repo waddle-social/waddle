@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 13, items 4.5/7.1/7.2/7.3)
+> Last updated: 2026-04-19 (loop 14, items 6.2/6.3/6.4/8.1)
 
 ## Legend
 
@@ -57,7 +57,7 @@
 | 4.1 | File upload (images, documents) | CRITICAL | [x] | XEP-0363, XEP-0447 | Discover upload service, request slot, HTTP PUT, send file-sharing message, PhotosPicker in composer |
 | 4.2 | Inline image display | CRITICAL | [x] | XEP-0446 | Parse XEP-0447/0446 file-sharing stanzas, render inline images with AsyncImage, show file download links with metadata |
 | 4.3 | Image lightbox viewer | HIGH | [x] | - | Full-screen image viewer on tap with dismiss button and filename overlay |
-| 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Web has trending + search GIF integration |
+| 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Requires external GIPHY/Tenor API key configuration |
 | 4.5 | Sticker support | LOW | [x] | XEP-0449 | Parse <sticker> element, isSticker flag on messages, sticker images displayed via existing file-sharing renderer |
 | 4.6 | File download | HIGH | [x] | - | Downloadable file links with name, media type, and size shown inline |
 
@@ -73,9 +73,9 @@
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
 | 6.1 | Create channel (text/forum) | HIGH | [x] | XEP-0050 | Two-step ad-hoc command flow, form with name/description/type/position, create button in channel rail |
-| 6.2 | Edit channel (name, description) | MEDIUM | [ ] | - | Web has EditChannelDialog |
-| 6.3 | Waddle settings dialog | MEDIUM | [ ] | - | Web has WaddleSettingsDialog |
-| 6.4 | Delete waddle | LOW | [ ] | - | Web has delete with confirmation |
+| 6.2 | Edit channel (name, description) | MEDIUM | [x] | - | REST API updateChannel, edit sheet from channel context menu, name/description form |
+| 6.3 | Waddle settings dialog | MEDIUM | [x] | - | Settings sheet from gear button, edit name/description, save via REST API |
+| 6.4 | Delete waddle | LOW | [x] | - | Delete button in waddle settings with confirmation alert, REST DELETE, clears selection |
 
 ## 7. Member Management
 
@@ -90,7 +90,7 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 8.1 | Push notifications | HIGH | [ ] | XEP-0357 | Web has VAPID-based push via service worker |
+| 8.1 | Push notifications | HIGH | [x] | XEP-0357 | XEP-0357 enable/disable IQs, UNUserNotificationCenter permission request, APNS token registration, push service JID discovery |
 | 8.2 | In-app notification toasts | MEDIUM | [x] | - | Toast overlay on broadcast mentions with sender, body preview, channel name, auto-dismiss after 5s |
 
 ## 9. Rich Text Editor

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UserNotifications
 
 private enum ChatSendError: LocalizedError {
     case noSession
@@ -535,6 +536,75 @@ final class AppModel: ObservableObject {
 
     func threadReplies(for threadID: String) -> [ChatTimelineMessage] {
         chatStore.messages.filter { $0.threadID == threadID && $0.isForumReply }
+    }
+
+    @Published var pushNotificationsEnabled = false
+
+    func requestPushNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { [weak self] granted, _ in
+            Task { @MainActor in
+                self?.pushNotificationsEnabled = granted
+                if granted {
+#if os(iOS)
+                    UIApplication.shared.registerForRemoteNotifications()
+#elseif os(macOS)
+                    NSApplication.shared.registerForRemoteNotifications()
+#endif
+                }
+            }
+        }
+    }
+
+    func registerPushToken(_ tokenData: Data) async {
+        let token = tokenData.map { String(format: "%02x", $0) }.joined()
+        guard let xmppService, let session else { return }
+        let pushServiceJID = "push.\(jidDomain(session.jid))"
+        let node = "waddle-apple-\(session.userID)"
+        do {
+            try await xmppService.enablePushNotifications(
+                pushServiceJID: pushServiceJID,
+                node: node,
+                token: token
+            )
+            pushNotificationsEnabled = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func updateWaddle(name: String, description: String?) async {
+        guard let session, let waddleID = selectedWaddleID else { return }
+        do {
+            try await client.updateWaddle(sessionID: session.sessionID, waddleID: waddleID, name: name, description: description)
+            await refreshPublicWaddles()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func deleteWaddle() async {
+        guard let session, let waddleID = selectedWaddleID else { return }
+        do {
+            try await client.deleteWaddle(sessionID: session.sessionID, waddleID: waddleID)
+            selectedWaddleID = nil
+            channels = []
+            selectedChannelID = nil
+            members = []
+            await refreshPublicWaddles()
+            updateChatSurfaceState()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func updateChannel(channelID: String, name: String, description: String?, position: Int) async {
+        guard let session, let waddleID = selectedWaddleID else { return }
+        do {
+            try await client.updateChannel(sessionID: session.sessionID, waddleID: waddleID, channelID: channelID, name: name, description: description, position: position)
+            await reloadSelectedWaddleStructure()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func addMember(userID: String, role: String = "member") async {

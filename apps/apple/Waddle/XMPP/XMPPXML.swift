@@ -269,6 +269,23 @@ enum XMPPXML {
         return payload
     }
 
+    static func pushEnable(id: String, pushServiceJID: String, node: String, token: String) -> String {
+        "<iq type='set' id='\(escape(id))'>" +
+        "<enable xmlns='urn:xmpp:push:0' jid='\(escape(pushServiceJID))' node='\(escape(node))'>" +
+        "<x xmlns='jabber:x:data' type='submit'>" +
+        "<field var='FORM_TYPE' type='hidden'><value>http://jabber.org/protocol/pubsub#publish-options</value></field>" +
+        "<field var='token'><value>\(escape(token))</value></field>" +
+        "</x>" +
+        "</enable>" +
+        "</iq>"
+    }
+
+    static func pushDisable(id: String, pushServiceJID: String, node: String) -> String {
+        "<iq type='set' id='\(escape(id))'>" +
+        "<disable xmlns='urn:xmpp:push:0' jid='\(escape(pushServiceJID))' node='\(escape(node))'/>" +
+        "</iq>"
+    }
+
     static func smEnable(resume: Bool = true) -> String {
         "<enable xmlns='urn:xmpp:sm:3'\(resume ? " resume='true'" : "")/>"
     }
