@@ -86,6 +86,190 @@ private final class XMPPFragmentParser: NSObject, XMLParserDelegate {
 }
 
 enum XMPPXML {
+
+    // MARK: - XEP-0430 Inbox
+
+    static func inboxQuery(id: String, max: Int = 50) -> String {
+        "<iq type='get' id='\(escape(id))'>" +
+        "<inbox xmlns='urn:xmpp:inbox:1'>" +
+        "<set xmlns='http://jabber.org/protocol/rsm'><max>\(max)</max></set>" +
+        "</inbox>" +
+        "</iq>"
+    }
+
+    static func parseInboxEntries(from element: XMPPElement) -> [XMPPInboxEntry] {
+        guard let inbox = element.firstChild(named: "inbox") else { return [] }
+        return inbox.children(named: "entry").compactMap { entry in
+            guard let jid = entry.attribute("jid") else { return nil }
+            let unread = Int(entry.attribute("unread") ?? "0") ?? 0
+            let body = entry.firstChild(named: "last-message")?.firstChild(named: "body")?.text
+                ?? entry.firstChild(named: "summary")?.text
+            let stamp = entry.attribute("timestamp").flatMap { parseXMPPDatePublic($0) }
+            return XMPPInboxEntry(jid: jid, unreadCount: unread, lastMessageBody: body, timestamp: stamp)
+        }
+    }
+
+    // MARK: - XEP-0107 User Mood
+
+    static func publishMood(id: String, mood: String, text: String? = nil) -> String {
+        var moodContent = "<mood xmlns='http://jabber.org/protocol/mood'>"
+        moodContent += "<\(escape(mood))/>"
+        if let text, !text.isEmpty {
+            moodContent += "<text>\(escape(text))</text>"
+        }
+        moodContent += "</mood>"
+        return "<iq type='set' id='\(escape(id))'>" +
+            "<pubsub xmlns='http://jabber.org/protocol/pubsub'>" +
+            "<publish node='http://jabber.org/protocol/mood'>" +
+            "<item>\(moodContent)</item>" +
+            "</publish>" +
+            "</pubsub>" +
+            "</iq>"
+    }
+
+    static func clearMood(id: String) -> String {
+        "<iq type='set' id='\(escape(id))'>" +
+        "<pubsub xmlns='http://jabber.org/protocol/pubsub'>" +
+        "<publish node='http://jabber.org/protocol/mood'>" +
+        "<item><mood xmlns='http://jabber.org/protocol/mood'/></item>" +
+        "</publish>" +
+        "</pubsub>" +
+        "</iq>"
+    }
+
+    static func parseMood(from element: XMPPElement) -> XMPPUserMood? {
+        guard let mood = element.firstChild(named: "mood") else { return nil }
+        let moodChild = mood.children.first(where: { $0.localName != "text" })
+        guard let moodValue = moodChild?.localName else { return nil }
+        return XMPPUserMood(mood: moodValue, text: mood.firstChild(named: "text")?.text)
+    }
+
+    // MARK: - XEP-0108 User Activity
+
+    static func publishActivity(id: String, activity: String, text: String? = nil) -> String {
+        var activityContent = "<activity xmlns='http://jabber.org/protocol/activity'>"
+        activityContent += "<\(escape(activity))/>"
+        if let text, !text.isEmpty {
+            activityContent += "<text>\(escape(text))</text>"
+        }
+        activityContent += "</activity>"
+        return "<iq type='set' id='\(escape(id))'>" +
+            "<pubsub xmlns='http://jabber.org/protocol/pubsub'>" +
+            "<publish node='http://jabber.org/protocol/activity'>" +
+            "<item>\(activityContent)</item>" +
+            "</publish>" +
+            "</pubsub>" +
+            "</iq>"
+    }
+
+    static func parseActivity(from element: XMPPElement) -> XMPPUserActivity? {
+        guard let activity = element.firstChild(named: "activity") else { return nil }
+        let activityChild = activity.children.first(where: { $0.localName != "text" })
+        guard let activityValue = activityChild?.localName else { return nil }
+        return XMPPUserActivity(activity: activityValue, text: activity.firstChild(named: "text")?.text)
+    }
+
+    // MARK: - XEP-0118 User Tune
+
+    static func publishTune(id: String, artist: String?, title: String?, source: String?, length: Int?, uri: String?) -> String {
+        var tuneContent = "<tune xmlns='http://jabber.org/protocol/tune'>"
+        if let artist, !artist.isEmpty { tuneContent += "<artist>\(escape(artist))</artist>" }
+        if let title, !title.isEmpty { tuneContent += "<title>\(escape(title))</title>" }
+        if let source, !source.isEmpty { tuneContent += "<source>\(escape(source))</source>" }
+        if let length { tuneContent += "<length>\(length)</length>" }
+        if let uri, !uri.isEmpty { tuneContent += "<uri>\(escape(uri))</uri>" }
+        tuneContent += "</tune>"
+        return "<iq type='set' id='\(escape(id))'>" +
+            "<pubsub xmlns='http://jabber.org/protocol/pubsub'>" +
+            "<publish node='http://jabber.org/protocol/tune'>" +
+            "<item>\(tuneContent)</item>" +
+            "</publish>" +
+            "</pubsub>" +
+            "</iq>"
+    }
+
+    static func clearTune(id: String) -> String {
+        "<iq type='set' id='\(escape(id))'>" +
+        "<pubsub xmlns='http://jabber.org/protocol/pubsub'>" +
+        "<publish node='http://jabber.org/protocol/tune'>" +
+        "<item><tune xmlns='http://jabber.org/protocol/tune'/></item>" +
+        "</publish>" +
+        "</pubsub>" +
+        "</iq>"
+    }
+
+    static func parseTune(from element: XMPPElement) -> XMPPUserTune? {
+        guard let tune = element.firstChild(named: "tune") else { return nil }
+        let artist = tune.firstChild(named: "artist")?.text
+        let title = tune.firstChild(named: "title")?.text
+        guard artist != nil || title != nil else { return nil }
+        return XMPPUserTune(
+            artist: artist,
+            title: title,
+            source: tune.firstChild(named: "source")?.text,
+            length: { if let t = tune.firstChild(named: "length")?.text { return Int(t) } else { return nil } }(),
+            uri: tune.firstChild(named: "uri")?.text
+        )
+    }
+
+    // MARK: - XEP-0448 Encrypted File Sharing
+
+    static func groupchatEncryptedFileMessage(
+        to roomJID: String,
+        body: String,
+        fileURL: String,
+        fileName: String,
+        mediaType: String,
+        size: Int,
+        keyBase64: String,
+        ivBase64: String,
+        cipher: String = "urn:xmpp:ciphers:aes-256-gcm-nopadding:0"
+    ) -> String {
+        var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
+        payload += "<body>\(escape(body))</body>"
+        payload += "<file-sharing xmlns='urn:xmpp:sfs:0' disposition='inline'>"
+        payload += "<file xmlns='urn:xmpp:file:metadata:0'>"
+        payload += "<name>\(escape(fileName))</name>"
+        payload += "<media-type>\(escape(mediaType))</media-type>"
+        payload += "<size>\(size)</size>"
+        payload += "</file>"
+        payload += "<sources>"
+        payload += "<encrypted xmlns='urn:xmpp:esfs:0' cipher='\(escape(cipher))'>"
+        payload += "<key>\(escape(keyBase64))</key>"
+        payload += "<iv>\(escape(ivBase64))</iv>"
+        payload += "<sources>"
+        payload += "<url-data xmlns='http://jabber.org/protocol/url-data' target='\(escape(fileURL))'/>"
+        payload += "</sources>"
+        payload += "</encrypted>"
+        payload += "</sources>"
+        payload += "</file-sharing>"
+        payload += "</message>"
+        return payload
+    }
+
+    static func parseEncryptedSource(from element: XMPPElement) -> XMPPEncryptedSource? {
+        guard let encrypted = element.firstChild(named: "encrypted") else { return nil }
+        let cipher = encrypted.attribute("cipher") ?? "urn:xmpp:ciphers:aes-256-gcm-nopadding:0"
+        guard let key = encrypted.firstChild(named: "key")?.text,
+              let iv = encrypted.firstChild(named: "iv")?.text else { return nil }
+        let url = encrypted.firstChild(named: "sources")?
+            .firstChild(named: "url-data")?
+            .attribute("target")
+        guard let url else { return nil }
+        return XMPPEncryptedSource(url: url, keyBase64: key, ivBase64: iv, cipher: cipher)
+    }
+
+    static func parseXMPPDatePublic(_ value: String) -> Date? {
+        let base = ISO8601DateFormatter()
+        base.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = base.date(from: value) { return date }
+        let fallback = ISO8601DateFormatter()
+        fallback.formatOptions = [.withInternetDateTime]
+        return fallback.date(from: value)
+    }
+
+    // MARK: - Stream
+
     static func openStream(to domain: String) -> String {
         "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='\(escape(domain))' version='1.0'/>"
     }
@@ -585,9 +769,11 @@ enum XMPPXML {
             let width = widthText.flatMap { Int($0) }
             let heightText = file?.firstChild(named: "height")?.text
             let height = heightText.flatMap { Int($0) }
-            let url = fs.firstChild(named: "sources")?
-                .firstChild(named: "url-data")?
-                .attribute("target")
+
+            let sources = fs.firstChild(named: "sources")
+            let encryptedSource = sources.flatMap { parseEncryptedSource(from: $0) }
+            let url = encryptedSource?.url
+                ?? sources?.firstChild(named: "url-data")?.attribute("target")
             guard let url, !url.isEmpty else { continue }
             files.append(XMPPSharedFile(
                 url: url,
@@ -596,7 +782,8 @@ enum XMPPXML {
                 size: size,
                 width: width,
                 height: height,
-                disposition: disposition
+                disposition: disposition,
+                encryptedSource: encryptedSource
             ))
         }
         return files

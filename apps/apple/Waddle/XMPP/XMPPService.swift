@@ -155,6 +155,51 @@ final class XMPPService: ObservableObject {
         )
     }
 
+    // MARK: - XEP-0430 Inbox
+
+    func fetchInbox(max: Int = 50) async throws -> [XMPPInboxEntry] {
+        try ensureReady()
+        let id = nextIQID(prefix: "inbox")
+        let response = try await sendIQ(XMPPXML.inboxQuery(id: id, max: max), id: id)
+        return XMPPXML.parseInboxEntries(from: response)
+    }
+
+    // MARK: - XEP-0107 User Mood
+
+    func publishMood(_ mood: String, text: String? = nil) async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "mood")
+        let _ = try await sendIQ(XMPPXML.publishMood(id: id, mood: mood, text: text), id: id)
+    }
+
+    func clearMood() async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "mood-clear")
+        let _ = try await sendIQ(XMPPXML.clearMood(id: id), id: id)
+    }
+
+    // MARK: - XEP-0108 User Activity
+
+    func publishActivity(_ activity: String, text: String? = nil) async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "activity")
+        let _ = try await sendIQ(XMPPXML.publishActivity(id: id, activity: activity, text: text), id: id)
+    }
+
+    // MARK: - XEP-0118 User Tune
+
+    func publishTune(artist: String?, title: String?, source: String? = nil, length: Int? = nil, uri: String? = nil) async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "tune")
+        let _ = try await sendIQ(XMPPXML.publishTune(id: id, artist: artist, title: title, source: source, length: length, uri: uri), id: id)
+    }
+
+    func clearTune() async throws {
+        try ensureReady()
+        let id = nextIQID(prefix: "tune-clear")
+        let _ = try await sendIQ(XMPPXML.clearTune(id: id), id: id)
+    }
+
     func sendDirectMessage(peerJID: String, body: String) async throws {
         try ensureReady()
         try await transport.send(XMPPXML.directMessage(to: peerJID, body: body))

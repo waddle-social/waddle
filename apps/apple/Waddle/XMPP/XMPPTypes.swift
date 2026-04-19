@@ -106,9 +106,14 @@ struct XMPPSharedFile: Sendable, Equatable, Hashable, Identifiable {
     let width: Int?
     let height: Int?
     let disposition: String
+    let encryptedSource: XMPPEncryptedSource?
 
     var isInlineImage: Bool {
         disposition == "inline" && (mediaType?.hasPrefix("image/") == true)
+    }
+
+    var isEncrypted: Bool {
+        encryptedSource != nil
     }
 }
 
@@ -153,6 +158,44 @@ struct XMPPPresenceEvent: Sendable, Equatable {
     let status: String?
     let show: String?
     let hats: [XMPPPresenceHat]
+}
+
+// MARK: - XEP-0430 Inbox
+
+struct XMPPInboxEntry: Sendable, Equatable {
+    let jid: String
+    let unreadCount: Int
+    let lastMessageBody: String?
+    let timestamp: Date?
+}
+
+// MARK: - XEP-0107/0108/0118 PEP User Status
+
+struct XMPPUserMood: Sendable, Equatable {
+    let mood: String
+    let text: String?
+}
+
+struct XMPPUserActivity: Sendable, Equatable {
+    let activity: String
+    let text: String?
+}
+
+struct XMPPUserTune: Sendable, Equatable {
+    let artist: String?
+    let title: String?
+    let source: String?
+    let length: Int?
+    let uri: String?
+}
+
+// MARK: - XEP-0448 Encrypted File Sharing
+
+struct XMPPEncryptedSource: Sendable, Equatable, Hashable {
+    let url: String
+    let keyBase64: String
+    let ivBase64: String
+    let cipher: String
 }
 
 enum XMPPEvent: Sendable, Equatable {

@@ -548,6 +548,69 @@ final class AppModel: ObservableObject {
     }
 
     @Published var pushNotificationsEnabled = false
+    @Published var currentMood: XMPPUserMood?
+    @Published var currentActivity: XMPPUserActivity?
+    @Published var currentTune: XMPPUserTune?
+    @Published var inboxEntries: [XMPPInboxEntry] = []
+
+    func fetchInbox() async {
+        guard let xmppService else { return }
+        do {
+            inboxEntries = try await xmppService.fetchInbox()
+        } catch {
+            logger.info("[WADDLE] inbox fetch error: \(error.localizedDescription)")
+        }
+    }
+
+    func setMood(_ mood: String, text: String? = nil) async {
+        guard let xmppService else { return }
+        do {
+            try await xmppService.publishMood(mood, text: text)
+            currentMood = XMPPUserMood(mood: mood, text: text)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func clearMood() async {
+        guard let xmppService else { return }
+        do {
+            try await xmppService.clearMood()
+            currentMood = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setActivity(_ activity: String, text: String? = nil) async {
+        guard let xmppService else { return }
+        do {
+            try await xmppService.publishActivity(activity, text: text)
+            currentActivity = XMPPUserActivity(activity: activity, text: text)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setTune(artist: String?, title: String?, source: String? = nil, uri: String? = nil) async {
+        guard let xmppService else { return }
+        do {
+            try await xmppService.publishTune(artist: artist, title: title, source: source, uri: uri)
+            currentTune = XMPPUserTune(artist: artist, title: title, source: source, length: nil, uri: uri)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func clearTune() async {
+        guard let xmppService else { return }
+        do {
+            try await xmppService.clearTune()
+            currentTune = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 
     func requestPushNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { [weak self] granted, _ in
