@@ -45,4 +45,14 @@ enum WaddleTheme {
     static let timestampFont = Font.caption2
     static let bodyFont = Font.subheadline
     static let channelFont = Font.subheadline
+
+    // MARK: - Avatar Colors (consistent hue per username)
+    static func avatarColor(for name: String) -> Color {
+        var hash: UInt32 = 5381
+        for char in name.unicodeScalars {
+            hash = ((hash &<< 5) &+ hash) &+ char.value
+        }
+        let hue = Double(hash % 360) / 360.0
+        return Color(hue: hue, saturation: 0.55, brightness: 0.75)
+    }
 }

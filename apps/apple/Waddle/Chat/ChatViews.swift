@@ -308,18 +308,21 @@ struct ChatTimelineView: View {
 struct ChatTimelineDayDividerView: View {
     let date: Date
 
+    private var label: String {
+        if Calendar.current.isDateInToday(date) { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        return date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            Rectangle().fill(WaddleTheme.divider).frame(height: 1)
-            Text(date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(WaddleTheme.textMuted)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(WaddleTheme.surfaceRaised, in: Capsule())
-            Rectangle().fill(WaddleTheme.divider).frame(height: 1)
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(WaddleTheme.textSecondary)
+            VStack { Divider().overlay(WaddleTheme.divider) }
         }
-        .padding(.vertical, 12)
+        .padding(.top, 20)
+        .padding(.bottom, 6)
         .padding(.horizontal, 16)
     }
 }
@@ -427,8 +430,8 @@ struct ChatMessageRowView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
-        .padding(.top, showsHeader ? 8 : 1)
-        .padding(.bottom, 1)
+        .padding(.top, showsHeader ? 14 : 2)
+        .padding(.bottom, 2)
         .contextMenu {
             if !message.isAction, !message.isRetracted {
                 if onReply != nil {
@@ -466,10 +469,7 @@ struct ChatMessageRowView: View {
             .font(.caption.weight(.bold))
             .foregroundStyle(.white)
             .frame(width: WaddleTheme.messageAvatarSize, height: WaddleTheme.messageAvatarSize)
-            .background(
-                WaddleTheme.accent.opacity(0.6),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
+            .background(WaddleTheme.avatarColor(for: message.senderDisplayName), in: Circle())
     }
 
     @ViewBuilder
@@ -635,19 +635,17 @@ struct ChatComposerView: View {
 
             composerReplyPreview
 
-            WaddleTheme.divider.frame(height: 1)
-
             VStack(spacing: 0) {
                 TextField(placeholder, text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .font(.body)
                     .foregroundStyle(WaddleTheme.textPrimary)
                     .padding(.horizontal, 14)
-                    .padding(.top, 10)
-                    .padding(.bottom, 6)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
                     .onSubmit { if hasSendableText { onSend() } }
 
-                HStack(spacing: 16) {
+                HStack(spacing: 18) {
                     attachmentPickerButton
                     gifPickerButton
                     emojiPickerButton
@@ -656,15 +654,19 @@ struct ChatComposerView: View {
 
                     Button(action: onSend) {
                         Image(systemName: "paperplane.fill")
-                            .font(.body)
+                            .font(.title3)
                             .foregroundStyle(hasSendableText ? WaddleTheme.accent : WaddleTheme.textMuted)
                     }
                     .disabled(!canSend || isSending || !hasSendableText)
                 }
                 .padding(.horizontal, 14)
-                .padding(.bottom, 8)
+                .padding(.bottom, 10)
             }
-            .background(WaddleTheme.composerBackground)
+            .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(WaddleTheme.divider))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(WaddleTheme.chatBackground)
         }
         .onChange(of: text) { _, newValue in
             updateMentionQuery(newValue)
