@@ -18,6 +18,7 @@ export type {
 export {
   GENERAL_ACTIVITIES,
   MOOD_KINDS,
+  fetchUserPepProfile,
   publishActivity, publishMood, publishTune,
   retractActivity, retractMood, retractTune,
 } from "./pep-publications";
@@ -27,6 +28,7 @@ export type {
   MoodKind,
   MoodPublication,
   TunePublication,
+  UserPepProfile,
 } from "./pep-publications";
 export { NS_ESFS_0 } from "./extensions/encrypted-file";
 export type {

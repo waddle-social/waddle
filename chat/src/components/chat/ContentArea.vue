@@ -12,13 +12,13 @@ import {
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
-import type { XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
+import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
 import { formatStamp } from "@/composables/useMessaging";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
-import UserPopover from "@/components/chat/UserPopover.vue";
+import UserProfileDrawer from "@/components/chat/UserProfileDrawer.vue";
 
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
@@ -52,6 +52,7 @@ const props = defineProps<{
   isSearching: boolean;
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   threadIndex: ThreadIndex;
+  xmppClient?: BrowserXmppClient | null;
 }>();
 
 const emit = defineEmits<{
@@ -219,6 +220,10 @@ const queuedMessageCount = computed(() =>
   ).length,
 );
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
+const profileDrawerOpen = computed({
+  get: () => !!popoverAuthor.value,
+  set: (v: boolean) => { if (!v) popoverAuthor.value = null; },
+});
 const conversationScope = computed(() => [
   props.sidebarMode ?? "channels",
   props.waddle?.id ?? "",
@@ -335,16 +340,19 @@ function presenceText(show?: string): string {
   return "offline";
 }
 
+function presenceTextForAuthor(username: string): string {
+  if (props.dmPeer?.peerUsername === username) return presenceText(props.dmPeer?.presenceShow);
+  const roomShow = props.roomPresence[username];
+  if (roomShow) return presenceText(roomShow === "online" ? "available" : roomShow);
+  return "offline";
+}
+
 function onAvatarClick(author: string) {
   if (author === props.currentUser) return;
   const authorJid = props.authorJidByNick?.[author]
     ?? (props.selfDomain ? `${author}@${props.selfDomain}` : null);
   if (!authorJid) return;
   popoverAuthor.value = { username: author, jid: authorJid };
-}
-
-function closePopover() {
-  popoverAuthor.value = null;
 }
 
 function openPopoverDm() {
@@ -774,13 +782,15 @@ function showDividerAfter(messageId: string): boolean {
       @typing="emit('typing')"
       @select-gif="onSelectGif"
     />
-    <UserPopover
-      :open="!!popoverAuthor"
+    <UserProfileDrawer
+      v-model:open="profileDrawerOpen"
       :username="popoverAuthor?.username ?? ''"
+      :jid="popoverAuthor?.jid ?? ''"
       :avatar-url="popoverAuthor ? avatarUrlByAuthor[popoverAuthor.username] ?? null : null"
-      :presence-text="dmPeer?.peerUsername === popoverAuthor?.username ? presenceText(dmPeer?.presenceShow) : undefined"
-      :can-message="!!popoverAuthor"
-      @close="closePopover"
+      :presence="popoverAuthor ? roomPresence[popoverAuthor.username] : undefined"
+      :presence-text="popoverAuthor ? presenceTextForAuthor(popoverAuthor.username) : undefined"
+      :hats="popoverAuthor ? roomHats[popoverAuthor.username] : undefined"
+      :xmpp-client="xmppClient"
       @message="openPopoverDm"
     />
   </div>

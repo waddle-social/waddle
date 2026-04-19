@@ -6,7 +6,7 @@ import type { OccupantPresence } from "@/lib/xmpp-client";
 const props = defineProps<{
   name: string;
   src?: string | null;
-  size?: "xs" | "sm" | "md";
+  size?: "xs" | "sm" | "md" | "lg";
   presence?: OccupantPresence;
   lastSeen?: number;
 }>();
@@ -25,12 +25,14 @@ const initials = computed(() =>
 const sizeClass = computed(() => {
   if (props.size === "xs") return "w-6 h-6 text-[10px]";
   if (props.size === "sm") return "w-7 h-7 text-[11px]";
+  if (props.size === "lg") return "w-12 h-12 text-base";
   return "w-8 h-8 text-xs";
 });
 
 const wrapperSizeClass = computed(() => {
   if (props.size === "xs") return "w-6 h-6";
   if (props.size === "sm") return "w-7 h-7";
+  if (props.size === "lg") return "w-12 h-12";
   return "w-8 h-8";
 });
 
@@ -47,11 +49,11 @@ const presenceDotColor = computed(() => {
   }
 });
 
-const dotSize = computed(() =>
-  props.size === "xs"
-    ? "w-[7px] h-[7px] border-[1.5px]"
-    : "w-2 h-2 border-[1.5px]",
-);
+const dotSize = computed(() => {
+  if (props.size === "xs") return "w-[7px] h-[7px] border-[1.5px]";
+  if (props.size === "lg") return "w-2.5 h-2.5 border-2";
+  return "w-2 h-2 border-[1.5px]";
+});
 
 function formatRelativeTime(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);

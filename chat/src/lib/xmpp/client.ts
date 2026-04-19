@@ -914,6 +914,12 @@ export class BrowserXmppClient {
     if (this.xmpp) await pep.retractTune(this.xmpp);
   }
 
+  async fetchUserPepProfile(jid: string): Promise<pep.UserPepProfile> {
+    await this.connect();
+    if (!this.xmpp) return { mood: null, activity: null, tune: null };
+    return pep.fetchUserPepProfile(this.xmpp, jid);
+  }
+
   // -- Query delegators --
 
   async queryMam(w: string, c: string, max = 50): Promise<LiveRoomMessage[]> {
