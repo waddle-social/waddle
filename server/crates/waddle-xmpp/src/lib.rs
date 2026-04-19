@@ -32,7 +32,6 @@ pub mod inbox;
 pub mod isr;
 pub mod mam;
 pub mod metrics;
-pub mod mix;
 pub mod muc;
 pub mod parser;
 pub mod parser_utils;

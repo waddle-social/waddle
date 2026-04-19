@@ -130,8 +130,8 @@ mod tests {
             .upsert(
                 &user,
                 InboxEntry::new(
-                    jid("general@mix.example.com"),
-                    ConversationKind::MixChannel,
+                    jid("general@conference.example.com"),
+                    ConversationKind::MucRoom,
                     "sid-2",
                     200,
                 ),

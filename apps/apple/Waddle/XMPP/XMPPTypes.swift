@@ -270,10 +270,6 @@ func roomBareJID(accountJID: String, waddleID: String, channelID: String) -> Str
     "\(waddleID)_\(channelID)@muc.\(jidDomain(accountJID))"
 }
 
-func mixChannelBareJID(accountJID: String, waddleID: String, channelID: String) -> String {
-    "\(waddleID)_\(channelID)@mix.\(jidDomain(accountJID))"
-}
-
 func parseManagedRoomBareJID(_ roomJID: String) -> (waddleID: String, channelID: String)? {
     let node = barePeerJID(roomJID).split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
     guard let separator = node.firstIndex(of: "_") else {

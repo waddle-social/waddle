@@ -10,8 +10,7 @@ import type {
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
   RoomHats, RoomPresence, SessionLifecycleEvent, XmppStatusSnapshot,
 } from "./types";
-import { barePeerJid, jidDomain, mixChannelBareJidFor, roomBareJidFor } from "./jid";
-import * as mixMessaging from "./mix-messaging";
+import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
 import { dispatchGroupchat, ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
@@ -680,59 +679,6 @@ export class BrowserXmppClient {
       }
       throw error;
     }
-  }
-
-  // -- MIX (XEP-0369 / XEP-0405) --
-  //
-  // The server-side MIX dispatch is not yet wired (see server/TODO.md), so
-  // these methods are reachable from feature-flagged surfaces only.
-
-  mixChannelJid(waddleId: string, channelId: string): string {
-    return mixChannelBareJidFor(this.session, waddleId, channelId);
-  }
-
-  async joinMixChannel(
-    waddleId: string,
-    channelId: string,
-    nick?: string,
-  ): Promise<unknown> {
-    await this.connect();
-    if (!this.xmpp) throw new Error("XMPP not connected");
-    const channelJid = this.mixChannelJid(waddleId, channelId);
-    const joinNick = nick ?? this.session.username;
-    return mixMessaging.joinMixChannel(this.xmpp, channelJid, joinNick);
-  }
-
-  async leaveMixChannel(waddleId: string, channelId: string): Promise<unknown> {
-    await this.connect();
-    if (!this.xmpp) throw new Error("XMPP not connected");
-    const channelJid = this.mixChannelJid(waddleId, channelId);
-    return mixMessaging.leaveMixChannel(this.xmpp, channelJid);
-  }
-
-  async setMixNick(
-    waddleId: string,
-    channelId: string,
-    nick: string,
-  ): Promise<unknown> {
-    await this.connect();
-    if (!this.xmpp) throw new Error("XMPP not connected");
-    const channelJid = this.mixChannelJid(waddleId, channelId);
-    return mixMessaging.setMixChannelNick(this.xmpp, channelJid, nick);
-  }
-
-  async sendMixMessage(
-    waddleId: string,
-    channelId: string,
-    body: string,
-    thread?: string,
-  ): Promise<string | null> {
-    const text = body.trim();
-    if (!text) return null;
-    await this.connect();
-    if (!this.xmpp) throw new Error("XMPP not connected");
-    const channelJid = this.mixChannelJid(waddleId, channelId);
-    return mixMessaging.sendMixMessage(this.xmpp, channelJid, text, thread);
   }
 
   // -- File upload (XEP-0363 + XEP-0447) --

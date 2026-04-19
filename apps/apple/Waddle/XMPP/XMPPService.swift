@@ -358,56 +358,6 @@ final class XMPPService: ObservableObject {
         )
     }
 
-    // MARK: - MIX (XEP-0369 / XEP-0405)
-
-    /// Subscribe to a MIX channel via MIX-PAM `client-join`. The caller's
-    /// own server proxies the subscription to the channel host.
-    @discardableResult
-    func joinMixChannel(
-        _ channelJID: String,
-        nick: String? = nil,
-        nodes: [String] = [XMPPMIX.nodeMessages, XMPPMIX.nodeParticipants]
-    ) async throws -> XMPPElement {
-        try ensureReady()
-        let joinNick = nick ?? credentials?.username ?? "waddle"
-        let id = nextIQID(prefix: "mix-join")
-        let xml = XMPPMIX.clientJoinIQ(
-            id: id,
-            channelJID: channelJID,
-            nick: joinNick,
-            nodes: nodes
-        )
-        return try await sendIQ(xml, id: id)
-    }
-
-    /// Unsubscribe from a MIX channel via MIX-PAM `client-leave`.
-    @discardableResult
-    func leaveMixChannel(_ channelJID: String) async throws -> XMPPElement {
-        try ensureReady()
-        let id = nextIQID(prefix: "mix-leave")
-        let xml = XMPPMIX.clientLeaveIQ(id: id, channelJID: channelJID)
-        return try await sendIQ(xml, id: id)
-    }
-
-    /// Publish a message to a MIX channel. Stanzas use `type='groupchat'`
-    /// per XEP-0369 §7.1; routing differs from MUC by the `mix.<domain>`
-    /// subdomain of the destination JID.
-    func sendMixMessage(channelJID: String, body: String, thread: String? = nil) async throws {
-        try ensureReady()
-        try await transport.send(
-            XMPPMIX.mixMessage(to: channelJID, body: body, thread: thread)
-        )
-    }
-
-    /// Change the caller's nick on a MIX channel via `<setnick>`.
-    @discardableResult
-    func setMixNick(channelJID: String, nick: String) async throws -> XMPPElement {
-        try ensureReady()
-        let id = nextIQID(prefix: "mix-setnick")
-        let xml = XMPPMIX.setNickIQ(id: id, channelJID: channelJID, nick: nick)
-        return try await sendIQ(xml, id: id)
-    }
-
     struct CreateChannelResult: Sendable {
         let channelID: String?
         let channelJID: String?

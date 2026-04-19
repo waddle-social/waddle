@@ -163,7 +163,6 @@ pub mod xep0352;
 pub mod xep0357;
 pub mod xep0359;
 pub mod xep0363;
-pub mod xep0369;
 pub mod xep0372;
 pub mod xep0377;
 pub mod xep0392;
@@ -171,8 +170,6 @@ pub mod xep0393;
 pub mod xep0398;
 pub mod xep0401;
 pub mod xep0402;
-pub mod xep0405;
-pub mod xep0407;
 pub mod xep0410;
 pub mod xep0421;
 pub mod xep0424;
@@ -413,19 +410,6 @@ pub use xep0357::{
 pub use xep0410::{
     build_self_ping, interpret_self_ping_response, is_self_ping, SelfPingResult,
     FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
-};
-
-pub use xep0369::is_mix_core_iq;
-
-pub use xep0405::{
-    build_client_join_result, build_client_leave_result, is_mix_pam_iq, parse_client_join,
-    parse_client_leave, ClientJoin, ClientLeave, PamError,
-};
-
-pub use xep0407::{
-    build_invitation_element, build_invite_result, is_mix_misc_iq, mix_disco_features,
-    parse_invitation, parse_invite_request, set_invitation_on_message, Invitation, InviteRequest,
-    MiscError, NS_MIX_MISC,
 };
 
 pub use xep0401::{AccountInvite, InviteRedeemError, InviteStore, COMMAND_NODE_INVITE};

@@ -114,12 +114,12 @@ XEPs for group chat, channels, and organizational structure (the core of a commu
 | 0306 | Extensible Status Conditions for MUC | Deferred | Custom room status |
 | 0307 | Unique Room Names for MUC | Deferred | Prevent room name collisions |
 | **0317** | **Hats** | Experimental | Roles/badges (admin, mod, etc.) | Implemented | Chat ✓ |
-| **0369** | **MIX (Mediated Information eXchange)** | Experimental | Next-gen group chat (MUC successor) | Implemented | Chat N/A |
+| 0369 | MIX (Mediated Information eXchange) | Experimental | Next-gen group chat — not pursued (ecosystem inactive; Conversations/Dino/Prosody/ejabberd don't ship it). Waddle stays on MUC with extensions. |
 | 0403 | MIX: Presence Support | Deferred | MIX presence |
 | 0404 | MIX: JID Hidden Channels | Deferred | Anonymous channels |
-| 0405 | MIX: Participant Server Requirements | Experimental | MIX server-side | Implemented | Chat N/A |
+| 0405 | MIX: Participant Server Requirements | Experimental | MIX server-side |
 | 0406 | MIX: Administration | Deferred | MIX admin |
-| 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras | Implemented | Chat N/A |
+| 0407 | MIX: Miscellaneous Capabilities | Deferred | MIX extras |
 | 0408 | MIX: Co-existence with MUC | Deferred | MIX/MUC bridge |
 | **0410** | **MUC Self-Ping** | Draft | Detect disconnection from rooms | Implemented | Chat ✓ |
 | **0421** | **Occupant Identifiers for Semi-Anonymous MUCs** | Draft | Stable anonymous identities | Implemented | Chat N/A |

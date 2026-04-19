@@ -97,14 +97,14 @@ pub fn parse_mark_read(iq: &Iq) -> Result<InboxMarkRead, InboxError> {
 fn kind_str(kind: ConversationKind) -> &'static str {
     match kind {
         ConversationKind::Direct => "direct",
-        ConversationKind::MixChannel => "mix",
+        ConversationKind::MucRoom => "muc",
     }
 }
 
 fn parse_kind_str(raw: &str) -> Result<ConversationKind, InboxError> {
     Ok(match raw {
         "direct" => ConversationKind::Direct,
-        "mix" => ConversationKind::MixChannel,
+        "muc" => ConversationKind::MucRoom,
         other => return Err(InboxError::InvalidKind(other.to_string())),
     })
 }
@@ -281,10 +281,10 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_round_trip_mix() {
+    fn test_entry_round_trip_muc() {
         let entry = InboxEntry::new(
-            "general@mix.example.com".parse().unwrap(),
-            ConversationKind::MixChannel,
+            "general@conference.example.com".parse().unwrap(),
+            ConversationKind::MucRoom,
             "sid-99",
             1_700_000_000,
         )
@@ -334,7 +334,7 @@ mod tests {
     fn test_invalid_kind_rejected() {
         let elem = Element::builder("conversation", NS_INBOX)
             .attr("partner", "a@example.com")
-            .attr("kind", "muc")
+            .attr("kind", "bogus")
             .attr("last-stanza-id", "s")
             .attr("last-updated", "0")
             .attr("unread", "0")

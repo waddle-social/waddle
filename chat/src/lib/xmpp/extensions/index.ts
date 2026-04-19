@@ -12,7 +12,6 @@ import push from "./push";
 import markup from "./markup";
 import replies from "./replies";
 import forums from "./forums";
-import mix from "./mix";
 
 const allDefinitions = [
   ...hats,
@@ -27,7 +26,6 @@ const allDefinitions = [
   ...markup,
   ...replies,
   ...forums,
-  ...mix,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {

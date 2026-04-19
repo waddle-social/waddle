@@ -1,7 +1,7 @@
 //! Unified inbox — "conversation list with unread counts".
 //!
 //! An *inbox entry* is a per-user materialised view of the last-message of
-//! every conversation the user is part of (1:1 and MIX-channel), plus an
+//! every conversation the user is part of (1:1 and MUC room), plus an
 //! unread counter and timestamp. It gives clients a single query to paint
 //! the chat list on app launch without having to fan out to MAM per room.
 //!
@@ -16,21 +16,20 @@ use std::collections::HashMap;
 use jid::BareJid;
 use serde::{Deserialize, Serialize};
 
-/// Conversation shape — 1:1 DM or MIX channel. MUC is intentionally not a
-/// variant: the plan migrates all group conversations to MIX.
+/// Conversation shape — 1:1 DM or MUC room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConversationKind {
     /// A direct-message conversation with another bare JID.
     Direct,
-    /// A MIX channel at `<channel>@mix.<domain>`.
-    MixChannel,
+    /// A MUC room at `<room>@conference.<domain>`.
+    MucRoom,
 }
 
 /// One row in the inbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxEntry {
     /// The conversation partner — either the other user (Direct) or the
-    /// MIX channel JID (MixChannel).
+    /// MUC room JID (MucRoom).
     pub partner: BareJid,
     pub kind: ConversationKind,
     /// XEP-0359 stanza-id of the last observed message in the conversation.
@@ -205,7 +204,12 @@ mod tests {
             false,
         );
         inbox.observe_message(
-            entry("g@mix.example.com", ConversationKind::MixChannel, "s3", 20),
+            entry(
+                "g@conference.example.com",
+                ConversationKind::MucRoom,
+                "s3",
+                20,
+            ),
             false,
         );
         let snap = inbox.snapshot();

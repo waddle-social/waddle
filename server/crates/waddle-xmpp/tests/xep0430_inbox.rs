@@ -40,8 +40,8 @@ fn inbox_view_observe_and_snapshot_order() {
     );
     view.observe_message(
         InboxEntry::new(
-            jid("g@mix.example.com"),
-            ConversationKind::MixChannel,
+            jid("g@conference.example.com"),
+            ConversationKind::MucRoom,
             "s2",
             30,
         ),
@@ -101,8 +101,8 @@ fn inbox_mark_read_requires_partner() {
 }
 
 #[test]
-fn inbox_entry_round_trip_mix_and_direct() {
-    for kind in [ConversationKind::Direct, ConversationKind::MixChannel] {
+fn inbox_entry_round_trip_muc_and_direct() {
+    for kind in [ConversationKind::Direct, ConversationKind::MucRoom] {
         let entry = InboxEntry::new(jid("x@example.com"), kind, "sid", 10)
             .with_unread(2)
             .with_preview("hi");
@@ -161,8 +161,8 @@ async fn inbox_in_memory_storage_end_to_end() {
         .upsert(
             &user,
             InboxEntry::new(
-                jid("g@mix.example.com"),
-                ConversationKind::MixChannel,
+                jid("g@conference.example.com"),
+                ConversationKind::MucRoom,
                 "s2",
                 200,
             ),
