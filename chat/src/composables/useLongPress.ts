@@ -69,7 +69,13 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
   }
 
   function swallowNextClick() {
-    if (typeof window === "undefined") return;
+    if (
+      typeof window === "undefined"
+      || typeof window.addEventListener !== "function"
+      || typeof window.removeEventListener !== "function"
+    ) {
+      return;
+    }
     const handler = (event: MouseEvent) => {
       event.stopPropagation();
       event.preventDefault();
