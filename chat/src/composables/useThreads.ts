@@ -17,7 +17,7 @@ export interface ThreadEntry {
 
 export type ThreadIndex = ReadonlyMap<string, ThreadEntry>;
 
-export interface UseThreadsResult {
+interface UseThreadsResult {
   index: Readonly<Ref<ThreadIndex>>;
   getEntry: (threadId: string | null | undefined) => ThreadEntry | undefined;
   /**

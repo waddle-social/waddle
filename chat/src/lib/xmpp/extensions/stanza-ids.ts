@@ -4,15 +4,6 @@ import { attribute } from "stanza/jxt";
 
 const NS_SID_0 = "urn:xmpp:sid:0";
 
-export interface WaddleOriginId {
-  id: string;
-}
-
-export interface WaddleStanzaId {
-  id: string;
-  by?: string;
-}
-
 const definitions: DefinitionOptions[] = [
   {
     aliases: [{ path: "message.originId", multiple: false }],

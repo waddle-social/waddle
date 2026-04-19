@@ -141,7 +141,7 @@ function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   }
 }
 
-export interface OutboundSendResult {
+interface OutboundSendResult {
   id: string | null;
   state: "queued" | "sending";
 }

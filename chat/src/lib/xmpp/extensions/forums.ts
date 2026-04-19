@@ -2,7 +2,7 @@
 import type { DefinitionOptions } from "stanza/jxt";
 import { attribute } from "stanza/jxt";
 
-export const NS_FORUMS_0 = "urn:xmpp:forums:0";
+const NS_FORUMS_0 = "urn:xmpp:forums:0";
 
 export interface WaddleThreadCreate {
   title: string;

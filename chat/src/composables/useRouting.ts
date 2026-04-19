@@ -1,6 +1,6 @@
 import type { WaddleSummary, ChannelSummary } from "@/lib/waddle-api";
 
-export interface RouteState {
+interface RouteState {
   page: "chat" | "settings";
   waddleSlug: string | null;
   channelSlug: string | null;

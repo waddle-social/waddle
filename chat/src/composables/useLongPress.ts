@@ -1,6 +1,6 @@
 import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
 
-export interface UseLongPressOptions {
+interface UseLongPressOptions {
   /** Delay in ms before the press fires. Default 500. */
   delay?: number;
   /** Max pointer movement in CSS pixels before the press cancels. Default 10. */
@@ -9,7 +9,7 @@ export interface UseLongPressOptions {
   onLongPress: (event: PointerEvent) => void;
 }
 
-export interface UseLongPressReturn {
+interface UseLongPressReturn {
   handlers: {
     onPointerdown: (event: PointerEvent) => void;
     onPointermove: (event: PointerEvent) => void;

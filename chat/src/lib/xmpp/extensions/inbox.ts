@@ -46,20 +46,6 @@ export interface WaddleInboxConversation {
   author?: string;
 }
 
-export interface WaddleInboxQuery {
-  since?: number;
-  onlyUnread?: boolean;
-  room?: string;
-  threads?: boolean;
-  totalUnread?: number;
-  conversations?: WaddleInboxConversation[];
-}
-
-export interface WaddleInboxMarkRead {
-  partner: string;
-  thread?: string;
-}
-
 const definitions: DefinitionOptions[] = [
   {
     aliases: [{ path: "iq.inbox", multiple: false }],

@@ -1,4 +1,4 @@
-export interface MessageIdCarrier {
+interface MessageIdCarrier {
   id: string;
   wireIds?: string[];
 }
@@ -8,7 +8,7 @@ function normalizeMessageId(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-export function dedupeMessageIds(ids: readonly (string | null | undefined)[]): string[] {
+function dedupeMessageIds(ids: readonly (string | null | undefined)[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
 

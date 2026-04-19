@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, watch } from "vue";
 import { X, ChevronLeft, ChevronRight, Download } from "lucide-vue-next";
 
-export interface LightboxImage {
+interface LightboxImage {
   url: string;
   name?: string;
   width?: number;

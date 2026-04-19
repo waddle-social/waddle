@@ -36,7 +36,7 @@ schema.#Project & {
 			when: {
 				pullRequest: true
 			}
-			"tasks": [tasks.preview]
+			"tasks": [tasks.lint, tasks.preview]
 			annotations: "Preview URL": schema.#TaskCaptureRef & {
 				cuenvTask:    "preview"
 				cuenvCapture: "previewUrl"
@@ -56,6 +56,23 @@ schema.#Project & {
 			]
 			outputs: [
 				"worker-configuration.d.ts",
+			]
+		}
+
+		lint: schema.#Task & {
+			command: "bun"
+			args: ["run", "lint"]
+			dependsOn: [generateTypes]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"package.json",
+				"knip.json",
+				"tsconfig.json",
+				"astro.config.mjs",
+				"src/**",
+				"scripts/**",
+				"tests/**",
 			]
 		}
 

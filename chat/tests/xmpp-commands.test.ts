@@ -1,10 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, mock } from "bun:test";
 import { executeCreateChannelCommand } from "@/lib/xmpp/commands";
 
 describe("XMPP Ad-Hoc Commands", () => {
   describe("executeCreateChannelCommand", () => {
     it("should execute create-channel command and return success", async () => {
-      const mockSendIQ = vi.fn();
+      const mockSendIQ = mock(() => Promise.resolve());
       
       // Mock the execute response (returns data form)
       mockSendIQ.mockResolvedValueOnce({
@@ -92,7 +92,7 @@ describe("XMPP Ad-Hoc Commands", () => {
     });
 
     it("should return error when command fails with error note", async () => {
-      const mockSendIQ = vi.fn();
+      const mockSendIQ = mock(() => Promise.resolve());
       
       mockSendIQ.mockResolvedValueOnce({
         command: {
@@ -129,7 +129,7 @@ describe("XMPP Ad-Hoc Commands", () => {
     });
 
     it("should return error when execute doesn't return session id", async () => {
-      const mockSendIQ = vi.fn();
+      const mockSendIQ = mock(() => Promise.resolve());
       
       mockSendIQ.mockResolvedValueOnce({
         command: {
@@ -155,7 +155,7 @@ describe("XMPP Ad-Hoc Commands", () => {
     });
 
     it("should handle XMPP errors gracefully", async () => {
-      const mockSendIQ = vi.fn();
+      const mockSendIQ = mock(() => Promise.resolve());
       
       mockSendIQ.mockRejectedValueOnce({
         error: {
@@ -182,7 +182,7 @@ describe("XMPP Ad-Hoc Commands", () => {
     });
 
     it("should handle missing channel_id in result", async () => {
-      const mockSendIQ = vi.fn();
+      const mockSendIQ = mock(() => Promise.resolve());
       
       mockSendIQ.mockResolvedValueOnce({
         command: {

@@ -10,14 +10,14 @@
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface MarkupSpan {
+interface MarkupSpan {
   type: 'b' | 'i' | 's' | 'code' | 'code-block' | 'blockquote' | 'link';
   start: number;
   end: number;
   uri?: string;
 }
 
-export interface SerializedMessage {
+interface SerializedMessage {
   /** XEP-0393 formatted plain text */
   body: string;
   /** XEP-0394 annotations */

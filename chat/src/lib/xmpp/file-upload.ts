@@ -3,7 +3,7 @@ import type { Agent } from "stanza";
 
 export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 
-export interface UploadResult {
+interface UploadResult {
   getUrl: string;
   filename: string;
   contentType: string;
@@ -129,15 +129,6 @@ export async function uploadFile(
     contentType,
     size,
   };
-}
-
-/**
- * Convert a clipboard paste event or drop event into a File.
- * Returns null if no image is found.
- */
-export function extractImageFromEvent(event: ClipboardEvent | DragEvent): File | null {
-  const all = extractImagesFromEvent(event);
-  return all[0] ?? null;
 }
 
 /** Extract every image from a paste or drop event. */

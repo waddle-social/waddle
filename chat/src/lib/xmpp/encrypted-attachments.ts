@@ -6,7 +6,7 @@ const AES_128_GCM_CIPHER = "urn:xmpp:ciphers:aes-128-gcm-nopadding:0";
 const AES_256_GCM_CIPHER = "urn:xmpp:ciphers:aes-256-gcm-nopadding:0";
 const SHA_256 = "sha-256";
 
-export interface PreparedEncryptedAttachmentUpload {
+interface PreparedEncryptedAttachmentUpload {
   uploadFile: File;
   encrypted: WaddleEncryptedFile;
   originalName: string;
@@ -14,7 +14,7 @@ export interface PreparedEncryptedAttachmentUpload {
   originalSize: number;
 }
 
-export interface EncryptedAttachmentDescriptor {
+interface EncryptedAttachmentDescriptor {
   url: string;
   name?: string;
   mediaType?: string;

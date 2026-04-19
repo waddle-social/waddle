@@ -10,7 +10,7 @@ export function barePeerJid(fullJid: string): string {
   return fullJid.split("/")[0] ?? "";
 }
 
-export function parseManagedRoomNode(node: string): { waddleId: string; channelId: string } | null {
+function parseManagedRoomNode(node: string): { waddleId: string; channelId: string } | null {
   const separatorIndex = node.indexOf("_");
   if (separatorIndex <= 0 || separatorIndex === node.length - 1) return null;
   return {
@@ -35,7 +35,7 @@ export function roomBareJidFor(
   return roomBareJidForAccountJid(session.jid, waddleId, channelId);
 }
 
-export function roomBareJidForAccountJid(
+function roomBareJidForAccountJid(
   jid: string,
   waddleId: string,
   channelId: string,

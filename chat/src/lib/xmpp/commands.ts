@@ -2,7 +2,7 @@
 import type { Agent } from "stanza";
 import type { IQ, AdHocCommand, DataForm } from "stanza/protocol";
 
-export interface CreateChannelCommandInput {
+interface CreateChannelCommandInput {
   waddleId: string;
   name: string;
   description?: string;
@@ -10,7 +10,7 @@ export interface CreateChannelCommandInput {
   position: number;
 }
 
-export interface CreateChannelCommandResult {
+interface CreateChannelCommandResult {
   success: boolean;
   channelId?: string;
   channelJid?: string;

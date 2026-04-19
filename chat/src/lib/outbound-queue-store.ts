@@ -3,7 +3,7 @@ import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/messaging";
 
 const PREFIX = "waddle.chat.outbound-queue";
 
-export interface PersistedQueuedMessageBase {
+interface PersistedQueuedMessageBase {
   id: string;
   createdAt: string;
   body: string;
@@ -26,7 +26,7 @@ export interface PersistedQueuedDmMessage extends PersistedQueuedMessageBase {
   peerJid: string;
 }
 
-export type PersistedQueuedMessage =
+type PersistedQueuedMessage =
   | PersistedQueuedRoomMessage
   | PersistedQueuedDmMessage;
 

@@ -1,11 +1,11 @@
 export type ScrollDirectionMode = "chat" | "social";
 
-export const SCROLL_DIRECTION_STORAGE_KEY = "waddle:scroll-direction";
+const SCROLL_DIRECTION_STORAGE_KEY = "waddle:scroll-direction";
 
 type StorageReader = Pick<Storage, "getItem">;
 type StorageWriter = Pick<Storage, "removeItem" | "setItem">;
 
-export function isScrollDirectionMode(value: string | null): value is ScrollDirectionMode {
+function isScrollDirectionMode(value: string | null): value is ScrollDirectionMode {
   return value === "chat" || value === "social";
 }
 
