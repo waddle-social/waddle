@@ -32,6 +32,8 @@ const props = defineProps<{
   firstUnseenId: string | null;
   xmppStatus: XmppStatusSnapshot;
   actionError: string;
+  updateAvailable: boolean;
+  isApplyingUpdate: boolean;
   isLoadingMessages: boolean;
   isSending: boolean;
   canManageChannels: boolean;
@@ -70,6 +72,7 @@ const emit = defineEmits<{
   clearSearch: [];
   openDm: [peerJid: string];
   openThread: [threadId: string];
+  refreshUpdate: [];
 }>();
 
 // Hide thread members from the main feed — they live inside the thread panel.
@@ -306,6 +309,11 @@ const connectionStatusClasses = computed(() => {
       return null;
   }
 });
+const updateNoticeBody = computed(() =>
+  props.isApplyingUpdate
+    ? "Refreshing to load the latest version."
+    : "A newer version is ready. Refresh to load it.",
+);
 
 defineExpose({ messagesContainer });
 
@@ -512,6 +520,44 @@ function showDividerAfter(messageId: string): boolean {
             {{ connectionNotice.body }}
           </p>
         </div>
+      </div>
+    </div>
+    <div
+      v-if="updateAvailable"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      class="border-b border-primary/12 bg-primary/8 text-foreground"
+    >
+      <div class="px-6 py-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex min-w-0 items-start gap-3">
+          <div class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-primary/15 bg-background/75 text-primary">
+            <RefreshCw
+              class="h-4 w-4"
+              :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
+            />
+          </div>
+          <div class="min-w-0 space-y-0.5">
+            <p class="text-[13px] font-medium tracking-tight">
+              Update ready
+            </p>
+            <p class="max-w-[72ch] text-[12px] leading-5 text-foreground/75">
+              {{ updateNoticeBody }}
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full bg-primary px-3.5 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35 disabled:cursor-wait disabled:opacity-75"
+          :disabled="isApplyingUpdate"
+          @click="emit('refreshUpdate')"
+        >
+          <RefreshCw
+            class="h-3.5 w-3.5"
+            :class="{ 'motion-safe:animate-spin': isApplyingUpdate }"
+          />
+          <span>{{ isApplyingUpdate ? "Refreshing…" : "Refresh" }}</span>
+        </button>
       </div>
     </div>
 

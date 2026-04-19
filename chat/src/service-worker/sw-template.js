@@ -1,4 +1,4 @@
-/** Generated from src/service-worker/sw-template.js for build 07164d116900. */
+/** Generated from src/service-worker/sw-template.js for build __WADDLE_BUILD_SHA__. */
 
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") {

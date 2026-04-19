@@ -1,5 +1,6 @@
 import { ref, watch } from "vue";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServiceWorker } from "@/lib/service-worker-registration";
 
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
 const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_WEB_PUSH_VAPID_PUBLIC_KEY ?? "").trim();
@@ -90,22 +91,14 @@ export function useNotifications() {
 
   // -- Service worker + Web Push --
 
-  let swRegistration: ServiceWorkerRegistration | null = null;
-
   async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
-    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return null;
-    try {
-      swRegistration = await navigator.serviceWorker.register("/sw.js");
-      return swRegistration;
-    } catch {
-      return null;
-    }
+    return registerChatServiceWorker();
   }
 
   async function subscribeToPush(
     vapidPublicKey: string,
   ): Promise<PushSubscription | null> {
-    const reg = swRegistration ?? (await registerServiceWorker());
+    const reg = await getOrRegisterServiceWorker();
     if (!reg) return null;
     try {
       const keyBytes = urlBase64ToUint8Array(vapidPublicKey);
@@ -145,7 +138,7 @@ export function useNotifications() {
   }
 
   async function disablePushSubscription(xmppClient: BrowserXmppClient, userJid: string): Promise<boolean> {
-    const reg = swRegistration ?? (await registerServiceWorker());
+    const reg = await getOrRegisterServiceWorker();
     if (reg) {
       const existing = await reg.pushManager.getSubscription();
       if (existing) {
