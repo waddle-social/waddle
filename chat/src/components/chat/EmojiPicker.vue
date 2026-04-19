@@ -77,6 +77,24 @@ const searchResults = computed(() => {
 
 const panelEl = ref<HTMLElement | null>(null);
 const searchInputEl = ref<HTMLInputElement | null>(null);
+const flipAbove = ref(false);
+
+// Rough upper bound matching `max-h-80` (20rem). Used before the panel has a
+// measured height so the first frame picks the right side instead of flashing.
+const ESTIMATED_PANEL_HEIGHT = 320;
+const VIEWPORT_MARGIN = 8;
+
+function updateFlipAbove() {
+  if (props.variant !== "popover") return;
+  const panel = panelEl.value;
+  const anchor = panel?.parentElement;
+  if (!anchor || typeof window === "undefined") return;
+  const anchorRect = anchor.getBoundingClientRect();
+  const panelHeight = panel.offsetHeight || ESTIMATED_PANEL_HEIGHT;
+  const spaceBelow = window.innerHeight - anchorRect.bottom - VIEWPORT_MARGIN;
+  const spaceAbove = anchorRect.top - VIEWPORT_MARGIN;
+  flipAbove.value = spaceBelow < panelHeight && spaceAbove > spaceBelow;
+}
 
 function onSelect(emoji: string) {
   saveRecent(emoji);
@@ -101,12 +119,16 @@ function attachWindowListeners() {
   if (props.variant === "sheet") return;
   window.addEventListener("pointerdown", onWindowPointer, true);
   window.addEventListener("keydown", onKey);
+  window.addEventListener("resize", updateFlipAbove);
+  window.addEventListener("scroll", updateFlipAbove, true);
 }
 
 function detachWindowListeners() {
   if (typeof window === "undefined") return;
   window.removeEventListener("pointerdown", onWindowPointer, true);
   window.removeEventListener("keydown", onKey);
+  window.removeEventListener("resize", updateFlipAbove);
+  window.removeEventListener("scroll", updateFlipAbove, true);
 }
 
 watch(
@@ -116,7 +138,9 @@ watch(
       loadRecents();
       attachWindowListeners();
       query.value = "";
+      flipAbove.value = false;
       void nextTick().then(() => {
+        updateFlipAbove();
         searchInputEl.value?.focus();
       });
     } else {
@@ -138,7 +162,10 @@ onBeforeUnmount(detachWindowListeners);
     :class="[
       'flex flex-col overflow-hidden',
       variant === 'popover'
-        ? 'absolute top-full right-0 mt-1 w-72 glass-panel border border-border rounded-xl z-50 shadow-2xl animate-fade-in max-h-80'
+        ? [
+            'absolute right-0 w-72 glass-panel border border-border rounded-xl z-50 shadow-2xl animate-fade-in max-h-80',
+            flipAbove ? 'bottom-full mb-1' : 'top-full mt-1',
+          ]
         : 'w-full max-h-[60vh]',
     ]"
     @pointerdown.stop
