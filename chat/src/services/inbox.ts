@@ -1,35 +1,10 @@
 /**
- * Effect-based inbox service layer.
+ * Inbox service layer.
  *
- * Manages inbox state (channel + thread level) with Schema-driven types.
+ * Manages inbox state (channel + thread level).
  * Vue composables consume this as plain reactive state via subscription.
  */
-import { Schema } from "effect";
 import type { InboxEntry } from "@/lib/xmpp/inbox";
-
-// ── Schemas ─────────────────────────────────────────────────────────
-
-export const InboxKey = Schema.Struct({
-  partner: Schema.String,
-  threadId: Schema.optionalWith(Schema.String, { as: "Option" }),
-});
-
-export const InboxMessage = Schema.Struct({
-  partner: Schema.String,
-  kind: Schema.Literal("direct", "muc"),
-  lastStanzaId: Schema.String,
-  lastUpdated: Schema.Number,
-  unread: Schema.Number,
-  preview: Schema.optional(Schema.String),
-  thread: Schema.optional(Schema.String),
-  threadTitle: Schema.optional(Schema.String),
-  replyCount: Schema.optional(Schema.Number),
-  author: Schema.optional(Schema.String),
-});
-
-export type InboxMessageType = typeof InboxMessage.Type;
-
-// ── State ───────────────────────────────────────────────────────────
 
 /** Composite key for deduplication: partner + optional thread. */
 function entryKey(entry: InboxEntry): string {

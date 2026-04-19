@@ -148,7 +148,7 @@ function isSilentPepError(err: unknown): boolean {
   );
 }
 
-export async function fetchMood(xmpp: Agent, jid: string): Promise<MoodPublication | null> {
+async function fetchMood(xmpp: Agent, jid: string): Promise<MoodPublication | null> {
   try {
     const result = await xmpp.getItems(jid, NS_MOOD);
     const item = result?.items?.[0];
@@ -163,7 +163,7 @@ export async function fetchMood(xmpp: Agent, jid: string): Promise<MoodPublicati
   }
 }
 
-export async function fetchActivity(xmpp: Agent, jid: string): Promise<ActivityPublication | null> {
+async function fetchActivity(xmpp: Agent, jid: string): Promise<ActivityPublication | null> {
   try {
     const result = await xmpp.getItems(jid, NS_ACTIVITY);
     const item = result?.items?.[0];
@@ -183,7 +183,7 @@ export async function fetchActivity(xmpp: Agent, jid: string): Promise<ActivityP
   }
 }
 
-export async function fetchTune(xmpp: Agent, jid: string): Promise<TunePublication | null> {
+async function fetchTune(xmpp: Agent, jid: string): Promise<TunePublication | null> {
   try {
     const result = await xmpp.getItems(jid, NS_TUNE);
     const item = result?.items?.[0];

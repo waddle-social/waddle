@@ -4,13 +4,6 @@ import { attribute } from "stanza/jxt";
 
 const NS_REFERENCE_0 = "urn:xmpp:reference:0";
 
-export interface WaddleReference {
-  type: string;
-  uri: string;
-  begin?: string;
-  end?: string;
-}
-
 const definitions: DefinitionOptions[] = [
   {
     aliases: [{ path: "message.references", multiple: true }],

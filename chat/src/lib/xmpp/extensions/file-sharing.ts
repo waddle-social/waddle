@@ -22,16 +22,6 @@ const NS_SFS_0 = "urn:xmpp:sfs:0";
 const NS_FILE_METADATA_0 = "urn:xmpp:file:metadata:0";
 const NS_URL_DATA = "http://jabber.org/protocol/url-data";
 
-export interface WaddleFileSharing {
-  disposition?: string;
-  name?: string;
-  mediaType?: string;
-  size?: string;
-  width?: string;
-  height?: string;
-  desc?: string;
-  url?: string;
-}
 
 function fileField(element: string): FieldDefinition<string> {
   return deepChildText([

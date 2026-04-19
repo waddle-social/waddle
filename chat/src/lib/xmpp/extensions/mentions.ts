@@ -4,10 +4,6 @@ import { attribute, splicePath } from "stanza/jxt";
 
 const NS_EXPLICIT_MENTIONS_0 = "urn:xmpp:emn:0";
 
-export interface WaddleExplicitMention {
-  type: string;
-}
-
 const definitions: DefinitionOptions[] = [
   {
     aliases: [{ path: "message.explicitMentions", multiple: false }],

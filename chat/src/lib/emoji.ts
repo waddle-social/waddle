@@ -17,7 +17,7 @@ for (const [emoji, keywords] of Object.entries(lib)) {
   }
 }
 
-export const EMOJI_SHORTCODES: Record<string, string> = _shortcodes;
+const EMOJI_SHORTCODES: Record<string, string> = _shortcodes;
 
 /** Search emoji shortcodes, returning up to `limit` matches. */
 export function searchEmoji(query: string, limit = 8): { name: string; emoji: string }[] {

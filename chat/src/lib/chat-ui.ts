@@ -91,7 +91,7 @@ export interface ChannelEditFormData {
 // ── XEP-0392 Consistent Color Generation ────────────────────────────
 
 /** Compute a deterministic hue (0–360) from a string using XEP-0392 algorithm. */
-export function consistentHue(input: string): number {
+function consistentHue(input: string): number {
   // Simple SHA-1-like hash using SubtleCrypto isn't available synchronously.
   // Use the same algorithm: hash → first 2 bytes → hue mapping.
   // We use a simple DJB2-variant that gives good distribution for short strings.

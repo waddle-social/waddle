@@ -4,7 +4,7 @@ import type { WaddleSession, AuthProvider } from "@/lib/server-auth";
 import type { WaddleApi } from "@/lib/waddle-api";
 import type { AppState } from "@/lib/chat-ui";
 
-export interface ConnectionStore {
+interface ConnectionStore {
   client: BrowserXmppClient | null;
   appState: AppState;
   session: WaddleSession | null;

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/components/ChatApp.vue",
+    "src/components/XmppProvider.vue",
+    "src/service-worker/sw-template.js",
+    "scripts/*.mjs",
+    "tests/**/*.test.ts"
+  ],
+  "project": [
+    "src/**/*.{ts,vue,astro,mjs}",
+    "scripts/**/*.mjs",
+    "tests/**/*.ts"
+  ],
+  "ignore": [],
+  "astro": true,
+  "ignoreDependencies": [
+    "@fontsource-variable/jetbrains-mono",
+    "@fontsource-variable/outfit",
+    "@fontsource-variable/syne",
+    "tailwindcss",
+    "events",
+    "cloudflare"
+  ]
+}

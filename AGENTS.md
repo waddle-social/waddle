@@ -24,6 +24,15 @@ bun test && bun run lint
   - Never use `npm`, `yarn`, or `pnpm` for installs, scripts, or CI.
   - Use `bun` and `bunx` exclusively.
 
+- Knip hard rule (chat/):
+  - `bun run lint` in `chat/` runs `knip` and must exit clean on every PR.
+  - A PR that introduces an unused file, export, or dependency MUST either
+    wire it up or remove it; do not silence findings via broad `ignore`
+    entries in `knip.json`. Targeted entry/ignoreDependencies additions are
+    acceptable only with a one-line justification in the PR description.
+  - CI runs `knip` via `cuenv` (task `lint` in `chat/env.cue`) before the
+    Cloudflare preview upload on every pull request.
+
 ## Code Style
 
 TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions

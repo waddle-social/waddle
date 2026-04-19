@@ -9,7 +9,7 @@ const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ??
 const hasNotificationApi =
   typeof window !== "undefined" && "Notification" in window;
 
-export interface MentionNotificationOptions {
+interface MentionNotificationOptions {
   senderNick: string;
   channelName: string;
   body: string;
@@ -18,7 +18,7 @@ export interface MentionNotificationOptions {
   onNavigate?: (roomJid: string) => void;
 }
 
-export interface DmNotificationOptions {
+interface DmNotificationOptions {
   senderUsername: string;
   peerJid: string;
   body: string;

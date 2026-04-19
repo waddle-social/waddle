@@ -4,11 +4,6 @@ import { attribute, multipleChildText } from "stanza/jxt";
 
 const NS_REACTIONS_0 = "urn:xmpp:reactions:0";
 
-export interface WaddleReactions {
-  id: string;
-  items: string[];
-}
-
 const definitions: DefinitionOptions[] = [
   {
     aliases: [{ path: "message.reactions", multiple: false }],

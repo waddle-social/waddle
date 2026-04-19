@@ -10,13 +10,6 @@ import {
   type InboxState,
 } from "@/services/inbox";
 
-export interface ChannelUnreadEntry {
-  roomJid: string;
-  channelId: string;
-  unreadCount: number;
-  mentionCount: number;
-}
-
 export interface ThreadInboxEntry {
   roomJid: string;
   threadId: string;

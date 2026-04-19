@@ -38,7 +38,7 @@ export interface UserSearchResult {
   jid: string;
 }
 
-export interface ChannelMessage {
+interface ChannelMessage {
   id: string;
   author: {
     user_id: string;

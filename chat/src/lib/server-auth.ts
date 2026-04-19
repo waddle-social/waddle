@@ -20,7 +20,7 @@ export interface AuthProvider {
   display_name?: string;
 }
 
-export interface LoginUrlOptions {
+interface LoginUrlOptions {
   sessionTransport?: "cookie" | "fragment";
 }
 
