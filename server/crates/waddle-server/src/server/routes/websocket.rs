@@ -45,6 +45,10 @@ use waddle_xmpp::{
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
     registry::{ConnectionRegistry, OutboundStanza},
+    stream_management::{
+        InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
+        StreamManagementState, SM_NS,
+    },
     xep::{
         build_command_items, build_command_result, build_spaces_metadata_form, has_file_sharing,
         is_moderation_request_message, is_moderation_result_message, is_reaction_message,
@@ -103,6 +107,15 @@ pub struct WebSocketState {
     pub dispatcher: Arc<StanzaDispatcher>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).
     pub pubsub_storage: Arc<dyn PubSubStorage>,
+    /// XEP-0198 detached-session registry — holds state for clients whose
+    /// WebSocket has closed but may still resume within the session timeout.
+    pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    /// Sidecar map keyed by SM stream id, holding the authenticated `Session`
+    /// so that a resumed stream doesn't lose its authorization context and
+    /// can serve IQs that check channel membership, etc. Entries are
+    /// populated on detach and removed on take/resume (or swept when the
+    /// corresponding SM session expires).
+    pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
 }
 
 /// In-progress SCRAM-SHA-256 authentication state between challenge and response.
@@ -126,6 +139,23 @@ struct LegacyConnState {
     authenticated_session: Option<Session>,
     resource_bound: bool,
     pending_scram: Option<PendingScramAuth>,
+    /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
+    /// once enabled and holds the unacked queue used for resumption.
+    sm_state: StreamManagementState,
+    /// True when this WebSocket was bootstrapped via `<resume/>` rather than
+    /// a fresh SASL + bind. Used for structured logging on the first
+    /// register call; the registration itself still happens in the main
+    /// loop (when `pending_tx.take()` fires after authenticated+bound
+    /// become true), regardless of the path that set those flags.
+    resumed: bool,
+    /// One-shot flag: when set, the main loop must NOT push the current
+    /// frame's responses into `sm_state.record_outbound`. The flag is
+    /// raised by `handle_sm_resume` because the responses it returns are
+    /// replayed stanzas that were already pushed into the unacked queue
+    /// before detach; re-recording them would double-count `outbound_count`
+    /// and duplicate queue entries. The main loop resets the flag to
+    /// `false` after skipping the record step.
+    suppress_sm_record_next_batch: bool,
 }
 
 impl LegacyConnState {
@@ -136,6 +166,9 @@ impl LegacyConnState {
             authenticated_session: None,
             resource_bound: false,
             pending_scram: None,
+            sm_state: StreamManagementState::new(),
+            resumed: false,
+            suppress_sm_record_next_batch: false,
         }
     }
 }
@@ -171,12 +204,22 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Create outbound channel for receiving messages from other connections
+    // Create outbound channel for receiving messages from other connections.
+    // After the session is registered, `pending_tx` is handed to the
+    // ConnectionRegistry and `None`'d out here — the registry becomes the sole
+    // holder of the sender. If another session arrives for the same FullJid,
+    // the registry replaces our entry, drops the sender, and our `recv()`
+    // returns `None` — that's how we detect replacement and exit cleanly.
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundStanza>(OUTBOUND_CHANNEL_SIZE);
+    let mut pending_tx: Option<mpsc::Sender<OutboundStanza>> = Some(outbound_tx);
 
     // Track connection state
     let mut conn = LegacyConnState::new();
-    let mut registered = false;
+    // Set when our own registry slot was replaced by a newer connection for
+    // the same FullJid (detected via outbound_rx closing). In that case the
+    // cleanup block below must NOT touch the registry or MUC state — those
+    // belong to the newcomer now.
+    let mut superseded = false;
 
     loop {
         tokio::select! {
@@ -196,11 +239,32 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() && !registered {
-                            if let Some(ref jid) = conn.session_jid {
-                                state.connection_registry.register(jid.clone(), outbound_tx.clone());
-                                registered = true;
-                                info!(jid = %jid, "WebSocket connection registered");
+                        if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() {
+                            if let (Some(jid), Some(tx)) = (conn.session_jid.as_ref(), pending_tx.take()) {
+                                state.connection_registry.register(jid.clone(), tx);
+                                info!(jid = %jid, resumed = conn.resumed, "WebSocket connection registered");
+                            }
+                        }
+
+                        // Record outbound stanzas for XEP-0198 replay BEFORE
+                        // writing them to the socket. If SM is enabled and
+                        // the stanza is countable, push it into the unacked
+                        // queue; a future resume will replay this exact XML.
+                        //
+                        // Exception: when `handle_sm_resume` just ran, the
+                        // responses ARE the replay of the restored unacked
+                        // queue — those stanzas already have their original
+                        // sequence numbers and are still in the queue.
+                        // Re-recording them would bump `outbound_count` past
+                        // reality and push duplicate queue entries, breaking
+                        // subsequent acks and a second resume.
+                        if conn.suppress_sm_record_next_batch {
+                            conn.suppress_sm_record_next_batch = false;
+                        } else if conn.sm_state.enabled {
+                            for frame in &responses {
+                                if is_countable_stanza(frame) {
+                                    conn.sm_state.record_outbound(frame.clone());
+                                }
                             }
                         }
 
@@ -249,6 +313,12 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                     Some(outbound_stanza) => {
                         debug!("Received outbound stanza from registry");
                         let xml = stanza_to_xml(&outbound_stanza.stanza);
+                        // Outbound stanzas routed from other connections are
+                        // always iq/message/presence — count them into the
+                        // SM outbound queue for replay if SM is enabled.
+                        if conn.sm_state.enabled && is_countable_stanza(&xml) {
+                            conn.sm_state.record_outbound(xml.clone());
+                        }
                         if !send_ws_message(
                             &mut ws_sender,
                             Message::Text(xml),
@@ -260,21 +330,74 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
                     }
                     None => {
-                        // Outbound channel closed - this shouldn't happen during normal operation
-                        debug!("Outbound channel closed");
+                        // Outbound channel closed. All clones of the sender (our
+                        // own outbound_tx + any copy held by the registry) have
+                        // been dropped. The only path to this state after
+                        // registration is a replacement register for the same
+                        // FullJid: the registry drops our entry (and with it
+                        // the sender) to install the new session's sender.
+                        // Mark as superseded so the cleanup block skips
+                        // unregister/MUC-cleanup/detach — all of those would
+                        // target the newcomer's registry slot and occupant.
+                        info!("Outbound channel closed; session superseded by replacement");
+                        superseded = true;
+                        break;
                     }
                 }
             }
         }
     }
 
-    // Unregister connection on disconnect
-    if let Some(ref jid) = conn.session_jid {
-        state.connection_registry.unregister(jid);
-        info!(jid = %jid, "WebSocket connection unregistered");
-
-        // Remove from any MUC rooms
-        cleanup_muc_presence(&state, jid).await;
+    // Connection is ending. Decide between two paths:
+    //   A. Fully clean up (unregister + remove MUC occupants) — the default
+    //      for non-SM sessions and for SM sessions that didn't negotiate
+    //      resume.
+    //   B. Detach for resumption — for SM sessions with `resume='true'`,
+    //      stash state into the SmSessionRegistry so a reconnecting client
+    //      can `<resume/>` without re-joining MUC or re-authenticating.
+    //      MUC occupants stay in place during the detach window so other
+    //      users continue to see this user as present.
+    //
+    // Short-circuit when this task was superseded: the registry and MUC
+    // occupant slots now belong to the newer connection for this FullJid,
+    // and any cleanup we do here would clobber the newcomer.
+    if !superseded {
+        if let Some(jid) = conn.session_jid.clone() {
+            if conn.sm_state.is_resumable() {
+                if let Some(detached) = conn.sm_state.to_detached_session(jid.clone()) {
+                    let stream_id = detached.stream_id.clone();
+                    if let Some(session) = conn.authenticated_session.clone() {
+                        state.resumable_sessions.insert(stream_id.clone(), session);
+                    }
+                    match state.sm_session_registry.store_session(detached).await {
+                        Ok(()) => {
+                            // Remove the routing entry only — the MUC occupant
+                            // slot stays. On a successful resume we'll re-register
+                            // the same FullJid and presence is preserved.
+                            state.connection_registry.unregister(&jid);
+                            info!(
+                                jid = %jid,
+                                stream_id = %stream_id,
+                                "SM session detached; awaiting resume"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
+                            state.resumable_sessions.remove(&stream_id);
+                            state.connection_registry.unregister(&jid);
+                            cleanup_muc_presence(&state, &jid).await;
+                        }
+                    }
+                } else {
+                    state.connection_registry.unregister(&jid);
+                    cleanup_muc_presence(&state, &jid).await;
+                }
+            } else {
+                state.connection_registry.unregister(&jid);
+                info!(jid = %jid, "WebSocket connection unregistered");
+                cleanup_muc_presence(&state, &jid).await;
+            }
+        }
     }
 
     info!("XMPP WebSocket connection closed");
@@ -319,6 +442,13 @@ where
 }
 
 /// Clean up MUC room presence when a connection disconnects
+/// Public alias for the MUC-presence cleanup used by the SM expired-session
+/// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
+/// to reimplement the room traversal.
+pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
+    cleanup_muc_presence(state, jid).await
+}
+
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
     // Get all rooms and remove this user from any they're in
     for room_jid in state.muc_registry.list_rooms() {
@@ -448,28 +578,30 @@ fn build_iq_error_xml(id: &str, error_type: &str, condition: &str) -> String {
 }
 
 fn build_stream_features_xml(authenticated: bool) -> String {
-    let feature = if authenticated {
-        Element::builder("bind", waddle_xmpp::ns::BIND).build()
+    let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
+    if authenticated {
+        features = features.append(Element::builder("bind", waddle_xmpp::ns::BIND).build());
+        // XEP-0198: advertise stream management so clients can <enable/> it
+        // after bind or <resume/> a detached session.
+        features = features.append(Element::builder("sm", SM_NS).build());
     } else {
-        Element::builder("mechanisms", waddle_xmpp::ns::SASL)
-            .append(
-                Element::builder("mechanism", waddle_xmpp::ns::SASL)
-                    .append("SCRAM-SHA-256")
-                    .build(),
-            )
-            .append(
-                Element::builder("mechanism", waddle_xmpp::ns::SASL)
-                    .append("OAUTHBEARER")
-                    .build(),
-            )
-            .build()
-    };
+        features = features.append(
+            Element::builder("mechanisms", waddle_xmpp::ns::SASL)
+                .append(
+                    Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                        .append("SCRAM-SHA-256")
+                        .build(),
+                )
+                .append(
+                    Element::builder("mechanism", waddle_xmpp::ns::SASL)
+                        .append("OAUTHBEARER")
+                        .build(),
+                )
+                .build(),
+        );
+    }
 
-    element_to_xml(
-        Element::builder("features", waddle_xmpp::ns::STREAM)
-            .append(feature)
-            .build(),
-    )
+    element_to_xml(features.build())
 }
 
 fn sasl_success_xml() -> String {
@@ -499,6 +631,163 @@ fn parse_sasl_auth_frame(frame: &str) -> Result<(String, String), String> {
     Ok((mechanism, element.text().trim().to_string()))
 }
 
+/// Returns true if the frame is an XMPP stanza that counts toward XEP-0198
+/// handled/sent counters. Only `<iq>`, `<message>`, `<presence>` qualify —
+/// stream headers, SASL frames, and SM control nonzas do not.
+fn is_countable_stanza(frame: &str) -> bool {
+    let trimmed = frame.trim_start();
+    trimmed.starts_with("<iq")
+        || trimmed.starts_with("<message")
+        || trimmed.starts_with("<presence")
+}
+
+/// Bundle the session-level borrows that XEP-0198 control handlers mutate.
+/// Passed through `handle_sm_stanza` and its helpers so each signature stays
+/// below the clippy too-many-arguments threshold.
+struct SmCtx<'a> {
+    sm_state: &'a mut StreamManagementState,
+    session_jid: &'a mut Option<FullJid>,
+    authenticated: &'a mut bool,
+    resource_bound: &'a mut bool,
+    authenticated_session: &'a mut Option<Session>,
+    resumed: &'a mut bool,
+    /// Set by `handle_sm_resume` so the main loop skips SM recording for
+    /// the responses it returns — those are replay stanzas already tracked
+    /// in the unacked queue.
+    suppress_sm_record_next_batch: &'a mut bool,
+}
+
+/// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
+/// dispatcher stays flat.
+async fn handle_sm_stanza(sm: SmStanza, state: &WebSocketState, ctx: SmCtx<'_>) -> Vec<String> {
+    use waddle_xmpp::stream_management::SmAck;
+
+    match sm {
+        SmStanza::Enable(enable) => handle_sm_enable(enable, ctx.sm_state, ctx.resource_bound),
+        SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
+        SmStanza::Ack(ack) => {
+            ctx.sm_state.acknowledge(ack.h);
+            vec![]
+        }
+        SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
+        // Server-origin nonzas should never arrive from a client. Ignore.
+        SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
+    }
+}
+
+fn handle_sm_enable(
+    enable: SmEnable,
+    sm_state: &mut StreamManagementState,
+    resource_bound: &bool,
+) -> Vec<String> {
+    use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
+
+    if !*resource_bound {
+        return vec![SmFailed::with_condition("unexpected-request").to_xml()];
+    }
+    if sm_state.enabled {
+        return vec![SmFailed::with_condition("unexpected-request").to_xml()];
+    }
+
+    let stream_id = uuid::Uuid::new_v4().to_string();
+    // Clamp resumption window to our server-side maximum (5 minutes) — this
+    // is also the registry TTL. Clients that asked for less get what they
+    // asked for; clients that asked for more or didn't specify get 300s.
+    const MAX_RESUME_SECS: u32 = 300;
+    let max = enable
+        .max
+        .map(|m| m.min(MAX_RESUME_SECS))
+        .unwrap_or(MAX_RESUME_SECS);
+    sm_state.enable(stream_id.clone(), enable.resume, Some(max));
+
+    info!(stream_id = %stream_id, resume = enable.resume, max = max, "SM enabled");
+    if enable.resume {
+        vec![SmEnabled::with_resume(stream_id, max).to_xml()]
+    } else {
+        vec![SmEnabled::new(stream_id).to_xml()]
+    }
+}
+
+async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'_>) -> Vec<String> {
+    use waddle_xmpp::stream_management::{SmFailed, SmResumed};
+
+    let SmCtx {
+        sm_state,
+        session_jid,
+        authenticated,
+        resource_bound,
+        authenticated_session,
+        resumed,
+        suppress_sm_record_next_batch,
+    } = ctx;
+
+    // Refuse to resume a stream that's already been bound. Clients that sent
+    // both bind and resume are confused; don't attempt to reconcile.
+    if *resource_bound {
+        return vec![SmFailed::with_condition("unexpected-request").to_xml()];
+    }
+
+    let detached = match state.sm_session_registry.take_session(&resume.previd).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            info!(stream_id = %resume.previd, "SM resume rejected: session not found or expired");
+            return vec![SmFailed::with_condition("item-not-found").to_xml()];
+        }
+        Err(e) => {
+            warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");
+            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+        }
+    };
+
+    // Restore SM counters + the unacked queue.
+    sm_state.restore_from_session(&detached);
+    // The client tells us how many of OUR outbound stanzas they've actually
+    // handled. Acknowledge up to that point so the replay set is minimal.
+    sm_state.acknowledge(resume.h);
+
+    // Restore authentication identity. If the sidecar has no matching
+    // Session (TTL expired / crash), resume still proceeds JID-only — the
+    // user retains basic messaging but any IQ that re-checks
+    // authenticated_session will re-deny until the next bind.
+    let restored_session = state
+        .resumable_sessions
+        .remove(&resume.previd)
+        .map(|(_, s)| s);
+    if restored_session.is_none() {
+        warn!(
+            stream_id = %resume.previd,
+            jid = %detached.jid,
+            "SM resumed without cached Session; authorization context is thinner than expected"
+        );
+    }
+
+    *session_jid = Some(detached.jid.clone());
+    *authenticated = true;
+    *resource_bound = true;
+    *authenticated_session = restored_session;
+    *resumed = true;
+    // Responses below include replayed stanzas straight from the restored
+    // unacked queue. They already carry their original sequence numbers —
+    // the main loop must NOT push them through `record_outbound` again.
+    *suppress_sm_record_next_batch = true;
+
+    let replay: Vec<String> = sm_state
+        .get_stanzas_to_resend(resume.h)
+        .into_iter()
+        .collect();
+    info!(
+        stream_id = %resume.previd,
+        jid = %detached.jid,
+        replay = replay.len(),
+        "SM resumed"
+    );
+
+    let mut responses = Vec::with_capacity(replay.len() + 1);
+    responses.push(SmResumed::new(resume.previd, sm_state.get_inbound_count()).to_xml());
+    responses.extend(replay);
+    responses
+}
+
 /// Handle an XMPP frame per RFC 7395
 async fn handle_xmpp_frame(
     frame: &str,
@@ -521,6 +810,9 @@ async fn handle_xmpp_frame(
         authenticated_session,
         resource_bound,
         pending_scram,
+        sm_state,
+        resumed,
+        suppress_sm_record_next_batch,
     } = conn;
     let frame = frame.trim();
     let muc_domain = format!("muc.{}", domain);
@@ -591,6 +883,24 @@ async fn handle_xmpp_frame(
         return vec![sasl_failure_xml("not-authorized")];
     }
 
+    // XEP-0198 Stream Management control frames can arrive anywhere from
+    // post-auth onward. `<resume/>` arrives instead of bind (to restore a
+    // detached session); `<enable/>`, `<r/>`, `<a/>` arrive after bind.
+    // Keep this branch BEFORE the resource-binding handler so a resuming
+    // client skips bind entirely.
+    if let Some(sm) = SmStanza::parse(frame) {
+        let ctx = SmCtx {
+            sm_state,
+            session_jid,
+            authenticated,
+            resource_bound,
+            authenticated_session,
+            resumed,
+            suppress_sm_record_next_batch,
+        };
+        return handle_sm_stanza(sm, state, ctx).await;
+    }
+
     // Handle resource binding
     if frame.contains("urn:ietf:params:xml:ns:xmpp-bind") && frame.starts_with("<iq") {
         let (responses, success) = handle_resource_binding(frame, domain, session_jid);
@@ -598,6 +908,13 @@ async fn handle_xmpp_frame(
             *resource_bound = true;
         }
         return responses;
+    }
+
+    // Count inbound stanzas for XEP-0198. SM "counts only stanzas
+    // (iq/message/presence)"; control frames (open/close/auth/sm-control)
+    // are excluded by this check.
+    if sm_state.enabled && is_countable_stanza(frame) {
+        sm_state.increment_inbound();
     }
 
     // Handle presence
@@ -1041,15 +1358,41 @@ async fn handle_muc_join(
 
     let mut room = room_data.write().await;
 
-    // Get existing occupants before adding the new one
+    // Detect nickname conflict. MUC occupants are keyed by nick (see
+    // MucRoom::add_occupant), so a prior entry with the joiner's nick is
+    // either (a) the joiner themselves reconnecting on a new resource or
+    // (b) a different user already holding that nick.
+    //
+    // (a) silent replace — add_occupant overwrites; clients have already
+    //     seen "nick online" so we don't re-emit a ghost occupant presence.
+    // (b) XEP-0045 §7.2.9 conflict — return a presence error and leave the
+    //     existing occupant untouched.
+    if let Some(existing_jid) = room.get_occupant(nick).map(|o| o.real_jid.clone()) {
+        if existing_jid.to_bare() != sender_jid.to_bare() {
+            drop(room);
+            warn!(
+                room = %room_jid,
+                nick = %nick,
+                existing = %existing_jid,
+                sender = %sender_jid,
+                "MUC nick collision; returning conflict"
+            );
+            return vec![build_muc_conflict_presence_xml(room_jid, nick, sender_jid)];
+        }
+    }
+
+    // Existing occupants for presence replay to the joiner. Filter by nick —
+    // the joiner's own prior resource (if any) must not be sent back as a
+    // separate occupant, which used to surface as a "ghost" presence that
+    // confused MUC libraries and caused self-presence to be ignored.
     let existing_occupants: Vec<(FullJid, String, Affiliation, Role)> = room
         .occupants
         .values()
-        .filter(|o| o.real_jid != *sender_jid)
+        .filter(|o| o.nick != nick)
         .map(|o| (o.real_jid.clone(), o.nick.clone(), o.affiliation, o.role))
         .collect();
 
-    // Add the new occupant
+    // Add (or silently replace) the occupant
     let occupant = Occupant {
         real_jid: sender_jid.clone(),
         nick: nick.to_string(),
@@ -1080,15 +1423,14 @@ async fn handle_muc_join(
         ));
     }
 
-    // Broadcast the new occupant's presence to all existing occupants
+    // Broadcast the new occupant's presence to all existing occupants.
+    // Non-blocking: a zombied/slow consumer must never stall the join path,
+    // which is how "Timed out waiting for self-presence" cascades start.
     for (existing_jid, _, _, _) in &existing_occupants {
         let presence_stanza =
             create_presence_stanza(room_jid, nick, sender_jid, existing_jid, false);
         let stanza = Stanza::Presence(presence_stanza);
-        let _ = state
-            .connection_registry
-            .send_to(existing_jid, stanza)
-            .await;
+        let _ = state.connection_registry.try_send_to(existing_jid, stanza);
     }
 
     // Send self-presence to the joining user (with status code 110)
@@ -1161,7 +1503,7 @@ async fn handle_muc_leave(
     room.remove_occupant(nick);
     drop(room);
 
-    // Broadcast unavailable presence to remaining occupants
+    // Broadcast unavailable presence to remaining occupants (non-blocking).
     for occupant_jid in &remaining_occupants {
         let from_jid = room_jid
             .clone()
@@ -1172,10 +1514,7 @@ async fn handle_muc_leave(
         presence.from = Some(jid::Jid::from(from_jid));
         presence.to = Some(jid::Jid::from(occupant_jid.clone()));
         let stanza = Stanza::Presence(presence);
-        let _ = state
-            .connection_registry
-            .send_to(occupant_jid, stanza)
-            .await;
+        let _ = state.connection_registry.try_send_to(occupant_jid, stanza);
     }
 
     // Send self-presence unavailable to the leaving user
@@ -2419,7 +2758,11 @@ async fn handle_message(
             }
         }
 
-        // Send to all occupants
+        // Send to all occupants. Groupchat broadcasts are fire-and-forget:
+        // message bodies are already archived to MAM, so any occupant the
+        // server can't reach right now (backpressured or stale) will pick up
+        // the message on their next MAM catch-up. Blocking here is what
+        // caused join cascades under zombie load.
         let mut echo_response = None;
         for (occupant_jid, _) in &occupants {
             if occupant_jid == sender_jid {
@@ -2434,10 +2777,7 @@ async fn handle_message(
                 let mut msg = prototype.clone();
                 msg.to = Some(jid::Jid::from(occupant_jid.clone()));
                 let stanza = Stanza::Message(msg);
-                let _ = state
-                    .connection_registry
-                    .send_to(occupant_jid, stanza)
-                    .await;
+                let _ = state.connection_registry.try_send_to(occupant_jid, stanza);
             }
         }
 
@@ -2786,6 +3126,30 @@ fn build_muc_join_presence_xml(
             .attr("from", from_jid.to_string())
             .attr("to", to_jid.to_string())
             .append(user_payload.build())
+            .build(),
+    )
+}
+
+/// XEP-0045 §7.2.9 conflict presence: the requested nick is already in use
+/// by a different user. The joiner receives a `<presence type='error'/>` and
+/// no room state changes.
+fn build_muc_conflict_presence_xml(room_jid: &BareJid, nick: &str, to_jid: &FullJid) -> String {
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(nick)
+        .unwrap_or_else(|_| to_jid.clone());
+
+    let error_payload = Element::builder("error", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr("type", "cancel")
+        .append(Element::builder("conflict", "urn:ietf:params:xml:ns:xmpp-stanzas").build())
+        .build();
+
+    element_to_xml(
+        Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr("from", from_jid.to_string())
+            .attr("to", to_jid.to_string())
+            .attr("type", "error")
+            .append(error_payload)
             .build(),
     )
 }
@@ -3198,6 +3562,8 @@ mod tests {
             extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
             dispatcher: Arc::new(dispatcher),
             pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+            sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
+            resumable_sessions: Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -4507,5 +4873,446 @@ mod tests {
         let element = Element::from_str(&responses[0]).expect("valid XML");
         let iq = xmpp_parsers::iq::Iq::try_from(element).expect("parseable IQ");
         assert_eq!(iq.id, "items-1");
+    }
+
+    // ---- B: Non-blocking broadcast ------------------------------------
+
+    #[tokio::test]
+    async fn try_send_to_returns_false_when_channel_full() {
+        // A size-1 channel lets us prove try_send does not block when the
+        // receiver isn't draining: the second send reports failure
+        // immediately instead of awaiting capacity.
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "user@example.com/res".parse().expect("jid");
+        let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+        registry.register(jid.clone(), tx);
+
+        let stanza_a = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        let stanza_b = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+
+        assert!(registry.try_send_to(&jid, stanza_a));
+        assert!(!registry.try_send_to(&jid, stanza_b));
+    }
+
+    #[tokio::test]
+    async fn try_send_to_unregisters_closed_channel() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "gone@example.com/res".parse().expect("jid");
+        let (tx, rx) = mpsc::channel::<OutboundStanza>(4);
+        registry.register(jid.clone(), tx);
+        drop(rx); // close the channel so try_send sees Closed
+
+        let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        assert!(!registry.try_send_to(&jid, stanza));
+        assert!(!registry.is_connected(&jid));
+    }
+
+    #[tokio::test]
+    async fn try_send_to_does_not_unregister_replacement_entry() {
+        // Simulate the replacement race: connection A is registered, its
+        // receiver is dropped so the sender is closed, connection B takes
+        // over the same JID with a live sender, then something (e.g. a MUC
+        // broadcast task that still holds a clone of A's sender) tries to
+        // send. The try_send would see Closed on A's cloned sender — but
+        // the entry in the registry is now B's live one and must NOT be
+        // evicted.
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let (tx_a, rx_a) = mpsc::channel::<OutboundStanza>(4);
+        registry.register(jid.clone(), tx_a);
+        drop(rx_a); // A's sender is now closed
+
+        // B takes over. The register() call replaces A's entry; only B's
+        // (live) sender is now in the registry.
+        let (tx_b, _rx_b) = mpsc::channel::<OutboundStanza>(4);
+        registry.register(jid.clone(), tx_b);
+
+        // A broadcast path now tries to send. From its perspective, it sees
+        // whatever sender is currently in the registry — which is B's live
+        // one — so try_send_to returns true. Either way, the entry must
+        // remain in the registry.
+        let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        let _ = registry.try_send_to(&jid, stanza);
+        assert!(
+            registry.is_connected(&jid),
+            "replacement entry must still be registered after a try_send_to that races with eviction"
+        );
+    }
+
+    // ---- C: MUC nick handling -----------------------------------------
+
+    #[tokio::test]
+    async fn muc_self_rejoin_does_not_emit_ghost_presence() {
+        // Same user joins the same nick twice from different resources —
+        // the second join must NOT include a presence for the old resource
+        // in the response (which used to be seen as a "ghost" occupant and
+        // broke self-presence detection on the client).
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "rejoin_channel@muc.example.com".parse().expect("room");
+        let first: FullJid = "alice@example.com/tab-1".parse().expect("first");
+        let second: FullJid = "alice@example.com/tab-2".parse().expect("second");
+
+        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &first, "alice").await;
+        let responses =
+            handle_muc_join(state.as_ref(), "example.com", &room_jid, &second, "alice").await;
+
+        // Count presences emitted to the joiner that came from room/alice.
+        // Only the self-presence (status 110) should be there — no "ghost".
+        let alice_presences_for_joiner = responses
+            .iter()
+            .filter_map(|xml| Element::from_str(xml).ok())
+            .filter(|el| el.name() == "presence")
+            .filter(|el| el.attr("from") == Some(&format!("{room_jid}/alice")))
+            .filter(|el| el.attr("to") == Some(&second.to_string()))
+            .count();
+        assert_eq!(
+            alice_presences_for_joiner, 1,
+            "self-rejoin must produce exactly one self-presence, not a ghost + self pair"
+        );
+
+        // And the one presence we got must carry status 110.
+        let self_presence = responses
+            .iter()
+            .filter_map(|xml| Element::from_str(xml).ok())
+            .find(|el| {
+                el.name() == "presence"
+                    && el.attr("from") == Some(&format!("{room_jid}/alice"))
+                    && el.attr("to") == Some(&second.to_string())
+            })
+            .expect("self-presence must be present");
+        let user_x = self_presence
+            .get_child("x", "http://jabber.org/protocol/muc#user")
+            .expect("muc user payload");
+        assert!(
+            user_x
+                .children()
+                .any(|child| child.name() == "status" && child.attr("code") == Some("110")),
+            "status 110 must be present on self-rejoin"
+        );
+    }
+
+    #[tokio::test]
+    async fn muc_nick_collision_returns_conflict_presence() {
+        // Two different users try to hold the same nick — second gets a
+        // <presence type='error'/> with <conflict/>, and room state for
+        // the incumbent is untouched.
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "conflict_channel@muc.example.com".parse().expect("room");
+        let alice: FullJid = "alice@example.com/desktop".parse().expect("alice");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
+
+        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &alice, "dino").await;
+        let responses =
+            handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "dino").await;
+
+        assert_eq!(responses.len(), 1, "exactly one error presence");
+        let el = Element::from_str(&responses[0]).expect("valid XML");
+        assert_eq!(el.name(), "presence");
+        assert_eq!(el.attr("type"), Some("error"));
+        let bob_str = bob.to_string();
+        assert_eq!(el.attr("to"), Some(bob_str.as_str()));
+        let err = el
+            .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
+            .expect("error element");
+        assert_eq!(err.attr("type"), Some("cancel"));
+        assert!(err
+            .get_child("conflict", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .is_some());
+
+        // Alice still owns the nick.
+        let room_data = state
+            .muc_registry
+            .get_room_data(&room_jid)
+            .expect("room data");
+        let room = room_data.read().await;
+        assert_eq!(room.find_nick_by_real_jid(&alice), Some("dino"));
+        assert!(room.find_nick_by_real_jid(&bob).is_none());
+        assert_eq!(room.occupant_count(), 1);
+    }
+
+    // ---- D: XEP-0198 stream management --------------------------------
+
+    #[tokio::test]
+    async fn sm_features_advertise_sm_namespace() {
+        // Stream features after successful auth must include <sm/>.
+        let features = build_stream_features_xml(true);
+        let el = Element::from_str(&features).expect("features xml");
+        assert!(
+            el.children()
+                .any(|child| child.name() == "sm" && child.ns() == SM_NS),
+            "post-auth features must advertise urn:xmpp:sm:3"
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_enable_requires_resource_binding() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        // Without resource_bound, enable must fail.
+        let frame = "<enable xmlns='urn:xmpp:sm:3' resume='true'/>";
+        let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "failed");
+        assert!(!conn.sm_state.enabled);
+    }
+
+    #[tokio::test]
+    async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some("alice@example.com/web".parse().expect("jid"));
+
+        let responses = handle_xmpp_frame(
+            "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "enabled");
+        assert_eq!(el.attr("resume"), Some("true"));
+        assert!(el.attr("id").filter(|s| !s.is_empty()).is_some());
+        assert!(conn.sm_state.enabled);
+        assert!(conn.sm_state.is_resumable());
+
+        // An ack request bumps no counters but produces <a h=inbound_count/>.
+        let ack_responses = handle_xmpp_frame(
+            "<r xmlns='urn:xmpp:sm:3'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        assert_eq!(ack_responses.len(), 1);
+        let ack_el = Element::from_str(&ack_responses[0]).expect("xml");
+        assert_eq!(ack_el.name(), "a");
+        assert_eq!(ack_el.attr("h"), Some("0"));
+
+        // A countable inbound stanza bumps the inbound counter.
+        let _ = handle_xmpp_frame(
+            "<presence xmlns='jabber:client'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        assert_eq!(conn.sm_state.get_inbound_count(), 1);
+
+        // Subsequent <r/> should now report h=1.
+        let ack2 = handle_xmpp_frame(
+            "<r xmlns='urn:xmpp:sm:3'/>",
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        let ack2_el = Element::from_str(&ack2[0]).expect("xml");
+        assert_eq!(ack2_el.attr("h"), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn sm_resume_restores_session_and_replays_unacked() {
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        // Seed a detached session directly in the registry — this is the
+        // shape left behind by a prior WebSocket task after detach-on-close.
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let stream_id = "stream-xyz".to_string();
+        let detached = DetachedSession {
+            stream_id: stream_id.clone(),
+            jid: jid.clone(),
+            inbound_count: 7,
+            outbound_count: 10,
+            last_acked: 8,
+            unacked_stanzas: vec![
+                (9, "<message id='m9'/>".to_string()),
+                (10, "<message id='m10'/>".to_string()),
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+        };
+        state
+            .sm_session_registry
+            .store_session(detached)
+            .await
+            .expect("store");
+
+        let mut conn = LegacyConnState::new();
+        // Client reports it has acked through 9, so only m10 needs replay.
+        let frame = format!(
+            "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='9'/>",
+            stream_id
+        );
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+
+        // Expect <resumed/> first, then exactly the one unacked stanza.
+        assert!(!responses.is_empty());
+        let resumed = Element::from_str(&responses[0]).expect("resumed xml");
+        assert_eq!(resumed.name(), "resumed");
+        assert_eq!(resumed.attr("previd"), Some(stream_id.as_str()));
+
+        let replay_count = responses.len() - 1;
+        assert_eq!(
+            replay_count, 1,
+            "only m10 should be replayed: {responses:?}"
+        );
+        assert!(responses[1].contains("m10"));
+
+        // Session identity restored without SASL or bind frames.
+        assert!(conn.authenticated);
+        assert!(conn.resource_bound);
+        assert_eq!(conn.session_jid, Some(jid));
+        assert!(conn.resumed);
+    }
+
+    #[tokio::test]
+    async fn sm_resume_with_unknown_stream_id_fails() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        let frame = "<resume xmlns='urn:xmpp:sm:3' previd='does-not-exist' h='0'/>";
+        let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(responses.len(), 1);
+        let el = Element::from_str(&responses[0]).expect("xml");
+        assert_eq!(el.name(), "failed");
+        // Must NOT mark the session as authenticated/bound.
+        assert!(!conn.authenticated);
+        assert!(!conn.resource_bound);
+        assert!(!conn.resumed);
+    }
+
+    #[tokio::test]
+    async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
+        // Regression guard for the double-record bug reported in PR review:
+        // `handle_sm_resume` must request suppression of outbound recording
+        // for its own response batch. Replayed stanzas are already in the
+        // unacked queue — re-recording them would bump `outbound_count` and
+        // create duplicates.
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let stream_id = "stream-dup-check".to_string();
+        let detached = DetachedSession {
+            stream_id: stream_id.clone(),
+            jid,
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 0,
+            unacked_stanzas: vec![
+                (1, "<message id='m1'/>".to_string()),
+                (2, "<message id='m2'/>".to_string()),
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+        };
+        state
+            .sm_session_registry
+            .store_session(detached)
+            .await
+            .expect("store");
+
+        let mut conn = LegacyConnState::new();
+        let frame = format!(
+            "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='0'/>",
+            stream_id
+        );
+        let _ = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+
+        // The resume handler must have raised the suppress flag so the main
+        // loop skips re-recording its own response batch.
+        assert!(
+            conn.suppress_sm_record_next_batch,
+            "handle_sm_resume must ask the main loop to skip SM recording for this batch"
+        );
+        // And the restored counters must still reflect what the client had
+        // acknowledged, not the inflated post-re-record values (2, not 4).
+        assert_eq!(conn.sm_state.outbound_count, 2);
+        assert_eq!(conn.sm_state.queue_len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
+        // Exercise the pieces the janitor composes: drain_expired() returns
+        // the removed sessions, and cleanup_muc_presence_for_jid removes the
+        // occupant that was held while the session was detached.
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "expired_channel@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        // Put alice in the room, as if she'd detached with SM.
+        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &jid, "alice").await;
+        assert!(state
+            .muc_registry
+            .get_room_data(&room_jid)
+            .expect("room")
+            .read()
+            .await
+            .find_nick_by_real_jid(&jid)
+            .is_some());
+
+        // Seed an immediately-expired detached session for that JID.
+        let stream_id = "already-expired".to_string();
+        state
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                jid: jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(0), // already expired
+                detached_at: std::time::Instant::now(),
+            })
+            .await
+            .expect("store");
+        state
+            .resumable_sessions
+            .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
+
+        // Wait a hair so the 0-second TTL is definitely in the past.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let drained = state
+            .sm_session_registry
+            .drain_expired()
+            .await
+            .expect("drain");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].stream_id, stream_id);
+
+        // The janitor body: remove sidecar + MUC occupant + any routing slot.
+        state.resumable_sessions.remove(&stream_id);
+        state.connection_registry.unregister(&drained[0].jid);
+        cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
+
+        assert!(!state.resumable_sessions.contains_key(&stream_id));
+        assert!(
+            state
+                .muc_registry
+                .get_room_data(&room_jid)
+                .expect("room")
+                .read()
+                .await
+                .find_nick_by_real_jid(&jid)
+                .is_none(),
+            "MUC occupant must be gone after janitor sweep"
+        );
     }
 }
