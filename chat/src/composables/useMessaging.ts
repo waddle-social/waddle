@@ -5,6 +5,7 @@ import { isForumChannel } from "@/lib/channel-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
+  barePeerJid,
   roomBareJidFor,
   type LiveRoomMessage,
   type RoomActivityEvent,
@@ -20,6 +21,10 @@ import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
 import { getLastSeen, roomKey, setLastSeen } from "@/lib/last-seen-store";
+import {
+  listQueuedRoomMessages,
+  type PersistedQueuedRoomMessage,
+} from "@/lib/outbound-queue-store";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 
 export function fromLiveMessage(
@@ -105,6 +110,52 @@ function applyForumContext(list: TimelineMessage[]): TimelineMessage[] {
   });
 }
 
+function queuedRoomMessageToTimeline(
+  session: WaddleSession,
+  roomJid: string,
+  queued: PersistedQueuedRoomMessage,
+): TimelineMessage {
+  const message: TimelineMessage = {
+    id: queued.id,
+    author: session.username,
+    authorJid: `${roomJid}/${session.username}`,
+    body: queued.body.trim() || (queued.files?.[0]?.url ?? ""),
+    createdAt: queued.createdAt,
+    isSelf: true,
+    deliveryStatus: "queued",
+  };
+  if (queued.markup && queued.markup.length > 0) message.markup = queued.markup;
+  if (queued.replyTo) {
+    message.replyTo = {
+      id: queued.replyTo.id,
+      ...(queued.replyTo.author ? { author: queued.replyTo.author } : {}),
+      ...(queued.replyTo.body ? { preview: queued.replyTo.body } : {}),
+    };
+  }
+  if (queued.threadId) message.threadId = queued.threadId;
+  if (queued.parentThreadId) message.parentThreadId = queued.parentThreadId;
+  if (queued.threadCreate) {
+    message.threadId = queued.id;
+    message.forumPostKind = "topic";
+    message.forumTitle = queued.threadCreate.title;
+    message.forumThreadTitle = queued.threadCreate.title;
+  } else if (queued.threadReply) {
+    message.forumPostKind = "reply";
+  }
+  if (queued.files && queued.files.length > 0) {
+    message.sharedFiles = queued.files.map((file) => ({
+      url: file.url,
+      name: file.name,
+      mediaType: file.mediaType,
+      size: file.size,
+      ...(file.width ? { width: file.width } : {}),
+      ...(file.height ? { height: file.height } : {}),
+      disposition: "inline" as const,
+    }));
+  }
+  return message;
+}
+
 export function formatStamp(value: string) {
   return new Intl.DateTimeFormat("en", {
     hour: "2-digit",
@@ -169,6 +220,20 @@ export function useMessaging(
     return roomBareJidFor(session.value, activeWaddleId.value, activeChannelId.value);
   });
   const channelIsForum = computed(() => isForumChannel(currentChannel.value));
+
+  function queuedMessagesForRoom(roomJid: string): TimelineMessage[] {
+    const currentSession = session.value;
+    if (!currentSession) return [];
+    const queued = listQueuedRoomMessages(barePeerJid(currentSession.jid), roomJid);
+    for (const message of queued) pendingEchoClientIds.add(message.id);
+    return queued.map((message) => queuedRoomMessageToTimeline(currentSession, roomJid, message));
+  }
+
+  function appendQueuedMessages(timeline: TimelineMessage[], roomJid: string): TimelineMessage[] {
+    const existingIds = new Set(timeline.map((message) => message.id));
+    const queued = queuedMessagesForRoom(roomJid).filter((message) => !existingIds.has(message.id));
+    return queued.length > 0 ? applyForumContext([...timeline, ...queued]) : timeline;
+  }
 
   watch(xmppClient, (client) => {
     if (client) {
@@ -323,7 +388,7 @@ export function useMessaging(
 
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      client.sendChatState(waddleId, channelId, "composing");
+      void client.sendChatState(waddleId, channelId, "composing").catch(() => undefined);
     }
 
     // Reset the pause timer: if user stops typing for 3s, send "paused"
@@ -336,7 +401,7 @@ export function useMessaging(
       )
         return;
       lastChatState = "paused";
-      client.sendChatState(waddleId, channelId, "paused");
+      void client.sendChatState(waddleId, channelId, "paused").catch(() => undefined);
     }, 3000);
   }
 
@@ -414,7 +479,8 @@ export function useMessaging(
 
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value) return;
-    xmppClient.value.sendDisplayed(activeWaddleId.value, activeChannelId.value, messageId);
+    void xmppClient.value.sendDisplayed(activeWaddleId.value, activeChannelId.value, messageId)
+      .catch(() => undefined);
   }
 
   function applyReaction(messageId: string, nick: string, emojis: string[]) {
@@ -476,7 +542,7 @@ export function useMessaging(
     );
     if (existing) {
       const wasPending = existing.id !== msg.id;
-      if (wasPending || existing.deliveryStatus === "sending") {
+      if (wasPending || (existing.deliveryStatus && existing.deliveryStatus !== "delivered")) {
         // Reconcile the ID to the server-assigned one and mark delivered.
         // A self-echo is authoritative evidence that the server accepted
         // the stanza, so it supersedes any prior "sending" or "failed"
@@ -511,8 +577,16 @@ export function useMessaging(
    */
   function onMessageAck(messageId: string) {
     messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus === "sending"
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
         ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  function onMessageQueueStatus(messageId: string, status: "queued" | "sending") {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
+        ? { ...m, deliveryStatus: status as DeliveryStatus }
         : m,
     );
   }
@@ -548,7 +622,11 @@ export function useMessaging(
     if (messages.value.length === 0) return;
     const preserved = messages.value.filter(
       (m) =>
-        m.isSelf && (m.deliveryStatus === "sending" || m.deliveryStatus === "failed"),
+        m.isSelf && (
+          m.deliveryStatus === "queued"
+          || m.deliveryStatus === "sending"
+          || m.deliveryStatus === "failed"
+        ),
     );
     void (async () => {
       await loadMessages(waddleId, channelId);
@@ -575,12 +653,15 @@ export function useMessaging(
     if (!session.value) return;
 
     const requestId = ++messageRequestId;
+    const roomJid = roomBareJidFor(session.value, waddleId, channelId);
     isLoadingMessages.value = true;
     // Reset the divider anchor up-front: a previous conversation's id could
     // coincidentally match a message in the new timeline, and an aborted
     // request (requestId mismatch) would otherwise leave stale state.
     firstUnseenId.value = null;
     clearActionError();
+    pendingEchoClientIds.clear();
+    messages.value = appendQueuedMessages([], roomJid);
 
     try {
       // XEP-0313: Load message history via MAM (XMPP-native)
@@ -665,7 +746,8 @@ export function useMessaging(
         }
       }
 
-      messages.value = applyForumContext(timeline);
+      const timelineWithQueue = appendQueuedMessages(applyForumContext(timeline), roomJid);
+      messages.value = timelineWithQueue;
       if (requestId === messageRequestId) {
         isLoadingMessages.value = false;
       }
@@ -678,11 +760,11 @@ export function useMessaging(
       // scroll to bottom and track the newest feed message as last-seen.
       const lastSeenId = getLastSeen(roomKey(waddleId, channelId));
       const lastSeenIdx = lastSeenId
-        ? timeline.findIndex((m) => m.id === lastSeenId)
+        ? timelineWithQueue.findIndex((m) => m.id === lastSeenId)
         : -1;
       const firstUnseen =
-        lastSeenIdx !== -1 && lastSeenIdx < timeline.length - 1
-          ? timeline.slice(lastSeenIdx + 1).find(isFeedVisible)
+        lastSeenIdx !== -1 && lastSeenIdx < timelineWithQueue.length - 1
+          ? timelineWithQueue.slice(lastSeenIdx + 1).find(isFeedVisible)
           : undefined;
       if (firstUnseen) {
         firstUnseenId.value = firstUnseen.id;
@@ -690,12 +772,14 @@ export function useMessaging(
       } else {
         firstUnseenId.value = null;
         await scrollToPinnedEdgeAndPin();
-        const newest = [...timeline].reverse().find(isFeedVisible);
+        const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
         if (newest) persistLastSeen(waddleId, channelId, newest.id);
       }
     } catch (e) {
       if (requestId === messageRequestId) {
-        actionError.value = normalizeError(e);
+        const queuedOnly = appendQueuedMessages([], roomJid);
+        messages.value = queuedOnly;
+        actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
         isLoadingMessages.value = false;
       }
     }
@@ -816,7 +900,7 @@ export function useMessaging(
       const threadReply = channelIsForum.value && replyTo && threadId
         ? { threadId }
         : undefined;
-      const msgId = await client.sendGroupMessage(waddleId, channelId, bodyText, {
+      const result = await client.sendGroupMessage(waddleId, channelId, bodyText, {
         markup,
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
@@ -825,6 +909,7 @@ export function useMessaging(
         ...(threadCreate ? { threadCreate } : {}),
         ...(threadReply ? { threadReply } : {}),
       });
+      const msgId = result?.id ?? null;
       const isStillCurrentChannel =
         xmppClient.value === client &&
         activeWaddleId.value === waddleId &&
@@ -839,7 +924,7 @@ export function useMessaging(
           body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
           createdAt: new Date().toISOString(),
           isSelf: true,
-          deliveryStatus: "sending",
+          deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
           markup,
         };
         if (replyTo && parent) {
@@ -890,7 +975,9 @@ export function useMessaging(
         }
         lastChatState = "active";
       }
-      await client.sendChatState(waddleId, channelId, "active");
+      if (result?.state === "sending") {
+        void client.sendChatState(waddleId, channelId, "active").catch(() => undefined);
+      }
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
@@ -988,6 +1075,7 @@ export function useMessaging(
   function disconnect() {
     messageRequestId++;
     searchRequestId++;
+    pendingEchoClientIds.clear();
     xmppStatus.value = { state: "offline", detail: "Live room offline" };
     clearTypingState();
     isLoadingMessages.value = false;
@@ -997,6 +1085,7 @@ export function useMessaging(
 
   function clearMessages() {
     messageRequestId++;
+    pendingEchoClientIds.clear();
     messages.value = [];
     isLoadingMessages.value = false;
     clearTypingState();
@@ -1093,6 +1182,7 @@ export function useMessaging(
     clearChannelActivity,
     scrollToPinnedEdge,
     lastMentionActivity,
+    onMessageQueueStatus,
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,

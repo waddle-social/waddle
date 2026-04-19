@@ -151,7 +151,7 @@ describe("scroll direction preference", () => {
   test("pins room timelines to the top for optimistic sends in social mode", async () => {
     setScrollDirection("social");
     const sendChatState = mock(async () => undefined);
-    const sendGroupMessage = mock(async () => "client-1");
+    const sendGroupMessage = mock(async () => ({ id: "client-1", state: "sending" as const }));
     const actionError = ref("");
     const messaging = useMessaging(
       ref(session()),

@@ -20,6 +20,14 @@ import * as dmMessaging from "./dm-messaging";
 import * as dmHistory from "./dm-history";
 import * as discovery from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
+import {
+  countQueuedMessages,
+  enqueueQueuedMessage,
+  listQueuedMessages,
+  listQueuedRoomMessages,
+  removeQueuedMessage,
+  type PersistedQueuedDmMessage,
+} from "../outbound-queue-store";
 
 type StanzaSaslMechanism = { name: string };
 type StanzaSaslFactory = {
@@ -106,6 +114,15 @@ function isOptionalXmppFeatureError(error: unknown): boolean {
   return !!condition && OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS.has(condition);
 }
 
+function isLocalAvailabilityError(error: unknown): boolean {
+  return error instanceof Error
+    && (
+      error.message === "XMPP session is not ready"
+      || error.message.startsWith("Room is not ready:")
+      || error.message === "Reconnection timed out"
+    );
+}
+
 function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   if ((pres.type ?? "available") === "unavailable") return "offline";
   switch (pres.show ?? "available") {
@@ -120,27 +137,14 @@ function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   }
 }
 
-/** Outbound messages buffered while the transport is unavailable. */
-type QueuedRoomMessage = {
-  kind: "room";
-  waddleId: string;
-  channelId: string;
-  roomJid: string;
-  body: string;
-  opts: messaging.SendGroupMessageOptions;
-  msgId: string;
-};
-type QueuedDmMessage = {
-  kind: "dm";
-  peerJid: string;
-  body: string;
-  opts: dmMessaging.SendDirectMessageOptions;
-  msgId: string;
-};
-type QueuedOutboundMessage = QueuedRoomMessage | QueuedDmMessage;
+export interface OutboundSendResult {
+  id: string | null;
+  state: "queued" | "sending";
+}
 
 export class BrowserXmppClient {
   private readonly session: WaddleSession;
+  private get queueScope() { return barePeerJid(this.session.jid); }
   private readonly resource = createXmppResource();
   private messageHandler: ((message: LiveRoomMessage) => void) | null = null;
   private directMessageHandler: ((message: LiveDmMessage) => void) | null = null;
@@ -162,6 +166,8 @@ export class BrowserXmppClient {
   private lastSeenHandler: ((nick: string, timestamp: number) => void) | null = null;
   private messageAckHandler: ((messageId: string) => void) | null = null;
   private messageDeliveryFailureHandler: ((messageId: string) => void) | null = null;
+  private queuedMessageStatusHandler:
+    ((messageId: string, status: "queued" | "sending") => void) | null = null;
   private sessionLifecycleHandler: ((event: SessionLifecycleEvent) => void) | null = null;
   private xmpp: Agent | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -176,13 +182,12 @@ export class BrowserXmppClient {
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
   private uploadServiceJid: string | null = null;
-  /** Outbound messages queued while the transport is unavailable. */
-  private outboundQueue: QueuedOutboundMessage[] = [];
-  private flushingQueue = false;
   private visibilityListener: (() => void) | null = null;
   private onlineListener: (() => void) | null = null;
   private reconnectNudgeAt = 0;
   private lastStanzaKickAt = 0;
+  private directQueueFlushPromise: Promise<void> | null = null;
+  private readonly roomQueueFlushes = new Map<string, Promise<void>>();
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -206,6 +211,9 @@ export class BrowserXmppClient {
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.lastSeenHandler = h; }
   setMessageAckHandler(h: (messageId: string) => void) { this.messageAckHandler = h; }
   setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.messageDeliveryFailureHandler = h; }
+  setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) {
+    this.queuedMessageStatusHandler = h;
+  }
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHandler = h; }
   setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
 
@@ -393,6 +401,7 @@ export class BrowserXmppClient {
       xmpp.joiningRooms?.delete(nextRoom);
       if (this.xmpp !== xmpp || this.currentRoom !== nextRoom) return;
       this.startSelfPing();
+      void this.flushQueuedRoomMessages(nextRoom);
     } catch (error) {
       if (this.currentRoom === nextRoom) {
         this.currentRoom = null;
@@ -445,50 +454,231 @@ export class BrowserXmppClient {
 
   // -- Send delegators --
 
+  private async requireConnectedXmpp(): Promise<Agent> {
+    await this.connect();
+    if (!this.xmpp || !this.connected || this.destroying) {
+      throw new Error("XMPP session is not ready");
+    }
+    return this.xmpp;
+  }
+
+  private async requireJoinedRoom(w: string, c: string): Promise<{ xmpp: Agent; roomJid: string }> {
+    const roomJid = roomBareJidFor(this.session, w, c);
+    await this.switchRoom(w, c);
+    if (!this.xmpp || !this.connected || this.destroying || this.currentRoom !== roomJid) {
+      throw new Error(`Room is not ready: ${roomJid}`);
+    }
+    return { xmpp: this.xmpp, roomJid };
+  }
+
+  private browserOffline(): boolean {
+    return typeof navigator !== "undefined" && navigator.onLine === false;
+  }
+
+  private canUseConnectedSession(): boolean {
+    return !!this.xmpp && this.connected && !this.destroying && !this.browserOffline();
+  }
+
+  private roomIsReady(roomJid: string): boolean {
+    return this.canUseConnectedSession() && this.currentRoom === roomJid;
+  }
+
+  private shouldQueueImmediately(): boolean {
+    return this.browserOffline() || this.destroying || (!!this.xmpp && !this.connected);
+  }
+
+  private noteQueuedMessage() {
+    const queueCount = countQueuedMessages(this.queueScope);
+    const detail = queueCount === 1
+      ? "Message queued until the connection returns"
+      : `${queueCount} messages queued until the connection returns`;
+    this.statusHandler?.({
+      state: this.browserOffline() ? "offline" : "reconnecting",
+      detail,
+    });
+  }
+
+  private queueRoomMessage(
+    roomJid: string,
+    body: string,
+    opts: messaging.SendGroupMessageOptions,
+  ): OutboundSendResult {
+    const queuedId = opts.id ?? globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+    enqueueQueuedMessage(this.queueScope, {
+      kind: "room",
+      id: queuedId,
+      createdAt: new Date().toISOString(),
+      roomJid,
+      body,
+      ...(opts.markup && opts.markup.length > 0 ? { markup: opts.markup } : {}),
+      ...(opts.files && opts.files.length > 0 ? { files: opts.files } : {}),
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+      ...(opts.threadId ? { threadId: opts.threadId } : {}),
+      ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
+      ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}),
+      ...(opts.threadReply ? { threadReply: opts.threadReply } : {}),
+    });
+    this.queuedMessageStatusHandler?.(queuedId, "queued");
+    this.noteQueuedMessage();
+    return { id: queuedId, state: "queued" };
+  }
+
+  private queueDirectMessage(
+    peerJid: string,
+    body: string,
+    opts: dmMessaging.SendDirectMessageOptions,
+  ): OutboundSendResult {
+    const queuedId = opts.id ?? globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+    enqueueQueuedMessage(this.queueScope, {
+      kind: "dm",
+      id: queuedId,
+      createdAt: new Date().toISOString(),
+      peerJid: barePeerJid(peerJid),
+      body,
+      ...(opts.files && opts.files.length > 0 ? { files: opts.files } : {}),
+      ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+      ...(opts.threadId ? { threadId: opts.threadId } : {}),
+      ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
+    });
+    this.queuedMessageStatusHandler?.(queuedId, "queued");
+    this.noteQueuedMessage();
+    return { id: queuedId, state: "queued" };
+  }
+
+  private nudgeReconnect() {
+    void this.connect().catch(() => undefined);
+  }
+
+  private async flushQueuedDirectMessages() {
+    if (this.directQueueFlushPromise) return this.directQueueFlushPromise;
+    if (!this.canUseConnectedSession() || !this.xmpp) return;
+
+    const flushPromise = (async () => {
+      const entries = listQueuedMessages(this.queueScope).filter(
+        (entry): entry is PersistedQueuedDmMessage => entry.kind === "dm",
+      );
+      for (const entry of entries) {
+        if (!this.canUseConnectedSession() || !this.xmpp) break;
+        this.queuedMessageStatusHandler?.(entry.id, "sending");
+        const messageId = dmMessaging.sendDirectMessage(
+          this.xmpp,
+          barePeerJid(entry.peerJid),
+          entry.body,
+          {
+            ...(entry.files && entry.files.length > 0 ? { files: entry.files } : {}),
+            ...(entry.replyTo ? { replyTo: entry.replyTo } : {}),
+            ...(entry.threadId ? { threadId: entry.threadId } : {}),
+            ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}),
+            id: entry.id,
+          },
+        );
+        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+      }
+    })();
+    const trackedPromise = flushPromise.finally(() => {
+      if (this.directQueueFlushPromise === trackedPromise) {
+        this.directQueueFlushPromise = null;
+      }
+    });
+    this.directQueueFlushPromise = trackedPromise;
+    return trackedPromise;
+  }
+
+  private async flushQueuedRoomMessages(roomJid: string) {
+    const inFlight = this.roomQueueFlushes.get(roomJid);
+    if (inFlight) return inFlight;
+    if (!this.roomIsReady(roomJid) || !this.xmpp) return;
+
+    const flushPromise = (async () => {
+      const entries = listQueuedRoomMessages(this.queueScope, roomJid);
+      for (const entry of entries) {
+        if (!this.roomIsReady(roomJid) || !this.xmpp) break;
+        this.queuedMessageStatusHandler?.(entry.id, "sending");
+        const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
+          ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
+          ...(entry.files && entry.files.length > 0 ? { files: entry.files } : {}),
+          ...(entry.replyTo ? { replyTo: entry.replyTo } : {}),
+          ...(entry.threadId ? { threadId: entry.threadId } : {}),
+          ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}),
+          ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}),
+          ...(entry.threadReply ? { threadReply: entry.threadReply } : {}),
+          id: entry.id,
+        });
+        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+      }
+    })();
+
+    const trackedPromise = flushPromise.finally(() => {
+      if (this.roomQueueFlushes.get(roomJid) === trackedPromise) {
+        this.roomQueueFlushes.delete(roomJid);
+      }
+    });
+    this.roomQueueFlushes.set(roomJid, trackedPromise);
+    return trackedPromise;
+  }
+
   async sendChatState(w: string, c: string, state: ChatStateType) {
-    if (this.xmpp) messaging.sendChatState(this.xmpp, roomBareJidFor(this.session, w, c), state);
+    const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
+    messaging.sendChatState(xmpp, roomJid, state);
   }
   async sendDisplayed(w: string, c: string, messageId: string) {
-    if (this.xmpp) messaging.sendDisplayed(this.xmpp, roomBareJidFor(this.session, w, c), messageId);
+    const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
+    messaging.sendDisplayed(xmpp, roomJid, messageId);
   }
   async sendReaction(w: string, c: string, messageId: string, emojis: string[]) {
-    if (this.xmpp) messaging.sendReaction(this.xmpp, roomBareJidFor(this.session, w, c), messageId, emojis);
+    const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
+    messaging.sendReaction(xmpp, roomJid, messageId, emojis);
   }
   async sendRetraction(w: string, c: string, retractsId: string) {
-    if (this.xmpp) messaging.sendRetraction(this.xmpp, roomBareJidFor(this.session, w, c), retractsId);
+    const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
+    messaging.sendRetraction(xmpp, roomJid, retractsId);
   }
   async sendModeration(w: string, c: string, targetId: string, reason?: string) {
-    if (this.xmpp) messaging.sendModeration(this.xmpp, roomBareJidFor(this.session, w, c), targetId, reason);
+    const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
+    messaging.sendModeration(xmpp, roomJid, targetId, reason);
   }
   async sendCorrection(w: string, c: string, body: string, replacesId: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
-    return this.xmpp ? messaging.sendCorrection(this.xmpp, roomBareJidFor(this.session, w, c), body, replacesId, markup) : null;
+    const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
+    return messaging.sendCorrection(xmpp, roomJid, body, replacesId, markup);
   }
   async sendGroupMessage(
     w: string,
     c: string,
     body: string,
     opts: messaging.SendGroupMessageOptions = {},
-  ): Promise<string | null> {
+  ): Promise<OutboundSendResult | null> {
     const { files } = opts;
     const text = body.trim();
     const hasFiles = !!files && files.length > 0;
     if (!text && !hasFiles) return null;
 
-    const msgId = crypto.randomUUID();
     const roomJid = roomBareJidFor(this.session, w, c);
-    // Queue immediately so the composable gets the ID back without waiting for
-    // connect/room-join.  The queue flushes once the transport is ready.
-    this.outboundQueue.push({
-      kind: "room",
-      waddleId: w,
-      channelId: c,
-      roomJid,
-      body,
-      opts: { ...opts, id: msgId },
-      msgId,
-    });
-    if (this.connected) void this.flushOutboundQueue();
-    return msgId;
+    if (this.shouldQueueImmediately()) {
+      const queued = this.queueRoomMessage(roomJid, body, opts);
+      void this.connect()
+        .then(() => this.switchRoom(w, c))
+        .then(() => this.flushQueuedRoomMessages(roomJid))
+        .catch(() => undefined);
+      return queued;
+    }
+
+    try {
+      const { xmpp } = await this.requireJoinedRoom(w, c);
+      return {
+        id: messaging.sendGroupMessage(xmpp, roomJid, body, opts),
+        state: "sending",
+      };
+    } catch (error) {
+      if (isLocalAvailabilityError(error)) {
+        const queued = this.queueRoomMessage(roomJid, body, opts);
+        void this.connect()
+          .then(() => this.switchRoom(w, c))
+          .then(() => this.flushQueuedRoomMessages(roomJid))
+          .catch(() => undefined);
+        return queued;
+      }
+      throw error;
+    }
   }
 
   // -- File upload (XEP-0363 + XEP-0447) --
@@ -537,46 +727,58 @@ export class BrowserXmppClient {
     peerJid: string,
     body: string,
     opts: dmMessaging.SendDirectMessageOptions = {},
-  ): Promise<string | null> {
+  ): Promise<OutboundSendResult | null> {
     const { files } = opts;
     const text = body.trim();
     const hasFiles = !!files && files.length > 0;
     if (!text && !hasFiles) return null;
 
-    const msgId = crypto.randomUUID();
-    this.outboundQueue.push({
-      kind: "dm",
-      peerJid: barePeerJid(peerJid),
-      body,
-      opts: { ...opts, id: msgId },
-      msgId,
-    });
-    if (this.connected) void this.flushOutboundQueue();
-    return msgId;
+    const normalizedPeerJid = barePeerJid(peerJid);
+    if (this.shouldQueueImmediately()) {
+      const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
+      this.nudgeReconnect();
+      return queued;
+    }
+
+    try {
+      const xmpp = await this.requireConnectedXmpp();
+      return {
+        id: dmMessaging.sendDirectMessage(xmpp, normalizedPeerJid, body, opts),
+        state: "sending",
+      };
+    } catch (error) {
+      if (isLocalAvailabilityError(error)) {
+        const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
+        this.nudgeReconnect();
+        return queued;
+      }
+      throw error;
+    }
   }
 
   async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> {
-    if (this.xmpp) dmMessaging.sendDmChatState(this.xmpp, barePeerJid(peerJid), state);
+    const xmpp = await this.requireConnectedXmpp();
+    dmMessaging.sendDmChatState(xmpp, barePeerJid(peerJid), state);
   }
 
   async sendDmDisplayed(peerJid: string, messageId: string): Promise<void> {
-    await this.connect();
-    if (this.xmpp) dmMessaging.sendDmDisplayed(this.xmpp, barePeerJid(peerJid), messageId);
+    const xmpp = await this.requireConnectedXmpp();
+    dmMessaging.sendDmDisplayed(xmpp, barePeerJid(peerJid), messageId);
   }
 
   async sendDmRetraction(peerJid: string, messageId: string): Promise<void> {
-    await this.connect();
-    if (this.xmpp) dmMessaging.sendDmRetraction(this.xmpp, barePeerJid(peerJid), messageId);
+    const xmpp = await this.requireConnectedXmpp();
+    dmMessaging.sendDmRetraction(xmpp, barePeerJid(peerJid), messageId);
   }
 
   async sendDmCorrection(peerJid: string, body: string, replacesId: string): Promise<string | null> {
-    await this.connect();
-    return this.xmpp ? dmMessaging.sendDmCorrection(this.xmpp, barePeerJid(peerJid), body, replacesId) : null;
+    const xmpp = await this.requireConnectedXmpp();
+    return dmMessaging.sendDmCorrection(xmpp, barePeerJid(peerJid), body, replacesId);
   }
 
   async sendDmReaction(peerJid: string, messageId: string, emojis: string[]): Promise<void> {
-    await this.connect();
-    if (this.xmpp) dmMessaging.sendDmReaction(this.xmpp, barePeerJid(peerJid), messageId, emojis);
+    const xmpp = await this.requireConnectedXmpp();
+    dmMessaging.sendDmReaction(xmpp, barePeerJid(peerJid), messageId, emojis);
   }
 
   async enablePushNotifications(opts: {
@@ -700,46 +902,6 @@ export class BrowserXmppClient {
 
   // -- Private --
 
-  /**
-   * Drain the outbound queue in insertion order.  Called after
-   * session:started (fresh bind, room rejoin already done) and after
-   * stream:management:resumed.  Room messages wait for the target room to be
-   * joined first; DM messages only need an active session.
-   */
-  private async flushOutboundQueue() {
-    if (this.flushingQueue) return;
-    this.flushingQueue = true;
-    try {
-      while (this.outboundQueue.length > 0) {
-        if (!this.xmpp || !this.connected || this.destroying) break;
-        const item = this.outboundQueue[0]!;
-        try {
-          if (item.kind === "room") {
-            if (this.currentRoom !== item.roomJid) {
-              await this.switchRoom(item.waddleId, item.channelId);
-            }
-            if (this.xmpp && !this.destroying) {
-              messaging.sendGroupMessage(this.xmpp, item.roomJid, item.body, item.opts);
-            } else {
-              this.messageDeliveryFailureHandler?.(item.msgId);
-            }
-          } else {
-            if (this.xmpp && !this.destroying) {
-              dmMessaging.sendDirectMessage(this.xmpp, item.peerJid, item.body, item.opts);
-            } else {
-              this.messageDeliveryFailureHandler?.(item.msgId);
-            }
-          }
-        } catch {
-          if (!this.destroying) this.messageDeliveryFailureHandler?.(item.msgId);
-        }
-        this.outboundQueue.shift();
-      }
-    } finally {
-      this.flushingQueue = false;
-    }
-  }
-
   private startSelfPing() {
     this.stopSelfPing();
     this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60_000);
@@ -842,11 +1004,15 @@ export class BrowserXmppClient {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.startKeepAlive();
-      this.statusHandler?.({ state: "online", detail: "Connection ready" });
+      this.statusHandler?.({
+        state: "online",
+        detail: countQueuedMessages(this.queueScope) > 0 ? "Reconnected — replaying queued messages" : "Connection ready",
+      });
       // `session:started` fires on fresh bind only; SM resume short-circuits
       // feature negotiation and does not emit this event. So any time we see
       // it here, it's a fresh session — consumers may close MAM gaps.
       this.sessionLifecycleHandler?.({ type: "fresh" });
+      void this.flushQueuedDirectMessages();
       try {
         await xmpp.enableCarbons();
       } catch (error) {
@@ -879,19 +1045,20 @@ export class BrowserXmppClient {
           console.warn("Failed to rejoin room after reconnect", error);
         }
       }
-      // Flush messages queued while the transport was unavailable.  Room
-      // messages run after the rejoin above so the MUC join is already done.
-      void this.flushOutboundQueue();
     });
     xmpp.on("stream:management:resumed", () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.startKeepAlive();
-      this.statusHandler?.({ state: "online", detail: "Connection resumed" });
+      this.statusHandler?.({
+        state: "online",
+        detail: countQueuedMessages(this.queueScope) > 0 ? "Connection resumed — replaying queued messages" : "Connection resumed",
+      });
       this.sessionLifecycleHandler?.({ type: "resumed" });
-      // XEP-0198 replays stanzas already submitted before the drop; flush any
-      // messages that were queued before xmpp.sendMessage() was ever called.
-      void this.flushOutboundQueue();
+      void this.flushQueuedDirectMessages();
+      if (this.currentRoom) {
+        void this.flushQueuedRoomMessages(this.currentRoom);
+      }
     });
 
     // XEP-0198: per-stanza ack from the server. stanza.js resolves individual
@@ -920,12 +1087,6 @@ export class BrowserXmppClient {
       this.stopKeepAlive();
 
       if (this.destroying) {
-        // Intentional disconnect — full cleanup.  Fail any messages that were
-        // queued but never submitted to the transport.
-        for (const item of this.outboundQueue) {
-          this.messageDeliveryFailureHandler?.(item.msgId);
-        }
-        this.outboundQueue = [];
         this.stopReconnectNudgeListeners();
         this.xmpp = null;
         this.currentRoom = null;
@@ -938,8 +1099,12 @@ export class BrowserXmppClient {
         this.statusHandler?.({ state: "offline", detail: err?.message ?? "Disconnected" });
       } else {
         // Unexpected drop — keep xmpp + currentRoom alive for auto-reconnect.
-        // The outbound queue is preserved and will flush when reconnected.
-        this.statusHandler?.({ state: "reconnecting", detail: err?.message ?? "Connection lost, reconnecting..." });
+        this.statusHandler?.({
+          state: "reconnecting",
+          detail: countQueuedMessages(this.queueScope) > 0
+            ? "Connection lost — queued messages will send when reconnected"
+            : (err?.message ?? "Connection lost, reconnecting..."),
+        });
       }
       console.error("XMPP disconnected", err);
     });

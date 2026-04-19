@@ -13,7 +13,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use chrono::Utc;
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use jid::{BareJid, FullJid, Jid};
 use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
@@ -183,20 +183,23 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                             }
                         }
 
-                        for response in responses {
-                            debug!(len = response.len(), "Sending XMPP WebSocket response");
-                            if let Err(e) = ws_sender.send(Message::Text(response)).await {
-                                error!(error = %e, "Failed to send WebSocket message");
-                                break;
-                            }
+                        if !send_ws_text_frames(
+                            &mut ws_sender,
+                            responses,
+                            "Failed to send WebSocket message",
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {
                         warn!("Received binary WebSocket message (not supported for XMPP)");
                     }
                     Some(Ok(Message::Ping(data))) => {
-                        if let Err(e) = ws_sender.send(Message::Pong(data)).await {
-                            error!(error = %e, "Failed to send pong");
+                        if !send_ws_message(&mut ws_sender, Message::Pong(data), "Failed to send pong")
+                            .await
+                        {
                             break;
                         }
                     }
@@ -225,9 +228,14 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                     Some(outbound_stanza) => {
                         debug!("Received outbound stanza from registry");
                         let xml = stanza_to_xml(&outbound_stanza.stanza);
-                        if let Err(e) = ws_sender.send(Message::Text(xml)).await {
-                            error!(error = %e, "Failed to send outbound stanza");
-                            // Don't break - the client might still be readable
+                        if !send_ws_message(
+                            &mut ws_sender,
+                            Message::Text(xml),
+                            "Failed to send outbound stanza",
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
                     None => {
@@ -249,6 +257,44 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     }
 
     info!("XMPP WebSocket connection closed");
+}
+
+async fn send_ws_text_frames<S, E, I>(
+    sender: &mut S,
+    frames: I,
+    failure_message: &'static str,
+) -> bool
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+    I: IntoIterator<Item = String>,
+{
+    for frame in frames {
+        debug!(len = frame.len(), "Sending XMPP WebSocket response");
+        if !send_ws_message(sender, Message::Text(frame), failure_message).await {
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn send_ws_message<S, E>(
+    sender: &mut S,
+    message: Message,
+    failure_message: &'static str,
+) -> bool
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    match sender.send(message).await {
+        Ok(()) => true,
+        Err(error) => {
+            error!(error = %error, "{failure_message}");
+            false
+        }
+    }
 }
 
 /// Clean up MUC room presence when a connection disconnects
@@ -2588,8 +2634,64 @@ mod tests {
     use crate::config::ServerConfig;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use crate::server::AppState;
+    use futures::Sink;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
     use tokio::sync::mpsc;
+
+    #[derive(Default)]
+    struct TestSink {
+        fail_after: Option<usize>,
+        sent: Vec<Message>,
+    }
+
+    impl TestSink {
+        fn succeeds() -> Self {
+            Self::default()
+        }
+
+        fn fails_after(sent_before_failure: usize) -> Self {
+            Self {
+                fail_after: Some(sent_before_failure),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl Sink<Message> for TestSink {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            if matches!(self.fail_after, Some(limit) if self.sent.len() >= limit) {
+                return Err("synthetic websocket sink failure");
+            }
+
+            self.sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     async fn create_test_websocket_state() -> Arc<WebSocketState> {
         let config = DatabaseConfig::default();
@@ -2640,6 +2742,36 @@ mod tests {
             .await
             .expect("session");
         session
+    }
+
+    #[tokio::test]
+    async fn send_ws_text_frames_stops_after_first_send_failure() {
+        let mut sink = TestSink::fails_after(1);
+
+        let sent = send_ws_text_frames(
+            &mut sink,
+            vec!["<open/>".to_string(), "<features/>".to_string()],
+            "synthetic failure",
+        )
+        .await;
+
+        assert!(!sent);
+        assert_eq!(sink.sent.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn send_ws_message_returns_true_on_success() {
+        let mut sink = TestSink::succeeds();
+
+        let sent = send_ws_message(
+            &mut sink,
+            Message::Text("<pong/>".into()),
+            "unexpected failure",
+        )
+        .await;
+
+        assert!(sent);
+        assert_eq!(sink.sent.len(), 1);
     }
 
     #[tokio::test]

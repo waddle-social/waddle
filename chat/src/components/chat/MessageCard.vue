@@ -112,6 +112,30 @@ const replyAuthorName = computed(() => {
   return nickPart ?? author;
 });
 
+const deliveryStatusLabel = computed(() => {
+  switch (props.message.deliveryStatus) {
+    case "queued":
+      return "queued";
+    case "sending":
+      return "sending…";
+    case "failed":
+      return "failed";
+    default:
+      return null;
+  }
+});
+
+const deliveryStatusClass = computed(() => {
+  switch (props.message.deliveryStatus) {
+    case "queued":
+      return "text-warning/80";
+    case "failed":
+      return "text-destructive/80";
+    default:
+      return "text-muted-foreground/50";
+  }
+});
+
 const replyChipExpanded = ref(false);
 
 function onReplyChipClick() {
@@ -340,7 +364,7 @@ watch(
           : message.threadId
             ? 'border-l-2 border-primary/20 hover:bg-muted/40'
             : 'hover:bg-muted/40',
-      message.deliveryStatus === 'sending' ? 'opacity-50' : '',
+      message.deliveryStatus === 'sending' || message.deliveryStatus === 'queued' ? 'opacity-50' : '',
       longPress.isPressing.value ? 'no-callout' : '',
     ]"
     @pointerdown="longPress.handlers.onPointerdown"
@@ -370,6 +394,13 @@ watch(
         {{ formatStamp(message.createdAt) }}
       </span>
       <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
+      <span
+        v-if="message.isSelf && deliveryStatusLabel"
+        class="text-[11px]"
+        :class="deliveryStatusClass"
+      >
+        {{ deliveryStatusLabel }}
+      </span>
       <span
         v-if="message.isSelf && message.readBy && message.readBy.length > 0"
         class="text-[11px] text-muted-foreground/50"

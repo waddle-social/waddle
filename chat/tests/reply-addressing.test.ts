@@ -16,7 +16,7 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
 
 describe("reply addressing", () => {
   test("room replies serialize the parent occupant JID while keeping the reply UI label", async () => {
-    const sendGroupMessage = mock(async () => "reply-1");
+    const sendGroupMessage = mock(async () => ({ id: "reply-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useMessaging(
@@ -70,7 +70,7 @@ describe("reply addressing", () => {
   });
 
   test("DM replies serialize the parent author JID while keeping the reply UI label", async () => {
-    const sendDirectMessage = mock(async () => "reply-1");
+    const sendDirectMessage = mock(async () => ({ id: "reply-1", state: "sending" as const }));
     const sendDmChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useDmMessaging(
@@ -120,7 +120,7 @@ describe("reply addressing", () => {
   });
 
   test("room sends drop stale reply context when the parent is not in the active timeline", async () => {
-    const sendGroupMessage = mock(async () => "reply-1");
+    const sendGroupMessage = mock(async () => ({ id: "reply-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useMessaging(
@@ -163,7 +163,7 @@ describe("reply addressing", () => {
   });
 
   test("DM sends drop stale reply context when the parent is not in the active timeline", async () => {
-    const sendDirectMessage = mock(async () => "reply-1");
+    const sendDirectMessage = mock(async () => ({ id: "reply-1", state: "sending" as const }));
     const sendDmChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useDmMessaging(

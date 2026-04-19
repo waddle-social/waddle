@@ -12,7 +12,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use crate::connection::Stanza;
 use crate::prometheus;
@@ -92,8 +92,6 @@ pub enum SendResult {
     Sent,
     /// The recipient is not currently connected
     NotConnected,
-    /// The channel to the recipient is full (backpressure)
-    ChannelFull,
     /// The channel to the recipient is closed
     ChannelClosed,
 }
@@ -217,7 +215,9 @@ impl ConnectionRegistry {
 
     /// Send a stanza to a connected user.
     ///
-    /// Returns the result of the send operation.
+    /// This waits for outbound channel capacity instead of dropping stanzas when
+    /// a connection is temporarily backpressured. Closed channels are treated as
+    /// stale connections and removed from the registry.
     #[instrument(skip(self, stanza), fields(to = %jid))]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         let sender = match self.connections.get(jid) {
@@ -230,21 +230,14 @@ impl ConnectionRegistry {
 
         let outbound = OutboundStanza::new(stanza);
 
-        match sender.try_send(outbound) {
+        match sender.send(outbound).await {
             Ok(()) => {
                 debug!("Stanza queued for delivery");
                 SendResult::Sent
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!("Outbound channel full, applying backpressure");
-                SendResult::ChannelFull
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(_) => {
                 debug!("Outbound channel closed, connection may have dropped");
-                // Remove the stale entry
-                if self.connections.remove(jid).is_some() {
-                    prometheus::decrement_connected_users();
-                }
+                self.unregister(jid);
                 SendResult::ChannelClosed
             }
         }
@@ -428,8 +421,7 @@ impl ConnectionRegistry {
             .collect();
 
         for jid in stale {
-            if self.connections.remove(&jid).is_some() {
-                prometheus::decrement_connected_users();
+            if self.unregister(&jid).is_some() {
                 debug!(jid = %jid, "Removed stale connection");
                 removed += 1;
             }
@@ -461,6 +453,7 @@ impl fmt::Debug for ConnectionRegistry {
 mod tests {
     use super::*;
     use jid::Jid;
+    use std::time::Duration;
     use xmpp_parsers::message::{Message, MessageType};
 
     fn test_jid(user: &str) -> FullJid {
@@ -584,21 +577,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_to_full_channel() {
+    async fn test_send_to_waits_for_capacity_instead_of_dropping() {
         let registry = ConnectionRegistry::new();
         let jid = test_jid("user1");
-        let (tx, _rx) = mpsc::channel(1); // Very small buffer
+        let (tx, mut rx) = mpsc::channel(1);
 
         registry.register(jid.clone(), tx);
 
-        // Fill the channel
+        // Fill the channel so the next send must wait for capacity.
         let msg1 = make_test_message("user1@example.com");
-        let _ = registry.send_to(&jid, Stanza::Message(msg1)).await;
+        assert!(matches!(
+            registry.send_to(&jid, Stanza::Message(msg1)).await,
+            SendResult::Sent
+        ));
 
-        // This should hit backpressure
         let msg2 = make_test_message("user1@example.com");
-        let result = registry.send_to(&jid, Stanza::Message(msg2)).await;
-        assert!(matches!(result, SendResult::ChannelFull));
+        let send = registry.send_to(&jid, Stanza::Message(msg2));
+        tokio::pin!(send);
+
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut send)
+            .await
+            .is_err());
+
+        let first = rx.recv().await;
+        assert!(first.is_some(), "first stanza should remain queued");
+
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut send)
+            .await
+            .expect("second send should complete once capacity is available");
+        assert!(matches!(result, SendResult::Sent));
+
+        let second = rx.recv().await;
+        assert!(
+            second.is_some(),
+            "second stanza should be delivered after backpressure"
+        );
     }
 
     #[test]

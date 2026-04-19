@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Hash, MessageCircle, MessagesSquare, Settings, Search, X, Upload } from "lucide-vue-next";
+import { AlertCircle, CheckCircle2, Hash, MessageCircle, MessagesSquare, RefreshCw, Settings, Search, Upload, WifiOff, X } from "lucide-vue-next";
 import { isForumChannel as detectForumChannel } from "@/lib/channel-types";
+import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import {
@@ -209,6 +210,11 @@ const searchInput = ref("");
 const avatarUrlByAuthor = computed(() => props.avatarUrlByAuthor ?? {});
 const isForumChannel = computed(() => detectForumChannel(props.channel));
 const canShowComposer = computed(() => !!(props.channel || props.dmPeer));
+const queuedMessageCount = computed(() =>
+  props.messages.filter((message) =>
+    message.isSelf && (message.deliveryStatus === "sending" || message.deliveryStatus === "failed")
+  ).length,
+);
 const popoverAuthor = ref<{ username: string; jid: string } | null>(null);
 const conversationScope = computed(() => [
   props.sidebarMode ?? "channels",
@@ -216,6 +222,90 @@ const conversationScope = computed(() => [
   props.channel?.id ?? "",
   props.dmPeer?.peerJid ?? "",
 ].join(":"));
+const hasSeenOnline = ref(props.xmppStatus.state === "online");
+const showReconnectedNotice = ref(false);
+let reconnectedNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function clearReconnectedNotice() {
+  if (reconnectedNoticeTimeout) {
+    clearTimeout(reconnectedNoticeTimeout);
+    reconnectedNoticeTimeout = null;
+  }
+  showReconnectedNotice.value = false;
+}
+
+watch(() => props.xmppStatus.state, (state, previousState) => {
+  if (state === "online") {
+    if (previousState && previousState !== "online" && hasSeenOnline.value) {
+      clearReconnectedNotice();
+      showReconnectedNotice.value = true;
+      reconnectedNoticeTimeout = setTimeout(() => {
+        showReconnectedNotice.value = false;
+        reconnectedNoticeTimeout = null;
+      }, 4200);
+    }
+    hasSeenOnline.value = true;
+    return;
+  }
+
+  clearReconnectedNotice();
+});
+
+const connectionNotice = computed(() =>
+  getConnectionNoticeCopy({
+    status: props.xmppStatus,
+    queuedMessageCount: queuedMessageCount.value,
+    showReconnected: showReconnectedNotice.value,
+  }),
+);
+const connectionStatusIcon = computed(() => {
+  switch (connectionNotice.value?.tone) {
+    case "offline":
+      return WifiOff;
+    case "reconnecting":
+      return RefreshCw;
+    case "error":
+      return AlertCircle;
+    case "reconnected":
+      return CheckCircle2;
+    default:
+      return WifiOff;
+  }
+});
+const connectionStatusClasses = computed(() => {
+  switch (connectionNotice.value?.tone) {
+    case "offline":
+      return {
+        banner: "bg-muted/35 text-foreground",
+        iconWrap: "border-border bg-background/70 text-muted-foreground",
+        chip: "border-border bg-background/75 text-muted-foreground",
+        body: "text-muted-foreground",
+      };
+    case "reconnecting":
+      return {
+        banner: "bg-warning/10 text-foreground",
+        iconWrap: "border-warning/20 bg-background/75 text-warning",
+        chip: "border-warning/20 bg-warning/10 text-warning",
+        body: "text-foreground/75",
+      };
+    case "error":
+      return {
+        banner: "bg-destructive/10 text-foreground",
+        iconWrap: "border-destructive/20 bg-background/75 text-destructive",
+        chip: "border-destructive/20 bg-destructive/10 text-destructive",
+        body: "text-foreground/80",
+      };
+    case "reconnected":
+      return {
+        banner: "bg-primary/8 text-foreground",
+        iconWrap: "border-primary/15 bg-background/75 text-primary",
+        chip: "border-primary/15 bg-primary/8 text-primary",
+        body: "text-foreground/75",
+      };
+    default:
+      return null;
+  }
+});
 
 defineExpose({ messagesContainer });
 
@@ -296,6 +386,7 @@ watch(
 watch(conversationScope, () => {
   cancelReply();
   clearReplyJumpNotice();
+  clearReconnectedNotice();
   forumTitle.value = "";
 });
 
@@ -311,6 +402,7 @@ watch(() => props.isSending, (sending, prevSending) => {
 });
 
 onBeforeUnmount(() => {
+  clearReconnectedNotice();
   if (replyJumpNoticeTimeout) {
     clearTimeout(replyJumpNoticeTimeout);
   }
@@ -343,7 +435,7 @@ function showDividerAfter(messageId: string): boolean {
     </div>
 
     <!-- Header — sleek, floating feel -->
-    <div class="h-14 border-b border-border px-6 flex items-center justify-between flex-shrink-0 glass-surface">
+    <div class="h-14 border-b border-border px-6 flex items-center justify-between gap-3 flex-shrink-0 glass-surface">
       <div class="flex items-center gap-3">
         <div class="flex items-center gap-2">
           <component :is="dmPeer ? MessageCircle : isForumChannel ? MessagesSquare : Hash" class="w-4 h-4 text-primary/70" />
@@ -358,39 +450,68 @@ function showDividerAfter(messageId: string): boolean {
           </span>
           <span v-if="dmPeer" class="text-[11px] text-muted-foreground">· {{ presenceText(dmPeer.presenceShow) }}</span>
         </div>
+      </div>
+      <div class="flex items-center gap-2">
         <div
-          v-if="xmppStatus.state !== 'online'"
-          class="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+          v-if="connectionNotice && connectionStatusClasses"
+          class="hidden md:inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium tracking-tight"
+          :class="connectionStatusClasses.chip"
         >
-          <span
-            class="w-1.5 h-1.5 rounded-full inline-block"
-            :class="{
-              'bg-destructive': xmppStatus.state === 'error',
-              'bg-warning animate-pulse': xmppStatus.state === 'reconnecting',
-              'bg-muted-foreground': xmppStatus.state === 'offline',
-            }"
+          <component
+            :is="connectionStatusIcon"
+            class="w-3.5 h-3.5"
+            :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
           />
-          {{ xmppStatus.state === 'reconnecting' ? 'reconnecting...' : xmppStatus.state }}
+          <span>{{ connectionNotice.shortLabel }}</span>
+        </div>
+        <div class="flex gap-1">
+          <button
+            v-if="channel || dmPeer"
+            class="h-8 w-8 flex items-center justify-center rounded-lg transition-all duration-200"
+            :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+            title="Search messages"
+            @click="showSearch = !showSearch"
+          >
+            <Search class="w-3.5 h-3.5" />
+          </button>
+          <button
+            v-if="canManageChannels && channel"
+            class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-200"
+            title="Channel settings"
+            @click="emit('editChannel')"
+          >
+            <Settings class="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
-      <div class="flex gap-1">
-        <button
-          v-if="channel || dmPeer"
-          class="h-8 w-8 flex items-center justify-center rounded-lg transition-all duration-200"
-          :class="showSearch ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-          title="Search messages"
-          @click="showSearch = !showSearch"
+    </div>
+    <div
+      v-if="connectionNotice && connectionStatusClasses"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      class="border-b border-border/80 animate-fade-in"
+      :class="connectionStatusClasses.banner"
+    >
+      <div class="px-6 py-3 flex items-start gap-3">
+        <div
+          class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border"
+          :class="connectionStatusClasses.iconWrap"
         >
-          <Search class="w-3.5 h-3.5" />
-        </button>
-        <button
-          v-if="canManageChannels && channel"
-          class="h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-200"
-          title="Channel settings"
-          @click="emit('editChannel')"
-        >
-          <Settings class="w-3.5 h-3.5" />
-        </button>
+          <component
+            :is="connectionStatusIcon"
+            class="h-4 w-4"
+            :class="{ 'motion-safe:animate-spin': connectionNotice.tone === 'reconnecting' }"
+          />
+        </div>
+        <div class="min-w-0 space-y-0.5">
+          <p class="text-[13px] font-medium tracking-tight">
+            {{ connectionNotice.title }}
+          </p>
+          <p class="max-w-[72ch] text-[12px] leading-5" :class="connectionStatusClasses.body">
+            {{ connectionNotice.body }}
+          </p>
+        </div>
       </div>
     </div>
 

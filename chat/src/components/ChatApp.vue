@@ -256,6 +256,10 @@ watch(xmppClient, (client) => {
     messaging.onMessageDeliveryFailure(id);
     dmMessaging.onMessageDeliveryFailure(id);
   });
+  client.setQueuedMessageStatusHandler((id, status) => {
+    messaging.onMessageQueueStatus(id, status);
+    dmMessaging.onMessageQueueStatus(id, status);
+  });
   client.setSessionLifecycleHandler((event) => {
     messaging.onSessionLifecycle(event);
     dmMessaging.onSessionLifecycle(event);

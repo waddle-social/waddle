@@ -247,7 +247,10 @@ describe("XEP-0198 delivery status (DM)", () => {
 
     // Seed two optimistic sends with identical body via the public sendMessage
     // path so the internal pendingEchoClientIds set is populated.
-    const sendDirectMessage = mock(async (_peer: string, _body: string) => "client-a");
+    const sendDirectMessage = mock(async (_peer: string, _body: string) => ({
+      id: "client-a",
+      state: "sending" as const,
+    }));
     const sendDmChatState = mock(async () => undefined);
     (client as unknown as { value: Record<string, unknown> }).value = {
       ...(client as unknown as { value: Record<string, unknown> }).value,
@@ -255,7 +258,10 @@ describe("XEP-0198 delivery status (DM)", () => {
       sendDmChatState,
     };
     await dm.sendMessage("ok");
-    sendDirectMessage.mockImplementationOnce(async () => "client-b");
+    sendDirectMessage.mockImplementationOnce(async () => ({
+      id: "client-b",
+      state: "sending" as const,
+    }));
     await dm.sendMessage("ok");
 
     expect(dm.messages.value.map((m) => m.id)).toEqual(["client-a", "client-b"]);
@@ -295,7 +301,10 @@ describe("XEP-0198 delivery status (DM)", () => {
     const client = makeDmClient();
     const { dm } = makeDmMessaging(client);
 
-    const sendDirectMessage = mock(async (_peer: string, _body: string) => "client-x");
+    const sendDirectMessage = mock(async (_peer: string, _body: string) => ({
+      id: "client-x",
+      state: "sending" as const,
+    }));
     const sendDmChatState = mock(async () => undefined);
     (client as unknown as { value: Record<string, unknown> }).value = {
       ...(client as unknown as { value: Record<string, unknown> }).value,

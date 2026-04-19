@@ -25,7 +25,7 @@ function forumChannel(partial: Partial<ChannelSummary> = {}): ChannelSummary {
 
 describe("forum composition", () => {
   test("top-level forum posts require a title and send thread-create metadata", async () => {
-    const sendGroupMessage = mock(async () => "topic-1");
+    const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useMessaging(
@@ -65,7 +65,7 @@ describe("forum composition", () => {
   });
 
   test("blocks top-level forum posts without a title", async () => {
-    const sendGroupMessage = mock(async () => "topic-1");
+    const sendGroupMessage = mock(async () => ({ id: "topic-1", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useMessaging(
@@ -89,7 +89,7 @@ describe("forum composition", () => {
   });
 
   test("forum replies send thread-reply metadata rooted at the topic", async () => {
-    const sendGroupMessage = mock(async () => "reply-2");
+    const sendGroupMessage = mock(async () => ({ id: "reply-2", state: "sending" as const }));
     const sendChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useMessaging(

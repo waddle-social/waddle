@@ -310,10 +310,6 @@ impl StanzaRouter {
                     debug!(to = %resource_jid, "Local user not connected");
                     offline_count += 1;
                 }
-                SendResult::ChannelFull => {
-                    warn!(to = %resource_jid, "Channel full, message dropped");
-                    offline_count += 1;
-                }
             }
         }
 

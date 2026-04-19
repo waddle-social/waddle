@@ -16,6 +16,10 @@ import type { OutboundFileAttachment } from "@/lib/xmpp";
 import { findMessageElementById } from "@/lib/message-targeting";
 import { getPinnedScrollTop, isTopPinnedScrollDirection } from "@/lib/scroll-direction";
 import { dmKey, getLastSeen, setLastSeen } from "@/lib/last-seen-store";
+import {
+  listQueuedDmMessages,
+  type PersistedQueuedDmMessage,
+} from "@/lib/outbound-queue-store";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 
 function fromLiveDmMessage(
@@ -48,6 +52,42 @@ function fromLiveDmMessage(
   return tm;
 }
 
+function queuedDmMessageToTimeline(
+  session: WaddleSession,
+  queued: PersistedQueuedDmMessage,
+): TimelineMessage {
+  const message: TimelineMessage = {
+    id: queued.id,
+    author: session.username,
+    authorJid: session.jid,
+    body: queued.body.trim() || (queued.files?.[0]?.url ?? ""),
+    createdAt: queued.createdAt,
+    isSelf: true,
+    deliveryStatus: "queued",
+  };
+  if (queued.replyTo) {
+    message.replyTo = {
+      id: queued.replyTo.id,
+      ...(queued.replyTo.author ? { author: queued.replyTo.author } : {}),
+      ...(queued.replyTo.body ? { preview: queued.replyTo.body } : {}),
+    };
+  }
+  if (queued.threadId) message.threadId = queued.threadId;
+  if (queued.parentThreadId) message.parentThreadId = queued.parentThreadId;
+  if (queued.files && queued.files.length > 0) {
+    message.sharedFiles = queued.files.map((file) => ({
+      url: file.url,
+      name: file.name,
+      mediaType: file.mediaType,
+      size: file.size,
+      ...(file.width ? { width: file.width } : {}),
+      ...(file.height ? { height: file.height } : {}),
+      disposition: "inline" as const,
+    }));
+  }
+  return message;
+}
+
 export function useDmMessaging(
   session: Ref<WaddleSession | null>,
   xmppClient: Ref<BrowserXmppClient | null>,
@@ -78,6 +118,20 @@ export function useDmMessaging(
   // Only these participate in the body-based fallback match so repeated
   // identical text doesn't mis-target already-reconciled messages.
   const pendingEchoClientIds = new Set<string>();
+
+  function queuedMessagesForPeer(peerJid: string): TimelineMessage[] {
+    const currentSession = session.value;
+    if (!currentSession) return [];
+    const queued = listQueuedDmMessages(barePeerJid(currentSession.jid), barePeerJid(peerJid));
+    for (const message of queued) pendingEchoClientIds.add(message.id);
+    return queued.map((message) => queuedDmMessageToTimeline(currentSession, message));
+  }
+
+  function appendQueuedMessages(timeline: TimelineMessage[], peerJid: string): TimelineMessage[] {
+    const existingIds = new Set(timeline.map((message) => message.id));
+    const queued = queuedMessagesForPeer(peerJid).filter((message) => !existingIds.has(message.id));
+    return queued.length > 0 ? [...timeline, ...queued] : timeline;
+  }
 
   async function scrollToPinnedEdge() {
     await nextTick();
@@ -226,7 +280,7 @@ export function useDmMessaging(
     );
     if (existing) {
       const wasPending = existing.id !== msg.id;
-      if (wasPending || existing.deliveryStatus === "sending") {
+      if (wasPending || (existing.deliveryStatus && existing.deliveryStatus !== "delivered")) {
         messages.value = messages.value.map((m) =>
           m.id !== existing.id
             ? m
@@ -248,8 +302,16 @@ export function useDmMessaging(
   /** XEP-0198: SM ack promotes the matching self-sent message to delivered. */
   function onMessageAck(messageId: string) {
     messages.value = messages.value.map((m) =>
-      m.id === messageId && m.isSelf && m.deliveryStatus === "sending"
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
         ? { ...m, deliveryStatus: "delivered" as DeliveryStatus }
+        : m,
+    );
+  }
+
+  function onMessageQueueStatus(messageId: string, status: "queued" | "sending") {
+    messages.value = messages.value.map((m) =>
+      m.id === messageId && m.isSelf && m.deliveryStatus !== "delivered"
+        ? { ...m, deliveryStatus: status as DeliveryStatus }
         : m,
     );
   }
@@ -274,7 +336,11 @@ export function useDmMessaging(
     if (messages.value.length === 0) return;
     const preserved = messages.value.filter(
       (m) =>
-        m.isSelf && (m.deliveryStatus === "sending" || m.deliveryStatus === "failed"),
+        m.isSelf && (
+          m.deliveryStatus === "queued"
+          || m.deliveryStatus === "sending"
+          || m.deliveryStatus === "failed"
+        ),
     );
     void (async () => {
       await loadMessages(peerJid);
@@ -291,6 +357,8 @@ export function useDmMessaging(
     isLoadingMessages.value = true;
     firstUnseenId.value = null;
     clearActionError();
+    pendingEchoClientIds.clear();
+    messages.value = appendQueuedMessages([], peerJid);
     try {
       const mamResults = xmppClient.value ? await xmppClient.value.queryPersonalMam(peerJid, 100) : [];
       if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return;
@@ -350,7 +418,8 @@ export function useDmMessaging(
         }
         target.reactions = reactions;
       }
-      messages.value = timeline;
+      const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
+      messages.value = timelineWithQueue;
       if (requestId === messageRequestId) isLoadingMessages.value = false;
 
       // See useMessaging.loadMessages — same last-seen anchor semantics,
@@ -359,11 +428,11 @@ export function useDmMessaging(
       const key = dmKey(barePeerJid(peerJid));
       const lastSeenId = getLastSeen(key);
       const lastSeenIdx = lastSeenId
-        ? timeline.findIndex((m) => m.id === lastSeenId)
+        ? timelineWithQueue.findIndex((m) => m.id === lastSeenId)
         : -1;
       const firstUnseen =
-        lastSeenIdx !== -1 && lastSeenIdx < timeline.length - 1
-          ? timeline.slice(lastSeenIdx + 1).find(isFeedVisible)
+        lastSeenIdx !== -1 && lastSeenIdx < timelineWithQueue.length - 1
+          ? timelineWithQueue.slice(lastSeenIdx + 1).find(isFeedVisible)
           : undefined;
       if (firstUnseen) {
         firstUnseenId.value = firstUnseen.id;
@@ -371,12 +440,14 @@ export function useDmMessaging(
       } else {
         firstUnseenId.value = null;
         await scrollToPinnedEdgeAndPin();
-        const newest = [...timeline].reverse().find(isFeedVisible);
+        const newest = [...timelineWithQueue].reverse().find(isFeedVisible);
         if (newest) setLastSeen(key, newest.id);
       }
     } catch (e) {
       if (requestId === messageRequestId) {
-        actionError.value = normalizeError(e);
+        const queuedOnly = appendQueuedMessages([], peerJid);
+        messages.value = queuedOnly;
+        actionError.value = queuedOnly.length > 0 ? "" : normalizeError(e);
         isLoadingMessages.value = false;
       }
     }
@@ -430,11 +501,12 @@ export function useDmMessaging(
           }
         : undefined;
       const threadId = parent ? (parent.threadId ?? replyTo?.id) : undefined;
-      const msgId = await client.sendDirectMessage(peerJid, bodyText, {
+      const result = await client.sendDirectMessage(peerJid, bodyText, {
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
       });
+      const msgId = result?.id ?? null;
       const isStillActive = xmppClient.value === client && activePeerJid.value === peerJid;
       if (isStillActive) {
         if (msgId) {
@@ -446,7 +518,7 @@ export function useDmMessaging(
             body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
             createdAt: new Date().toISOString(),
             isSelf: true,
-            deliveryStatus: "sending",
+            deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
           };
           if (replyTo && parent) {
             optimistic.replyTo = {
@@ -477,7 +549,9 @@ export function useDmMessaging(
         }
         lastChatState = "active";
       }
-      void client.sendDmChatState(peerJid, "active").catch(() => undefined);
+      if (result?.state === "sending") {
+        void client.sendDmChatState(peerJid, "active").catch(() => undefined);
+      }
     } catch (e) {
       actionError.value = normalizeError(e);
     } finally {
@@ -526,7 +600,7 @@ export function useDmMessaging(
 
   function markDisplayed(messageId: string) {
     if (!xmppClient.value || !activePeerJid.value) return;
-    xmppClient.value.sendDmDisplayed(activePeerJid.value, messageId);
+    void xmppClient.value.sendDmDisplayed(activePeerJid.value, messageId).catch(() => undefined);
   }
 
   function notifyComposing() {
@@ -535,13 +609,13 @@ export function useDmMessaging(
     if (!client || !peerJid) return;
     if (lastChatState !== "composing") {
       lastChatState = "composing";
-      client.sendDmChatState(peerJid, "composing");
+      void client.sendDmChatState(peerJid, "composing").catch(() => undefined);
     }
     if (composingTimeout) clearTimeout(composingTimeout);
     composingTimeout = setTimeout(() => {
       if (xmppClient.value !== client || activePeerJid.value !== peerJid) return;
       lastChatState = "paused";
-      client.sendDmChatState(peerJid, "paused");
+      void client.sendDmChatState(peerJid, "paused").catch(() => undefined);
     }, 3000);
   }
 
@@ -577,6 +651,7 @@ export function useDmMessaging(
 
   function clearMessages() {
     messageRequestId++;
+    pendingEchoClientIds.clear();
     messages.value = [];
     isLoadingMessages.value = false;
     firstUnseenId.value = null;
@@ -586,6 +661,7 @@ export function useDmMessaging(
   function disconnect() {
     messageRequestId++;
     searchRequestId++;
+    pendingEchoClientIds.clear();
     isLoadingMessages.value = false;
     isSearching.value = false;
     firstUnseenId.value = null;
@@ -655,6 +731,7 @@ export function useDmMessaging(
     onChatState,
     onDisplayed,
     onReaction,
+    onMessageQueueStatus,
     onMessageAck,
     onMessageDeliveryFailure,
     onSessionLifecycle,

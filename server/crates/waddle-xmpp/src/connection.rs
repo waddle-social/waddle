@@ -1730,22 +1730,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     SendResult::Sent => {
                         debug!(to = %outbound.to, "Message routed to local occupant");
                     }
-                    SendResult::NotConnected => {
+                    SendResult::NotConnected | SendResult::ChannelClosed => {
                         debug!(
                             to = %outbound.to,
-                            "Local occupant not connected, message not delivered"
-                        );
-                    }
-                    SendResult::ChannelFull => {
-                        warn!(
-                            to = %outbound.to,
-                            "Local occupant's channel full, message dropped"
-                        );
-                    }
-                    SendResult::ChannelClosed => {
-                        debug!(
-                            to = %outbound.to,
-                            "Local occupant's channel closed, message not delivered"
+                            "Local occupant unavailable, message not delivered"
                         );
                     }
                 }
@@ -1988,12 +1976,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     );
                     should_fallback_to_bare = true;
                 }
-                SendResult::ChannelFull => {
-                    warn!(
-                        to = %recipient_full,
-                        "Recipient full JID channel full, message dropped"
-                    );
-                }
                 SendResult::ChannelClosed => {
                     debug!(
                         to = %recipient_full,
@@ -2023,9 +2005,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         SendResult::NotConnected | SendResult::ChannelClosed => {
                             debug!(to = %resource_jid, "Fallback recipient unavailable");
                         }
-                        SendResult::ChannelFull => {
-                            warn!(to = %resource_jid, "Fallback recipient channel full");
-                        }
                     }
                 }
             }
@@ -2050,14 +2029,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         delivered = true;
                         delivered_resources.push(resource_jid.clone());
                     }
-                    SendResult::NotConnected => {
-                        debug!(to = %resource_jid, "Recipient resource not connected");
-                    }
-                    SendResult::ChannelFull => {
-                        warn!(to = %resource_jid, "Recipient's channel full, message dropped");
-                    }
-                    SendResult::ChannelClosed => {
-                        debug!(to = %resource_jid, "Recipient's channel closed");
+                    SendResult::NotConnected | SendResult::ChannelClosed => {
+                        debug!(to = %resource_jid, "Recipient resource unavailable");
                     }
                 }
             }
@@ -2195,14 +2168,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         debug!(to = %resource_jid, "Direct invite delivered to recipient resource");
                         delivered = true;
                     }
-                    SendResult::NotConnected => {
-                        debug!(to = %resource_jid, "Recipient resource not connected for direct invite");
-                    }
-                    SendResult::ChannelFull => {
-                        warn!(to = %resource_jid, "Recipient's channel full, direct invite dropped");
-                    }
-                    SendResult::ChannelClosed => {
-                        debug!(to = %resource_jid, "Recipient's channel closed");
+                    SendResult::NotConnected | SendResult::ChannelClosed => {
+                        debug!(to = %resource_jid, "Recipient resource unavailable for direct invite");
                     }
                 }
             }
@@ -3573,10 +3540,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         // Full-JID target is gone; silently drop.
                         return Ok(());
                     }
-                    SendResult::ChannelFull => {
-                        warn!(to = %target_full, "Directed presence dropped: recipient channel full");
-                        return Ok(());
-                    }
                 }
             }
 
@@ -3880,7 +3843,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 );
                 Ok(())
             }
-            SendResult::NotConnected | SendResult::ChannelClosed | SendResult::ChannelFull => {
+            SendResult::NotConnected | SendResult::ChannelClosed => {
                 match &iq.payload {
                     IqType::Get(_) | IqType::Set(_) => {
                         let error_to = sender_jid.to_string();
@@ -6172,7 +6135,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 SendResult::NotConnected => {
                     debug!(to = %resource_jid, "Resource not connected for roster push");
                 }
-                SendResult::ChannelFull | SendResult::ChannelClosed => {
+                SendResult::ChannelClosed => {
                     warn!(to = %resource_jid, "Failed to send roster push");
                 }
             }
@@ -7403,7 +7366,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 SendResult::NotConnected => {
                     debug!(to = %resource_jid, "Resource not connected for block push");
                 }
-                SendResult::ChannelFull | SendResult::ChannelClosed => {
+                SendResult::ChannelClosed => {
                     warn!(to = %resource_jid, "Failed to send block push");
                 }
             }
@@ -7451,7 +7414,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 SendResult::NotConnected => {
                     debug!(to = %resource_jid, "Resource not connected for unblock push");
                 }
-                SendResult::ChannelFull | SendResult::ChannelClosed => {
+                SendResult::ChannelClosed => {
                     warn!(to = %resource_jid, "Failed to send unblock push");
                 }
             }

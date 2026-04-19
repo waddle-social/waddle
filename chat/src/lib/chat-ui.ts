@@ -3,7 +3,7 @@ export type AdminTab = "rooms" | "people" | "settings";
 export type EditableRole = "member" | "moderator" | "admin";
 
 /** Delivery status for messages sent by the current user. */
-export type DeliveryStatus = "sending" | "delivered" | "failed";
+export type DeliveryStatus = "queued" | "sending" | "delivered" | "failed";
 
 export interface MarkupSpan {
   type: "b" | "i" | "s" | "code" | "code-block" | "blockquote" | "link";

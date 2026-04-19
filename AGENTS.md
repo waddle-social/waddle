@@ -28,6 +28,11 @@ bun test && bun run lint
 
 TypeScript 5.8.x; Bun 1.3.x: Follow standard conventions
 
+## Commit Messages
+
+- Use Conventional Commits with a single scope: `fix(chat): ...`, `fix(server): ...`, `feat(apple/ui): ...`.
+- Do not use unscoped subjects. If a change spans multiple areas, scope it to the dominant subsystem/user-facing surface and keep the subject lowercase after the colon.
+
 ## Recent Changes
 
 - 001-setup-topics-service: Added TypeScript 5.8 (Bun toolchain) + Projen `WaddleDataService` generator, Drizzle ORM, Pothos GraphQL + federation plugins, GraphQL Yoga, Cloudflare D1
