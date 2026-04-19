@@ -5,6 +5,24 @@ import os
 
 private let logger = Logger(subsystem: "social.waddle.ios", category: "AppModel")
 
+@MainActor
+final class DebugLog: ObservableObject {
+    static let shared = DebugLog()
+    @Published var lines: [String] = []
+
+    func log(_ message: String) {
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let line = "[\(timestamp)] \(message)"
+        lines.append(line)
+        if lines.count > 200 { lines.removeFirst(lines.count - 200) }
+        logger.info("\(line)")
+    }
+}
+
+private func dlog(_ msg: String) {
+    Task { @MainActor in DebugLog.shared.log(msg) }
+}
+
 private enum ChatSendError: LocalizedError {
     case noSession
     case noWaddle
@@ -273,7 +291,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectChannel(_ channelID: String?) async {
-        logger.info("[WADDLE] selectChannel: \(channelID ?? "nil")")
+        dlog(" selectChannel: \(channelID ?? "nil")")
         selectedChannelID = channelID
         selectedForumThreadID = nil
         syncChatRooms()
@@ -287,13 +305,13 @@ final class AppModel: ObservableObject {
 
         do {
             try await joinSelectedChannel()
-            logger.info("[WADDLE] joined, loading history for roomJID=\(self.currentRoomJID ?? "nil")")
+            dlog(" joined, loading history for roomJID=\(self.currentRoomJID ?? "nil")")
             await chatStore.refreshSelectedRoomHistory()
             syncChatMessages()
-            logger.info("[WADDLE] history done: store=\(self.chatStore.messages.count) cached=\(self.messagesByRoomJID[self.currentRoomJID ?? ""]?.count ?? 0)")
+            dlog(" history done: store=\(self.chatStore.messages.count) cached=\(self.messagesByRoomJID[self.currentRoomJID ?? ""]?.count ?? 0)")
             updateChatSurfaceState()
         } catch {
-            logger.info("[WADDLE] selectChannel error: \(error)")
+            dlog(" selectChannel error: \(error)")
             errorMessage = error.localizedDescription
             chatStore.setBannerState(.error(message: error.localizedDescription))
             chatStore.failRoomHistoryLoad(error.localizedDescription)
@@ -558,7 +576,7 @@ final class AppModel: ObservableObject {
         do {
             inboxEntries = try await xmppService.fetchInbox()
         } catch {
-            logger.info("[WADDLE] inbox fetch error: \(error.localizedDescription)")
+            dlog(" inbox fetch error: \(error.localizedDescription)")
         }
     }
 
@@ -926,33 +944,33 @@ final class AppModel: ObservableObject {
     private func handleXMPPEvent(_ event: XMPPEvent) async {
         switch event {
         case .streamFeatures:
-            logger.info("[WADDLE] streamFeatures received")
+            dlog(" streamFeatures received")
             updateConnectionBanner(for: .negotiating)
         case .authenticated:
-            logger.info("[WADDLE] authenticated")
+            dlog(" authenticated")
             updateConnectionBanner(for: .authenticating)
         case .resourceBound(let jid):
-            logger.info("[WADDLE] resourceBound: \(jid)")
+            dlog(" resourceBound: \(jid)")
             updateConnectionBanner(for: .binding)
         case .sessionReady:
-            logger.info("[WADDLE] sessionReady")
+            dlog(" sessionReady")
             reconnectTask?.cancel()
             reconnectTask = nil
             updateConnectionBanner(for: .ready)
             do {
                 try await xmppService?.sendPresence()
-                logger.info("[WADDLE] presence sent")
+                dlog(" presence sent")
             } catch {
-                logger.info("[WADDLE] presence error: \(error)")
+                dlog(" presence error: \(error)")
                 errorMessage = error.localizedDescription
             }
             await refreshAccessibleWaddles()
-            logger.info("[WADDLE] accessible waddles: \(self.accessibleWaddles.count), public: \(self.publicWaddles.count)")
+            dlog(" accessible waddles: \(self.accessibleWaddles.count), public: \(self.publicWaddles.count)")
             if let selectedWaddleID {
-                logger.info("[WADDLE] loading structure for \(selectedWaddleID)")
+                dlog(" loading structure for \(selectedWaddleID)")
                 await loadStructure(for: selectedWaddleID)
             } else if let nextWaddleID = publicWaddles.first?.id {
-                logger.info("[WADDLE] selecting first waddle \(nextWaddleID)")
+                dlog(" selecting first waddle \(nextWaddleID)")
                 await selectWaddle(nextWaddleID)
             } else {
                 updateChatSurfaceState()
@@ -963,13 +981,13 @@ final class AppModel: ObservableObject {
             handleIncomingPresence(presence)
         case .authenticationFailed(let detail):
             let message = detail ?? "The server rejected the XMPP bearer token."
-            logger.info("[WADDLE] authenticationFailed: \(message)")
+            dlog(" authenticationFailed: \(message)")
             errorMessage = message
             chatStore.setBannerState(.error(message: message))
             updateChatSurfaceState()
         case .streamError(let name, let text):
             let message = text ?? name
-            logger.info("[WADDLE] streamError: \(name) \(text ?? "")")
+            dlog(" streamError: \(name) \(text ?? "")")
             errorMessage = message
             chatStore.setBannerState(.error(message: message))
             updateChatSurfaceState()
@@ -1013,10 +1031,10 @@ final class AppModel: ObservableObject {
     }
 
     private func loadStructure(for waddleID: String) async {
-        logger.info("[WADDLE] loadStructure for \(waddleID)")
-        guard let session else { logger.info("[WADDLE] loadStructure: no session"); return }
+        dlog(" loadStructure for \(waddleID)")
+        guard let session else { dlog(" loadStructure: no session"); return }
         guard let xmppService else {
-            logger.info("[WADDLE] loadStructure: no xmppService")
+            dlog(" loadStructure: no xmppService")
             updateChatSurfaceState()
             return
         }
@@ -1029,7 +1047,7 @@ final class AppModel: ObservableObject {
             async let loadedMembers = client.listMembers(sessionID: session.sessionID, waddleID: waddleID)
 
             let (xmppChannels, loadedMembersValue) = try await (discoveredChannels, loadedMembers)
-            logger.info("[WADDLE] discovered \(xmppChannels.count) channels, \(loadedMembersValue.count) members")
+            dlog(" discovered \(xmppChannels.count) channels, \(loadedMembersValue.count) members")
             guard selectedWaddleID == waddleID else { return }
 
             channels = xmppChannels
@@ -1085,6 +1103,7 @@ final class AppModel: ObservableObject {
         }
 
         let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: selectedChannelID)
+        dlog("joinSelectedChannel: roomJID=\(roomJID) nick=\(session.username) alreadyJoined=\(joinedRoomJIDs.contains(roomJID))")
         if joinedRoomJIDs.contains(roomJID) {
             if roomJID == currentRoomJID {
                 let roomTitle = chatStore.selectedRoom?.title ?? selectedChannel?.name ?? "chat"
@@ -1174,14 +1193,18 @@ final class AppModel: ObservableObject {
     }
 
     private func loadRoomHistory(for room: ChatRoomSelection, before: Date?) async throws -> ChatRoomHistoryPage {
+        dlog(" loadRoomHistory called for room.id=\(room.id) room.title=\(room.title) before=\(String(describing: before))")
         guard let session,
               let xmppService,
               let roomJID = roomJID(for: room.id) else {
+            dlog(" loadRoomHistory: guard failed — session=\(self.session != nil) xmppService=\(self.xmppService != nil) roomJID=\(self.roomJID(for: room.id) ?? "nil")")
             return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
         }
 
+        dlog(" loadRoomHistory: roomJID=\(roomJID)")
         let requestBefore = before == nil ? "" : roomHistoryBeforeCursorByRoomJID[roomJID]
         if before != nil, requestBefore == nil {
+            dlog(" loadRoomHistory: no cursor for older load, returning empty")
             return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
         }
 
@@ -1213,7 +1236,7 @@ final class AppModel: ObservableObject {
         if roomJID == currentRoomJID {
             syncChatMessages()
         }
-        logger.info("[WADDLE] loadRoomHistory: roomJID=\(roomJID) archive=\(archivePage.messages.count) delta=\(deltaMessages.count) merged=\(mergedMessages.count)")
+        dlog(" loadRoomHistory: roomJID=\(roomJID) archive=\(archivePage.messages.count) delta=\(deltaMessages.count) merged=\(mergedMessages.count)")
 
         let nextBeforeCursor = archivePage.pageInfo.first ?? archivePage.messages.first?.mamID ?? archivePage.messages.first?.stanzaID
         let hasMoreOlderMessages = !archivePage.pageInfo.isComplete
@@ -1596,8 +1619,10 @@ final class AppModel: ObservableObject {
             hatsByRoomJID[roomJID] = roomHats
         }
 
+        dlog("presence: room=\(roomJID) nick=\(nick) type=\(event.type ?? "nil") sessionUser=\(session?.username ?? "nil") match=\(session?.username == nick)")
         if session?.username == nick {
             let joinKey = roomJoinKey(roomJID: roomJID, nick: nick)
+            dlog("presence: self-presence! joinKey=\(joinKey) pendingKeys=\(Array(roomJoinContinuations.keys))")
             if event.type == "unavailable" {
                 joinedRoomJIDs.remove(roomJID)
                 failPendingRoomJoin(key: joinKey, error: XMPPServiceError.disconnected)
@@ -1653,7 +1678,7 @@ final class AppModel: ObservableObject {
     private func syncChatMessages() {
         let key = currentRoomJID ?? ""
         let msgs = messagesByRoomJID[key] ?? []
-        logger.info("[WADDLE] syncChatMessages: key=\(key) count=\(msgs.count)")
+        dlog(" syncChatMessages: key=\(key) count=\(msgs.count)")
         chatStore.replaceMessages(msgs)
     }
 
