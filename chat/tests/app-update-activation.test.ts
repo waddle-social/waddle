@@ -241,6 +241,98 @@ describe("useAppUpdate activation flow", () => {
 		expect(await appUpdate.applyUpdate()).toBe(true);
 	});
 
+	test("triggers an update check when the document becomes visible after the throttle window", async () => {
+		const appUpdate = useAppUpdate();
+		const registration = new FakeServiceWorkerRegistration();
+		serviceWorker.registration =
+			registration as unknown as ServiceWorkerRegistration;
+
+		await appUpdate.start();
+		expect(registration.update).toHaveBeenCalledTimes(1);
+
+		// Simulate hidden→visible: visibilityState is still "visible" here, throttle blocks it
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(registration.update).toHaveBeenCalledTimes(1);
+
+		// After the throttle window, a visible transition should trigger a check
+		advanceTime(61_000);
+		Object.defineProperty(document, "visibilityState", {
+			configurable: true,
+			writable: true,
+			value: "hidden",
+		});
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(registration.update).toHaveBeenCalledTimes(1);
+
+		Object.defineProperty(document, "visibilityState", {
+			configurable: true,
+			writable: true,
+			value: "visible",
+		});
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(registration.update).toHaveBeenCalledTimes(2);
+	});
+
+	test("does not trigger an update check when the document becomes hidden", async () => {
+		const appUpdate = useAppUpdate();
+		const registration = new FakeServiceWorkerRegistration();
+		serviceWorker.registration =
+			registration as unknown as ServiceWorkerRegistration;
+
+		await appUpdate.start();
+		expect(registration.update).toHaveBeenCalledTimes(1);
+
+		advanceTime(61_000);
+		Object.defineProperty(document, "visibilityState", {
+			configurable: true,
+			writable: true,
+			value: "hidden",
+		});
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+
+		expect(registration.update).toHaveBeenCalledTimes(1);
+	});
+
+	test("concurrent checkForUpdate calls share a single inflight update() call", async () => {
+		const appUpdate = useAppUpdate();
+		const registration = new FakeServiceWorkerRegistration();
+		serviceWorker.registration =
+			registration as unknown as ServiceWorkerRegistration;
+
+		await appUpdate.start();
+		advanceTime(61_000);
+
+		const p1 = appUpdate.checkForUpdate();
+		const p2 = appUpdate.checkForUpdate();
+
+		const [r1, r2] = await Promise.all([p1, p2]);
+		// Both callers share the same pending check: one update() call, same resolved value
+		expect(r1).toBe(r2);
+		expect(registration.update).toHaveBeenCalledTimes(2);
+	});
+
+	test("stop() while a check is inflight abandons the result via lifecycle token", async () => {
+		const appUpdate = useAppUpdate();
+		const registration = new FakeServiceWorkerRegistration();
+		serviceWorker.registration =
+			registration as unknown as ServiceWorkerRegistration;
+
+		await appUpdate.start();
+		advanceTime(61_000);
+
+		const p = appUpdate.checkForUpdate();
+		appUpdate.stop();
+
+		const result = await p;
+		expect(result).toBeNull();
+		expect(appUpdate.isChecking.value).toBe(false);
+		expect(appUpdate.hasWaitingWorker.value).toBe(false);
+	});
+
 	test("does not reload when another source changes the controller", async () => {
 		const appUpdate = useAppUpdate();
 		const registration = new FakeServiceWorkerRegistration();

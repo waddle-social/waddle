@@ -17,7 +17,7 @@
   --secondary: light-dark(#eef0f3, #1a1c24);
   --secondary-foreground: light-dark(#0f1115, #e4e6ed);
   --muted: light-dark(#e8eaef, rgba(255, 255, 255, 0.06));
-  --muted-foreground: #6b7080;
+  --muted-foreground: light-dark(#6b7080, #9196a5);
   --accent: light-dark(#00b4a0, #00ddc0);
   --accent-foreground: light-dark(#ffffff, #0c0d12);
   --destructive: #ef4444;
@@ -266,6 +266,29 @@
 }
 .message-jump-flash.message-jump-flash-fade {
   outline-color: transparent;
+}
+
+/* Suppress unnecessary motion for users who prefer reduced stimulus */
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    animation: none;
+  }
+  .animate-message-in,
+  .animate-slide-up,
+  .animate-fade-in {
+    animation: none;
+  }
+  .animate-pulse-glow {
+    animation: none;
+  }
+  .typing-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+  .message-jump-flash {
+    animation: none;
+    transition: none;
+  }
 }
 
 /* Glass panel utility */
