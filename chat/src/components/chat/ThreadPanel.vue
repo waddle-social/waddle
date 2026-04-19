@@ -7,6 +7,8 @@ import MessageComposer from "@/components/chat/MessageComposer.vue";
 import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
+import { useScrollDirection } from "@/composables/useScrollDirection";
+import { orderTimelineForScrollDirection, getPinnedScrollTop } from "@/lib/scroll-direction";
 
 const props = defineProps<{
   threadStack: string[];
@@ -50,6 +52,8 @@ const emit = defineEmits<{
   typing: [];
 }>();
 
+const { mode: scrollDirectionMode } = useScrollDirection();
+
 const open = computed(() => props.threadStack.length > 0);
 const activeThreadId = computed(() => props.threadStack[props.threadStack.length - 1] ?? null);
 const parentThreadId = computed(() =>
@@ -59,42 +63,36 @@ const activeEntry = computed(() =>
   activeThreadId.value ? props.resolveEntry(activeThreadId.value) ?? null : null,
 );
 
-const draft = ref("");
+const orderedChildren = computed(() => {
+  const children = activeEntry.value?.directChildren ?? [];
+  return orderTimelineForScrollDirection(children, scrollDirectionMode.value);
+});
 
-const replyingTo = ref<{ id: string; author: string; body?: string; preview?: string } | null>(null);
+const scrollContainerRef = ref<HTMLElement | null>(null);
 
-type MessageComposerHandle = {
-  focus: () => void;
-};
-
-const composerRef = ref<MessageComposerHandle | null>(null);
-const setComposerRef = (instance: MessageComposerHandle | null) => {
-  composerRef.value = instance;
-};
-
-function focusComposer() {
-  void nextTick(() => composerRef.value?.focus());
+async function scrollToPinnedEdge() {
+  // Two ticks: first lets Vue flush the DOM update, second gives the browser
+  // time to recalculate layout (scrollHeight) before we set scrollTop.
+  await nextTick();
+  await nextTick();
+  const el = scrollContainerRef.value;
+  if (!el) return;
+  el.scrollTop = getPinnedScrollTop(el, scrollDirectionMode.value);
 }
 
-function beginReplyInThread(message: TimelineMessage) {
-  replyingTo.value = {
-    id: message.id,
-    author: message.author,
-    ...(message.body ? { body: message.body, preview: message.body } : {}),
-  };
-  focusComposer();
-}
-
-function cancelReplyInThread() {
-  replyingTo.value = null;
-}
-
-// Close clears the draft and any pending reply target so opening a different
-// thread starts fresh.
+// Switching threads resets composer state and scrolls to the pinned edge.
 watch(activeThreadId, () => {
   replyingTo.value = null;
   draft.value = "";
+  void scrollToPinnedEdge();
 });
+
+watch(
+  () => activeEntry.value?.directChildren.length,
+  () => {
+    void scrollToPinnedEdge();
+  },
+);
 
 const breadcrumbLabels = computed(() =>
   props.threadStack.map((id) => {
@@ -172,7 +170,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </template>
 
     <div class="flex flex-col h-full">
-      <div class="flex-1 min-h-0 overflow-auto px-3 py-3">
+      <div ref="scrollContainerRef" class="flex-1 min-h-0 overflow-auto px-3 py-3">
         <template v-if="activeEntry">
           <div v-if="!activeEntry.root" class="text-[12px] text-muted-foreground px-3 py-2 rounded-xl bg-muted/40 mb-2">
             Thread root isn't in the loaded history. Scroll the main channel or reload to backfill.
@@ -196,7 +194,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           />
 
           <div
-            v-for="child in activeEntry.directChildren"
+            v-for="child in orderedChildren"
             :key="child.id"
             class="relative group/thread-child"
           >
