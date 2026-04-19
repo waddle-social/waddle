@@ -196,9 +196,8 @@ function emitAvatarClick() {
 const bubbleEl = ref<HTMLElement | null>(null);
 // Inline hover toolbar's SmilePlus popover. Desktop-only; bound to hover.
 const pickerOpen = ref(false);
-// Unified action sheet: touch long-press, MoreHorizontal click, and keyboard
-// focus all open the same surface so there is never more than one emoji rail
-// on screen at a time.
+// Unified action sheet: touch long-press and the mobile MoreHorizontal trigger
+// open the same surface so there is never more than one emoji rail on screen.
 const sheetOpen = ref(false);
 type SheetView = "actions" | "emoji";
 const sheetView = ref<SheetView>("actions");
@@ -609,13 +608,11 @@ watch(
       </template>
     </div>
 
-    <!-- Action-sheet trigger. Small and low-contrast on desktop (where hover
-         already reveals the inline toolbar) and enlarged on touch so fingers
-         can actually hit it when long-press feels awkward. -->
+    <!-- Action-sheet trigger. Touch-only; desktop already has the hover toolbar. -->
     <button
       v-if="!isEditing"
       type="button"
-      class="absolute top-1 right-1 z-10 h-6 w-6 [@media(pointer:coarse)]:h-10 [@media(pointer:coarse)]:w-10 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted opacity-40 hover:opacity-100 focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-70 transition-all duration-150"
+      class="absolute top-1 right-1 z-10 hidden h-6 w-6 [@media(pointer:coarse)]:flex [@media(pointer:coarse)]:h-10 [@media(pointer:coarse)]:w-10 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted opacity-70 transition-all duration-150"
       title="Message actions"
       aria-label="Message actions"
       :aria-expanded="sheetOpen"
@@ -626,10 +623,10 @@ watch(
     </button>
   </div>
 
-  <!-- Unified action sheet: opened by touch long-press, the MoreHorizontal
-       trigger, or keyboard focus. Teleported so it escapes overflow-hidden
+  <!-- Unified action sheet: opened by touch long-press or the MoreHorizontal
+       trigger. Teleported so it escapes overflow-hidden
        ancestors; anchored at the bottom on mobile for large touch targets
-       and centred as a modal on desktop. -->
+       and centred when opened from a wider touch viewport. -->
   <Teleport to="body">
     <div
       v-if="sheetOpen"
