@@ -176,6 +176,7 @@ struct ChatTimelineView: View {
     var historyState: ChatRoomHistoryState = .init()
     var onLoadOlderMessages: (() -> Void)? = nil
     var onReply: ((ChatTimelineMessage) -> Void)? = nil
+    var onRetract: ((ChatTimelineMessage) -> Void)? = nil
     var emptyState: AnyView? = nil
     var usesOperationalDensity: Bool = false
     var usesCompactConversationStyle: Bool = false
@@ -262,7 +263,8 @@ struct ChatTimelineView: View {
                             previousMessage: previousMessage,
                             nextMessage: nextMessage,
                             usesCompactConversationStyle: usesCompactConversationStyle,
-                            onReply: onReply
+                            onReply: onReply,
+                            onRetract: onRetract
                         )
                         .id(message.id)
                     }
@@ -331,6 +333,8 @@ struct ChatMessageRowView: View {
     var nextMessage: ChatTimelineMessage? = nil
     var usesCompactConversationStyle: Bool = false
     var onReply: ((ChatTimelineMessage) -> Void)? = nil
+    var onRetract: ((ChatTimelineMessage) -> Void)? = nil
+    @State private var lightboxImage: XMPPSharedFile?
 
     var body: some View {
         if usesOperationalLayout {
@@ -467,6 +471,16 @@ struct ChatMessageRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let hats = message.hatTitles {
+                    ForEach(hats, id: \.self) { hat in
+                        Text(hat)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(hatColor(for: hat))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(hatColor(for: hat).opacity(0.12), in: Capsule())
+                    }
+                }
                 if let mention = message.broadcastMention {
                     Text("@\(mention)")
                         .font(.caption2.weight(.bold))
@@ -532,11 +546,20 @@ struct ChatMessageRowView: View {
             }
         }
         .contextMenu {
-            if !message.isAction, !message.isRetracted, onReply != nil {
-                Button {
-                    onReply?(message)
-                } label: {
-                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+            if !message.isAction, !message.isRetracted {
+                if onReply != nil {
+                    Button {
+                        onReply?(message)
+                    } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+                if message.isOutgoing, onRetract != nil {
+                    Button(role: .destructive) {
+                        onRetract?(message)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
                 }
             }
         }
@@ -548,31 +571,46 @@ struct ChatMessageRowView: View {
         if !images.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(images, id: \.url) { file in
-                    AsyncImage(url: URL(string: file.url)) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(maxWidth: maxWidth, maxHeight: 240)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        case .failure:
-                            Label(file.name ?? "Image", systemImage: "photo")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(8)
-                                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                        case .empty:
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color.secondary.opacity(0.08))
-                                .frame(width: min(CGFloat(file.width ?? 200), maxWidth), height: min(CGFloat(file.height ?? 150), 240))
-                                .overlay { ProgressView() }
-                        @unknown default:
-                            EmptyView()
+                    Button {
+                        lightboxImage = file
+                    } label: {
+                        AsyncImage(url: URL(string: file.url)) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(maxWidth: maxWidth, maxHeight: 240)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            case .failure:
+                                Label(file.name ?? "Image", systemImage: "photo")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding(8)
+                                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                            case .empty:
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Color.secondary.opacity(0.08))
+                                    .frame(width: min(CGFloat(file.width ?? 200), maxWidth), height: min(CGFloat(file.height ?? 150), 240))
+                                    .overlay { ProgressView() }
+                            @unknown default:
+                                EmptyView()
+                            }
                         }
                     }
+                    .buttonStyle(.plain)
                 }
             }
+#if os(iOS)
+            .fullScreenCover(item: $lightboxImage) { file in
+                ChatImageLightboxView(file: file)
+            }
+#else
+            .sheet(item: $lightboxImage) { file in
+                ChatImageLightboxView(file: file)
+                    .frame(minWidth: 600, minHeight: 500)
+            }
+#endif
         }
     }
 
@@ -610,6 +648,17 @@ struct ChatMessageRowView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func hatColor(for title: String) -> Color {
+        switch title.lowercased() {
+        case "owner": return .purple
+        case "admin": return .blue
+        case "moderator", "mod": return .green
+        case "bot": return .mint
+        case "verified": return .cyan
+        default: return .secondary
         }
     }
 
@@ -703,11 +752,20 @@ struct ChatMessageRowView: View {
                 .strokeBorder(compactCardStroke, lineWidth: 1)
         }
         .contextMenu {
-            if !message.isAction, !message.isRetracted, onReply != nil {
-                Button {
-                    onReply?(message)
-                } label: {
-                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+            if !message.isAction, !message.isRetracted {
+                if onReply != nil {
+                    Button {
+                        onReply?(message)
+                    } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                }
+                if message.isOutgoing, onRetract != nil {
+                    Button(role: .destructive) {
+                        onRetract?(message)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
                 }
             }
         }
@@ -1110,6 +1168,64 @@ struct ChatTypingIndicatorView: View {
         default:
             return "\(typingUsers[0]) and \(typingUsers.count - 1) others are typing"
         }
+    }
+}
+
+struct ChatImageLightboxView: View {
+    let file: XMPPSharedFile
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            AsyncImage(url: URL(string: file.url)) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .ignoresSafeArea()
+                case .failure:
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.largeTitle)
+                        Text("Failed to load image")
+                            .font(.subheadline)
+                    }
+                    .foregroundStyle(.white.opacity(0.6))
+                case .empty:
+                    ProgressView()
+                        .tint(.white)
+                @unknown default:
+                    EmptyView()
+                }
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(16)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let name = file.name, !name.isEmpty {
+                Text(name)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.5), in: Capsule())
+                    .padding(.bottom, 20)
+            }
+        }
+#if os(iOS)
+        .statusBarHidden()
+#endif
     }
 }
 

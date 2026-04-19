@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 4, items 1.4/4.2/4.6)
+> Last updated: 2026-04-19 (loop 5, items 1.7/4.3/7.4)
 
 ## Legend
 
@@ -28,7 +28,7 @@
 | 1.4 | Broadcast mentions (@everyone, @here) | HIGH | [x] | XEP-0513 | Parse <mentions> element, display @everyone/@here badge on messages |
 | 1.5 | Read receipts / chat markers | HIGH | [x] | XEP-0333 | Send displayed markers for incoming messages, parse displayed marker stanzas |
 | 1.6 | Typing indicators (chat state) | HIGH | [x] | XEP-0085 | Send composing/paused on text input, parse incoming chat state, typing indicator UI with auto-expiry |
-| 1.7 | Message moderation (admin retract) | MEDIUM | [ ] | XEP-0425 | Web supports moderation with reason field |
+| 1.7 | Message moderation (admin retract) | MEDIUM | [x] | XEP-0425 | Send retraction via XEP-0424, context menu "Delete" on own messages, moderation IQ stanza builder |
 | 1.8 | Delivery status echo matching | LOW | [~] | - | Apple has states but web has body-fallback matching + pendingEcho tracking |
 
 ## 2. Direct Messages
@@ -56,7 +56,7 @@
 |---|-----|----------|--------|-----|-------|
 | 4.1 | File upload (images, documents) | CRITICAL | [ ] | XEP-0363, XEP-0447 | Web has drag-drop, paste, file picker (10MB max) |
 | 4.2 | Inline image display | CRITICAL | [x] | XEP-0446 | Parse XEP-0447/0446 file-sharing stanzas, render inline images with AsyncImage, show file download links with metadata |
-| 4.3 | Image lightbox viewer | HIGH | [ ] | - | Web has full-screen image viewer |
+| 4.3 | Image lightbox viewer | HIGH | [x] | - | Full-screen image viewer on tap with dismiss button and filename overlay |
 | 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Web has trending + search GIF integration |
 | 4.5 | Sticker support | LOW | [ ] | XEP-0449 | Web supports sticker packs |
 | 4.6 | File download | HIGH | [x] | - | Downloadable file links with name, media type, and size shown inline |
@@ -84,7 +84,7 @@
 | 7.1 | Add member to waddle | HIGH | [ ] | - | Web has member search + add via REST API |
 | 7.2 | Remove member from waddle | HIGH | [ ] | - | Web has remove via REST API |
 | 7.3 | Change member role | MEDIUM | [ ] | - | Web supports owner/admin/moderator/member roles |
-| 7.4 | Hat/badge display (role badges) | MEDIUM | [ ] | XEP-0317 | Web shows colored role badges on messages |
+| 7.4 | Hat/badge display (role badges) | MEDIUM | [x] | XEP-0317 | Parse hats from presence, display colored role badges (owner/admin/mod/bot/verified) on messages |
 
 ## 8. Notifications
 

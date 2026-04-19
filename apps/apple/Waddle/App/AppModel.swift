@@ -67,6 +67,7 @@ final class AppModel: ObservableObject {
     private var xmppEventsTask: Task<Void, Never>?
     private var messagesByRoomJID: [String: [ChatTimelineMessage]] = [:]
     private var presenceByRoomJID: [String: [String: ChatPresenceState]] = [:]
+    private var hatsByRoomJID: [String: [String: [XMPPPresenceHat]]] = [:]
     private var joinedRoomJIDs: Set<String> = []
     private var roomJoinContinuations: [String: CheckedContinuation<Void, Error>] = [:]
     private var roomJoinTimeoutTasks: [String: Task<Void, Never>] = [:]
@@ -335,6 +336,15 @@ final class AppModel: ObservableObject {
     }
 
     @Published var isCreatingChannel = false
+
+    func retractMessage(_ message: ChatTimelineMessage) async {
+        guard let roomJID = currentRoomJID, let xmppService else { return }
+        do {
+            try await xmppService.retractMessage(roomJID: roomJID, messageID: message.id)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 
     func createChannel(name: String, description: String?, channelType: String) async {
         guard let selectedWaddleID, let xmppService else { return }
@@ -992,7 +1002,8 @@ final class AppModel: ObservableObject {
             replyToBody: replyToBody,
             markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans,
             sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles,
-            broadcastMention: event.broadcastMention
+            broadcastMention: event.broadcastMention,
+            hatTitles: hatsByRoomJID[roomJID]?[senderName]?.map(\.title)
         )
     }
 
@@ -1027,6 +1038,12 @@ final class AppModel: ObservableObject {
             roomPresence[nick] = presenceState(from: event)
         }
         presenceByRoomJID[roomJID] = roomPresence
+
+        if !event.hats.isEmpty {
+            var roomHats = hatsByRoomJID[roomJID] ?? [:]
+            roomHats[nick] = event.hats
+            hatsByRoomJID[roomJID] = roomHats
+        }
 
         if session?.username == nick {
             let joinKey = roomJoinKey(roomJID: roomJID, nick: nick)

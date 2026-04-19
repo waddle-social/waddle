@@ -132,6 +132,11 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.displayedMarker(to: roomJID, messageID: messageID))
     }
 
+    func retractMessage(roomJID: String, messageID: String) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.retractMessage(to: roomJID, retractsID: messageID))
+    }
+
     func sendGroupchatReplyMessage(
         roomJID: String,
         body: String,

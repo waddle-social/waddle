@@ -523,6 +523,7 @@ struct WaddleChatWorkspaceView: View {
                         Task { await store.loadOlderMessages() }
                     } : nil,
                     onReply: { message in store.setReplyingTo(message) },
+                    onRetract: { message in Task { await model.retractMessage(message) } },
                     usesOperationalDensity: true
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -578,6 +579,7 @@ struct WaddleChatWorkspaceView: View {
                             Task { await store.loadOlderMessages() }
                         } : nil,
                         onReply: { message in store.setReplyingTo(message) },
+                        onRetract: { message in Task { await model.retractMessage(message) } },
                         usesCompactConversationStyle: compactStyle
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

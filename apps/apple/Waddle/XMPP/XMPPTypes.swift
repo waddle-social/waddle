@@ -96,7 +96,8 @@ struct XMPPMarkupSpan: Sendable, Equatable, Hashable {
     let uri: String?
 }
 
-struct XMPPSharedFile: Sendable, Equatable, Hashable {
+struct XMPPSharedFile: Sendable, Equatable, Hashable, Identifiable {
+    var id: String { url }
     let url: String
     let name: String?
     let mediaType: String?
@@ -133,12 +134,18 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let broadcastMention: String?
 }
 
+struct XMPPPresenceHat: Sendable, Equatable, Hashable {
+    let uri: String
+    let title: String
+}
+
 struct XMPPPresenceEvent: Sendable, Equatable {
     let from: String?
     let to: String?
     let type: String?
     let status: String?
     let show: String?
+    let hats: [XMPPPresenceHat]
 }
 
 enum XMPPEvent: Sendable, Equatable {

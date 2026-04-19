@@ -132,6 +132,28 @@ enum XMPPXML {
         "<message to='\(escape(roomJID))' type='groupchat'><displayed xmlns='urn:xmpp:chat-markers:0' id='\(escape(messageID))'/></message>"
     }
 
+    static func retractMessage(to roomJID: String, retractsID: String) -> String {
+        "<message to='\(escape(roomJID))' type='groupchat'>" +
+        "<body>This person attempted to retract a previous message.</body>" +
+        "<retract xmlns='urn:xmpp:message-retract:1' id='\(escape(retractsID))'/>" +
+        "<store xmlns='urn:xmpp:hints'/>" +
+        "</message>"
+    }
+
+    static func moderateMessage(to roomJID: String, messageID: String, reason: String? = nil) -> String {
+        var payload = "<iq type='set' to='\(escape(roomJID))'>"
+        payload += "<apply-to xmlns='urn:xmpp:fasten:0' id='\(escape(messageID))'>"
+        payload += "<moderated xmlns='urn:xmpp:message-moderate:1'>"
+        payload += "<retract xmlns='urn:xmpp:message-retract:1'/>"
+        if let reason, !reason.isEmpty {
+            payload += "<reason>\(escape(reason))</reason>"
+        }
+        payload += "</moderated>"
+        payload += "</apply-to>"
+        payload += "</iq>"
+        return payload
+    }
+
     static func groupchatMessage(to roomJID: String, body: String, thread: String? = nil) -> String {
         var payload = "<message to='\(escape(roomJID))' type='groupchat'>"
         payload += "<body>\(escape(body))</body>"
@@ -472,12 +494,21 @@ enum XMPPXML {
     }
 
     static func parsePresence(from element: XMPPElement) -> XMPPPresenceEvent {
-        XMPPPresenceEvent(
+        var hats: [XMPPPresenceHat] = []
+        if let hatsElement = element.firstChild(named: "hats") {
+            for hat in hatsElement.children(named: "hat") {
+                if let uri = hat.attribute("uri"), let title = hat.attribute("title") {
+                    hats.append(XMPPPresenceHat(uri: uri, title: title))
+                }
+            }
+        }
+        return XMPPPresenceEvent(
             from: element.attribute("from"),
             to: element.attribute("to"),
             type: element.attribute("type"),
             status: element.firstChild(named: "status")?.text,
-            show: element.firstChild(named: "show")?.text
+            show: element.firstChild(named: "show")?.text,
+            hats: hats
         )
     }
 

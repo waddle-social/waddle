@@ -88,6 +88,7 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var markupSpans: [XMPPMarkupSpan]?
     var sharedFiles: [XMPPSharedFile]?
     var broadcastMention: String?
+    var hatTitles: [String]?
 
     var inlineImages: [XMPPSharedFile] {
         sharedFiles?.filter(\.isInlineImage) ?? []
@@ -316,7 +317,8 @@ extension ChatTimelineMessage {
             replyToBody: other.replyToBody ?? replyToBody,
             markupSpans: other.markupSpans ?? markupSpans,
             sharedFiles: other.sharedFiles ?? sharedFiles,
-            broadcastMention: other.broadcastMention ?? broadcastMention
+            broadcastMention: other.broadcastMention ?? broadcastMention,
+            hatTitles: other.hatTitles ?? hatTitles
         )
     }
 
