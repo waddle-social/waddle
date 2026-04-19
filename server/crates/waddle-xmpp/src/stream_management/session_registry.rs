@@ -171,7 +171,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
 
         // Clean up expired sessions if at capacity
         if sessions.len() >= self.max_sessions {
-            cleanup_expired_internal(&mut sessions);
+            let _ = drain_expired_internal(&mut sessions);
         }
 
         // Still at capacity after cleanup?
@@ -247,8 +247,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-        let removed = cleanup_expired_internal(&mut sessions);
-        Ok(removed)
+        Ok(drain_expired_internal(&mut sessions).len())
     }
 
     async fn session_count(&self) -> usize {
@@ -256,21 +255,53 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     }
 }
 
-/// Internal helper to clean up expired sessions (requires write lock already held).
-fn cleanup_expired_internal(sessions: &mut HashMap<String, DetachedSession>) -> usize {
-    let initial_count = sessions.len();
-    sessions.retain(|_, s| !s.is_expired());
-    let removed = initial_count - sessions.len();
+impl InMemorySmSessionRegistry {
+    /// Remove every expired session and return the detached state in full.
+    ///
+    /// Callers (notably the server-side janitor) need the JID and stream id
+    /// of each expired session so they can run associated cleanup —
+    /// removing MUC occupants, evicting routing entries, and discarding
+    /// sidecar auth context. `cleanup_expired` only returns a count, which
+    /// isn't enough for that work.
+    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
 
-    if removed > 0 {
+        Ok(drain_expired_internal(&mut sessions))
+    }
+}
+
+/// Internal helper: remove expired sessions and return them.
+fn drain_expired_internal(sessions: &mut HashMap<String, DetachedSession>) -> Vec<DetachedSession> {
+    let expired_keys: Vec<String> = sessions
+        .iter()
+        .filter_map(|(k, s)| {
+            if s.is_expired() {
+                Some(k.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut drained = Vec::with_capacity(expired_keys.len());
+    for key in &expired_keys {
+        if let Some(session) = sessions.remove(key) {
+            drained.push(session);
+        }
+    }
+
+    if !drained.is_empty() {
         debug!(
-            removed = removed,
+            removed = drained.len(),
             remaining = sessions.len(),
             "Cleaned up expired SM sessions"
         );
     }
 
-    removed
+    drained
 }
 
 /// Check if sequence a > b, handling wrap-around.

@@ -974,6 +974,46 @@ async fn create_router(
         sm_session_registry,
         resumable_sessions,
     });
+    // XEP-0198 expired-session janitor. Without this, detached SM sessions
+    // whose resume window elapses leave MUC occupants in their rooms forever
+    // (ghosts) and the `resumable_sessions` sidecar grows unbounded. Holds a
+    // Weak reference so it doesn't keep the WebSocketState alive past the
+    // server's lifetime.
+    {
+        let weak_state = Arc::downgrade(&websocket_state);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            // Skip the first tick (immediate) so we don't sweep before the
+            // server has accepted any connections.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(state) = weak_state.upgrade() else {
+                    break;
+                };
+                let drained = match state.sm_session_registry.drain_expired().await {
+                    Ok(sessions) => sessions,
+                    Err(err) => {
+                        warn!(error = %err, "SM janitor: drain_expired failed");
+                        continue;
+                    }
+                };
+                if drained.is_empty() {
+                    continue;
+                }
+                info!(
+                    count = drained.len(),
+                    "SM janitor: cleaning up expired detached sessions"
+                );
+                for session in drained {
+                    state.resumable_sessions.remove(&session.stream_id);
+                    state.connection_registry.unregister(&session.jid);
+                    routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
+                }
+            }
+        });
+    }
+
     let websocket_router = routes::websocket::router(websocket_state);
 
     // Permission router with Zanzibar-inspired permission service

@@ -143,10 +143,19 @@ struct LegacyConnState {
     /// once enabled and holds the unacked queue used for resumption.
     sm_state: StreamManagementState,
     /// True when this WebSocket was bootstrapped via `<resume/>` rather than
-    /// a fresh SASL + bind. The outer loop uses this to skip the normal
-    /// first-time registration handshake (registration already happened
-    /// inside the resume handler).
+    /// a fresh SASL + bind. Used for structured logging on the first
+    /// register call; the registration itself still happens in the main
+    /// loop (when `pending_tx.take()` fires after authenticated+bound
+    /// become true), regardless of the path that set those flags.
     resumed: bool,
+    /// One-shot flag: when set, the main loop must NOT push the current
+    /// frame's responses into `sm_state.record_outbound`. The flag is
+    /// raised by `handle_sm_resume` because the responses it returns are
+    /// replayed stanzas that were already pushed into the unacked queue
+    /// before detach; re-recording them would double-count `outbound_count`
+    /// and duplicate queue entries. The main loop resets the flag to
+    /// `false` after skipping the record step.
+    suppress_sm_record_next_batch: bool,
 }
 
 impl LegacyConnState {
@@ -159,6 +168,7 @@ impl LegacyConnState {
             pending_scram: None,
             sm_state: StreamManagementState::new(),
             resumed: false,
+            suppress_sm_record_next_batch: false,
         }
     }
 }
@@ -205,6 +215,11 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
     // Track connection state
     let mut conn = LegacyConnState::new();
+    // Set when our own registry slot was replaced by a newer connection for
+    // the same FullJid (detected via outbound_rx closing). In that case the
+    // cleanup block below must NOT touch the registry or MUC state — those
+    // belong to the newcomer now.
+    let mut superseded = false;
 
     loop {
         tokio::select! {
@@ -235,7 +250,17 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         // writing them to the socket. If SM is enabled and
                         // the stanza is countable, push it into the unacked
                         // queue; a future resume will replay this exact XML.
-                        if conn.sm_state.enabled {
+                        //
+                        // Exception: when `handle_sm_resume` just ran, the
+                        // responses ARE the replay of the restored unacked
+                        // queue — those stanzas already have their original
+                        // sequence numbers and are still in the queue.
+                        // Re-recording them would bump `outbound_count` past
+                        // reality and push duplicate queue entries, breaking
+                        // subsequent acks and a second resume.
+                        if conn.suppress_sm_record_next_batch {
+                            conn.suppress_sm_record_next_batch = false;
+                        } else if conn.sm_state.enabled {
                             for frame in &responses {
                                 if is_countable_stanza(frame) {
                                     conn.sm_state.record_outbound(frame.clone());
@@ -307,11 +332,15 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                     None => {
                         // Outbound channel closed. All clones of the sender (our
                         // own outbound_tx + any copy held by the registry) have
-                        // been dropped. The typical path: another WebSocket
-                        // arrived for the same FullJid and replaced our registry
-                        // slot. Exit the task so MUC cleanup runs; the newer
-                        // connection is authoritative.
-                        info!("Outbound channel closed; terminating session");
+                        // been dropped. The only path to this state after
+                        // registration is a replacement register for the same
+                        // FullJid: the registry drops our entry (and with it
+                        // the sender) to install the new session's sender.
+                        // Mark as superseded so the cleanup block skips
+                        // unregister/MUC-cleanup/detach — all of those would
+                        // target the newcomer's registry slot and occupant.
+                        info!("Outbound channel closed; session superseded by replacement");
+                        superseded = true;
                         break;
                     }
                 }
@@ -328,40 +357,46 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     //      can `<resume/>` without re-joining MUC or re-authenticating.
     //      MUC occupants stay in place during the detach window so other
     //      users continue to see this user as present.
-    if let Some(jid) = conn.session_jid.clone() {
-        if conn.sm_state.is_resumable() {
-            if let Some(detached) = conn.sm_state.to_detached_session(jid.clone()) {
-                let stream_id = detached.stream_id.clone();
-                if let Some(session) = conn.authenticated_session.clone() {
-                    state.resumable_sessions.insert(stream_id.clone(), session);
-                }
-                match state.sm_session_registry.store_session(detached).await {
-                    Ok(()) => {
-                        // Remove the routing entry only — the MUC occupant
-                        // slot stays. On a successful resume we'll re-register
-                        // the same FullJid and presence is preserved.
-                        state.connection_registry.unregister(&jid);
-                        info!(
-                            jid = %jid,
-                            stream_id = %stream_id,
-                            "SM session detached; awaiting resume"
-                        );
+    //
+    // Short-circuit when this task was superseded: the registry and MUC
+    // occupant slots now belong to the newer connection for this FullJid,
+    // and any cleanup we do here would clobber the newcomer.
+    if !superseded {
+        if let Some(jid) = conn.session_jid.clone() {
+            if conn.sm_state.is_resumable() {
+                if let Some(detached) = conn.sm_state.to_detached_session(jid.clone()) {
+                    let stream_id = detached.stream_id.clone();
+                    if let Some(session) = conn.authenticated_session.clone() {
+                        state.resumable_sessions.insert(stream_id.clone(), session);
                     }
-                    Err(err) => {
-                        warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                        state.resumable_sessions.remove(&stream_id);
-                        state.connection_registry.unregister(&jid);
-                        cleanup_muc_presence(&state, &jid).await;
+                    match state.sm_session_registry.store_session(detached).await {
+                        Ok(()) => {
+                            // Remove the routing entry only — the MUC occupant
+                            // slot stays. On a successful resume we'll re-register
+                            // the same FullJid and presence is preserved.
+                            state.connection_registry.unregister(&jid);
+                            info!(
+                                jid = %jid,
+                                stream_id = %stream_id,
+                                "SM session detached; awaiting resume"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
+                            state.resumable_sessions.remove(&stream_id);
+                            state.connection_registry.unregister(&jid);
+                            cleanup_muc_presence(&state, &jid).await;
+                        }
                     }
+                } else {
+                    state.connection_registry.unregister(&jid);
+                    cleanup_muc_presence(&state, &jid).await;
                 }
             } else {
                 state.connection_registry.unregister(&jid);
+                info!(jid = %jid, "WebSocket connection unregistered");
                 cleanup_muc_presence(&state, &jid).await;
             }
-        } else {
-            state.connection_registry.unregister(&jid);
-            info!(jid = %jid, "WebSocket connection unregistered");
-            cleanup_muc_presence(&state, &jid).await;
         }
     }
 
@@ -407,6 +442,13 @@ where
 }
 
 /// Clean up MUC room presence when a connection disconnects
+/// Public alias for the MUC-presence cleanup used by the SM expired-session
+/// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
+/// to reimplement the room traversal.
+pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
+    cleanup_muc_presence(state, jid).await
+}
+
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
     // Get all rooms and remove this user from any they're in
     for room_jid in state.muc_registry.list_rooms() {
@@ -609,6 +651,10 @@ struct SmCtx<'a> {
     resource_bound: &'a mut bool,
     authenticated_session: &'a mut Option<Session>,
     resumed: &'a mut bool,
+    /// Set by `handle_sm_resume` so the main loop skips SM recording for
+    /// the responses it returns — those are replay stanzas already tracked
+    /// in the unacked queue.
+    suppress_sm_record_next_batch: &'a mut bool,
 }
 
 /// Dispatch an XEP-0198 control nonza. Isolated helper so the main frame
@@ -672,6 +718,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         resource_bound,
         authenticated_session,
         resumed,
+        suppress_sm_record_next_batch,
     } = ctx;
 
     // Refuse to resume a stream that's already been bound. Clients that sent
@@ -719,6 +766,10 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *resource_bound = true;
     *authenticated_session = restored_session;
     *resumed = true;
+    // Responses below include replayed stanzas straight from the restored
+    // unacked queue. They already carry their original sequence numbers —
+    // the main loop must NOT push them through `record_outbound` again.
+    *suppress_sm_record_next_batch = true;
 
     let replay: Vec<String> = sm_state
         .get_stanzas_to_resend(resume.h)
@@ -761,6 +812,7 @@ async fn handle_xmpp_frame(
         pending_scram,
         sm_state,
         resumed,
+        suppress_sm_record_next_batch,
     } = conn;
     let frame = frame.trim();
     let muc_domain = format!("muc.{}", domain);
@@ -844,6 +896,7 @@ async fn handle_xmpp_frame(
             resource_bound,
             authenticated_session,
             resumed,
+            suppress_sm_record_next_batch,
         };
         return handle_sm_stanza(sm, state, ctx).await;
     }
@@ -4860,6 +4913,41 @@ mod tests {
         assert!(!registry.is_connected(&jid));
     }
 
+    #[tokio::test]
+    async fn try_send_to_does_not_unregister_replacement_entry() {
+        // Simulate the replacement race: connection A is registered, its
+        // receiver is dropped so the sender is closed, connection B takes
+        // over the same JID with a live sender, then something (e.g. a MUC
+        // broadcast task that still holds a clone of A's sender) tries to
+        // send. The try_send would see Closed on A's cloned sender — but
+        // the entry in the registry is now B's live one and must NOT be
+        // evicted.
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let (tx_a, rx_a) = mpsc::channel::<OutboundStanza>(4);
+        registry.register(jid.clone(), tx_a);
+        drop(rx_a); // A's sender is now closed
+
+        // B takes over. The register() call replaces A's entry; only B's
+        // (live) sender is now in the registry.
+        let (tx_b, _rx_b) = mpsc::channel::<OutboundStanza>(4);
+        registry.register(jid.clone(), tx_b);
+
+        // A broadcast path now tries to send. From its perspective, it sees
+        // whatever sender is currently in the registry — which is B's live
+        // one — so try_send_to returns true. Either way, the entry must
+        // remain in the registry.
+        let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        let _ = registry.try_send_to(&jid, stanza);
+        assert!(
+            registry.is_connected(&jid),
+            "replacement entry must still be registered after a try_send_to that races with eviction"
+        );
+    }
+
     // ---- C: MUC nick handling -----------------------------------------
 
     #[tokio::test]
@@ -5105,5 +5193,126 @@ mod tests {
         assert!(!conn.authenticated);
         assert!(!conn.resource_bound);
         assert!(!conn.resumed);
+    }
+
+    #[tokio::test]
+    async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
+        // Regression guard for the double-record bug reported in PR review:
+        // `handle_sm_resume` must request suppression of outbound recording
+        // for its own response batch. Replayed stanzas are already in the
+        // unacked queue — re-recording them would bump `outbound_count` and
+        // create duplicates.
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let stream_id = "stream-dup-check".to_string();
+        let detached = DetachedSession {
+            stream_id: stream_id.clone(),
+            jid,
+            inbound_count: 0,
+            outbound_count: 2,
+            last_acked: 0,
+            unacked_stanzas: vec![
+                (1, "<message id='m1'/>".to_string()),
+                (2, "<message id='m2'/>".to_string()),
+            ],
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+        };
+        state
+            .sm_session_registry
+            .store_session(detached)
+            .await
+            .expect("store");
+
+        let mut conn = LegacyConnState::new();
+        let frame = format!(
+            "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='0'/>",
+            stream_id
+        );
+        let _ = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+
+        // The resume handler must have raised the suppress flag so the main
+        // loop skips re-recording its own response batch.
+        assert!(
+            conn.suppress_sm_record_next_batch,
+            "handle_sm_resume must ask the main loop to skip SM recording for this batch"
+        );
+        // And the restored counters must still reflect what the client had
+        // acknowledged, not the inflated post-re-record values (2, not 4).
+        assert_eq!(conn.sm_state.outbound_count, 2);
+        assert_eq!(conn.sm_state.queue_len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
+        // Exercise the pieces the janitor composes: drain_expired() returns
+        // the removed sessions, and cleanup_muc_presence_for_jid removes the
+        // occupant that was held while the session was detached.
+        use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "expired_channel@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        // Put alice in the room, as if she'd detached with SM.
+        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &jid, "alice").await;
+        assert!(state
+            .muc_registry
+            .get_room_data(&room_jid)
+            .expect("room")
+            .read()
+            .await
+            .find_nick_by_real_jid(&jid)
+            .is_some());
+
+        // Seed an immediately-expired detached session for that JID.
+        let stream_id = "already-expired".to_string();
+        state
+            .sm_session_registry
+            .store_session(DetachedSession {
+                stream_id: stream_id.clone(),
+                jid: jid.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                last_acked: 0,
+                unacked_stanzas: Vec::new(),
+                max_resume_time: Some(0), // already expired
+                detached_at: std::time::Instant::now(),
+            })
+            .await
+            .expect("store");
+        state
+            .resumable_sessions
+            .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
+
+        // Wait a hair so the 0-second TTL is definitely in the past.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let drained = state
+            .sm_session_registry
+            .drain_expired()
+            .await
+            .expect("drain");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].stream_id, stream_id);
+
+        // The janitor body: remove sidecar + MUC occupant + any routing slot.
+        state.resumable_sessions.remove(&stream_id);
+        state.connection_registry.unregister(&drained[0].jid);
+        cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
+
+        assert!(!state.resumable_sessions.contains_key(&stream_id));
+        assert!(
+            state
+                .muc_registry
+                .get_room_data(&room_jid)
+                .expect("room")
+                .read()
+                .await
+                .find_nick_by_real_jid(&jid)
+                .is_none(),
+            "MUC occupant must be gone after janitor sweep"
+        );
     }
 }

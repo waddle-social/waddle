@@ -246,11 +246,12 @@ impl ConnectionRegistry {
     /// Non-blocking send. Returns true iff the stanza was queued.
     ///
     /// Intended for fan-out paths (MUC broadcasts) where a slow or zombied
-    /// consumer must never stall the producer task. On `Closed` the entry is
-    /// unregistered; on `Full` the stanza is dropped without touching the
-    /// registry (the consumer may just be catching up). Callers are free to
-    /// do their own stronger eviction on `Full` if they have additional
-    /// signal.
+    /// consumer must never stall the producer task. On `Closed` the stale
+    /// entry is evicted, but only if the current registry entry's sender is
+    /// still closed — a concurrent `register` for the same FullJid may have
+    /// installed a fresh, live sender between our `get` and `try_send`, and
+    /// we must not wipe the newcomer. On `Full` the stanza is dropped
+    /// without touching the registry (the consumer may just be catching up).
     pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> bool {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
@@ -266,10 +267,28 @@ impl ConnectionRegistry {
                 false
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                debug!(jid = %jid, "Outbound channel closed; unregistering stale connection");
-                self.unregister(jid);
+                self.remove_if_sender_closed(jid);
                 false
             }
+        }
+    }
+
+    /// Race-safe eviction of a stale entry whose outbound channel is closed.
+    ///
+    /// Used on the non-blocking broadcast path to clean up zombies without
+    /// risking the deletion of a live registration that happened to take
+    /// over the slot between the caller's `get` and its `try_send`. If the
+    /// currently-registered sender is still closed, the entry is removed
+    /// and the connected-users metric and presence state are updated;
+    /// otherwise this is a no-op.
+    fn remove_if_sender_closed(&self, jid: &FullJid) {
+        let removed = self
+            .connections
+            .remove_if(jid, |_, entry| entry.sender.is_closed());
+        if removed.is_some() {
+            prometheus::decrement_connected_users();
+            self.presence_states.remove(jid);
+            debug!(jid = %jid, "Evicted stale closed connection entry");
         }
     }
 
