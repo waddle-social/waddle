@@ -295,17 +295,17 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var compactChatHeader: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             Button { showChannelSidebar.toggle() } label: {
                 Image(systemName: "line.3.horizontal")
-                    .font(.body.weight(.semibold))
+                    .font(.title3)
                     .foregroundStyle(WaddleTheme.textSecondary)
             }
             .buttonStyle(.plain)
 
-            HStack(spacing: 6) {
-                Image(systemName: "number")
-                    .font(.caption.weight(.bold))
+            HStack(spacing: 5) {
+                Text("#")
+                    .font(.headline.weight(.bold))
                     .foregroundStyle(WaddleTheme.textMuted)
                 Text(store.selectedRoom?.title ?? "Select channel")
                     .font(.headline)
@@ -315,14 +315,9 @@ struct WaddleChatWorkspaceView: View {
 
             Spacer()
 
-            if store.bannerState.isVisible {
-                ChatConnectionBannerView(state: store.bannerState)
-                    .fixedSize()
-            }
-
             Button { showMembersSheet = true } label: {
                 Image(systemName: "person.2")
-                    .font(.subheadline)
+                    .font(.title3)
                     .foregroundStyle(WaddleTheme.textSecondary)
             }
             .buttonStyle(.plain)
