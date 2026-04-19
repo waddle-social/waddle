@@ -137,7 +137,10 @@ pub mod xep0084;
 pub mod xep0085;
 pub mod xep0092;
 pub mod xep0106;
+pub mod xep0107;
+pub mod xep0108;
 pub mod xep0115;
+pub mod xep0118;
 pub mod xep0153;
 pub mod xep0172;
 pub mod xep0184;
@@ -172,6 +175,7 @@ pub mod xep0421;
 pub mod xep0424;
 pub mod xep0425;
 pub mod xep0428;
+pub mod xep0430;
 pub mod xep0431;
 pub mod xep0433;
 pub mod xep0437;
@@ -179,6 +183,7 @@ pub mod xep0444;
 pub mod xep0445;
 pub mod xep0446;
 pub mod xep0447;
+pub mod xep0448;
 pub mod xep0449;
 pub mod xep0452;
 pub mod xep0461;
@@ -286,6 +291,21 @@ pub use xep0092::{
 };
 
 pub use xep0106::{escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping};
+
+pub use xep0107::{
+    build_mood_element, build_mood_retraction, is_mood_element, parse_mood_element, Mood,
+    MoodError, MoodKind, NS_MOOD, PEP_NODE_MOOD,
+};
+
+pub use xep0108::{
+    build_activity_element, build_activity_retraction, is_activity_element, parse_activity_element,
+    Activity, ActivityError, GeneralActivity, SpecificActivity, NS_ACTIVITY, PEP_NODE_ACTIVITY,
+};
+
+pub use xep0118::{
+    build_tune_element, build_tune_retraction, is_tune_element, parse_tune_element, Tune,
+    TuneError, NS_TUNE, PEP_NODE_TUNE,
+};
 
 pub use xep0172::{
     build_nick_element, extract_nickname_from_message, extract_nickname_from_presence, has_nick,
@@ -427,6 +447,12 @@ pub use xep0428::{
     set_fallback_payloads, strip_fallback_ranges, FallbackIndication, FallbackRange, NS_FALLBACK,
 };
 
+pub use xep0430::{
+    build_entry_element, build_inbox_query_result, build_mark_read_result, is_inbox_iq,
+    parse_entry_element, parse_inbox_query, parse_mark_read, InboxError, InboxMarkRead, InboxQuery,
+    NS_INBOX,
+};
+
 pub use xep0402::{
     build_bookmark_element, build_bookmark_item, is_bookmarks_node, parse_bookmark, Bookmark,
     BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
@@ -475,6 +501,12 @@ pub use xep0446::{
     build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
     is_file_metadata_element, parse_file_metadata_element, set_file_metadata, strip_file_metadata,
     FileMetadata, FileMetadataCarrier, FileMetadataError, NS_FILE_METADATA,
+};
+
+pub use xep0448::{
+    build_encrypted_element, extract_encrypted_file, is_encrypted_file_element,
+    parse_encrypted_element, set_encrypted_file, Cipher, EncryptedFile, EncryptedFileError,
+    EncryptedHash, NS_ESFS,
 };
 
 pub use xep0461::{
@@ -548,8 +580,9 @@ pub use xep0501::{
 };
 
 pub use xep0502::{
-    build_activity_notification, build_subscribe_element, is_activity_element,
-    parse_activity_notifications, ActivityTracker, RoomActivity, NS_MUC_ACTIVITY,
+    build_activity_notification, build_subscribe_element,
+    is_activity_element as is_muc_activity_element, parse_activity_notifications, ActivityTracker,
+    RoomActivity, NS_MUC_ACTIVITY,
 };
 
 pub use xep0500::{

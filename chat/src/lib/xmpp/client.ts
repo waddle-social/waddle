@@ -28,6 +28,8 @@ import {
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
 } from "../outbound-queue-store";
+import * as inboxApi from "./inbox";
+import * as pep from "./pep-publications";
 
 type StanzaSaslMechanism = { name: string };
 type StanzaSaslFactory = {
@@ -827,6 +829,46 @@ export class BrowserXmppClient {
       console.warn("Failed to disable XMPP push notifications", err);
       return false;
     }
+  }
+
+  // -- Inbox (XEP-0430) --
+
+  async fetchInbox(opts: inboxApi.FetchInboxOptions = {}): Promise<inboxApi.InboxResult> {
+    await this.connect();
+    if (!this.xmpp) return { totalUnread: 0, conversations: [] };
+    return inboxApi.fetchInbox(this.xmpp, opts);
+  }
+
+  async markInboxRead(partnerJid: string): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await inboxApi.markInboxRead(this.xmpp, barePeerJid(partnerJid));
+  }
+
+  // -- PEP Mood / Activity / Tune (XEP-0107 / 0108 / 0118) --
+
+  async publishMood(mood: pep.MoodPublication): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await pep.publishMood(this.xmpp, mood);
+  }
+  async retractMood(): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await pep.retractMood(this.xmpp);
+  }
+  async publishActivity(activity: pep.ActivityPublication): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await pep.publishActivity(this.xmpp, activity);
+  }
+  async retractActivity(): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await pep.retractActivity(this.xmpp);
+  }
+  async publishTune(tune: pep.TunePublication): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await pep.publishTune(this.xmpp, tune);
+  }
+  async retractTune(): Promise<void> {
+    await this.connect();
+    if (this.xmpp) await pep.retractTune(this.xmpp);
   }
 
   // -- Query delegators --

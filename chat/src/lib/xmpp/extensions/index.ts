@@ -12,6 +12,8 @@ import push from "./push";
 import markup from "./markup";
 import replies from "./replies";
 import forums from "./forums";
+import inbox from "./inbox";
+import encryptedFile from "./encrypted-file";
 
 const allDefinitions = [
   ...hats,
@@ -26,6 +28,8 @@ const allDefinitions = [
   ...markup,
   ...replies,
   ...forums,
+  ...inbox,
+  ...encryptedFile,
 ];
 
 export function registerWaddleExtensions(client: Agent): void {

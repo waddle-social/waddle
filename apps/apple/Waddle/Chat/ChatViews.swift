@@ -664,7 +664,7 @@ struct ChatComposerView: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
             }
-            .glassEffect(in: .rect(cornerRadius: 16))
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
         }
@@ -1464,7 +1464,7 @@ struct ChatNotificationToastView: View {
             .buttonStyle(.plain)
         }
         .padding(12)
-        .glassEffect(in: .rect(cornerRadius: 14))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .padding(.horizontal, 16)
         .transition(.move(edge: .top).combined(with: .opacity))
     }

@@ -1180,3 +1180,59 @@ enum XMPPXML {
         return string[next]
     }
 }
+
+// MARK: - Typed XML builder (CLAUDE.md XML rule-compliant)
+//
+// New outbound stanzas must be composed with `OutboundXMLElement`, which
+// mirrors the `minidom::Element::builder` pattern used on the Rust side.
+// The existing string-concat builders above are tracked for refactor in
+// GAP.md item 11.1 — do not add new string-concat builders.
+
+struct OutboundXMLElement: Sendable {
+    let name: String
+    let xmlns: String?
+    let attributes: [(String, String)]
+    let children: [OutboundXMLNode]
+
+    init(
+        _ name: String,
+        xmlns: String? = nil,
+        attributes: [(String, String)] = [],
+        children: [OutboundXMLNode] = []
+    ) {
+        self.name = name
+        self.xmlns = xmlns
+        self.attributes = attributes
+        self.children = children
+    }
+
+    func serialize() -> String {
+        var out = "<" + name
+        if let xmlns {
+            out += " xmlns='" + XMPPXML.escape(xmlns) + "'"
+        }
+        for (key, value) in attributes {
+            out += " " + key + "='" + XMPPXML.escape(value) + "'"
+        }
+        if children.isEmpty {
+            out += "/>"
+            return out
+        }
+        out += ">"
+        for child in children {
+            switch child {
+            case .element(let element):
+                out += element.serialize()
+            case .text(let text):
+                out += XMPPXML.escape(text)
+            }
+        }
+        out += "</" + name + ">"
+        return out
+    }
+}
+
+enum OutboundXMLNode: Sendable {
+    case element(OutboundXMLElement)
+    case text(String)
+}

@@ -28,6 +28,7 @@ pub mod carbons;
 pub mod commands;
 pub mod connection;
 pub mod disco;
+pub mod inbox;
 pub mod isr;
 pub mod mam;
 pub mod metrics;
