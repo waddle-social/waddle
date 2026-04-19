@@ -12,8 +12,9 @@ import type {
 } from "./types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
-import { dispatchGroupchat, ext } from "./message-parsing";
+import { ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
+import { buildMessageDispatcher } from "./message-dispatch";
 import * as messaging from "./messaging";
 import * as history from "./history";
 import * as dmMessaging from "./dm-messaging";
@@ -1266,23 +1267,24 @@ export class BrowserXmppClient {
       }
     });
 
-    xmpp.on("groupchat", (msg) => dispatchGroupchat(msg, {
-      currentRoom: this.currentRoom,
-      selfNick: this.session.username,
-      onMessage: this.messageHandler,
-      onChatState: this.chatStateHandler,
-      onDisplayed: this.displayedHandler,
-      onReaction: this.reactionHandler,
-      onActivity: this.activityHandler,
-    }));
-
-    xmpp.on("chat", (msg) => dispatchChat(msg, {
-      selfBareJid: barePeerJid(this.session.jid),
-      onMessage: this.directMessageHandler,
-      onChatState: this.dmChatStateHandler,
-      onDisplayed: this.dmDisplayedHandler,
-      onReaction: this.dmReactionHandler,
-    }));
+    xmpp.on("message", buildMessageDispatcher(
+      () => ({
+        currentRoom: this.currentRoom,
+        selfNick: this.session.username,
+        onMessage: this.messageHandler,
+        onChatState: this.chatStateHandler,
+        onDisplayed: this.displayedHandler,
+        onReaction: this.reactionHandler,
+        onActivity: this.activityHandler,
+      }),
+      () => ({
+        selfBareJid: barePeerJid(this.session.jid),
+        onMessage: this.directMessageHandler,
+        onChatState: this.dmChatStateHandler,
+        onDisplayed: this.dmDisplayedHandler,
+        onReaction: this.dmReactionHandler,
+      }),
+    ));
 
     xmpp.on("carbon:sent", (msg) => {
       const forwarded = msg.carbon?.forward?.message;
