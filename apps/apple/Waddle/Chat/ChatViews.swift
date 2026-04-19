@@ -839,6 +839,7 @@ struct ChatComposerView: View {
     var replyingToMessage: ChatTimelineMessage? = nil
     var onCancelReply: (() -> Void)? = nil
     var onFileSelected: ((_ data: Data, _ fileName: String, _ mediaType: String) -> Void)? = nil
+    var onGifSelected: ((_ url: String) -> Void)? = nil
     var isUploadingFile: Bool = false
     var mentionSuggestions: [ChatRoomMember] = []
     var onMentionQueryChanged: ((String?) -> Void)? = nil
@@ -846,6 +847,7 @@ struct ChatComposerView: View {
     var usesCompactConversationChrome: Bool = false
     var onSend: () -> Void
     @State private var showEmojiPicker = false
+    @State private var showGifPicker = false
     @State private var selectedPhoto: PhotosPickerItem?
 
     private var hasSendableText: Bool {
@@ -991,6 +993,7 @@ struct ChatComposerView: View {
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 attachmentPickerButton
+                gifPickerButton
                 emojiPickerButton
 
                 sendButton
@@ -1120,6 +1123,26 @@ struct ChatComposerView: View {
                         selectedPhoto = nil
                     }
                 }
+            }
+        }
+    }
+
+    private var gifPickerButton: some View {
+        Button {
+            showGifPicker.toggle()
+        } label: {
+            Text("GIF")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showGifPicker) {
+            ChatGifPickerView { url in
+                showGifPicker = false
+                onGifSelected?(url)
             }
         }
     }
@@ -1309,6 +1332,119 @@ struct ChatTypingIndicatorView: View {
             return "\(typingUsers[0]) and \(typingUsers[1]) are typing"
         default:
             return "\(typingUsers[0]) and \(typingUsers.count - 1) others are typing"
+        }
+    }
+}
+
+struct ChatGifPickerView: View {
+    var onSelect: (String) -> Void
+    @State private var searchText = ""
+    @State private var results: [GiphyGif] = []
+    @State private var isLoading = false
+    @State private var searchTask: Task<Void, Never>?
+
+    private let apiKey = "dc6zaTOxFJmzC"
+
+    struct GiphyGif: Identifiable, Decodable {
+        let id: String
+        let images: GiphyImages
+
+        struct GiphyImages: Decodable {
+            let fixed_height_small: GiphyImage
+            let original: GiphyImage
+        }
+
+        struct GiphyImage: Decodable {
+            let url: String
+            let width: String?
+            let height: String?
+        }
+    }
+
+    struct GiphyResponse: Decodable {
+        let data: [GiphyGif]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("Search GIFs", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(10)
+                .onChange(of: searchText) { _, query in
+                    searchTask?.cancel()
+                    searchTask = Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        guard !Task.isCancelled else { return }
+                        await fetchGifs(query: query)
+                    }
+                }
+
+            if isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if results.isEmpty {
+                Text("No GIFs found")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 4)], spacing: 4) {
+                        ForEach(results) { gif in
+                            Button {
+                                onSelect(gif.images.original.url)
+                            } label: {
+                                AsyncImage(url: URL(string: gif.images.fixed_height_small.url)) { phase in
+                                    switch phase {
+                                    case .success(let image):
+                                        image
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fill)
+                                            .frame(height: 80)
+                                            .clipped()
+                                    case .empty:
+                                        Color.secondary.opacity(0.1)
+                                            .frame(height: 80)
+                                            .overlay { ProgressView() }
+                                    default:
+                                        Color.secondary.opacity(0.1)
+                                            .frame(height: 80)
+                                    }
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(8)
+                }
+            }
+        }
+        .frame(width: 360, height: 340)
+        .task {
+            await fetchGifs(query: "")
+        }
+    }
+
+    private func fetchGifs(query: String) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        let endpoint: String
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            endpoint = "https://api.giphy.com/v1/gifs/trending?api_key=\(apiKey)&limit=24&rating=g"
+        } else {
+            let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+            endpoint = "https://api.giphy.com/v1/gifs/search?q=\(encoded)&api_key=\(apiKey)&limit=24&rating=g"
+        }
+
+        guard let url = URL(string: endpoint) else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let response = try JSONDecoder().decode(GiphyResponse.self, from: data)
+            results = response.data
+        } catch {
+            results = []
         }
     }
 }

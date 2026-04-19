@@ -852,6 +852,10 @@ struct WaddleChatWorkspaceView: View {
                 onFileSelected: { data, name, type in
                     Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
                 },
+                onGifSelected: { url in
+                    store.composerText = url
+                    Task { await store.sendComposerMessage() }
+                },
                 isUploadingFile: model.isUploadingFile,
                 mentionSuggestions: mentionSuggestions,
                 onMentionQueryChanged: { query in store.mentionQuery = query },
@@ -912,6 +916,10 @@ struct WaddleChatWorkspaceView: View {
                         onCancelReply: { store.setReplyingTo(nil) },
                         onFileSelected: { data, name, type in
                             Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+                        },
+                        onGifSelected: { url in
+                            store.composerText = url
+                            Task { await store.sendComposerMessage() }
                         },
                         isUploadingFile: model.isUploadingFile,
                         mentionSuggestions: mentionSuggestions,

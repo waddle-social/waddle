@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 14, items 6.2/6.3/6.4/8.1)
+> Last updated: 2026-04-19 (loop 15 — ALL GAPS CLOSED)
 
 ## Legend
 
@@ -57,7 +57,7 @@
 | 4.1 | File upload (images, documents) | CRITICAL | [x] | XEP-0363, XEP-0447 | Discover upload service, request slot, HTTP PUT, send file-sharing message, PhotosPicker in composer |
 | 4.2 | Inline image display | CRITICAL | [x] | XEP-0446 | Parse XEP-0447/0446 file-sharing stanzas, render inline images with AsyncImage, show file download links with metadata |
 | 4.3 | Image lightbox viewer | HIGH | [x] | - | Full-screen image viewer on tap with dismiss button and filename overlay |
-| 4.4 | GIF picker (GIPHY) | MEDIUM | [ ] | - | Requires external GIPHY/Tenor API key configuration |
+| 4.4 | GIF picker (GIPHY) | MEDIUM | [x] | - | GIPHY API search/trending, grid picker popover with AsyncImage previews, sends GIF URL as message |
 | 4.5 | Sticker support | LOW | [x] | XEP-0449 | Parse <sticker> element, isSticker flag on messages, sticker images displayed via existing file-sharing renderer |
 | 4.6 | File download | HIGH | [x] | - | Downloadable file links with name, media type, and size shown inline |
 
