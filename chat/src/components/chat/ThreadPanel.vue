@@ -31,10 +31,10 @@ const props = defineProps<{
   uploadProgress: { uploading: boolean; progress: number; filename: string };
   channelName: string;
   /**
-   * When true, the composer is hidden and sub-thread navigation is suppressed.
+   * When true, the composer is hidden but sub-thread navigation stays active.
    * Used to render the parent context pane in the accordion layout.
    */
-  readOnly?: boolean;
+  hideComposer?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -123,7 +123,7 @@ function presenceFor(author: string): OccupantPresence {
 }
 
 function beginReplyInThread(message: TimelineMessage) {
-  if (props.readOnly) return;
+  if (props.hideComposer) return;
   replyingTo.value = {
     id: message.id,
     author: message.author,
@@ -161,7 +161,6 @@ function startSubThread(message: TimelineMessage) {
 }
 
 function onOpenThreadFromCard(threadId: string) {
-  if (props.readOnly) return;
   // Already-open thread id is a no-op; otherwise push it onto the stack.
   if (threadId === activeThreadId.value) return;
   emit("pushThread", threadId);
@@ -182,23 +181,17 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         <template v-for="(label, i) in breadcrumbLabels" :key="i">
           <ChevronRight class="w-3 h-3 text-muted-foreground/60 flex-shrink-0" />
           <button
-            v-if="!readOnly"
             type="button"
             class="truncate max-w-40 text-left hover:text-primary transition-colors"
             :class="i === breadcrumbLabels.length - 1 ? 'text-foreground' : 'text-muted-foreground'"
             :title="label"
             @click="emit('popTo', i)"
           >{{ label }}</button>
-          <span
-            v-else
-            class="truncate max-w-40 text-muted-foreground"
-            :title="label"
-          >{{ label }}</span>
         </template>
       </div>
       <!-- Mobile back button: goes up one level in the thread stack (hidden on desktop) -->
       <button
-        v-if="!readOnly && threadStack.length > 1"
+        v-if="threadStack.length > 1"
         type="button"
         class="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-all duration-200 lg:hidden"
         title="Go back"
@@ -208,7 +201,6 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       </button>
       <!-- Close button: closes the entire thread panel -->
       <button
-        v-if="!readOnly"
         type="button"
         class="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-all duration-200"
         title="Close thread"
@@ -263,7 +255,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             @reply="beginReplyInThread"
             @open-thread="onOpenThreadFromCard"
           />
-          <div v-if="!readOnly" class="flex flex-wrap items-center gap-2 pl-12 pb-1.5 -mt-0.5">
+          <div class="flex flex-wrap items-center gap-2 pl-12 pb-1.5 -mt-0.5">
             <button
               v-if="replyChildHasNestedThread(child)"
               type="button"
@@ -287,7 +279,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         </div>
 
         <div
-          v-if="activeEntry.directChildren.length === 0 && !readOnly"
+          v-if="activeEntry.directChildren.length === 0 && !hideComposer"
           class="text-center py-8 text-[12px] text-muted-foreground"
         >
           No replies yet. Start the conversation.
@@ -301,8 +293,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       </div>
     </div>
 
-    <!-- Composer: hidden in readOnly (parent context) mode -->
-    <div v-if="!readOnly" class="border-t border-border flex-shrink-0">
+    <!-- Composer: hidden in parent context pane -->
+    <div v-if="!hideComposer" class="border-t border-border flex-shrink-0">
       <MessageComposer
         :ref="setComposerRef"
         v-model:draft="draft"

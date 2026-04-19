@@ -127,6 +127,12 @@ const activeFirstUnseenId = computed(() =>
 // don't use XEP-0201 threads yet.
 const activeThreadStack = ref<string[]>([]);
 const threads = useThreads(activeMessages);
+
+function getThreadLabel(threadId: string): string {
+  const entry = threads.resolveEntry(threadId);
+  const body = entry?.root?.body?.trim() ?? "";
+  return body.length > 0 ? body.slice(0, 40) : threadId.slice(0, 8);
+}
 const activeDraft = computed({
   get: () => (ui.sidebarMode.value === "dms" ? dmMessaging.draft.value : messaging.draft.value),
   set: (value: string) => {
@@ -1099,9 +1105,39 @@ onUnmounted(() => {
           />
         </div>
 
+        <!-- Collapsed accordion bars: one per hidden ancestor level (desktop only, depth >= 2).
+             Each bar is a thin vertical strip with a rotated label; clicking
+             navigates to that level. The channel bar returns to the main feed,
+             thread bars collapse levels older than the parent context pane. -->
+        <template v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2">
+          <!-- Channel / main-feed bar -->
+          <button
+            type="button"
+            class="hidden lg:flex flex-col items-center justify-start w-10 min-h-0 border-l border-border bg-muted/30 hover:bg-muted/60 transition-colors cursor-pointer flex-shrink-0 pt-4 gap-1"
+            title="Back to channel"
+            @click="closeThreadPanel"
+          >
+            <span class="accordion-bar-label text-muted-foreground/80">
+              {{ waddles.currentChannel.value?.name ?? 'Channel' }}
+            </span>
+          </button>
+          <!-- Ancestor thread bars: levels older than the parent (skip last 2 = parent + active) -->
+          <button
+            v-for="(threadId, i) in activeThreadStack.slice(0, -2)"
+            :key="threadId"
+            type="button"
+            class="hidden lg:flex flex-col items-center justify-start w-10 min-h-0 border-l border-border bg-muted/20 hover:bg-muted/50 transition-colors cursor-pointer flex-shrink-0 pt-4 gap-1"
+            :title="getThreadLabel(threadId)"
+            @click="popThreadTo(i)"
+          >
+            <span class="accordion-bar-label text-muted-foreground/60">
+              {{ getThreadLabel(threadId) }}
+            </span>
+          </button>
+        </template>
+
         <!-- Parent thread pane: desktop-only context when depth >= 2.
-             Shows the stack up to (but not including) the current active thread,
-             rendered in read-only mode (no composer, no sub-thread navigation). -->
+             Shows the second-to-last thread in read-only mode (no composer). -->
         <div
           v-if="ui.sidebarMode.value === 'channels' && activeThreadStack.length >= 2"
           class="hidden lg:flex lg:flex-col lg:flex-1 min-w-0 min-h-0"
@@ -1122,7 +1158,10 @@ onUnmounted(() => {
             :is-sending="false"
             :upload-progress="{ uploading: false, progress: 0, filename: '' }"
             :channel-name="waddles.currentChannel.value?.name ?? ''"
-            :read-only="true"
+            :hide-composer="true"
+            @close="closeThreadPanel"
+            @pop-to="popThreadTo"
+            @push-thread="pushThread"
             @edit-message="editActiveMessage"
             @retract-message="retractActiveMessage"
             @react-message="reactActiveMessage"
