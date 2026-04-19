@@ -635,36 +635,36 @@ struct ChatComposerView: View {
 
             composerReplyPreview
 
-            HStack(spacing: 6) {
-                attachmentPickerButton
-                gifPickerButton
-                emojiPickerButton
+            WaddleTheme.divider.frame(height: 1)
 
-                HStack(spacing: 0) {
-                    TextField(placeholder, text: $text, axis: .vertical)
-                        .lineLimit(1...4)
-                        .font(.subheadline)
-                        .foregroundStyle(WaddleTheme.textPrimary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .onSubmit { if hasSendableText { onSend() } }
+            VStack(spacing: 0) {
+                TextField(placeholder, text: $text, axis: .vertical)
+                    .lineLimit(1...6)
+                    .font(.body)
+                    .foregroundStyle(WaddleTheme.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    .padding(.bottom, 6)
+                    .onSubmit { if hasSendableText { onSend() } }
 
-                    if hasSendableText {
-                        Button(action: onSend) {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.title3)
-                                .foregroundStyle(WaddleTheme.accent)
-                        }
-                        .disabled(!canSend || isSending)
-                        .padding(.trailing, 6)
+                HStack(spacing: 16) {
+                    attachmentPickerButton
+                    gifPickerButton
+                    emojiPickerButton
+
+                    Spacer()
+
+                    Button(action: onSend) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.body)
+                            .foregroundStyle(hasSendableText ? WaddleTheme.accent : WaddleTheme.textMuted)
                     }
+                    .disabled(!canSend || isSending || !hasSendableText)
                 }
-                .background(WaddleTheme.surfaceRaised, in: Capsule())
-                .overlay(Capsule().strokeBorder(WaddleTheme.divider))
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(WaddleTheme.chatBackground)
+            .background(WaddleTheme.composerBackground)
         }
         .onChange(of: text) { _, newValue in
             updateMentionQuery(newValue)
