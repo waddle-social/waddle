@@ -7,6 +7,7 @@ import { useDmMessaging } from "@/composables/useDmMessaging";
 import { useMessaging } from "@/composables/useMessaging";
 import { useThreads } from "@/composables/useThreads";
 import { useUiState } from "@/composables/useUiState";
+import { useAppUpdate } from "@/composables/useAppUpdate";
 import { useNotifications } from "@/composables/useNotifications";
 import { useVersion } from "@/composables/useVersion";
 import { buildDmPath, buildPath, buildSettingsPath, parseRoute, pushDmRoute, pushRoute, pushSettingsRoute, resolveWaddle, resolveChannel } from "@/composables/useRouting";
@@ -169,6 +170,7 @@ const activeDmPeer = computed(() => {
 });
 
 const notifications = useNotifications();
+const appUpdate = useAppUpdate();
 const version = useVersion(xmppClient);
 const avatarUrlByAuthor = computed<Record<string, string | null>>(() => {
   const avatars: Record<string, string | null> = {};
@@ -300,6 +302,10 @@ async function handleToggleNotifications() {
   } else if (xmppClient.value && connectionStore.session) {
     await notifications.disablePushSubscription(xmppClient.value, connectionStore.session.jid);
   }
+}
+
+async function refreshAppUpdate() {
+  await appUpdate.applyUpdate();
 }
 
 const activeTarget = computed(() =>
@@ -751,6 +757,19 @@ let hasBootstrapped = false;
 watch(
   () => connectionStore.appState,
   (state) => {
+    if (state === "ready") {
+      void appUpdate.start();
+      return;
+    }
+
+    appUpdate.stop();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => connectionStore.appState,
+  (state) => {
     if (state === "ready" && !hasBootstrapped) {
       hasBootstrapped = true;
       void onConnectionReady();
@@ -765,6 +784,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
+  appUpdate.stop();
   messaging.disconnect();
   dmMessaging.disconnect();
 });
@@ -973,6 +993,8 @@ onUnmounted(() => {
           :first-unseen-id="activeFirstUnseenId"
           :xmpp-status="messaging.xmppStatus.value"
           :action-error="ui.actionError.value"
+          :update-available="appUpdate.updateAvailable.value"
+          :is-applying-update="appUpdate.isApplyingUpdate.value"
           :is-loading-messages="activeIsLoadingMessages"
           :is-sending="activeIsSending"
           :can-manage-channels="waddles.canManageChannels.value"
@@ -1002,6 +1024,7 @@ onUnmounted(() => {
           @edit-channel="openChannelEdit"
           @open-dm="handleOpenDm"
           @open-thread="openThread"
+          @refresh-update="refreshAppUpdate"
         />
 
         <ThreadPanel
