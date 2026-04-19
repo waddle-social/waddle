@@ -662,11 +662,9 @@ struct ChatComposerView: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
             }
-            .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(WaddleTheme.divider))
+            .glassEffect(in: .rect(cornerRadius: 16))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(WaddleTheme.chatBackground)
         }
         .onChange(of: text) { _, newValue in
             updateMentionQuery(newValue)
@@ -1464,8 +1462,7 @@ struct ChatNotificationToastView: View {
             .buttonStyle(.plain)
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
+        .glassEffect(in: .rect(cornerRadius: 14))
         .padding(.horizontal, 16)
         .transition(.move(edge: .top).combined(with: .opacity))
     }

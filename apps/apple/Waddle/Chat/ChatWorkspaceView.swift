@@ -247,7 +247,7 @@ struct WaddleChatWorkspaceView: View {
 
                 compactSidebar
                     .frame(width: WaddleTheme.sidebarWidth)
-                    .background(WaddleTheme.sidebarBackground.ignoresSafeArea())
+                    .glassEffect(in: .rect)
                     .transition(.move(edge: .leading))
             }
         }
@@ -324,8 +324,7 @@ struct WaddleChatWorkspaceView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(WaddleTheme.surfaceRaised)
-        .overlay(alignment: .bottom) { WaddleTheme.divider.frame(height: 1) }
+        .glassEffect(.regular, in: .rect(cornerRadius: 0))
     }
 
     private var joinButton: some View {
