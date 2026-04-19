@@ -5,6 +5,7 @@ struct WaddleChatWorkspaceView: View {
     @ObservedObject var store: ChatSurfaceStore
     let waddle: WaddleSummary
     @State private var showMembersSheet = false
+    @State private var showChannelSidebar = false
     private var mentionSuggestions: [ChatRoomMember] {
         guard let query = store.mentionQuery else { return [] }
         if query.isEmpty { return model.chatMembers.filter { !$0.isSelf } }
@@ -232,11 +233,25 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var compactLayoutView: some View {
-        VStack(spacing: 0) {
-            compactChrome
-            conversationPane(compactStyle: true)
+        ZStack(alignment: .leading) {
+            VStack(spacing: 0) {
+                compactChatHeader
+                conversationPane(compactStyle: true)
+            }
+            .background(WaddleTheme.chatBackground)
+
+            if showChannelSidebar {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                    .onTapGesture { showChannelSidebar = false }
+
+                compactSidebar
+                    .frame(width: WaddleTheme.sidebarWidth)
+                    .background(WaddleTheme.sidebarBackground.ignoresSafeArea())
+                    .transition(.move(edge: .leading))
+            }
         }
-        .background(workspaceBackground)
+        .animation(.easeOut(duration: 0.2), value: showChannelSidebar)
     }
 
     @ViewBuilder
@@ -258,7 +273,7 @@ struct WaddleChatWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 #else
         VStack(spacing: 0) {
-            compactChrome
+            compactChatHeader
 
             HStack(spacing: 0) {
                 desktopChannelRail
@@ -279,115 +294,43 @@ struct WaddleChatWorkspaceView: View {
 #endif
     }
 
-    private var compactChrome: some View {
-        VStack(spacing: 0) {
-            compactHeader
-            compactChannelRail
-        }
-        .background(compactChromeBackground)
-        .overlay(alignment: .bottom) {
-            Divider()
-        }
-    }
+    private var compactChatHeader: some View {
+        HStack(spacing: 12) {
+            Button { showChannelSidebar.toggle() } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(WaddleTheme.textSecondary)
+            }
+            .buttonStyle(.plain)
 
-    private var compactHeader: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(waddle.name)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    if store.selectedRoom == nil, let description = waddle.description, !description.isEmpty {
-                        Text(description)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                compactChannelMenu
-
-                Button {
-                    showMembersSheet = true
-                } label: {
-                    Image(systemName: "person.2.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(width: 38, height: 38)
-                        .background(compactToolbarFill, in: Circle())
-                        .overlay(alignment: .topTrailing) {
-                            if !model.chatMembers.isEmpty {
-                                Text("\(min(model.chatMembers.count, 99))")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.background)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(Color.accentColor, in: Capsule())
-                                    .offset(x: 6, y: -5)
-                            }
-                        }
-                }
-                .buttonStyle(.plain)
-
-                compactJoinButton
+            HStack(spacing: 6) {
+                Image(systemName: "number")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(WaddleTheme.textMuted)
+                Text(store.selectedRoom?.title ?? "Select channel")
+                    .font(.headline)
+                    .foregroundStyle(WaddleTheme.textPrimary)
+                    .lineLimit(1)
             }
 
-            if let room = store.selectedRoom {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("#\(room.title)")
-                            .font(.title3.weight(.semibold))
-                            .lineLimit(1)
+            Spacer()
 
-                        if room.unreadCount > 0 {
-                            compactMetaPill(text: "\(room.unreadCount) new", systemImage: "circle.fill", tint: .accentColor)
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-
-                    HStack(spacing: 8) {
-                        if let subtitle = room.subtitle, !subtitle.isEmpty {
-                            compactMetaPill(text: subtitle, systemImage: "bubble.left.and.text.bubble.right")
-                        }
-
-                        compactMetaPill(text: "\(model.chatMembers.count)", systemImage: "person.2.fill")
-
-                        if let lastActivityAt = room.lastActivityAt {
-                            compactMetaPill(
-                                text: RelativeDateTimeFormatter().localizedString(for: lastActivityAt, relativeTo: Date()),
-                                systemImage: "clock"
-                            )
-                        }
-                    }
-
-                    if store.bannerState.isVisible {
-                        ChatConnectionBannerView(state: store.bannerState)
-                    }
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Choose a channel")
-                        .font(.title3.weight(.semibold))
-
-                    if let description = waddle.description, !description.isEmpty {
-                        Text(description)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                }
-            }
-
-            if store.selectedRoom == nil, store.bannerState.isVisible {
+            if store.bannerState.isVisible {
                 ChatConnectionBannerView(state: store.bannerState)
+                    .fixedSize()
             }
+
+            Button { showMembersSheet = true } label: {
+                Image(systemName: "person.2")
+                    .font(.subheadline)
+                    .foregroundStyle(WaddleTheme.textSecondary)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
+        .padding(.vertical, 10)
+        .background(WaddleTheme.surfaceRaised)
+        .overlay(alignment: .bottom) { WaddleTheme.divider.frame(height: 1) }
     }
 
     private var joinButton: some View {
@@ -404,111 +347,128 @@ struct WaddleChatWorkspaceView: View {
         }
     }
 
-    private var compactJoinButton: some View {
-        Group {
-            if model.isJoined(waddle.id) {
-                Label("Joined", systemImage: "checkmark.circle.fill")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(compactToolbarFill, in: Capsule())
-            } else {
-                Button("Join") {
-                    Task { await model.join(waddle) }
+    private var compactSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text(waddle.name.prefix(2).uppercased())
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .background(WaddleTheme.accent, in: RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(waddle.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(WaddleTheme.textPrimary)
+                    Text("\(model.members.count) members")
+                        .font(.caption2)
+                        .foregroundStyle(WaddleTheme.textMuted)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                Spacer()
             }
-        }
-    }
+            .padding(16)
 
-    private var compactChannelMenu: some View {
-        Menu {
-            if store.rooms.isEmpty {
-                Text("No channels yet")
-            } else {
-                ForEach(store.rooms) { room in
-                    Button {
-                        Task { await model.selectChannel(room.id) }
-                    } label: {
-                        if room.id == model.selectedChannelID {
-                            Label("#\(room.title)", systemImage: "checkmark")
-                        } else {
-                            Text("#\(room.title)")
-                        }
-                    }
-                }
-            }
+            WaddleTheme.divider.frame(height: 1)
 
-            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    sidebarSectionHeader("Channels", action: { showCreateChannelSheet = true })
 
-            Button {
-                showCreateChannelSheet = true
-            } label: {
-                Label("New Channel", systemImage: "plus")
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "number")
-                    .font(.caption.weight(.semibold))
-                Text(store.selectedRoom?.title ?? "Channels")
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.bold))
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(compactToolbarFill, in: Capsule())
-        }
-    }
-
-    private var compactChannelRail: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
                     ForEach(store.rooms) { room in
-                        Button {
-                            Task { await model.selectChannel(room.id) }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text("#\(room.title)")
-                                    .font(.footnote.weight(.semibold))
-                                    .lineLimit(1)
+                        sidebarChannelRow(room: room)
+                    }
 
-                                if room.unreadCount > 0 {
-                                    Text("\(room.unreadCount)")
-                                        .font(.caption2.weight(.bold))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 3)
-                                        .background(Color.accentColor.opacity(0.16), in: Capsule())
-                                }
-                            }
-                            .foregroundStyle(room.id == model.selectedChannelID ? .primary : .secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(compactRailFill(isSelected: room.id == model.selectedChannelID), in: Capsule())
-                            .overlay {
-                                Capsule()
-                                    .strokeBorder(compactRailStroke(isSelected: room.id == model.selectedChannelID), lineWidth: 1)
-                            }
+                    if !store.dmConversations.isEmpty {
+                        sidebarSectionHeader("Direct Messages", action: { showNewDmSheet = true })
+
+                        ForEach(store.dmConversations) { convo in
+                            sidebarDmRow(convo: convo)
                         }
-                        .buttonStyle(.plain)
-                        .id(room.id)
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
-            }
-            .onAppear {
-                scrollToSelectedChannel(using: proxy)
-            }
-            .onChange(of: model.selectedChannelID) { _, _ in
-                scrollToSelectedChannel(using: proxy)
+                .padding(.vertical, 8)
             }
         }
+    }
+
+    private func sidebarSectionHeader(_ title: String, action: @escaping () -> Void) -> some View {
+        HStack {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(WaddleTheme.textMuted)
+                .textCase(.uppercase)
+            Spacer()
+            Button(action: action) {
+                Image(systemName: "plus")
+                    .font(.caption)
+                    .foregroundStyle(WaddleTheme.textMuted)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+    }
+
+    private func sidebarChannelRow(room: ChatRoomSelection) -> some View {
+        Button {
+            Task { await model.selectChannel(room.id) }
+            showChannelSidebar = false
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "number")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(model.selectedChannelID == room.id ? WaddleTheme.textPrimary : WaddleTheme.textMuted)
+                    .frame(width: 18)
+                Text(room.title)
+                    .font(WaddleTheme.channelFont)
+                    .foregroundStyle(model.selectedChannelID == room.id ? WaddleTheme.textPrimary : WaddleTheme.textSecondary)
+                    .lineLimit(1)
+                Spacer()
+                if room.unreadCount > 0 {
+                    Text("\(room.unreadCount)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(WaddleTheme.unreadBadge, in: Capsule())
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(model.selectedChannelID == room.id ? WaddleTheme.channelSelected : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 8)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sidebarDmRow(convo: DmConversation) -> some View {
+        Button {
+            Task { await model.openDm(peerJID: convo.peerJID, peerUsername: convo.peerUsername) }
+            showChannelSidebar = false
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(convo.presenceShow == .available ? WaddleTheme.presenceOnline : WaddleTheme.presenceOffline)
+                    .frame(width: 8, height: 8)
+                Text(convo.peerUsername)
+                    .font(WaddleTheme.channelFont)
+                    .foregroundStyle(WaddleTheme.textSecondary)
+                    .lineLimit(1)
+                Spacer()
+                if convo.unreadCount > 0 {
+                    Text("\(convo.unreadCount)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(WaddleTheme.unreadBadge, in: Capsule())
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .padding(.horizontal, 8)
+        }
+        .buttonStyle(.plain)
     }
 
     private var desktopChannelRail: some View {
@@ -858,8 +818,7 @@ struct WaddleChatWorkspaceView: View {
                 },
                 isUploadingFile: model.isUploadingFile,
                 mentionSuggestions: mentionSuggestions,
-                onMentionQueryChanged: { query in store.mentionQuery = query },
-                usesOperationalChrome: true
+                onMentionQueryChanged: { query in store.mentionQuery = query }
                 ) {
                     Task { await store.sendComposerMessage() }
                 }
@@ -923,8 +882,7 @@ struct WaddleChatWorkspaceView: View {
                         },
                         isUploadingFile: model.isUploadingFile,
                         mentionSuggestions: mentionSuggestions,
-                        onMentionQueryChanged: { query in store.mentionQuery = query },
-                        usesCompactConversationChrome: compactStyle
+                        onMentionQueryChanged: { query in store.mentionQuery = query }
                     ) {
                         Task { await store.sendComposerMessage() }
                     }
@@ -1057,22 +1015,6 @@ struct WaddleChatWorkspaceView: View {
 #endif
     }
 
-    private var compactChromeBackground: Color {
-#if os(iOS)
-        return Color(.secondarySystemGroupedBackground)
-#else
-        return workspaceBackground
-#endif
-    }
-
-    private var compactToolbarFill: Color {
-#if os(iOS)
-        return Color(.tertiarySystemGroupedBackground)
-#else
-        return Color.secondary.opacity(0.08)
-#endif
-    }
-
     private var desktopPaneBackground: some View {
         RoundedRectangle(cornerRadius: 26, style: .continuous)
             .fill(.thinMaterial)
@@ -1088,30 +1030,6 @@ struct WaddleChatWorkspaceView: View {
             return AnyShapeStyle(Color.accentColor.opacity(0.16))
         }
         return AnyShapeStyle(Color.secondary.opacity(0.08))
-    }
-
-    private func compactRailFill(isSelected: Bool) -> Color {
-        isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.10)
-    }
-
-    private func compactRailStroke(isSelected: Bool) -> Color {
-        isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12)
-    }
-
-    private func compactMetaPill(text: String, systemImage: String, tint: Color = .secondary) -> some View {
-        Label(text, systemImage: systemImage)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(tint.opacity(tint == .secondary ? 0.10 : 0.12), in: Capsule())
-    }
-
-    private func scrollToSelectedChannel(using proxy: ScrollViewProxy) {
-        guard let selectedChannelID = model.selectedChannelID else { return }
-        withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo(selectedChannelID, anchor: .center)
-        }
     }
 
     private func isInteractivePresence(_ member: ChatRoomMember) -> Bool {
