@@ -49,6 +49,8 @@ export async function retractMood(xmpp: Agent): Promise<void> {
 
 // -- Activity (XEP-0108) ------------------------------------------------
 
+const NS_ACTIVITY = "http://jabber.org/protocol/activity";
+
 /** General activity categories from XEP-0108 §3.1 (matches USER_ACTIVITY_GENERAL). */
 export type GeneralActivity =
   | "doing_chores" | "drinking" | "eating" | "exercising" | "grooming"
@@ -70,7 +72,7 @@ export async function publishActivity(xmpp: Agent, activity: ActivityPublication
 }
 
 export async function retractActivity(xmpp: Agent): Promise<void> {
-  await xmpp.publishActivity({ activity: ["undefined"] });
+  await xmpp.publish("", NS_ACTIVITY, { itemType: NS_ACTIVITY });
 }
 
 // -- Tune (XEP-0118) ----------------------------------------------------

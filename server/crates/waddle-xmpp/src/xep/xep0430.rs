@@ -248,6 +248,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_query_accepts_numeric_only_unread() {
+        let iq = get_iq(
+            Element::builder("query", NS_INBOX)
+                .attr("since", "123")
+                .attr("only-unread", "1")
+                .build(),
+        );
+        let parsed = parse_inbox_query(&iq).unwrap();
+        assert_eq!(parsed.since, Some(123));
+        assert!(parsed.only_unread);
+    }
+
+    #[test]
     fn test_parse_mark_read() {
         let iq = set_iq(
             Element::builder("mark-read", NS_INBOX)

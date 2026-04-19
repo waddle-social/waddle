@@ -11,10 +11,12 @@ import {
 
 function makeAgent() {
   return {
+    publish: mock(() => Promise.resolve({})),
     publishMood: mock(() => Promise.resolve({})),
     publishActivity: mock(() => Promise.resolve({})),
     publishTune: mock(() => Promise.resolve({})),
   } as unknown as Agent & {
+    publish: ReturnType<typeof mock>;
     publishMood: ReturnType<typeof mock>;
     publishActivity: ReturnType<typeof mock>;
     publishTune: ReturnType<typeof mock>;
@@ -67,12 +69,15 @@ describe("PEP Activity (XEP-0108)", () => {
     });
   });
 
-  test("retractActivity publishes the undefined sentinel", async () => {
+  test("retractActivity publishes an empty activity item", async () => {
     const xmpp = makeAgent();
     await retractActivity(xmpp);
-    expect((xmpp.publishActivity as ReturnType<typeof mock>).mock.calls[0][0]).toEqual({
-      activity: ["undefined"],
-    });
+    expect(xmpp.publishActivity).toHaveBeenCalledTimes(0);
+    expect((xmpp.publish as ReturnType<typeof mock>).mock.calls[0]).toEqual([
+      "",
+      "http://jabber.org/protocol/activity",
+      { itemType: "http://jabber.org/protocol/activity" },
+    ]);
   });
 });
 

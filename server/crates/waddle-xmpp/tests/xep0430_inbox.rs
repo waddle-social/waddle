@@ -89,6 +89,16 @@ fn inbox_query_defaults_and_explicit() {
     let parsed = parse_inbox_query(&iq).unwrap();
     assert_eq!(parsed.since, Some(1_700_000));
     assert!(parsed.only_unread);
+
+    let iq = get_iq(
+        Element::builder("query", NS_INBOX)
+            .attr("since", "1700000")
+            .attr("only-unread", "1")
+            .build(),
+    );
+    let parsed = parse_inbox_query(&iq).unwrap();
+    assert_eq!(parsed.since, Some(1_700_000));
+    assert!(parsed.only_unread);
 }
 
 #[test]
