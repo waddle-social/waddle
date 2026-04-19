@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { Bell, BellOff, LogOut, Settings } from "lucide-vue-next";
+import { Bell, BellOff, ChevronUp, LogOut, Settings } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ThemeSwitcher from "@/components/chat/ThemeSwitcher.vue";
 import VersionFooter from "@/components/chat/VersionFooter.vue";
@@ -40,7 +40,9 @@ const bellAriaLabel = computed(() => {
 });
 
 const detailsOpen = ref(false);
+const accountMenuOpen = ref(false);
 const compactRootEl = ref<HTMLElement | null>(null);
+const expandedMenuRootEl = ref<HTMLElement | null>(null);
 
 function handleBellClick() {
   if (props.notificationPermission === "denied") return;
@@ -59,31 +61,48 @@ function closeDetails() {
   detailsOpen.value = false;
 }
 
+function toggleAccountMenu() {
+  accountMenuOpen.value = !accountMenuOpen.value;
+}
+
+function closeAccountMenu() {
+  accountMenuOpen.value = false;
+}
+
 function handleOpenSettings() {
   closeDetails();
+  closeAccountMenu();
   emit("open-settings");
 }
 
 function handleLogout() {
   closeDetails();
+  closeAccountMenu();
   emit("logout");
 }
 
 function onWindowClick(event: MouseEvent) {
-  if (!props.compact || !detailsOpen.value) return;
   const target = event.target as Node | null;
-  if (!compactRootEl.value || !target) return;
-  if (!compactRootEl.value.contains(target)) closeDetails();
+  if (!target) return;
+  if (props.compact && detailsOpen.value && compactRootEl.value && !compactRootEl.value.contains(target)) {
+    closeDetails();
+  }
+  if (!props.compact && accountMenuOpen.value && expandedMenuRootEl.value && !expandedMenuRootEl.value.contains(target)) {
+    closeAccountMenu();
+  }
 }
 
 function onEsc(event: KeyboardEvent) {
-  if (event.key === "Escape") closeDetails();
+  if (event.key !== "Escape") return;
+  closeDetails();
+  closeAccountMenu();
 }
 
 watch(
   () => props.compact,
   (compact) => {
-    if (!compact) closeDetails();
+    if (compact) closeAccountMenu();
+    else closeDetails();
   },
 );
 
@@ -125,8 +144,8 @@ onUnmounted(() => {
     </button>
     <button
       class="flex h-10 w-10 items-center justify-center rounded-xl text-rail-foreground transition-all duration-200 hover:bg-rail-hover hover:text-rail-active"
-      :title="`${session.username} — Account and build details`"
-      aria-haspopup="dialog"
+      :title="`${session.username} — Account menu`"
+      aria-haspopup="menu"
       :aria-expanded="detailsOpen"
       @click="toggleDetails"
     >
@@ -144,46 +163,49 @@ onUnmounted(() => {
           <div class="truncate text-[13px] font-semibold">{{ session.username }}</div>
           <div class="text-[11px] text-muted-foreground">Signed in</div>
         </div>
-      </div>
-      <div class="mt-2 rounded-lg border border-border/70 bg-background/50 px-2.5 py-2">
         <ThemeSwitcher />
       </div>
-      <div class="mt-2 border-t border-border pt-2">
+      <div class="mt-2 flex flex-col gap-0.5 border-t border-border pt-2">
         <button
-          class="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
+          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
           @click="handleOpenSettings"
         >
           <Settings class="h-3.5 w-3.5 text-primary/70" />
-          <span class="min-w-0 flex-1">Settings</span>
+          <span>Settings</span>
+        </button>
+        <button
+          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+          @click="handleLogout"
+        >
+          <LogOut class="h-3.5 w-3.5" />
+          <span>Log out</span>
         </button>
       </div>
-      <div class="mt-2 border-t border-border pt-2">
+      <div class="mt-2 border-t border-border px-2.5 pt-2">
         <VersionFooter
           :web-commit-sha="webCommitSha"
           :server-version="serverVersion"
           layout="detail"
         />
       </div>
-      <button
-        class="mt-2 flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
-        @click="handleLogout"
-      >
-        <LogOut class="h-3.5 w-3.5" />
-        <span>Log out</span>
-      </button>
     </div>
   </div>
 
   <div v-else class="flex flex-shrink-0 flex-col gap-2.5 border-t border-border px-3 py-2.5">
-    <div class="flex items-center gap-2">
+    <div ref="expandedMenuRootEl" class="relative flex items-center gap-2">
       <button
         class="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-1.5 py-1.5 text-left transition-all duration-200 hover:bg-sidebar-accent"
-        title="Open settings"
-        @click="handleOpenSettings"
+        :title="`${session.username} — Account menu`"
+        aria-haspopup="menu"
+        :aria-expanded="accountMenuOpen"
+        @click="toggleAccountMenu"
       >
         <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
         <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-sidebar-foreground">{{ session.username }}</span>
-        <Settings class="h-3.5 w-3.5 flex-shrink-0 text-sidebar-muted" />
+        <ChevronUp
+          class="h-3.5 w-3.5 flex-shrink-0 text-sidebar-muted transition-transform duration-200"
+          :class="accountMenuOpen ? 'rotate-180' : ''"
+        />
       </button>
       <button
         class="relative flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
@@ -208,16 +230,30 @@ onUnmounted(() => {
           aria-hidden="true"
         >{{ totalUnreadCount }}</span>
       </button>
-      <button
-        class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-sidebar-muted transition-all duration-200 hover:bg-sidebar-accent hover:text-destructive"
-        title="Log out"
-        @click="handleLogout"
-      >
-        <LogOut class="h-3.5 w-3.5" />
-      </button>
-    </div>
-    <div class="rounded-lg border border-border/70 bg-muted/30 px-2.5 py-2">
       <ThemeSwitcher />
+      <div
+        v-if="accountMenuOpen"
+        class="animate-fade-in absolute bottom-full left-0 z-20 mb-2 flex w-56 flex-col gap-0.5 rounded-lg border border-border bg-popover/95 p-1 text-popover-foreground shadow-xl backdrop-blur-xl"
+        role="menu"
+        :aria-label="`${session.username} account menu`"
+      >
+        <button
+          role="menuitem"
+          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
+          @click="handleOpenSettings"
+        >
+          <Settings class="h-3.5 w-3.5 text-primary/70" />
+          <span>Settings</span>
+        </button>
+        <button
+          role="menuitem"
+          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+          @click="handleLogout"
+        >
+          <LogOut class="h-3.5 w-3.5" />
+          <span>Log out</span>
+        </button>
+      </div>
     </div>
     <div class="border-t border-border pt-2">
       <VersionFooter
