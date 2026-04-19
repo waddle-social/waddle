@@ -11,6 +11,10 @@ export interface InboxEntry {
   lastUpdated: number;
   unread: number;
   preview?: string;
+  thread?: string;
+  threadTitle?: string;
+  replyCount?: number;
+  author?: string;
 }
 
 export interface InboxResult {
@@ -21,6 +25,10 @@ export interface InboxResult {
 export interface FetchInboxOptions {
   since?: number;
   onlyUnread?: boolean;
+  /** When set with `threads: true`, return thread-level entries for this room. */
+  room?: string;
+  /** When true (requires `room`), return thread entries instead of channel entries. */
+  threads?: boolean;
 }
 
 interface InboxIqResponse {
@@ -42,6 +50,10 @@ function toEntry(raw: WaddleInboxConversation): InboxEntry {
     lastUpdated: typeof raw.lastUpdated === "number" ? raw.lastUpdated : Number(raw.lastUpdated ?? 0),
     unread: typeof raw.unread === "number" ? raw.unread : Number(raw.unread ?? 0),
     preview: raw.preview && raw.preview.length > 0 ? raw.preview : undefined,
+    thread: raw.thread && raw.thread.length > 0 ? raw.thread : undefined,
+    threadTitle: raw.threadTitle && raw.threadTitle.length > 0 ? raw.threadTitle : undefined,
+    replyCount: typeof raw.replyCount === "number" ? raw.replyCount : undefined,
+    author: raw.author && raw.author.length > 0 ? raw.author : undefined,
   };
 }
 
@@ -51,6 +63,8 @@ export async function fetchInbox(xmpp: Agent, opts: FetchInboxOptions = {}): Pro
     inbox: {
       since: opts.since,
       onlyUnread: opts.onlyUnread,
+      room: opts.room,
+      threads: opts.threads,
     },
   } as Parameters<Agent["sendIQ"]>[0])) as InboxIqResponse;
   const inbox = res?.inbox ?? {};
@@ -61,9 +75,12 @@ export async function fetchInbox(xmpp: Agent, opts: FetchInboxOptions = {}): Pro
   };
 }
 
-export async function markInboxRead(xmpp: Agent, partnerJid: string): Promise<void> {
+export async function markInboxRead(xmpp: Agent, partnerJid: string, threadId?: string): Promise<void> {
   await xmpp.sendIQ({
     type: "set",
-    inboxMarkRead: { partner: partnerJid },
+    inboxMarkRead: {
+      partner: partnerJid,
+      ...(threadId ? { thread: threadId } : {}),
+    },
   } as Parameters<Agent["sendIQ"]>[0]);
 }

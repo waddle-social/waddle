@@ -885,9 +885,15 @@ export class BrowserXmppClient {
     return inboxApi.fetchInbox(this.xmpp, opts);
   }
 
-  async markInboxRead(partnerJid: string): Promise<void> {
+  async markInboxRead(partnerJid: string, threadId?: string): Promise<void> {
     await this.connect();
-    if (this.xmpp) await inboxApi.markInboxRead(this.xmpp, barePeerJid(partnerJid));
+    if (this.xmpp) await inboxApi.markInboxRead(this.xmpp, barePeerJid(partnerJid), threadId);
+  }
+
+  async fetchThreadInbox(roomJid: string): Promise<inboxApi.InboxResult> {
+    await this.connect();
+    if (!this.xmpp) return { totalUnread: 0, conversations: [] };
+    return inboxApi.fetchInbox(this.xmpp, { room: roomJid, threads: true });
   }
 
   // -- PEP Mood / Activity / Tune (XEP-0107 / 0108 / 0118) --

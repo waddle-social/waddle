@@ -29,7 +29,10 @@ use waddle_xmpp::{
         Feature, Identity,
     },
     inbox::{
-        runtime::{direct_message_entry, filter_query, groupchat_entry, should_project_message},
+        runtime::{
+            direct_message_entry, filter_query, groupchat_entry, groupchat_thread_entry,
+            preview_text, should_project_message,
+        },
         storage::InboxStorage,
     },
     mam::{
@@ -1871,11 +1874,33 @@ async fn handle_iq_with_conn_state(
                             return vec![build_iq_error_xml(&id, "modify", "bad-request")];
                         }
                     };
-                    let entries = match state.inbox_storage.list(&user_jid).await {
-                        Ok(entries) => entries,
-                        Err(error) => {
-                            warn!(error = %error, jid = %user_jid, "Failed to list inbox");
-                            return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                    let entries = if query.threads {
+                        if let Some(room) = &query.room {
+                            match state.inbox_storage.list_threads(&user_jid, room).await {
+                                Ok(entries) => entries,
+                                Err(error) => {
+                                    warn!(error = %error, jid = %user_jid, "Failed to list thread inbox");
+                                    return vec![build_iq_error_xml(
+                                        &id,
+                                        "wait",
+                                        "internal-server-error",
+                                    )];
+                                }
+                            }
+                        } else {
+                            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                        }
+                    } else {
+                        match state.inbox_storage.list(&user_jid).await {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                warn!(error = %error, jid = %user_jid, "Failed to list inbox");
+                                return vec![build_iq_error_xml(
+                                    &id,
+                                    "wait",
+                                    "internal-server-error",
+                                )];
+                            }
                         }
                     };
                     let total_unread = match state.inbox_storage.total_unread(&user_jid).await {
@@ -1902,7 +1927,11 @@ async fn handle_iq_with_conn_state(
                     };
                     if let Err(error) = state
                         .inbox_storage
-                        .mark_read(&user_jid, &mark_read.partner)
+                        .mark_read(
+                            &user_jid,
+                            &mark_read.partner,
+                            mark_read.thread_id.as_deref(),
+                        )
                         .await
                     {
                         warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
@@ -2323,6 +2352,30 @@ async fn handle_message(
                 warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender inbox for groupchat");
             }
 
+            // Thread-level inbox projection: if the message carries a <thread/>,
+            // upsert a thread-scoped entry alongside the channel-level one.
+            let thread_entry = prototype.thread.as_ref().map(|thread| {
+                // Resolve thread title: XEP-0508 thread-create title, or first message preview
+                let forum_title = waddle_xmpp::xep::xep0508::extract_forum_action(&prototype)
+                    .and_then(|action| match action {
+                        waddle_xmpp::xep::xep0508::ForumAction::CreateThread(tc) => Some(tc.title),
+                        _ => None,
+                    });
+                let title = forum_title.or_else(|| preview_text(&prototype));
+                let author_nick = prototype
+                    .from
+                    .as_ref()
+                    .and_then(|jid| jid.resource().map(|r| r.to_string()));
+                groupchat_thread_entry(
+                    room_jid.clone(),
+                    &prototype,
+                    timestamp,
+                    &thread.0,
+                    title.as_deref(),
+                    author_nick.as_deref(),
+                )
+            });
+
             for (occupant_jid, _) in &occupants {
                 if occupant_jid == sender_jid {
                     continue;
@@ -2337,6 +2390,31 @@ async fn handle_message(
                     Err(error) => {
                         warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant inbox for groupchat");
                     }
+                }
+
+                // Push thread-level entry too
+                if let Some(ref thread_entry) = thread_entry {
+                    match state
+                        .inbox_storage
+                        .upsert(&occupant_bare, thread_entry.clone(), true)
+                        .await
+                    {
+                        Ok(updated) => push_inbox_update(state, &occupant_bare, &updated).await,
+                        Err(error) => {
+                            warn!(jid = %occupant_bare, room = %room_jid, error = %error, "Failed to update occupant thread inbox");
+                        }
+                    }
+                }
+            }
+
+            // Upsert thread entry for sender too (without incrementing unread)
+            if let Some(ref thread_entry) = thread_entry {
+                if let Err(error) = state
+                    .inbox_storage
+                    .upsert(&sender_bare, thread_entry.clone(), false)
+                    .await
+                {
+                    warn!(jid = %sender_bare, room = %room_jid, error = %error, "Failed to update sender thread inbox");
                 }
             }
         }

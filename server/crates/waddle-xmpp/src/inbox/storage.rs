@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use jid::BareJid;
 
-use super::{InboxEntry, InboxView};
+use super::{InboxEntry, InboxKey, InboxView};
 
 /// Errors returned by [`InboxStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -22,11 +22,18 @@ pub enum InboxStorageError {
 /// Storage contract for the per-user inbox projection.
 #[async_trait]
 pub trait InboxStorage: Send + Sync {
-    /// Fetch every inbox entry for `user`, newest first.
+    /// Fetch every channel-level inbox entry for `user`, newest first.
     async fn list(&self, user: &BareJid) -> Result<Vec<InboxEntry>, InboxStorageError>;
 
+    /// Fetch thread-level inbox entries for `user` within a specific room.
+    async fn list_threads(
+        &self,
+        user: &BareJid,
+        room: &BareJid,
+    ) -> Result<Vec<InboxEntry>, InboxStorageError>;
+
     /// Upsert an entry, incrementing unread unless `increment_unread` is
-    /// false.  Returns the post-upsert state of the entry.
+    /// false. Returns the post-upsert state of the entry.
     async fn upsert(
         &self,
         user: &BareJid,
@@ -34,10 +41,16 @@ pub trait InboxStorage: Send + Sync {
         increment_unread: bool,
     ) -> Result<InboxEntry, InboxStorageError>;
 
-    /// Mark the conversation with `partner` as read.
-    async fn mark_read(&self, user: &BareJid, partner: &BareJid) -> Result<(), InboxStorageError>;
+    /// Mark a conversation as read. When `thread_id` is `Some`, only the
+    /// specific thread is marked; otherwise the channel-level entry is.
+    async fn mark_read(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+    ) -> Result<(), InboxStorageError>;
 
-    /// Return the total unread count for the user.
+    /// Return the total unread count for the user (channel-level only).
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError>;
 }
 
@@ -64,6 +77,21 @@ impl InboxStorage for InMemoryInboxStorage {
         Ok(guard.get(user).map(|v| v.snapshot()).unwrap_or_default())
     }
 
+    async fn list_threads(
+        &self,
+        user: &BareJid,
+        room: &BareJid,
+    ) -> Result<Vec<InboxEntry>, InboxStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .get(user)
+            .map(|v| v.threads_for_room(room))
+            .unwrap_or_default())
+    }
+
     async fn upsert(
         &self,
         user: &BareJid,
@@ -78,13 +106,22 @@ impl InboxStorage for InMemoryInboxStorage {
         Ok(view.observe_message(entry, increment_unread))
     }
 
-    async fn mark_read(&self, user: &BareJid, partner: &BareJid) -> Result<(), InboxStorageError> {
+    async fn mark_read(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+    ) -> Result<(), InboxStorageError> {
         let mut guard = self
             .per_user
             .lock()
             .map_err(|e| InboxStorageError::Other(e.to_string()))?;
         if let Some(view) = guard.get_mut(user) {
-            view.mark_read(partner);
+            let key = match thread_id {
+                Some(tid) => InboxKey::thread(partner.clone(), tid),
+                None => InboxKey::channel(partner.clone()),
+            };
+            view.mark_read_by_key(&key);
         }
         Ok(())
     }
@@ -144,9 +181,56 @@ mod tests {
         assert_eq!(store.total_unread(&user).await.unwrap(), 2);
 
         store
-            .mark_read(&user, &jid("alice@example.com"))
+            .mark_read(&user, &jid("alice@example.com"), None)
             .await
             .unwrap();
+        assert_eq!(store.total_unread(&user).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_thread_entries() {
+        let store = InMemoryInboxStorage::new();
+        let user = jid("me@example.com");
+        let room = jid("room@muc.example.com");
+
+        // Channel-level entry
+        store
+            .upsert(
+                &user,
+                InboxEntry::new(room.clone(), ConversationKind::MucRoom, "s1", 100),
+                true,
+            )
+            .await
+            .unwrap();
+
+        // Thread entry
+        store
+            .upsert(
+                &user,
+                InboxEntry::new(room.clone(), ConversationKind::MucRoom, "s2", 200)
+                    .with_thread("t1")
+                    .with_thread_title("Discussion"),
+                true,
+            )
+            .await
+            .unwrap();
+
+        // Channel list excludes threads
+        let channels = store.list(&user).await.unwrap();
+        assert_eq!(channels.len(), 1);
+        assert!(channels[0].thread_id.is_none());
+
+        // Thread list for room
+        let threads = store.list_threads(&user, &room).await.unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].thread_id.as_deref(), Some("t1"));
+
+        // Mark thread read
+        store.mark_read(&user, &room, Some("t1")).await.unwrap();
+        let threads = store.list_threads(&user, &room).await.unwrap();
+        assert_eq!(threads[0].unread, 0);
+
+        // Channel unread unaffected
         assert_eq!(store.total_unread(&user).await.unwrap(), 1);
     }
 }

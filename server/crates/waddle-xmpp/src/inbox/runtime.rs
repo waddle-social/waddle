@@ -81,6 +81,35 @@ pub fn groupchat_entry(room: BareJid, msg: &Message, timestamp: i64) -> InboxEnt
     entry
 }
 
+/// Build a thread-level inbox entry from a groupchat message that carries a
+/// `<thread/>` element.
+pub fn groupchat_thread_entry(
+    room: BareJid,
+    msg: &Message,
+    timestamp: i64,
+    thread_id: &str,
+    thread_title: Option<&str>,
+    author: Option<&str>,
+) -> InboxEntry {
+    let mut entry = InboxEntry::new(
+        room,
+        ConversationKind::MucRoom,
+        projection_stanza_id(msg),
+        timestamp,
+    );
+    entry.thread_id = Some(thread_id.to_owned());
+    if let Some(title) = thread_title {
+        entry.thread_title = Some(title.to_owned());
+    }
+    if let Some(author) = author {
+        entry.author = Some(author.to_owned());
+    }
+    if let Some(preview) = preview_text(msg) {
+        entry.preview = Some(preview);
+    }
+    entry
+}
+
 pub fn filter_query(mut entries: Vec<InboxEntry>, query: &InboxQuery) -> Vec<InboxEntry> {
     if let Some(since) = query.since {
         entries.retain(|entry| entry.last_updated >= since);
@@ -148,6 +177,7 @@ mod tests {
             &InboxQuery {
                 since: None,
                 only_unread: true,
+                ..Default::default()
             },
         );
         assert_eq!(unread_only.len(), 2);
@@ -158,6 +188,7 @@ mod tests {
             &InboxQuery {
                 since: Some(20),
                 only_unread: false,
+                ..Default::default()
             },
         );
         assert_eq!(since.len(), 2);

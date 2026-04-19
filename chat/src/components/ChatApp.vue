@@ -371,6 +371,19 @@ function openThread(threadId: string) {
   }
 }
 
+async function onSelectThread(channelId: string, threadId: string) {
+  // Navigate to the channel if not already there
+  if (waddles.activeChannelId.value !== channelId) {
+    await selectChannel(channelId);
+  }
+  // Mark thread as read
+  if (waddles.activeWaddleId.value && connectionStore.session) {
+    const roomJid = roomBareJidFor(connectionStore.session, waddles.activeWaddleId.value, channelId);
+    channelUnread.markThreadRead(roomJid, threadId);
+  }
+  openThread(threadId);
+}
+
 function pushThread(threadId: string) {
   if (!threadId) return;
   if (
@@ -906,8 +919,10 @@ onUnmounted(() => {
           :member-count="waddles.members.value.length"
           :active-channel-jids="messaging.activeChannels.value"
           :channel-unread-map="computedChannelUnreadMap"
+          :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           class="!w-full !border-r-0 !flex-1"
           @select-channel="selectChannel"
+          @select-thread="onSelectThread"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"
@@ -1008,7 +1023,9 @@ onUnmounted(() => {
           :member-count="waddles.members.value.length"
           :active-channel-jids="messaging.activeChannels.value"
           :channel-unread-map="computedChannelUnreadMap"
+          :thread-entries-fn="(roomJid: string) => channelUnread.threadEntries(roomJid)"
           @select-channel="selectChannel"
+          @select-thread="onSelectThread"
           @create-channel="ui.showCreateChannel.value = true"
           @open-settings="ui.showWaddleSettings.value = true"
           @open-members="ui.showMembers.value = true"

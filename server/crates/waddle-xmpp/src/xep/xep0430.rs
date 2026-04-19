@@ -9,6 +9,9 @@
 //! `urn:xmpp:inbox:0` namespace while the XSF consolidates the spec; the
 //! on-wire shape is stable and already consumed by MongooseIM / Movim.
 //!
+//! Thread-level entries extend the `<conversation>` element with optional
+//! `thread`, `thread-title`, `reply-count`, and `author` attributes.
+//!
 //! The storage side of the feature lives behind the
 //! [`crate::inbox::storage::InboxStorage`] trait.
 
@@ -46,12 +49,19 @@ pub struct InboxQuery {
     pub since: Option<i64>,
     /// If true, only return conversations with unread > 0.
     pub only_unread: bool,
+    /// When set, return thread-level entries for this specific room instead
+    /// of channel-level entries.
+    pub room: Option<BareJid>,
+    /// When true (and `room` is set), return thread entries for the room.
+    pub threads: bool,
 }
 
-/// A `<mark-read>` action — `partner` attr carries the target JID.
+/// A `<mark-read>` action — `partner` attr carries the target JID,
+/// optional `thread` attr scopes to a specific thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxMarkRead {
     pub partner: BareJid,
+    pub thread_id: Option<String>,
 }
 
 fn iq_payload<'a>(iq: &'a Iq, want_set: bool) -> Result<&'a Element, InboxError> {
@@ -78,7 +88,23 @@ pub fn parse_inbox_query(iq: &Iq) -> Result<InboxQuery, InboxError> {
         .attr("only-unread")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
-    Ok(InboxQuery { since, only_unread })
+    let room = match elem.attr("room") {
+        Some(raw) => Some(
+            raw.parse::<BareJid>()
+                .map_err(|_| InboxError::InvalidJid(raw.to_string()))?,
+        ),
+        None => None,
+    };
+    let threads = elem
+        .attr("threads")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    Ok(InboxQuery {
+        since,
+        only_unread,
+        room,
+        threads,
+    })
 }
 
 pub fn parse_mark_read(iq: &Iq) -> Result<InboxMarkRead, InboxError> {
@@ -92,7 +118,11 @@ pub fn parse_mark_read(iq: &Iq) -> Result<InboxMarkRead, InboxError> {
     let partner: BareJid = raw
         .parse()
         .map_err(|_| InboxError::InvalidJid(raw.to_string()))?;
-    Ok(InboxMarkRead { partner })
+    let thread_id = elem
+        .attr("thread")
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(InboxMarkRead { partner, thread_id })
 }
 
 fn kind_str(kind: ConversationKind) -> &'static str {
@@ -117,6 +147,18 @@ pub fn build_entry_element(entry: &InboxEntry) -> Element {
         .attr("last-stanza-id", entry.last_stanza_id.as_str())
         .attr("last-updated", entry.last_updated.to_string())
         .attr("unread", entry.unread.to_string());
+    if let Some(thread_id) = &entry.thread_id {
+        builder = builder.attr("thread", thread_id.as_str());
+    }
+    if let Some(title) = &entry.thread_title {
+        builder = builder.attr("thread-title", title.as_str());
+    }
+    if entry.reply_count > 0 {
+        builder = builder.attr("reply-count", entry.reply_count.to_string());
+    }
+    if let Some(author) = &entry.author {
+        builder = builder.attr("author", author.as_str());
+    }
     if let Some(preview) = &entry.preview {
         builder = builder.append(
             Element::builder("preview", NS_INBOX)
@@ -161,6 +203,22 @@ pub fn parse_entry_element(elem: &Element) -> Result<InboxEntry, InboxError> {
         .get_child("preview", NS_INBOX)
         .map(|p| p.text())
         .filter(|s| !s.is_empty());
+    let thread_id = elem
+        .attr("thread")
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
+    let thread_title = elem
+        .attr("thread-title")
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
+    let reply_count: u32 = elem
+        .attr("reply-count")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let author = elem
+        .attr("author")
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
     Ok(InboxEntry {
         partner,
         kind,
@@ -168,6 +226,10 @@ pub fn parse_entry_element(elem: &Element) -> Result<InboxEntry, InboxError> {
         last_updated,
         unread,
         preview,
+        thread_id,
+        thread_title,
+        reply_count,
+        author,
     })
 }
 
@@ -246,6 +308,8 @@ mod tests {
         let parsed = parse_inbox_query(&iq).unwrap();
         assert_eq!(parsed.since, None);
         assert!(!parsed.only_unread);
+        assert!(parsed.room.is_none());
+        assert!(!parsed.threads);
     }
 
     #[test]
@@ -275,6 +339,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_query_with_threads_filter() {
+        let iq = get_iq(
+            Element::builder("query", NS_INBOX)
+                .attr("room", "general@muc.example.com")
+                .attr("threads", "true")
+                .build(),
+        );
+        let parsed = parse_inbox_query(&iq).unwrap();
+        assert_eq!(
+            parsed.room.as_ref().map(|j| j.to_string()),
+            Some("general@muc.example.com".to_string())
+        );
+        assert!(parsed.threads);
+    }
+
+    #[test]
     fn test_parse_mark_read() {
         let iq = set_iq(
             Element::builder("mark-read", NS_INBOX)
@@ -283,6 +363,20 @@ mod tests {
         );
         let parsed = parse_mark_read(&iq).unwrap();
         assert_eq!(parsed.partner.to_string(), "alice@example.com");
+        assert!(parsed.thread_id.is_none());
+    }
+
+    #[test]
+    fn test_parse_mark_read_with_thread() {
+        let iq = set_iq(
+            Element::builder("mark-read", NS_INBOX)
+                .attr("partner", "room@muc.example.com")
+                .attr("thread", "thread-42")
+                .build(),
+        );
+        let parsed = parse_mark_read(&iq).unwrap();
+        assert_eq!(parsed.partner.to_string(), "room@muc.example.com");
+        assert_eq!(parsed.thread_id.as_deref(), Some("thread-42"));
     }
 
     #[test]
@@ -318,6 +412,25 @@ mod tests {
             1_700_000_000,
         )
         .with_unread(0);
+        let elem = build_entry_element(&entry);
+        let parsed = parse_entry_element(&elem).unwrap();
+        assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn test_entry_round_trip_thread() {
+        let entry = InboxEntry::new(
+            "room@muc.example.com".parse().unwrap(),
+            ConversationKind::MucRoom,
+            "sid-100",
+            1_700_000_000,
+        )
+        .with_unread(2)
+        .with_thread("thread-42")
+        .with_thread_title("Getting Started")
+        .with_reply_count(7)
+        .with_author("alice")
+        .with_preview("latest reply");
         let elem = build_entry_element(&entry);
         let parsed = parse_entry_element(&elem).unwrap();
         assert_eq!(parsed, entry);

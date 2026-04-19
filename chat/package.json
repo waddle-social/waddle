@@ -33,6 +33,7 @@
     "@tiptap/starter-kit": "^3.22.3",
     "@tiptap/vue-3": "^3.22.3",
     "astro": "^6.0.8",
+    "effect": "^3.21.1",
     "emojilib": "^4.0.2",
     "events": "^3.3.0",
     "lucide-vue-next": "^0.509.0",

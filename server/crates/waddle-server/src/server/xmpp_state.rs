@@ -1025,7 +1025,7 @@ impl waddle_xmpp::AppState for XmppAppState {
             .as_ref()
             .ok_or_else(|| XmppError::internal("Inbox storage not configured"))?;
         storage
-            .mark_read(user_jid, partner_jid)
+            .mark_read(user_jid, partner_jid, None)
             .await
             .map_err(|error| {
                 warn!(
