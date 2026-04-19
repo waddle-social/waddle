@@ -15,6 +15,7 @@ struct WaddleChatWorkspaceView: View {
     @State private var newChannelName = ""
     @State private var newChannelDescription = ""
     @State private var newChannelType = "text"
+    @State private var showNewDmSheet = false
     @State private var showCreateTopicSheet = false
     @State private var newTopicTitle = ""
     @State private var newTopicBody = ""
@@ -59,6 +60,36 @@ struct WaddleChatWorkspaceView: View {
         }
         .sheet(isPresented: $showCreateChannelSheet) {
             createChannelSheet
+        }
+        .sheet(isPresented: $showNewDmSheet) {
+            NavigationStack {
+                List(model.chatMembers.filter { !$0.isSelf }) { member in
+                    Button {
+                        let peerJID = "\(member.displayName.lowercased())@\(jidDomain(model.session?.jid ?? ""))"
+                        showNewDmSheet = false
+                        Task { await model.openDm(peerJID: peerJID, peerUsername: member.displayName) }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(member.avatarInitials ?? String(member.displayName.prefix(2)).uppercased())
+                                .font(.caption.weight(.semibold))
+                                .frame(width: 32, height: 32)
+                                .background(.quaternary, in: Circle())
+                            Text(member.displayName)
+                                .font(.subheadline)
+                        }
+                    }
+                }
+                .navigationTitle("New Message")
+#if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+#endif
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showNewDmSheet = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
         }
     }
 
@@ -495,6 +526,44 @@ struct WaddleChatWorkspaceView: View {
                     .padding(.bottom, 12)
                 }
             }
+
+            if !store.dmConversations.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Direct Messages")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .padding(.horizontal, 18)
+
+                    ForEach(store.dmConversations) { convo in
+                        Button {
+                            Task { await model.openDm(peerJID: convo.peerJID, peerUsername: convo.peerUsername) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(convo.presenceShow == .available ? .green : .secondary)
+                                    .frame(width: 8, height: 8)
+                                Text(convo.peerUsername)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                Spacer()
+                                if convo.unreadCount > 0 {
+                                    Text("\(convo.unreadCount)")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                                }
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.top, 8)
+            }
         }
         .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -525,6 +594,24 @@ struct WaddleChatWorkspaceView: View {
 
     @ViewBuilder
     private var desktopConversationContent: some View {
+        if let dmPeer = store.activeDmPeerJID,
+           let convo = store.dmConversations.first(where: { $0.peerJID == dmPeer }) {
+            ChatDmConversationView(
+                peerUsername: convo.peerUsername,
+                messages: store.dmMessages,
+                composerText: $store.dmComposerText,
+                onSend: {
+                    Task { await model.sendDm(body: store.dmComposerText); store.dmComposerText = "" }
+                },
+                onBack: { model.closeDm() }
+            )
+        } else {
+            channelConversationContent
+        }
+    }
+
+    @ViewBuilder
+    private var channelConversationContent: some View {
         switch store.surfaceState {
         case .loading:
             ChatLoadingStateView(title: "Preparing conversation…")

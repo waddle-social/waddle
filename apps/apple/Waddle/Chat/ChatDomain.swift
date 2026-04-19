@@ -463,6 +463,16 @@ extension Array where Element == ChatTimelineMessage {
     }
 }
 
+struct DmConversation: Identifiable, Hashable {
+    let id: String
+    var peerJID: String
+    var peerUsername: String
+    var lastMessageBody: String?
+    var lastMessageAt: Date?
+    var unreadCount: Int
+    var presenceShow: ChatPresenceState
+}
+
 struct ChatNotificationToast: Identifiable, Equatable {
     let id = UUID()
     let senderName: String

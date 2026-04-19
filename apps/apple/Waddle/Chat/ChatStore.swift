@@ -26,6 +26,10 @@ final class ChatSurfaceStore: ObservableObject {
     @Published var typingUsers: [String] = []
     @Published var notificationToast: ChatNotificationToast?
     @Published var mentionQuery: String?
+    @Published var dmConversations: [DmConversation] = []
+    @Published var activeDmPeerJID: String?
+    @Published var dmMessages: [ChatTimelineMessage] = []
+    @Published var dmComposerText: String = ""
 
     private var sendHandler: ChatMessageSendHandler?
     private var roomHistoryLoadHandler: ChatRoomHistoryLoadHandler?

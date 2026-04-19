@@ -338,6 +338,179 @@ final class AppModel: ObservableObject {
 
     @Published var selectedForumThreadID: String?
 
+    private var dmMessagesByPeer: [String: [ChatTimelineMessage]] = [:]
+    private var dmPresence: [String: ChatPresenceState] = [:]
+
+    func openDm(peerJID: String, peerUsername: String) async {
+        let bareJID = barePeerJID(peerJID)
+        ensureDmConversation(peerJID: bareJID, peerUsername: peerUsername)
+        chatStore.activeDmPeerJID = bareJID
+        markDmRead(peerJID: bareJID)
+        chatStore.dmMessages = dmMessagesByPeer[bareJID] ?? []
+
+        guard let xmppService, let session else { return }
+        do {
+            let archive = try await xmppService.fetchDmHistory(peerJID: bareJID, max: 50)
+            let messages = archive.messages.compactMap { archiveMsg -> ChatTimelineMessage? in
+                let event = archiveMsg.message
+                let text = (event.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+                let senderBare = barePeerJID(event.from ?? "")
+                let senderName = XMPPJID(string: event.from ?? "")?.localpart ?? senderBare
+                let isOutgoing = senderBare == barePeerJID(session.jid)
+                let messageID = event.id ?? event.stanzaID ?? archiveMsg.mamID ?? UUID().uuidString
+                return ChatTimelineMessage(
+                    id: messageID,
+                    roomID: bareJID,
+                    senderID: senderBare,
+                    senderDisplayName: isOutgoing ? session.username : peerUsername,
+                    body: text,
+                    sentAt: archiveMsg.delayedDeliveryTimestamp ?? event.timestamp ?? Date(),
+                    editedAt: nil,
+                    deliveryState: .delivered,
+                    isOutgoing: isOutgoing,
+                    isAction: false,
+                    senderInitials: initials(from: isOutgoing ? session.username : peerUsername),
+                    reactions: nil,
+                    isRetracted: false
+                )
+            }
+            dmMessagesByPeer[bareJID] = messages.sorted { $0.sentAt < $1.sentAt }
+            if chatStore.activeDmPeerJID == bareJID {
+                chatStore.dmMessages = dmMessagesByPeer[bareJID] ?? []
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sendDm(body: String) async {
+        guard let peerJID = chatStore.activeDmPeerJID, let xmppService, let session else { return }
+        let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        let optimistic = ChatTimelineMessage(
+            id: UUID().uuidString,
+            roomID: peerJID,
+            senderID: barePeerJID(session.jid),
+            senderDisplayName: session.username,
+            body: text,
+            sentAt: Date(),
+            editedAt: nil,
+            deliveryState: .sending,
+            isOutgoing: true,
+            isAction: false,
+            senderInitials: initials(from: session.username),
+            reactions: nil,
+            isRetracted: false
+        )
+        var messages = dmMessagesByPeer[peerJID] ?? []
+        messages.append(optimistic)
+        dmMessagesByPeer[peerJID] = messages
+        chatStore.dmMessages = messages
+
+        do {
+            try await xmppService.sendDirectMessage(peerJID: peerJID, body: text)
+            updateDmConversation(peerJID: peerJID, body: text, date: Date())
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func closeDm() {
+        chatStore.activeDmPeerJID = nil
+        chatStore.dmMessages = []
+        chatStore.dmComposerText = ""
+    }
+
+    private func handleIncomingDm(_ event: XMPPMessageEvent) {
+        guard let session else { return }
+        guard event.type == "chat" || event.type == "normal" || event.type == nil else { return }
+        let text = (event.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        let fromBare = barePeerJID(event.from ?? "")
+        let toBare = barePeerJID(event.to ?? "")
+        let selfBare = barePeerJID(session.jid)
+        let isSelf = fromBare == selfBare
+        let peerJID = isSelf ? toBare : fromBare
+        let peerUsername = XMPPJID(string: isSelf ? (event.to ?? "") : (event.from ?? ""))?.localpart ?? peerJID
+
+        if peerJID.contains("@muc.") { return }
+
+        let messageID = event.id ?? event.stanzaID ?? UUID().uuidString
+        let message = ChatTimelineMessage(
+            id: messageID,
+            roomID: peerJID,
+            senderID: fromBare,
+            senderDisplayName: isSelf ? session.username : peerUsername,
+            body: text,
+            sentAt: event.timestamp ?? Date(),
+            editedAt: nil,
+            deliveryState: .delivered,
+            isOutgoing: isSelf,
+            isAction: false,
+            senderInitials: initials(from: isSelf ? session.username : peerUsername),
+            reactions: nil,
+            isRetracted: false,
+            markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans,
+            sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles
+        )
+
+        if isSelf {
+            var msgs = dmMessagesByPeer[peerJID] ?? []
+            msgs.removeAll { $0.isOutgoing && $0.deliveryState == .sending && $0.body == text }
+            msgs.append(message)
+            dmMessagesByPeer[peerJID] = msgs
+        } else {
+            var msgs = dmMessagesByPeer[peerJID] ?? []
+            msgs.append(message)
+            dmMessagesByPeer[peerJID] = msgs
+        }
+
+        ensureDmConversation(peerJID: peerJID, peerUsername: peerUsername)
+        updateDmConversation(peerJID: peerJID, body: text, date: event.timestamp ?? Date())
+
+        if !isSelf, chatStore.activeDmPeerJID != peerJID {
+            incrementDmUnread(peerJID: peerJID)
+        }
+
+        if chatStore.activeDmPeerJID == peerJID {
+            chatStore.dmMessages = dmMessagesByPeer[peerJID] ?? []
+        }
+    }
+
+    private func ensureDmConversation(peerJID: String, peerUsername: String) {
+        if !chatStore.dmConversations.contains(where: { $0.peerJID == peerJID }) {
+            chatStore.dmConversations.append(DmConversation(
+                id: peerJID,
+                peerJID: peerJID,
+                peerUsername: peerUsername,
+                unreadCount: 0,
+                presenceShow: dmPresence[peerJID] ?? .offline
+            ))
+        }
+    }
+
+    private func updateDmConversation(peerJID: String, body: String, date: Date) {
+        if let idx = chatStore.dmConversations.firstIndex(where: { $0.peerJID == peerJID }) {
+            chatStore.dmConversations[idx].lastMessageBody = body
+            chatStore.dmConversations[idx].lastMessageAt = date
+        }
+    }
+
+    private func incrementDmUnread(peerJID: String) {
+        if let idx = chatStore.dmConversations.firstIndex(where: { $0.peerJID == peerJID }) {
+            chatStore.dmConversations[idx].unreadCount += 1
+        }
+    }
+
+    private func markDmRead(peerJID: String) {
+        if let idx = chatStore.dmConversations.firstIndex(where: { $0.peerJID == peerJID }) {
+            chatStore.dmConversations[idx].unreadCount = 0
+        }
+    }
+
     func sendForumTopic(title: String, body: String) async {
         guard let roomJID = currentRoomJID, let xmppService else { return }
         do {
@@ -854,6 +1027,12 @@ final class AppModel: ObservableObject {
 
     private func handleIncomingMessage(_ event: XMPPMessageEvent) {
         guard let session else { return }
+
+        if event.type == "chat" || (event.type == nil && parseManagedRoomBareJID(barePeerJID(event.from ?? "")) == nil) {
+            handleIncomingDm(event)
+            return
+        }
+
         let roomJID = barePeerJID(event.from ?? event.to ?? "")
         guard parseManagedRoomBareJID(roomJID) != nil else {
             return
@@ -1175,10 +1354,18 @@ final class AppModel: ObservableObject {
 
     private func handleIncomingPresence(_ event: XMPPPresenceEvent) {
         guard let from = event.from else { return }
-        let roomJID = barePeerJID(from)
-        guard parseManagedRoomBareJID(roomJID) != nil else {
+        let bareFrom = barePeerJID(from)
+
+        if parseManagedRoomBareJID(bareFrom) == nil {
+            let presence = presenceState(from: event)
+            dmPresence[bareFrom] = presence
+            if let idx = chatStore.dmConversations.firstIndex(where: { $0.peerJID == bareFrom }) {
+                chatStore.dmConversations[idx].presenceShow = presence
+            }
             return
         }
+
+        let roomJID = bareFrom
 
         guard let nick = XMPPJID(string: from)?.resource, !nick.isEmpty else {
             return

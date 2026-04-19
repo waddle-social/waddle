@@ -132,6 +132,37 @@ final class XMPPService: ObservableObject {
         try await transport.send(XMPPXML.displayedMarker(to: roomJID, messageID: messageID))
     }
 
+    func sendDirectMessage(peerJID: String, body: String) async throws {
+        try ensureReady()
+        try await transport.send(XMPPXML.directMessage(to: peerJID, body: body))
+    }
+
+    func fetchDmHistory(peerJID: String, max: Int = 50, before: String? = "") async throws -> XMPPArchivePage {
+        try ensureReady()
+        guard pendingArchiveQuery == nil else {
+            throw XMPPServiceError.notReady
+        }
+
+        let id = nextIQID(prefix: "dm-mam")
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = PendingArchiveQuery(id: id, roomJID: peerJID, continuation: continuation)
+            pendingArchiveQuery = request
+            request.timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                await self?.handleArchiveQueryTimeout(id: id, roomJID: peerJID)
+            }
+
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.transport.send(XMPPXML.personalMamQuery(id: id, withJID: peerJID, max: max, before: before))
+                } catch {
+                    self.resumePendingArchiveQuery(with: error)
+                }
+            }
+        }
+    }
+
     func sendForumTopic(roomJID: String, body: String, title: String) async throws {
         try ensureReady()
         try await transport.send(XMPPXML.forumTopicMessage(to: roomJID, body: body, title: title))

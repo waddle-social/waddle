@@ -1256,6 +1256,177 @@ struct ChatTypingIndicatorView: View {
     }
 }
 
+struct ChatDmListView: View {
+    let conversations: [DmConversation]
+    var onSelect: ((DmConversation) -> Void)? = nil
+    var onNewDm: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Direct Messages")
+                    .font(.headline)
+                Spacer()
+                if let onNewDm {
+                    Button(action: onNewDm) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(12)
+
+            Divider()
+
+            if conversations.isEmpty {
+                ChatEmptyStateView(
+                    title: "No conversations",
+                    message: "Start a direct message with a member.",
+                    systemImage: "person.2"
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(conversations) { convo in
+                            Button {
+                                onSelect?(convo)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Text(convo.peerUsername.prefix(2).uppercased())
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 32, height: 32)
+                                        .background(dmPresenceColor(convo.presenceShow).opacity(0.16), in: Circle())
+                                        .overlay(alignment: .bottomTrailing) {
+                                            Circle()
+                                                .fill(dmPresenceColor(convo.presenceShow))
+                                                .frame(width: 9, height: 9)
+                                        }
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack {
+                                            Text(convo.peerUsername)
+                                                .font(.subheadline.weight(.medium))
+                                                .lineLimit(1)
+                                            Spacer()
+                                            if let date = convo.lastMessageAt {
+                                                Text(date, style: .relative)
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        if let body = convo.lastMessageBody {
+                                            Text(body)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+
+                                    if convo.unreadCount > 0 {
+                                        Text("\(convo.unreadCount)")
+                                            .font(.caption2.weight(.bold))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.accentColor, in: Capsule())
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
+    private func dmPresenceColor(_ state: ChatPresenceState) -> Color {
+        switch state {
+        case .available: return .green
+        case .away: return .orange
+        case .dnd: return .red
+        case .offline, .unknown: return .secondary
+        }
+    }
+}
+
+struct ChatDmConversationView: View {
+    let peerUsername: String
+    let messages: [ChatTimelineMessage]
+    @Binding var composerText: String
+    var isSending: Bool = false
+    var onSend: () -> Void
+    var onBack: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.body.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+
+                Text(peerUsername)
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(12)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(messages) { message in
+                        HStack(alignment: .top, spacing: 8) {
+                            if message.isOutgoing { Spacer(minLength: 40) }
+
+                            VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
+                                Text(message.styledBody)
+                                    .font(.subheadline)
+                                    .textSelection(.enabled)
+
+                                Text(message.sentAt, style: .time)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                message.isOutgoing ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+
+                            if !message.isOutgoing { Spacer(minLength: 40) }
+                        }
+                    }
+                }
+                .padding(12)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                TextField("Message \(peerUsername)", text: $composerText)
+                    .textFieldStyle(.roundedBorder)
+
+                Button(action: onSend) {
+                    Image(systemName: "paperplane.fill")
+                }
+                .disabled(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(12)
+        }
+    }
+}
+
 struct ChatForumTopicListView: View {
     let topics: [ChatTimelineMessage]
     var onSelectTopic: ((ChatTimelineMessage) -> Void)? = nil

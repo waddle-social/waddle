@@ -171,6 +171,33 @@ enum XMPPXML {
         return payload
     }
 
+    static func directMessage(to peerJID: String, body: String) -> String {
+        "<message to='\(escape(peerJID))' type='chat'>" +
+        "<body>\(escape(body))</body>" +
+        "<store xmlns='urn:xmpp:hints'/>" +
+        "</message>"
+    }
+
+    static func personalMamQuery(id: String, withJID: String, max: Int, before: String? = "") -> String {
+        var query = "<query xmlns='urn:xmpp:mam:2' queryid='\(escape(id))'>"
+        query += "<x xmlns='jabber:x:data' type='submit'>"
+        query += "<field var='FORM_TYPE' type='hidden'><value>urn:xmpp:mam:2</value></field>"
+        query += "<field var='with'><value>\(escape(withJID))</value></field>"
+        query += "</x>"
+        query += "<set xmlns='http://jabber.org/protocol/rsm'>"
+        query += "<max>\(max)</max>"
+        if let before {
+            if before.isEmpty {
+                query += "<before/>"
+            } else {
+                query += "<before>\(escape(before))</before>"
+            }
+        }
+        query += "</set>"
+        query += "</query>"
+        return "<iq type='set' id='\(escape(id))'>\(query)</iq>"
+    }
+
     static func chatStateMessage(to roomJID: String, state: String) -> String {
         "<message to='\(escape(roomJID))' type='groupchat'><\(escape(state)) xmlns='http://jabber.org/protocol/chatstates'/></message>"
     }

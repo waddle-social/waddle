@@ -1,7 +1,7 @@
 # Gap Analysis: Apple App vs Web Chat
 
 > Generated: 2026-04-18
-> Last updated: 2026-04-19 (loop 9, items 3.1/3.2/3.3)
+> Last updated: 2026-04-19 (loop 10, items 2.1-2.5)
 
 ## Legend
 
@@ -35,11 +35,11 @@
 
 | # | Gap | Priority | Status | XEP | Notes |
 |---|-----|----------|--------|-----|-------|
-| 2.1 | 1-on-1 DM conversations | CRITICAL | [ ] | type="chat" | Web has full DM system with presence, unread counts, MAM |
-| 2.2 | DM conversation list panel | CRITICAL | [ ] | - | Web has DmPanel with last message preview, timestamps |
-| 2.3 | DM presence tracking | HIGH | [ ] | - | Web shows online/away/dnd/offline per DM peer |
-| 2.4 | New DM dialog (user search) | HIGH | [ ] | - | Web has user search + DM initiation |
-| 2.5 | DM unread counts | MEDIUM | [ ] | - | Web tracks unread per conversation |
+| 2.1 | 1-on-1 DM conversations | CRITICAL | [x] | type="chat" | Send/receive type="chat" messages, personal MAM history with "with" filter, DM conversation view with bubbles |
+| 2.2 | DM conversation list panel | CRITICAL | [x] | - | DM list in desktop sidebar with presence dots, last message preview, timestamps |
+| 2.3 | DM presence tracking | HIGH | [x] | - | Track presence for non-MUC JIDs, update DM conversation presence dots |
+| 2.4 | New DM dialog (user search) | HIGH | [x] | - | New message sheet with member list, select to open DM |
+| 2.5 | DM unread counts | MEDIUM | [x] | - | Track unread per conversation, badge in DM list, mark read on open |
 
 ## 3. Threading & Forums
 
