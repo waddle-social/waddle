@@ -4,6 +4,7 @@ import { useAuth } from "@/composables/useAuth";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import { createServerAuth } from "@/lib/server-auth";
+import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
 
 const props = defineProps<{
   serverBaseUrl: string;
@@ -36,6 +37,13 @@ async function bootstrap() {
       }
       return refreshed;
     });
+    // The status handler is owned here — XmppProvider is persisted across
+    // route changes (transition:persist), so there is exactly one writer to
+    // $xmppStatus for the lifetime of the client. Transient consumers
+    // (useMessaging, connection-notice) read the store via useStore.
+    client.setStatusHandler((status) => {
+      $xmppStatus.set(status);
+    });
     connectionStore.client = client;
   }
 }
@@ -53,6 +61,7 @@ connectionStore.fetchProviders = async (serverUrl: string) => {
 connectionStore.logout = async () => {
   connectionStore.client?.disconnect().catch(() => undefined);
   connectionStore.client = null;
+  $xmppStatus.set(OFFLINE_SNAPSHOT);
   await auth.logout();
   syncStoreFromAuth();
 };
@@ -66,6 +75,7 @@ onMounted(() => {
 onUnmounted(() => {
   connectionStore.client?.disconnect().catch(() => undefined);
   connectionStore.client = null;
+  $xmppStatus.set(OFFLINE_SNAPSHOT);
 });
 </script>
 

@@ -3,6 +3,7 @@ import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -22,7 +23,7 @@ describe("reply addressing", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
       ref({ id: "c1", name: "general", channel_type: "text" }),
@@ -126,7 +127,7 @@ describe("reply addressing", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c2"),
       ref({ id: "c2", name: "general", channel_type: "text" }),

@@ -4,6 +4,7 @@ import type { WaddleSession } from "../src/lib/server-auth";
 import { roomBareJidFor, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -35,7 +36,7 @@ function makeRoomMessaging(xmppClient: ReturnType<typeof makeRoomClient>) {
 
 function makeRoomClient(queryMamResults: LiveRoomMessage[] = []) {
   const queryMam = mock(async () => queryMamResults);
-  return ref({ queryMam } as never) as never;
+  return ref({ ...handlerStubs(), queryMam } as never) as never;
 }
 
 function makeDmMessaging(xmppClient: ReturnType<typeof makeDmClient>) {

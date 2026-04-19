@@ -267,7 +267,7 @@ watch(xmppClient, (client) => {
     dmMessaging.onSessionLifecycle(event);
     void dmConversations.hydrateFromInbox();
   });
-});
+}, { immediate: true });
 
 const publicBrowseQuery = ref("");
 const isApplyingRoute = ref(false);

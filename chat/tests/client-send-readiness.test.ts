@@ -5,6 +5,7 @@ import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
 import { BrowserXmppClient, roomBareJidFor } from "../src/lib/xmpp-client";
 import { listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -134,7 +135,7 @@ describe("optimistic UI waits for successful sends", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
       ref({ id: "c1", name: "general", channel_type: "text" }),
@@ -187,7 +188,7 @@ describe("optimistic UI waits for successful sends", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
       ref({ id: "c1", name: "general", channel_type: "text" }),

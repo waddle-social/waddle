@@ -3,6 +3,7 @@ import { ref } from "vue";
 import type { ChannelSummary } from "../src/lib/waddle-api";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useMessaging } from "../src/composables/useMessaging";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -31,7 +32,7 @@ describe("forum composition", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
       ref(forumChannel()),
@@ -71,7 +72,7 @@ describe("forum composition", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
       ref(forumChannel()),
@@ -95,7 +96,7 @@ describe("forum composition", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ sendGroupMessage, sendChatState } as never),
+      ref({ ...handlerStubs(), sendGroupMessage, sendChatState } as never),
       ref("w1"),
       ref("c1"),
       ref(forumChannel()),

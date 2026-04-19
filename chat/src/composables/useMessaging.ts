@@ -1,4 +1,5 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
+import { useStore } from "@nanostores/vue";
 import type { WaddleApi } from "@/lib/waddle-api";
 import type { ChannelSummary } from "@/lib/waddle-api";
 import { isForumChannel } from "@/lib/channel-types";
@@ -10,11 +11,11 @@ import {
   type LiveRoomMessage,
   type RoomActivityEvent,
   type SessionLifecycleEvent,
-  type XmppStatusSnapshot,
   type ChatStateType,
   type RoomHats,
   type RoomPresence,
 } from "@/lib/xmpp-client";
+import { $xmppStatus } from "@/stores/xmpp-status";
 import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
@@ -187,10 +188,10 @@ export function useMessaging(
   clearActionError: () => void,
 ) {
   const { mode: scrollDirection } = useScrollDirection();
-  const xmppStatus = ref<XmppStatusSnapshot>({
-    state: "offline",
-    detail: "Live room offline",
-  });
+  // xmppStatus is owned by $xmppStatus (written from XmppProvider, which is
+  // persisted across route changes). Reading via useStore keeps the composable
+  // in sync with the authoritative snapshot on every mount.
+  const xmppStatus = useStore($xmppStatus);
 
   const messages = ref<TimelineMessage[]>([]);
   const draft = ref("");
@@ -293,9 +294,6 @@ export function useMessaging(
           }
         }
       });
-      client.setStatusHandler((status) => {
-        xmppStatus.value = status;
-      });
       client.setChatStateHandler((event) => {
         if (!currentRoomJid.value || event.roomJid !== currentRoomJid.value) return;
         if (event.state === "composing") {
@@ -349,10 +347,10 @@ export function useMessaging(
         }, 1000);
       });
     } else {
-      xmppStatus.value = { state: "offline", detail: "Live room offline" };
+      // $xmppStatus is reset by XmppProvider on logout/unmount.
       clearTypingState();
     }
-  });
+  }, { immediate: true });
 
   function addTypingUser(nick: string) {
     if (!typingUsers.value.includes(nick)) {
@@ -1105,7 +1103,7 @@ export function useMessaging(
     messageRequestId++;
     searchRequestId++;
     pendingEchoClientIds.clear();
-    xmppStatus.value = { state: "offline", detail: "Live room offline" };
+    // $xmppStatus is authoritative and owned by XmppProvider; do not write it here.
     clearTypingState();
     isLoadingMessages.value = false;
     isSearching.value = false;

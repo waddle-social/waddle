@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { nextTick, ref } from "vue";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
 import { useScrollDirection } from "../src/composables/useScrollDirection";
 import {
   getNewMessagesDividerPlacement,
@@ -157,6 +158,7 @@ describe("scroll direction preference", () => {
       ref(session()),
       ref(null),
       ref({
+        ...handlerStubs(),
         sendChatState,
         sendGroupMessage,
       } as never) as never,
@@ -205,7 +207,7 @@ describe("scroll direction preference", () => {
     const messaging = useMessaging(
       ref(session()),
       ref(null),
-      ref({ queryMam } as never) as never,
+      ref({ ...handlerStubs(), queryMam } as never) as never,
       ref("w1"),
       ref("c1"),
       ref({ id: "c1", name: "general", channel_type: "text" }),

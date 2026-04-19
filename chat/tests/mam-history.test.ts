@@ -5,6 +5,7 @@ import { queryPersonalMam } from "../src/lib/xmpp/dm-history";
 import { queryMam } from "../src/lib/xmpp/history";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
 import { useMessaging } from "../src/composables/useMessaging";
+import { handlerStubs } from "./helpers/xmpp-client-mock";
 
 function makeMamAgent(results: unknown[]) {
   return {
@@ -184,6 +185,7 @@ describe("MAM history application", () => {
       domain: "example.com",
     } as never);
     const xmppClient = ref({
+      ...handlerStubs(),
       queryMam: mock(async () => [
         {
           id: "msg-1",
@@ -255,6 +257,7 @@ describe("MAM history application", () => {
       domain: "example.com",
     } as never);
     const xmppClient = ref({
+      ...handlerStubs(),
       queryMam: mock(async () => [
         {
           id: "stable-msg-1",
