@@ -952,6 +952,13 @@ async fn create_router(
     let pubsub_storage: Arc<dyn waddle_xmpp::pubsub::PubSubStorage> =
         Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new());
 
+    // XEP-0198 detached-session registry for stream resumption across
+    // transient WebSocket drops.
+    let sm_session_registry =
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+    let resumable_sessions: Arc<dashmap::DashMap<String, crate::auth::Session>> =
+        Arc::new(dashmap::DashMap::new());
+
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
         app_state: state.clone(),
@@ -964,6 +971,8 @@ async fn create_router(
         extension_manager,
         dispatcher: stanza_dispatcher,
         pubsub_storage,
+        sm_session_registry,
+        resumable_sessions,
     });
     let websocket_router = routes::websocket::router(websocket_state);
 

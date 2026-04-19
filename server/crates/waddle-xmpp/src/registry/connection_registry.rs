@@ -243,6 +243,36 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Non-blocking send. Returns true iff the stanza was queued.
+    ///
+    /// Intended for fan-out paths (MUC broadcasts) where a slow or zombied
+    /// consumer must never stall the producer task. On `Closed` the entry is
+    /// unregistered; on `Full` the stanza is dropped without touching the
+    /// registry (the consumer may just be catching up). Callers are free to
+    /// do their own stronger eviction on `Full` if they have additional
+    /// signal.
+    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> bool {
+        let sender = match self.connections.get(jid) {
+            Some(entry) => entry.value().sender.clone(),
+            None => return false,
+        };
+
+        let outbound = OutboundStanza::new(stanza);
+
+        match sender.try_send(outbound) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                debug!(jid = %jid, "Outbound channel full; dropping broadcast stanza");
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!(jid = %jid, "Outbound channel closed; unregistering stale connection");
+                self.unregister(jid);
+                false
+            }
+        }
+    }
+
     /// Send a stanza to multiple recipients.
     ///
     /// Returns a vector of (jid, result) pairs for each recipient.
