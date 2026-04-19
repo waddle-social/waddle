@@ -126,7 +126,7 @@ fn inbox_query_result_and_mark_read_result() {
         _ => panic!("expected result"),
     }
     let mr = build_mark_read_result(&iq);
-    matches!(mr.payload, IqType::Result(None));
+    assert!(matches!(mr.payload, IqType::Result(None)));
 }
 
 #[test]
@@ -142,6 +142,33 @@ fn inbox_iq_recognition() {
     assert!(!is_inbox_iq(&get_iq(
         Element::builder("query", "other").build()
     )));
+}
+
+#[test]
+fn inbox_entry_invalid_integer_reports_raw_value() {
+    let bad_last_updated = Element::builder("conversation", NS_INBOX)
+        .attr("partner", "x@example.com")
+        .attr("kind", "direct")
+        .attr("last-stanza-id", "sid")
+        .attr("last-updated", "not-a-number")
+        .attr("unread", "2")
+        .build();
+    assert_eq!(
+        parse_entry_element(&bad_last_updated),
+        Err(InboxError::InvalidInteger("not-a-number".into()))
+    );
+
+    let bad_unread = Element::builder("conversation", NS_INBOX)
+        .attr("partner", "x@example.com")
+        .attr("kind", "direct")
+        .attr("last-stanza-id", "sid")
+        .attr("last-updated", "10")
+        .attr("unread", "NaN")
+        .build();
+    assert_eq!(
+        parse_entry_element(&bad_unread),
+        Err(InboxError::InvalidInteger("NaN".into()))
+    );
 }
 
 #[tokio::test]

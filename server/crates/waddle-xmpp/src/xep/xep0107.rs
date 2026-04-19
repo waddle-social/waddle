@@ -354,10 +354,10 @@ pub fn parse_mood_element(elem: &Element) -> Result<Option<Mood>, MoodError> {
     let mut text: Option<String> = None;
     let mut has_any = false;
     for child in elem.children() {
-        has_any = true;
         if child.ns() != NS_MOOD {
             continue;
         }
+        has_any = true;
         let name = child.name();
         if name == "text" {
             text = Some(child.text());

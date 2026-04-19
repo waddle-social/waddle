@@ -166,10 +166,10 @@ pub fn parse_activity_element(elem: &Element) -> Result<Option<Activity>, Activi
     let mut text: Option<String> = None;
     let mut has_any = false;
     for child in elem.children() {
-        has_any = true;
         if child.ns() != NS_ACTIVITY {
             continue;
         }
+        has_any = true;
         let name = child.name();
         if name == "text" {
             text = Some(child.text());

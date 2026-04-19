@@ -144,16 +144,18 @@ pub fn parse_entry_element(elem: &Element) -> Result<InboxEntry, InboxError> {
         .attr("last-stanza-id")
         .ok_or(InboxError::MissingAttribute("last-stanza-id"))?
         .to_string();
-    let last_updated: i64 = elem
+    let last_updated_raw = elem
         .attr("last-updated")
-        .ok_or(InboxError::MissingAttribute("last-updated"))?
+        .ok_or(InboxError::MissingAttribute("last-updated"))?;
+    let last_updated: i64 = last_updated_raw
         .parse()
-        .map_err(|_| InboxError::InvalidInteger("last-updated".into()))?;
-    let unread: u32 = elem
+        .map_err(|_| InboxError::InvalidInteger(last_updated_raw.to_string()))?;
+    let unread_raw = elem
         .attr("unread")
-        .ok_or(InboxError::MissingAttribute("unread"))?
+        .ok_or(InboxError::MissingAttribute("unread"))?;
+    let unread: u32 = unread_raw
         .parse()
-        .map_err(|_| InboxError::InvalidInteger("unread".into()))?;
+        .map_err(|_| InboxError::InvalidInteger(unread_raw.to_string()))?;
     let preview = elem
         .get_child("preview", NS_INBOX)
         .map(|p| p.text())

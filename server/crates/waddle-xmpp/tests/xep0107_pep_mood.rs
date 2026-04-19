@@ -38,6 +38,14 @@ fn xep0107_retraction_is_empty_mood_element() {
 }
 
 #[test]
+fn xep0107_foreign_children_do_not_cancel_retraction() {
+    let elem = Element::builder("mood", NS_MOOD)
+        .append(Element::builder("ext", "urn:waddle:test").build())
+        .build();
+    assert!(parse_mood_element(&elem).unwrap().is_none());
+}
+
+#[test]
 fn xep0107_unknown_kind_rejected() {
     let elem = Element::builder("mood", NS_MOOD)
         .append(Element::builder("euphoric", NS_MOOD).build())

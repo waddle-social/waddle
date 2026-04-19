@@ -121,7 +121,10 @@ impl EncryptedFile {
 }
 
 /// Build the `<encrypted/>` payload element from a typed value.
-pub fn build_encrypted_element(enc: &EncryptedFile) -> Element {
+pub fn build_encrypted_element(enc: &EncryptedFile) -> Result<Element, EncryptedFileError> {
+    if enc.sources.is_empty() {
+        return Err(EncryptedFileError::NoSources);
+    }
     let mut builder = Element::builder("encrypted", NS_ESFS).attr("cipher", enc.cipher.as_uri());
     builder = builder.append(
         Element::builder("key", NS_ESFS)
@@ -150,7 +153,7 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Element {
         );
     }
     builder = builder.append(sources.build());
-    builder.build()
+    Ok(builder.build())
 }
 
 pub fn parse_encrypted_element(elem: &Element) -> Result<EncryptedFile, EncryptedFileError> {
@@ -216,8 +219,12 @@ pub fn is_encrypted_file_element(elem: &Element) -> bool {
 }
 
 /// Attach an `<encrypted/>` envelope to a message payload.
-pub fn set_encrypted_file(msg: &mut Message, enc: &EncryptedFile) {
-    msg.payloads.push(build_encrypted_element(enc));
+pub fn set_encrypted_file(
+    msg: &mut Message,
+    enc: &EncryptedFile,
+) -> Result<(), EncryptedFileError> {
+    msg.payloads.push(build_encrypted_element(enc)?);
+    Ok(())
 }
 
 /// Extract the first `<encrypted/>` element from a message payload.
@@ -241,7 +248,7 @@ mod tests {
     #[test]
     fn test_round_trip() {
         let enc = sample();
-        let elem = build_encrypted_element(&enc);
+        let elem = build_encrypted_element(&enc).unwrap();
         let parsed = parse_encrypted_element(&elem).unwrap();
         assert_eq!(parsed, enc);
     }
@@ -288,9 +295,24 @@ mod tests {
             "bob@example.com".parse::<BareJid>().unwrap(),
         )));
         let enc = sample();
-        set_encrypted_file(&mut msg, &enc);
+        set_encrypted_file(&mut msg, &enc).unwrap();
         let extracted = extract_encrypted_file(&msg).unwrap().unwrap();
         assert_eq!(extracted, enc);
+    }
+
+    #[test]
+    fn test_build_requires_sources() {
+        let enc = EncryptedFile {
+            cipher: Cipher::Aes256GcmNoPadding,
+            key_b64: "a2V5".into(),
+            iv_b64: "aXY=".into(),
+            hashes: Vec::new(),
+            sources: Vec::new(),
+        };
+        assert!(matches!(
+            build_encrypted_element(&enc),
+            Err(EncryptedFileError::NoSources)
+        ));
     }
 
     #[test]

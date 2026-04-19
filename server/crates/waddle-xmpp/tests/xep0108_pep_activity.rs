@@ -48,6 +48,14 @@ fn xep0108_empty_element_is_retraction() {
 }
 
 #[test]
+fn xep0108_foreign_children_do_not_cancel_retraction() {
+    let elem = Element::builder("activity", NS_ACTIVITY)
+        .append(Element::builder("ext", "urn:waddle:test").build())
+        .build();
+    assert!(parse_activity_element(&elem).unwrap().is_none());
+}
+
+#[test]
 fn xep0108_unknown_general_rejected() {
     let elem = Element::builder("activity", NS_ACTIVITY)
         .append(Element::builder("flying", NS_ACTIVITY).build())

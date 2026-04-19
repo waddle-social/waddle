@@ -18,7 +18,7 @@ fn sample() -> EncryptedFile {
 #[test]
 fn encrypted_sfs_round_trip() {
     let enc = sample();
-    let elem = build_encrypted_element(&enc);
+    let elem = build_encrypted_element(&enc).unwrap();
     let parsed = parse_encrypted_element(&elem).unwrap();
     assert_eq!(parsed, enc);
 }
@@ -61,7 +61,7 @@ fn encrypted_sfs_attach_to_message() {
         "bob@example.com".parse::<BareJid>().unwrap(),
     )));
     let enc = sample();
-    set_encrypted_file(&mut msg, &enc);
+    set_encrypted_file(&mut msg, &enc).unwrap();
     let extracted = extract_encrypted_file(&msg).unwrap().unwrap();
     assert_eq!(extracted, enc);
 }
@@ -73,5 +73,20 @@ fn encrypted_sfs_is_detected_by_namespace() {
     ));
     assert!(!is_encrypted_file_element(
         &Element::builder("encrypted", "other").build()
+    ));
+}
+
+#[test]
+fn encrypted_sfs_builder_rejects_missing_sources() {
+    let enc = EncryptedFile {
+        cipher: Cipher::Aes256GcmNoPadding,
+        key_b64: "a2V5".into(),
+        iv_b64: "aXY=".into(),
+        hashes: Vec::new(),
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        build_encrypted_element(&enc),
+        Err(EncryptedFileError::NoSources)
     ));
 }
