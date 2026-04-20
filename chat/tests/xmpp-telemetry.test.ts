@@ -233,6 +233,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.wireEvents(stubXmpp);
     internal.inflightQueuedIds.add("dm-9");
     internal.pendingSendAt.set("dm-9", { at: performance.now() - 10, kind: "dm" });
+    // Record the pending kind so the failure hook reports it truthfully.
+    internal.pendingSendAt.set("live-1", { at: performance.now() - 5, kind: "dm" });
 
     // Ack → Faro event + measurement
     (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "dm-9" });
@@ -309,5 +311,104 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(() => {
       (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
     }).not.toThrow();
+  });
+
+  test("message:failed emits queue depth and preserves recorded DM kind", () => {
+    const client = new BrowserXmppClient(session());
+
+    const fails: Array<{ id: string; kind: "room" | "dm" }> = [];
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    client.onMessageDeliveryFailed((id, meta) => fails.push({ id, kind: meta.kind }));
+    client.onQueueDepthChange((d) => depths.push(d));
+
+    const internal = client as unknown as {
+      inflightQueuedIds: Set<string>;
+      pendingSendAt: Map<string, { at: number; kind: "room" | "dm" }>;
+      xmpp: unknown;
+      wireEvents: (xmpp: unknown) => void;
+    };
+    const handlers = new Map<string, Array<(msg: unknown) => void>>();
+    const stubXmpp = {
+      on(event: string, handler: (msg: unknown) => void) {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+      emit(event: string, msg: unknown) {
+        for (const h of handlers.get(event) ?? []) h(msg);
+      },
+    };
+    internal.xmpp = stubXmpp;
+    internal.wireEvents(stubXmpp);
+    internal.inflightQueuedIds.add("dm-fail-1");
+    internal.pendingSendAt.set("dm-fail-1", { at: performance.now(), kind: "dm" });
+
+    stubXmpp.emit("message:failed", { id: "dm-fail-1" });
+
+    expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
+    expect(depths).toHaveLength(1);
+    expect(depths[0].inflight).toBe(0);
+  });
+
+  test("message:failed without a recorded pending entry does not fire the failure hook", () => {
+    const client = new BrowserXmppClient(session());
+
+    const fails: string[] = [];
+    client.onMessageDeliveryFailed((id) => fails.push(id));
+
+    const internal = client as unknown as {
+      xmpp: unknown;
+      wireEvents: (xmpp: unknown) => void;
+    };
+    const handlers = new Map<string, Array<(msg: unknown) => void>>();
+    const stubXmpp = {
+      on(event: string, handler: (msg: unknown) => void) {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+      emit(event: string, msg: unknown) {
+        for (const h of handlers.get(event) ?? []) h(msg);
+      },
+    };
+    internal.xmpp = stubXmpp;
+    internal.wireEvents(stubXmpp);
+
+    stubXmpp.emit("message:failed", { id: "orphan" });
+
+    expect(fails).toEqual([]);
+  });
+
+  test("reconnect duration is only reported on reconnecting → online", () => {
+    const client = new BrowserXmppClient(session());
+
+    const reconnectDurations: number[] = [];
+    client.onStatus((_snap, meta) => {
+      if (meta.reconnectDurationMs !== undefined) {
+        reconnectDurations.push(meta.reconnectDurationMs);
+      }
+    });
+
+    const internal = client as unknown as {
+      emitStatus: (snap: { state: string; detail?: string }) => void;
+    };
+
+    // reconnecting → offline: should NOT emit a duration.
+    internal.emitStatus({ state: "reconnecting" });
+    internal.emitStatus({ state: "offline" });
+    expect(reconnectDurations).toEqual([]);
+
+    // reconnecting → online: SHOULD emit a duration.
+    internal.emitStatus({ state: "reconnecting" });
+    internal.emitStatus({ state: "online" });
+    expect(reconnectDurations).toHaveLength(1);
+    expect(reconnectDurations[0]).toBeGreaterThanOrEqual(0);
+
+    // reconnecting → error: should NOT emit, and should reset the timer
+    // so a subsequent bare `online` doesn't retroactively emit.
+    internal.emitStatus({ state: "reconnecting" });
+    internal.emitStatus({ state: "error", detail: "fatal" });
+    internal.emitStatus({ state: "online" });
+    expect(reconnectDurations).toHaveLength(1);
   });
 });

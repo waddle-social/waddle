@@ -273,14 +273,13 @@ export class BrowserXmppClient {
     }
   }
 
-  private emitQueueDepth(kind: "room" | "dm") {
+  private emitQueueDepth() {
     if (this.queueDepthHooks.length === 0) return;
     const depth = {
       persisted: countQueuedMessages(this.queueScope),
       inflight: this.inflightQueuedIds.size,
     };
     this.fireHook(this.queueDepthHooks, depth);
-    void kind;
   }
 
   private recordPendingSend(id: string | null, kind: "room" | "dm") {
@@ -301,8 +300,10 @@ export class BrowserXmppClient {
   /**
    * Track `reconnecting → online` transitions for telemetry latency.
    * Called from `emitStatus` so every status transition is observed.
-   * Returns `{ reconnectDurationMs }` when the snap is the first
-   * non-reconnecting snap after a reconnecting one; empty otherwise.
+   * Only returns `{ reconnectDurationMs }` on a successful resumption
+   * (reconnecting → online). Transitions to `offline` / `error` just
+   * reset the timer without emitting, so failed reconnect attempts
+   * don't skew `chat.xmpp.reconnect.duration_ms`.
    */
   private updateReconnectTimer(snap: XmppStatusSnapshot): { reconnectDurationMs?: number } {
     if (snap.state === "reconnecting") {
@@ -311,11 +312,13 @@ export class BrowserXmppClient {
       }
       return {};
     }
-    if (this.reconnectStartedAt !== null) {
+    if (this.reconnectStartedAt === null) return {};
+    if (snap.state === "online") {
       const durationMs = performance.now() - this.reconnectStartedAt;
       this.reconnectStartedAt = null;
       return { reconnectDurationMs: durationMs };
     }
+    this.reconnectStartedAt = null;
     return {};
   }
 
@@ -667,7 +670,7 @@ export class BrowserXmppClient {
     this.queuedMessageStatusHandler?.(queuedId, "queued");
     this.noteQueuedMessage();
     this.fireHook(this.sendEnqueuedHooks, { kind: "room", reason: this.enqueueReason() });
-    this.emitQueueDepth("room");
+    this.emitQueueDepth();
     return { id: queuedId, state: "queued" };
   }
 
@@ -691,7 +694,7 @@ export class BrowserXmppClient {
     this.queuedMessageStatusHandler?.(queuedId, "queued");
     this.noteQueuedMessage();
     this.fireHook(this.sendEnqueuedHooks, { kind: "dm", reason: this.enqueueReason() });
-    this.emitQueueDepth("dm");
+    this.emitQueueDepth();
     return { id: queuedId, state: "queued" };
   }
 
@@ -1279,7 +1282,7 @@ export class BrowserXmppClient {
         const latencyMs = performance.now() - pending.at;
         this.fireHook(this.messageAckHooks, msg.id, { kind: pending.kind, latencyMs });
       }
-      if (wasQueued) this.emitQueueDepth("room");
+      if (wasQueued) this.emitQueueDepth();
     });
 
     // XEP-0198: stanza.js emits message:failed when SM resume fails (server
@@ -1293,12 +1296,14 @@ export class BrowserXmppClient {
     xmpp.on("message:failed", (msg) => {
       if (this.xmpp !== xmpp) return;
       if (!msg?.id) return;
-      this.inflightQueuedIds.delete(msg.id);
+      const wasQueued = this.inflightQueuedIds.delete(msg.id);
       this.messageDeliveryFailureHandler?.(msg.id);
       const pending = this.pendingSendAt.get(msg.id);
-      const kind = pending?.kind ?? "room";
-      this.pendingSendAt.delete(msg.id);
-      this.fireHook(this.messageFailHooks, msg.id, { kind });
+      if (pending) {
+        this.pendingSendAt.delete(msg.id);
+        this.fireHook(this.messageFailHooks, msg.id, { kind: pending.kind });
+      }
+      if (wasQueued) this.emitQueueDepth();
     });
 
     xmpp.on("disconnected", (err) => {
