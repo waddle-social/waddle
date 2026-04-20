@@ -1,7 +1,18 @@
 /** Generated from src/service-worker/sw-template.js for build __WADDLE_BUILD_SHA__. */
 
 const CACHE_NAME = "waddle-__WADDLE_BUILD_SHA__";
-const PRECACHE_URLS = ["/offline.html", "/manifest.webmanifest", "/favicon.svg", "/icon.svg"];
+const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
+const PRECACHE_URLS = [
+  "/offline.html",
+  "/manifest.webmanifest",
+  "/waddle-logo.svg",
+  "/favicon.ico",
+  "/favicon-16x16.png",
+  "/favicon-32x32.png",
+  "/apple-touch-icon.png",
+  NOTIFICATION_ICON_URL,
+  "/android-chrome-512x512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -39,11 +50,14 @@ self.addEventListener("fetch", (event) => {
   // Static assets (Astro bundles, icons, manifest): cache-first
   if (
     url.pathname.startsWith("/_astro/") ||
-    url.pathname.startsWith("/icons/") ||
     url.pathname === "/manifest.webmanifest" ||
-    url.pathname === "/favicon.svg" ||
+    url.pathname === "/waddle-logo.svg" ||
     url.pathname === "/favicon.ico" ||
-    url.pathname === "/icon.svg"
+    url.pathname === "/favicon-16x16.png" ||
+    url.pathname === "/favicon-32x32.png" ||
+    url.pathname === "/apple-touch-icon.png" ||
+    url.pathname === NOTIFICATION_ICON_URL ||
+    url.pathname === "/android-chrome-512x512.png"
   ) {
     event.respondWith(
       caches.match(request).then(
@@ -82,7 +96,7 @@ self.addEventListener("push", (event) => {
     self.registration.showNotification(data.title ?? "Waddle", {
       body: data.body ?? "",
       tag: data.roomJid,
-      icon: "/icon.svg",
+      icon: NOTIFICATION_ICON_URL,
       data: { url: data.url ?? roomJidToPath(data.roomJid) },
     }),
   );
