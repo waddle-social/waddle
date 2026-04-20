@@ -17,3 +17,9 @@ type = "nix"
 flake = "../.."
 digest = "sha256:25223788b0503216458257e1093a50b8206d248df694e0d6dbf20d229567fea3"
 lockfile = "infrastructure/waddle.cloud/../../flake.lock"
+
+[runtimes.website]
+type = "nix"
+flake = ".."
+digest = "sha256:25223788b0503216458257e1093a50b8206d248df694e0d6dbf20d229567fea3"
+lockfile = "website/../flake.lock"

@@ -1,0 +1,29 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"compatibility_date": "2026-04-17",
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"name": "website",
+	"main": "@astrojs/cloudflare/entrypoints/server",
+	"workers_dev": true,
+	"preview_urls": false,
+	"routes": [
+		{
+			"pattern": "waddle.social",
+			"custom_domain": true
+		}
+	],
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "waddle-social",
+			"database_id": "fd7af7f7-d271-4d90-a7df-7fe1fa6a3e42"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}
