@@ -20,7 +20,7 @@ mod connection_registry;
 pub mod user_actor;
 pub mod user_registry;
 
-pub use connection_registry::{ConnectionRegistry, OutboundStanza, SendResult};
+pub use connection_registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza, SendResult};
 pub use user_registry::{
     GetOrCreateUser, GetUser, ListUsers, RemoveUser, UserCount, UserRegistryActor,
 };

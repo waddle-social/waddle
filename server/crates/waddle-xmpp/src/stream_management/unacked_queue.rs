@@ -18,6 +18,24 @@ pub struct UnackedStanza {
     pub sent_at: Instant,
 }
 
+/// Outcome of a `push` onto the unacked queue.
+///
+/// `Evicted(stanza)` carries the stanza that had to be dropped to make
+/// room for the new entry, so `StreamManagementState` can emit a
+/// structured warning and bump the eviction metric. Silent eviction —
+/// the previous behaviour — is what causes `<resumed/>` to succeed
+/// while the caller's earliest messages are already gone, which is the
+/// sender-side half of "reconnects drop messages".
+#[derive(Debug)]
+pub enum UnackedPushResult {
+    /// Queue had room; the new stanza was appended without eviction.
+    Accepted,
+    /// Queue was at capacity; the oldest stanza was evicted to make
+    /// room. The evicted entry is returned so the caller can log its
+    /// sequence number.
+    Evicted(UnackedStanza),
+}
+
 impl UnackedStanza {
     /// Create a new unacked stanza.
     pub fn new(sequence: u32, stanza_xml: String) -> Self {
@@ -57,15 +75,27 @@ impl UnackedQueue {
 
     /// Push a new stanza onto the queue.
     ///
-    /// If the queue is at capacity, the oldest stanza is removed.
-    pub fn push(&mut self, sequence: u32, stanza_xml: String) {
-        // If at capacity, remove oldest
-        if self.stanzas.len() >= self.max_size {
-            self.stanzas.pop_front();
-        }
+    /// Returns `UnackedPushResult::Accepted` when the queue had
+    /// capacity, or `UnackedPushResult::Evicted(stanza)` when the
+    /// queue was full and the oldest entry had to be removed to make
+    /// room. Callers MUST observe the evicted variant (log + metric)
+    /// — a non-zero eviction rate means subsequent `<resumed/>`
+    /// replays will be missing those stanzas entirely.
+    #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
+    pub fn push(&mut self, sequence: u32, stanza_xml: String) -> UnackedPushResult {
+        let evicted = if self.stanzas.len() >= self.max_size {
+            self.stanzas.pop_front()
+        } else {
+            None
+        };
 
         self.stanzas
             .push_back(UnackedStanza::new(sequence, stanza_xml));
+
+        match evicted {
+            Some(stanza) => UnackedPushResult::Evicted(stanza),
+            None => UnackedPushResult::Accepted,
+        }
     }
 
     /// Remove all stanzas with sequence <= h (they've been acknowledged).
@@ -163,14 +193,23 @@ fn sequence_gt(a: u32, b: u32) -> bool {
 mod tests {
     use super::*;
 
+    fn push_accepted(queue: &mut UnackedQueue, sequence: u32, xml: &str) {
+        match queue.push(sequence, xml.to_string()) {
+            UnackedPushResult::Accepted => {}
+            UnackedPushResult::Evicted(stanza) => {
+                panic!("unexpected eviction of stanza sequence={}", stanza.sequence)
+            }
+        }
+    }
+
     #[test]
     fn test_unacked_queue_basic() {
         let mut queue = UnackedQueue::new(10);
         assert!(queue.is_empty());
 
-        queue.push(1, "<msg1/>".to_string());
-        queue.push(2, "<msg2/>".to_string());
-        queue.push(3, "<msg3/>".to_string());
+        push_accepted(&mut queue, 1, "<msg1/>");
+        push_accepted(&mut queue, 2, "<msg2/>");
+        push_accepted(&mut queue, 3, "<msg3/>");
 
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.oldest_sequence(), Some(1));
@@ -181,10 +220,10 @@ mod tests {
     fn test_unacked_queue_acknowledge() {
         let mut queue = UnackedQueue::new(10);
 
-        queue.push(1, "<msg1/>".to_string());
-        queue.push(2, "<msg2/>".to_string());
-        queue.push(3, "<msg3/>".to_string());
-        queue.push(4, "<msg4/>".to_string());
+        push_accepted(&mut queue, 1, "<msg1/>");
+        push_accepted(&mut queue, 2, "<msg2/>");
+        push_accepted(&mut queue, 3, "<msg3/>");
+        push_accepted(&mut queue, 4, "<msg4/>");
 
         // Acknowledge up to 2
         queue.acknowledge(2);
@@ -200,10 +239,10 @@ mod tests {
     fn test_unacked_queue_get_unacked_after() {
         let mut queue = UnackedQueue::new(10);
 
-        queue.push(1, "<msg1/>".to_string());
-        queue.push(2, "<msg2/>".to_string());
-        queue.push(3, "<msg3/>".to_string());
-        queue.push(4, "<msg4/>".to_string());
+        push_accepted(&mut queue, 1, "<msg1/>");
+        push_accepted(&mut queue, 2, "<msg2/>");
+        push_accepted(&mut queue, 3, "<msg3/>");
+        push_accepted(&mut queue, 4, "<msg4/>");
 
         // Get stanzas after h=2 (should be 3 and 4)
         let unacked = queue.get_unacked_after(2);
@@ -217,16 +256,24 @@ mod tests {
     }
 
     #[test]
-    fn test_unacked_queue_max_size() {
+    fn test_unacked_queue_max_size_returns_evicted_stanza() {
         let mut queue = UnackedQueue::new(3);
 
-        queue.push(1, "<msg1/>".to_string());
-        queue.push(2, "<msg2/>".to_string());
-        queue.push(3, "<msg3/>".to_string());
+        push_accepted(&mut queue, 1, "<msg1/>");
+        push_accepted(&mut queue, 2, "<msg2/>");
+        push_accepted(&mut queue, 3, "<msg3/>");
         assert_eq!(queue.len(), 3);
 
-        // Adding a 4th should remove the oldest
-        queue.push(4, "<msg4/>".to_string());
+        // Adding a 4th should remove the oldest and surface the evicted
+        // stanza so `StreamManagementState::record_outbound` can warn
+        // about it instead of dropping silently.
+        let result = queue.push(4, "<msg4/>".to_string());
+        let evicted = match result {
+            UnackedPushResult::Evicted(stanza) => stanza,
+            UnackedPushResult::Accepted => panic!("queue at capacity must evict"),
+        };
+        assert_eq!(evicted.sequence, 1);
+        assert_eq!(evicted.stanza_xml, "<msg1/>");
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.oldest_sequence(), Some(2));
     }
@@ -267,8 +314,8 @@ mod tests {
     fn test_unacked_queue_clear() {
         let mut queue = UnackedQueue::new(10);
 
-        queue.push(1, "<msg1/>".to_string());
-        queue.push(2, "<msg2/>".to_string());
+        push_accepted(&mut queue, 1, "<msg1/>");
+        push_accepted(&mut queue, 2, "<msg2/>");
         assert!(!queue.is_empty());
 
         queue.clear();

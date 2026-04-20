@@ -79,9 +79,28 @@ describe("offline outbound queue replay", () => {
       "dm-2",
     ]);
 
-    const xmpp = { sendMessage: mock(() => undefined) };
+    // stanza.js calls emit(...) on its event bus; the BrowserXmppClient
+    // wires "message:acked" in `wireEvents`, and that's what drives
+    // removal from the persisted queue post-fix. For the flush test we
+    // drive sendMessage directly and simulate the ack afterwards.
+    const handlers = new Map<string, Array<(payload: unknown) => void>>();
+    const xmpp = {
+      sendMessage: mock(() => undefined),
+      on(event: string, handler: (payload: unknown) => void) {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+      emit(event: string, payload: unknown) {
+        for (const handler of handlers.get(event) ?? []) {
+          handler(payload);
+        }
+      },
+    };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
+    // Wire the ack handler the same way wireEvents would.
+    (client as unknown as { wireEvents: (x: typeof xmpp) => void }).wireEvents(xmpp);
 
     const statuses: Array<{ id: string; status: string }> = [];
     client.setQueuedMessageStatusHandler((id, status) => {
@@ -98,6 +117,26 @@ describe("offline outbound queue replay", () => {
       "dm-1",
       "dm-2",
     ]);
+    // Post-fix: persisted queue entries linger until XEP-0198
+    // `message:acked` confirms the server received them.
+    expect(
+      listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id),
+    ).toEqual(["dm-1", "dm-2"]);
+
+    // A second flush in the same session must NOT re-send: both entries
+    // are already inflight (handed to stanza.js, ack pending).
+    xmpp.sendMessage.mockClear();
+    await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
+    expect(xmpp.sendMessage.mock.calls).toEqual([]);
+
+    // Now simulate the server acking dm-1 — that entry drops out of the
+    // persisted queue; dm-2 is still pending.
+    xmpp.emit("message:acked", { id: "dm-1" });
+    expect(
+      listQueuedDmMessages("alice@example.com", "bob@example.com").map((message) => message.id),
+    ).toEqual(["dm-2"]);
+
+    xmpp.emit("message:acked", { id: "dm-2" });
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com")).toEqual([]);
   });
 
@@ -119,11 +158,25 @@ describe("offline outbound queue replay", () => {
       "room-2",
     ]);
 
-    const xmpp = { sendMessage: mock(() => undefined) };
+    const handlers = new Map<string, Array<(payload: unknown) => void>>();
+    const xmpp = {
+      sendMessage: mock(() => undefined),
+      on(event: string, handler: (payload: unknown) => void) {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+      emit(event: string, payload: unknown) {
+        for (const handler of handlers.get(event) ?? []) {
+          handler(payload);
+        }
+      },
+    };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).connected = true;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).currentRoom =
       roomJid;
+    (client as unknown as { wireEvents: (x: typeof xmpp) => void }).wireEvents(xmpp);
 
     await (client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid);
 
@@ -131,6 +184,13 @@ describe("offline outbound queue replay", () => {
       "room-1",
       "room-2",
     ]);
+    // Persisted entries stay until ack, same as the DM path.
+    expect(
+      listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id),
+    ).toEqual(["room-1", "room-2"]);
+
+    xmpp.emit("message:acked", { id: "room-1" });
+    xmpp.emit("message:acked", { id: "room-2" });
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 });

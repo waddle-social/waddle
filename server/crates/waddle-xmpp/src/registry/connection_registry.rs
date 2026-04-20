@@ -96,6 +96,37 @@ pub enum SendResult {
     ChannelClosed,
 }
 
+/// Outcome of a non-blocking fan-out send via `try_send_to`.
+///
+/// Returning a typed outcome (rather than `bool`) forces callers to
+/// distinguish delivery, absence, and the two silent-drop cases — the
+/// previous `bool` API conflated them and they were all observed as
+/// "just didn't get the message" from the recipient side. Each variant
+/// bumps the matching Prometheus counter inside `try_send_to` so
+/// per-site aggregation is optional for callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastOutcome {
+    /// Stanza enqueued on the recipient's outbound channel.
+    Delivered,
+    /// No registry entry for the recipient (e.g. disconnected or SM-detached).
+    NotConnected,
+    /// Recipient's outbound channel is full; stanza dropped. The consumer
+    /// is backpressured — a persistent non-zero rate of this outcome is
+    /// the silent-message-loss symptom that PR #160's fan-out
+    /// fire-and-forget path introduced.
+    DroppedFull,
+    /// Recipient's outbound channel was closed; stanza dropped and the
+    /// stale registry entry has been evicted.
+    DroppedClosed,
+}
+
+impl BroadcastOutcome {
+    /// True iff the stanza was enqueued for delivery.
+    pub fn is_delivered(self) -> bool {
+        matches!(self, BroadcastOutcome::Delivered)
+    }
+}
+
 /// Registry for tracking active XMPP connections.
 ///
 /// Thread-safe registry that maps full JIDs to connection entries.
@@ -243,7 +274,8 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Non-blocking send. Returns true iff the stanza was queued.
+    /// Non-blocking send. Returns a typed `BroadcastOutcome` describing
+    /// delivery, absence, or which silent-drop path was taken.
     ///
     /// Intended for fan-out paths (MUC broadcasts) where a slow or zombied
     /// consumer must never stall the producer task. On `Closed` the stale
@@ -252,23 +284,44 @@ impl ConnectionRegistry {
     /// installed a fresh, live sender between our `get` and `try_send`, and
     /// we must not wipe the newcomer. On `Full` the stanza is dropped
     /// without touching the registry (the consumer may just be catching up).
-    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> bool {
+    ///
+    /// Every outcome bumps a Prometheus counter so production drop rates
+    /// are visible even when callers discard the return value.
+    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
-            None => return false,
+            None => {
+                prometheus::increment_broadcast_not_connected();
+                return BroadcastOutcome::NotConnected;
+            }
         };
 
         let outbound = OutboundStanza::new(stanza);
 
         match sender.try_send(outbound) {
-            Ok(()) => true,
+            Ok(()) => {
+                prometheus::increment_broadcast_delivered();
+                BroadcastOutcome::Delivered
+            }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                debug!(jid = %jid, "Outbound channel full; dropping broadcast stanza");
-                false
+                prometheus::increment_broadcast_dropped_full();
+                // Keep per-recipient detail at debug only — the
+                // aggregated broadcast log at the call site already
+                // reports a per-send `dropped_full` total, and
+                // `waddle_broadcast_dropped_full_total` is always on.
+                // A `warn!` here would turn into a log storm under
+                // sustained fan-out backpressure (125+/s) and drown
+                // out every other signal on the pod.
+                debug!(
+                    jid = %jid,
+                    "Outbound channel full; broadcast stanza dropped"
+                );
+                BroadcastOutcome::DroppedFull
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                prometheus::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed(jid);
-                false
+                BroadcastOutcome::DroppedClosed
             }
         }
     }

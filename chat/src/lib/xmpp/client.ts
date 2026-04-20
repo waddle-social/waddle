@@ -118,15 +118,6 @@ function isOptionalXmppFeatureError(error: unknown): boolean {
   return !!condition && OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS.has(condition);
 }
 
-function isLocalAvailabilityError(error: unknown): boolean {
-  return error instanceof Error
-    && (
-      error.message === "XMPP session is not ready"
-      || error.message.startsWith("Room is not ready:")
-      || error.message === "Reconnection timed out"
-    );
-}
-
 function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   if ((pres.type ?? "available") === "unavailable") return "offline";
   switch (pres.show ?? "available") {
@@ -192,6 +183,14 @@ export class BrowserXmppClient {
   private lastStanzaKickAt = 0;
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
+  // IDs of persisted-queue entries that have been handed to stanza.js on
+  // this connection and whose `message:acked` is still pending. The
+  // persisted localStorage entry only goes away when the ack arrives, so
+  // flushes that race with an ack must skip already-in-flight entries —
+  // otherwise resume + concurrent flush double-sends. Cleared on fresh
+  // session (session:started) because stanza.js drops its SM buffer
+  // there, so those stanzas need to be re-flushed from scratch.
+  private readonly inflightQueuedIds = new Set<string>();
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -465,10 +464,16 @@ export class BrowserXmppClient {
     const fullJid = `${roomJid}/${nick}`;
 
     return new Promise((resolve, reject) => {
+      // 4s was 10s. Past experience: when the server is healthy the
+      // self-presence arrives in under a second; at 10s a caller
+      // awaiting this (e.g. `performRoomSwitch`) blocks for a full
+      // beat before surfacing the failure. At 4s the surrounding room
+      // switch still gets its retry path and the next presence event
+      // caught by `muc:available` papers over any single-request lag.
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out waiting for self-presence in ${roomJid}`));
-      }, 10_000);
+      }, 4_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
@@ -601,6 +606,10 @@ export class BrowserXmppClient {
       );
       for (const entry of entries) {
         if (!this.canUseConnectedSession() || !this.xmpp) break;
+        // Skip entries we already handed to stanza.js on this connection —
+        // their ack is in flight. Removing them from the persisted queue
+        // happens on `message:acked`, not on synchronous send.
+        if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = dmMessaging.sendDirectMessage(
           this.xmpp,
@@ -614,7 +623,7 @@ export class BrowserXmppClient {
             id: entry.id,
           },
         );
-        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+        if (messageId) this.inflightQueuedIds.add(entry.id);
       }
     })();
     const trackedPromise = flushPromise.finally(() => {
@@ -635,6 +644,7 @@ export class BrowserXmppClient {
       const entries = listQueuedRoomMessages(this.queueScope, roomJid);
       for (const entry of entries) {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
+        if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
           ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
@@ -646,7 +656,7 @@ export class BrowserXmppClient {
           ...(entry.threadReply ? { threadReply: entry.threadReply } : {}),
           id: entry.id,
         });
-        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+        if (messageId) this.inflightQueuedIds.add(entry.id);
       }
     })();
 
@@ -695,32 +705,26 @@ export class BrowserXmppClient {
     if (!text && !hasFiles) return null;
 
     const roomJid = roomBareJidFor(this.session, w, c);
-    if (this.shouldQueueImmediately()) {
-      const queued = this.queueRoomMessage(roomJid, body, opts);
-      void this.connect()
-        .then(() => this.switchRoom(w, c))
-        .then(() => this.flushQueuedRoomMessages(roomJid))
-        .catch(() => undefined);
-      return queued;
-    }
 
-    try {
-      const { xmpp } = await this.requireJoinedRoom(w, c);
+    // Fast path: connected and already in this room — send directly,
+    // no awaits, no UI freeze. Any other state (offline, reconnecting,
+    // mid-room-switch, or just not joined yet) enqueues optimistically
+    // and recovers in the background. This is what stops the Send
+    // button from hanging on connect(15s) + switchRoom(10s→4s) while
+    // the user is staring at a spinner.
+    if (this.roomIsReady(roomJid) && this.xmpp) {
       return {
-        id: messaging.sendGroupMessage(xmpp, roomJid, body, opts),
+        id: messaging.sendGroupMessage(this.xmpp, roomJid, body, opts),
         state: "sending",
       };
-    } catch (error) {
-      if (isLocalAvailabilityError(error)) {
-        const queued = this.queueRoomMessage(roomJid, body, opts);
-        void this.connect()
-          .then(() => this.switchRoom(w, c))
-          .then(() => this.flushQueuedRoomMessages(roomJid))
-          .catch(() => undefined);
-        return queued;
-      }
-      throw error;
     }
+
+    const queued = this.queueRoomMessage(roomJid, body, opts);
+    void this.connect()
+      .then(() => this.switchRoom(w, c))
+      .then(() => this.flushQueuedRoomMessages(roomJid))
+      .catch(() => undefined);
+    return queued;
   }
 
   // -- File upload (XEP-0363 + XEP-0447/XEP-0448) --
@@ -781,26 +785,22 @@ export class BrowserXmppClient {
     if (!text && !hasFiles) return null;
 
     const normalizedPeerJid = barePeerJid(peerJid);
-    if (this.shouldQueueImmediately()) {
-      const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
-      this.nudgeReconnect();
-      return queued;
-    }
 
-    try {
-      const xmpp = await this.requireConnectedXmpp();
+    // Fast path: connected now — send directly. Any other state
+    // (offline, reconnecting, destroying) enqueues optimistically and
+    // nudges reconnect. Never await connect() from this entry point —
+    // the 15s `Reconnection timed out` path used to block the Send
+    // button under a bad network.
+    if (this.canUseConnectedSession() && this.xmpp) {
       return {
-        id: dmMessaging.sendDirectMessage(xmpp, normalizedPeerJid, body, opts),
+        id: dmMessaging.sendDirectMessage(this.xmpp, normalizedPeerJid, body, opts),
         state: "sending",
       };
-    } catch (error) {
-      if (isLocalAvailabilityError(error)) {
-        const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
-        this.nudgeReconnect();
-        return queued;
-      }
-      throw error;
     }
+
+    const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
+    this.nudgeReconnect();
+    return queued;
   }
 
   async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> {
@@ -1079,6 +1079,11 @@ export class BrowserXmppClient {
       // `session:started` fires on fresh bind only; SM resume short-circuits
       // feature negotiation and does not emit this event. So any time we see
       // it here, it's a fresh session — consumers may close MAM gaps.
+      //
+      // A fresh session also means stanza.js dropped its unacked-stanza
+      // buffer; anything we thought was in flight is gone. Clear the
+      // inflight set so the next flush re-sends all persisted entries.
+      this.inflightQueuedIds.clear();
       this.sessionLifecycleHandler?.({ type: "fresh" });
       void this.flushQueuedDirectMessages();
       try {
@@ -1133,17 +1138,42 @@ export class BrowserXmppClient {
     // stanzas against the ack count and emits message:acked with the original
     // outbound Message. Downstream uses stanza.id to move the optimistic
     // "sending" entry to "delivered".
+    //
+    // Also the canonical signal that a persisted queue entry has actually
+    // landed on the server. Removing the entry here instead of on the
+    // synchronous `sendMessage` return is what closes the "stanza.js
+    // buffered it but the wire write never went through" window that was
+    // wiping messages out of localStorage before they were durable.
     xmpp.on("message:acked", (msg) => {
       if (this.xmpp !== xmpp) return;
-      if (msg?.id) this.messageAckHandler?.(msg.id);
+      if (msg?.id) {
+        // Only touch localStorage for ids that originated from the
+        // persisted queue. `inflightQueuedIds` is the authoritative
+        // set of handed-off-from-localStorage ids; anything else is a
+        // live-send ack and doesn't belong in the persistence layer.
+        // `Set.prototype.delete` returns true iff the id was present,
+        // so this gate is also the inflight-removal step.
+        if (this.inflightQueuedIds.delete(msg.id)) {
+          removeQueuedMessage(this.queueScope, msg.id);
+        }
+        this.messageAckHandler?.(msg.id);
+      }
     });
 
     // XEP-0198: stanza.js emits message:failed when SM resume fails (server
     // drops the session) or when we tried to send with no transport and SM is
     // not resumable. The message was almost certainly not delivered.
+    //
+    // For a persisted-queue entry this means stanza.js won't try again on
+    // its own; drop it from the in-flight set so the next reconnect's
+    // flush picks it up. The persisted queue entry itself stays — it will
+    // get re-sent.
     xmpp.on("message:failed", (msg) => {
       if (this.xmpp !== xmpp) return;
-      if (msg?.id) this.messageDeliveryFailureHandler?.(msg.id);
+      if (msg?.id) {
+        this.inflightQueuedIds.delete(msg.id);
+        this.messageDeliveryFailureHandler?.(msg.id);
+      }
     });
 
     xmpp.on("disconnected", (err) => {
