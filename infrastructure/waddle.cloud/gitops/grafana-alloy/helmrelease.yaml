@@ -1,0 +1,142 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: grafana-alloy
+  namespace: grafana-alloy
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: alloy
+      version: 1.0.x
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: grafana-alloy
+      interval: 12h
+  values:
+    # Stateless collector — one replica is enough for a single-pod
+    # waddle-server deployment; scale up when that changes.
+    controller:
+      type: deployment
+      replicas: 1
+    # Default service (ClusterIP) exposes 12345 for Alloy's own UI and
+    # 4317/4318 via otelcol.receiver.otlp below.
+    alloy:
+      # The Alloy config below is what actually does the work. Env vars
+      # referenced via env("…") come from `envFrom` on the container.
+      configMap:
+        create: true
+        content: |
+          logging {
+            level  = "info"
+            format = "json"
+          }
+
+          // ---------- OTLP receive from waddle-server ----------
+          otelcol.receiver.otlp "default" {
+            grpc {
+              endpoint = "0.0.0.0:4317"
+            }
+            http {
+              endpoint = "0.0.0.0:4318"
+            }
+            output {
+              metrics = [otelcol.processor.batch.default.input]
+              traces  = [otelcol.processor.batch.default.input]
+              logs    = [otelcol.processor.batch.default.input]
+            }
+          }
+
+          otelcol.processor.batch "default" {
+            output {
+              metrics = [otelcol.exporter.otlphttp.grafana_cloud.input]
+              traces  = [otelcol.exporter.otlphttp.grafana_cloud.input]
+              logs    = [otelcol.exporter.otlphttp.grafana_cloud.input]
+            }
+          }
+
+          // ---------- OTLP export to Grafana Cloud ----------
+          otelcol.auth.basic "grafana_cloud" {
+            username = sys.env("OTLP_USERNAME")
+            password = sys.env("OTLP_PASSWORD")
+          }
+
+          otelcol.exporter.otlphttp "grafana_cloud" {
+            client {
+              endpoint = sys.env("OTLP_ENDPOINT")
+              auth     = otelcol.auth.basic.grafana_cloud.handler
+            }
+          }
+
+          // ---------- Prometheus scrape of waddle-server /metrics ----------
+          // waddle-server's Service exposes port `http` (3000) which the
+          // Rust server binds for both the HTTP API and the Prometheus
+          // text /metrics endpoint rendered from waddle-xmpp::prometheus.
+          discovery.kubernetes "waddle_server" {
+            role = "endpoints"
+            namespaces {
+              names = ["waddle"]
+            }
+          }
+
+          discovery.relabel "waddle_server" {
+            targets = discovery.kubernetes.waddle_server.targets
+            rule {
+              source_labels = ["__meta_kubernetes_service_name"]
+              action        = "keep"
+              regex         = "waddle-server"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_endpoint_port_name"]
+              action        = "keep"
+              regex         = "http"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "instance"
+            }
+            rule {
+              target_label = "job"
+              replacement  = "waddle-server"
+            }
+          }
+
+          prometheus.scrape "waddle_server" {
+            targets         = discovery.relabel.waddle_server.output
+            forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+            metrics_path    = "/metrics"
+            scrape_interval = "30s"
+          }
+
+          prometheus.remote_write "grafana_cloud" {
+            endpoint {
+              url = sys.env("MIMIR_URL")
+              basic_auth {
+                username = sys.env("MIMIR_USERNAME")
+                password = sys.env("MIMIR_PASSWORD")
+              }
+            }
+          }
+      # Inject Grafana Cloud creds from the ExternalSecret.
+      extraEnvFrom:
+        - secretRef:
+            name: grafana-cloud-credentials
+      # Expose OTLP receivers so waddle-server (cluster-internal) can
+      # reach them via the default alloy Service at alloy.grafana-alloy.svc.
+      extraPorts:
+        - name: otlp-grpc
+          port: 4317
+          targetPort: 4317
+          protocol: TCP
+        - name: otlp-http
+          port: 4318
+          targetPort: 4318
+          protocol: TCP
+    # Alloy needs read access to Service / Endpoint objects across the
+    # cluster for the discovery.kubernetes target above. The chart's
+    # default RBAC already grants this when `rbac.create=true`.
+    rbac:
+      create: true
+    serviceAccount:
+      create: true
