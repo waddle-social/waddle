@@ -12,7 +12,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use crate::connection::Stanza;
 use crate::prometheus;
@@ -305,9 +305,16 @@ impl ConnectionRegistry {
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 prometheus::increment_broadcast_dropped_full();
-                warn!(
+                // Keep per-recipient detail at debug only — the
+                // aggregated broadcast log at the call site already
+                // reports a per-send `dropped_full` total, and
+                // `waddle_broadcast_dropped_full_total` is always on.
+                // A `warn!` here would turn into a log storm under
+                // sustained fan-out backpressure (125+/s) and drown
+                // out every other signal on the pod.
+                debug!(
                     jid = %jid,
-                    "Outbound channel full; broadcast stanza dropped silently"
+                    "Outbound channel full; broadcast stanza dropped"
                 );
                 BroadcastOutcome::DroppedFull
             }
