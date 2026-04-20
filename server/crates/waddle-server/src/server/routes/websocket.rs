@@ -634,11 +634,17 @@ fn parse_sasl_auth_frame(frame: &str) -> Result<(String, String), String> {
 /// Returns true if the frame is an XMPP stanza that counts toward XEP-0198
 /// handled/sent counters. Only `<iq>`, `<message>`, `<presence>` qualify —
 /// stream headers, SASL frames, and SM control nonzas do not.
+///
+/// Parses by element name rather than string-prefix: a substring match
+/// like `starts_with("<message")` would also accept future nonzas such
+/// as `<messages>` or `<presences>`. PR #164 (xs:boolean parsing) burned
+/// us on exactly this kind of substring assumption — do it by element
+/// name and never build a surprise in future.
 fn is_countable_stanza(frame: &str) -> bool {
-    let trimmed = frame.trim_start();
-    trimmed.starts_with("<iq")
-        || trimmed.starts_with("<message")
-        || trimmed.starts_with("<presence")
+    let Ok(element) = Element::from_str(frame.trim_start()) else {
+        return false;
+    };
+    matches!(element.name(), "iq" | "message" | "presence")
 }
 
 /// Bundle the session-level borrows that XEP-0198 control handlers mutate.
@@ -4988,6 +4994,42 @@ mod tests {
             registry.is_connected(&jid),
             "replacement entry must still be registered after a try_send_to that races with eviction"
         );
+    }
+
+    #[test]
+    fn is_countable_stanza_matches_element_name_not_prefix() {
+        // Real stanzas that must count toward SM handled/sent counters.
+        assert!(is_countable_stanza(
+            "<iq xmlns='jabber:client' type='get' id='1'/>"
+        ));
+        assert!(is_countable_stanza("<message xmlns='jabber:client'/>"));
+        assert!(is_countable_stanza("<presence xmlns='jabber:client'/>"));
+        // Leading whitespace is tolerated (matches the pre-existing
+        // trim behaviour — frames are always serialized with a
+        // namespace by minidom, so callers never produce bare `<iq/>`).
+        assert!(is_countable_stanza("  <iq xmlns='jabber:client' id='1'/>"));
+
+        // SM control nonzas and stream-level frames must NOT count.
+        assert!(!is_countable_stanza("<r xmlns='urn:xmpp:sm:3'/>"));
+        assert!(!is_countable_stanza("<a xmlns='urn:xmpp:sm:3' h='1'/>"));
+        assert!(!is_countable_stanza(
+            "<enable xmlns='urn:xmpp:sm:3' resume='1'/>"
+        ));
+        assert!(!is_countable_stanza(
+            "<resumed xmlns='urn:xmpp:sm:3' previd='x' h='0'/>"
+        ));
+
+        // Substring prefix collisions that the old `starts_with`
+        // implementation would have accepted. These are all non-standard
+        // today but the element-name match is how we stay safe if any
+        // future XEP introduces similarly-named nonzas.
+        assert!(!is_countable_stanza("<messages xmlns='urn:example'/>"));
+        assert!(!is_countable_stanza("<presences xmlns='urn:example'/>"));
+        assert!(!is_countable_stanza("<iqsomething/>"));
+
+        // Malformed XML just doesn't count — no panic, no false positive.
+        assert!(!is_countable_stanza("not-xml-at-all"));
+        assert!(!is_countable_stanza(""));
     }
 
     // ---- C: MUC nick handling -----------------------------------------
