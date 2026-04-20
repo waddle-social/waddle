@@ -24,7 +24,7 @@ spec:
     # 4317/4318 via otelcol.receiver.otlp below.
     alloy:
       # The Alloy config below is what actually does the work. Env vars
-      # referenced via env("…") come from `envFrom` on the container.
+      # referenced via sys.env("…") come from `envFrom` on the container.
       configMap:
         create: true
         content: |
@@ -123,7 +123,8 @@ spec:
         - secretRef:
             name: grafana-cloud-credentials
       # Expose OTLP receivers so waddle-server (cluster-internal) can
-      # reach them via the default alloy Service at alloy.grafana-alloy.svc.
+      # reach them via the default alloy Service at
+      # grafana-alloy.grafana-alloy.svc.cluster.local.
       extraPorts:
         - name: otlp-grpc
           port: 4317
