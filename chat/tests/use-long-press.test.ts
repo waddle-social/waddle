@@ -137,6 +137,23 @@ describe("useLongPress", () => {
     scope.stop();
   });
 
+  test("safety cleanup removes the listener from the original window", async () => {
+    const onLongPress = mock(() => {});
+    const scope = effectScope();
+    scope.run(() => {
+      const lp = useLongPress({ delay: 20, moveThreshold: 10, onLongPress });
+      lp.handlers.onPointerdown(makePointerEvent());
+    });
+    await waitMs(40);
+    expect(clickListeners).toHaveLength(1);
+
+    globalThis.window = originalWindow;
+    await waitMs(410);
+
+    expect(clickListeners).toHaveLength(0);
+    scope.stop();
+  });
+
   test("cancel() aborts a pending press", async () => {
     const onLongPress = mock(() => {});
     const scope = effectScope();
