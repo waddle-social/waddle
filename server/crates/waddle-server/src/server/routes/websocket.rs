@@ -44,7 +44,7 @@ use waddle_xmpp::{
         frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
-    registry::{ConnectionRegistry, OutboundStanza},
+    registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza},
     stream_management::{
         InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
         StreamManagementState, SM_NS,
@@ -1428,11 +1428,14 @@ async fn handle_muc_join(
     // Broadcast the new occupant's presence to all existing occupants.
     // Non-blocking: a zombied/slow consumer must never stall the join path,
     // which is how "Timed out waiting for self-presence" cascades start.
+    // Drop accounting is handled inside `try_send_to` (logs + metrics);
+    // per-occupant outcome is discarded here because a missed join
+    // presence self-heals via the next MUC presence/probe round-trip.
     for (existing_jid, _, _, _) in &existing_occupants {
         let presence_stanza =
             create_presence_stanza(room_jid, nick, sender_jid, existing_jid, false);
         let stanza = Stanza::Presence(presence_stanza);
-        let _ = state.connection_registry.try_send_to(existing_jid, stanza);
+        let _outcome = state.connection_registry.try_send_to(existing_jid, stanza);
     }
 
     // Send self-presence to the joining user (with status code 110)
@@ -1506,6 +1509,7 @@ async fn handle_muc_leave(
     drop(room);
 
     // Broadcast unavailable presence to remaining occupants (non-blocking).
+    // Drop accounting is handled inside `try_send_to`.
     for occupant_jid in &remaining_occupants {
         let from_jid = room_jid
             .clone()
@@ -1516,7 +1520,7 @@ async fn handle_muc_leave(
         presence.from = Some(jid::Jid::from(from_jid));
         presence.to = Some(jid::Jid::from(occupant_jid.clone()));
         let stanza = Stanza::Presence(presence);
-        let _ = state.connection_registry.try_send_to(occupant_jid, stanza);
+        let _outcome = state.connection_registry.try_send_to(occupant_jid, stanza);
     }
 
     // Send self-presence unavailable to the leaving user
@@ -2766,6 +2770,10 @@ async fn handle_message(
         // the message on their next MAM catch-up. Blocking here is what
         // caused join cascades under zombie load.
         let mut echo_response = None;
+        let mut delivered = 0u32;
+        let mut dropped_full = 0u32;
+        let mut dropped_closed = 0u32;
+        let mut not_connected = 0u32;
         for (occupant_jid, _) in &occupants {
             if occupant_jid == sender_jid {
                 // Echo back to sender — serialize the enriched prototype
@@ -2779,14 +2787,23 @@ async fn handle_message(
                 let mut msg = prototype.clone();
                 msg.to = Some(jid::Jid::from(occupant_jid.clone()));
                 let stanza = Stanza::Message(msg);
-                let _ = state.connection_registry.try_send_to(occupant_jid, stanza);
+                match state.connection_registry.try_send_to(occupant_jid, stanza) {
+                    BroadcastOutcome::Delivered => delivered += 1,
+                    BroadcastOutcome::DroppedFull => dropped_full += 1,
+                    BroadcastOutcome::DroppedClosed => dropped_closed += 1,
+                    BroadcastOutcome::NotConnected => not_connected += 1,
+                }
             }
         }
 
         info!(
             room = %room_jid,
             sender = %sender_nick,
-            recipients = occupants.len(),
+            intended = occupants.len(),
+            delivered,
+            dropped_full,
+            dropped_closed,
+            not_connected,
             "Groupchat message broadcast"
         );
 
@@ -4880,10 +4897,11 @@ mod tests {
     // ---- B: Non-blocking broadcast ------------------------------------
 
     #[tokio::test]
-    async fn try_send_to_returns_false_when_channel_full() {
+    async fn try_send_to_returns_dropped_full_on_backpressured_channel() {
         // A size-1 channel lets us prove try_send does not block when the
-        // receiver isn't draining: the second send reports failure
-        // immediately instead of awaiting capacity.
+        // receiver isn't draining: the second send must report DroppedFull
+        // immediately instead of awaiting capacity. Callers rely on this
+        // variant to count silent drops for observability.
         let registry = ConnectionRegistry::new();
         let jid: FullJid = "user@example.com/res".parse().expect("jid");
         let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
@@ -4896,12 +4914,18 @@ mod tests {
             xmpp_parsers::presence::Type::None,
         ));
 
-        assert!(registry.try_send_to(&jid, stanza_a));
-        assert!(!registry.try_send_to(&jid, stanza_b));
+        assert_eq!(
+            registry.try_send_to(&jid, stanza_a),
+            BroadcastOutcome::Delivered
+        );
+        assert_eq!(
+            registry.try_send_to(&jid, stanza_b),
+            BroadcastOutcome::DroppedFull
+        );
     }
 
     #[tokio::test]
-    async fn try_send_to_unregisters_closed_channel() {
+    async fn try_send_to_returns_dropped_closed_and_unregisters() {
         let registry = ConnectionRegistry::new();
         let jid: FullJid = "gone@example.com/res".parse().expect("jid");
         let (tx, rx) = mpsc::channel::<OutboundStanza>(4);
@@ -4911,8 +4935,24 @@ mod tests {
         let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
             xmpp_parsers::presence::Type::None,
         ));
-        assert!(!registry.try_send_to(&jid, stanza));
+        assert_eq!(
+            registry.try_send_to(&jid, stanza),
+            BroadcastOutcome::DroppedClosed
+        );
         assert!(!registry.is_connected(&jid));
+    }
+
+    #[tokio::test]
+    async fn try_send_to_returns_not_connected_when_unregistered() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "nobody@example.com/res".parse().expect("jid");
+        let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        assert_eq!(
+            registry.try_send_to(&jid, stanza),
+            BroadcastOutcome::NotConnected
+        );
     }
 
     #[tokio::test]
@@ -4938,12 +4978,12 @@ mod tests {
 
         // A broadcast path now tries to send. From its perspective, it sees
         // whatever sender is currently in the registry — which is B's live
-        // one — so try_send_to returns true. Either way, the entry must
-        // remain in the registry.
+        // one — so try_send_to returns Delivered. Either way, the entry
+        // must remain in the registry.
         let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
             xmpp_parsers::presence::Type::None,
         ));
-        let _ = registry.try_send_to(&jid, stanza);
+        let _outcome = registry.try_send_to(&jid, stanza);
         assert!(
             registry.is_connected(&jid),
             "replacement entry must still be registered after a try_send_to that races with eviction"
