@@ -888,17 +888,19 @@ async fn handle_xmpp_frame(
     // detached session); `<enable/>`, `<r/>`, `<a/>` arrive after bind.
     // Keep this branch BEFORE the resource-binding handler so a resuming
     // client skips bind entirely.
-    if let Some(sm) = SmStanza::parse(frame) {
-        let ctx = SmCtx {
-            sm_state,
-            session_jid,
-            authenticated,
-            resource_bound,
-            authenticated_session,
-            resumed,
-            suppress_sm_record_next_batch,
-        };
-        return handle_sm_stanza(sm, state, ctx).await;
+    if SmStanza::is_client_nonza_candidate(frame) {
+        if let Some(sm) = SmStanza::parse(frame) {
+            let ctx = SmCtx {
+                sm_state,
+                session_jid,
+                authenticated,
+                resource_bound,
+                authenticated_session,
+                resumed,
+                suppress_sm_record_next_batch,
+            };
+            return handle_sm_stanza(sm, state, ctx).await;
+        }
     }
 
     // Handle resource binding

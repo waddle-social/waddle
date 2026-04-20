@@ -542,6 +542,17 @@ pub enum SmStanza {
 }
 
 impl SmStanza {
+    /// Cheap lexical prefilter used by hot paths (e.g. WebSocket frame
+    /// routing) so we only pay full XML parsing for likely SM control nonzas.
+    pub fn is_client_nonza_candidate(xml: &str) -> bool {
+        let trimmed = xml.trim_start();
+        (trimmed.starts_with("<enable")
+            || trimmed.starts_with("<resume")
+            || trimmed.starts_with("<r")
+            || trimmed.starts_with("<a"))
+            && trimmed.contains(SM_NS)
+    }
+
     /// Try to parse a stream management nonza from XML.
     ///
     /// Only parses client-origin nonzas: `<enable/>`, `<resume/>`, `<r/>`,
@@ -741,6 +752,27 @@ mod tests {
         // Non-SM stanza
         let other = SmStanza::parse("<message/>");
         assert!(other.is_none());
+    }
+
+    #[test]
+    fn test_sm_stanza_candidate_prefilter() {
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<enable xmlns='urn:xmpp:sm:3'/>"
+        ));
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<resume xmlns='urn:xmpp:sm:3' previd='id' h='1'/>"
+        ));
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<r xmlns='urn:xmpp:sm:3'/>"
+        ));
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<a xmlns='urn:xmpp:sm:3' h='4'/>"
+        ));
+
+        assert!(!SmStanza::is_client_nonza_candidate(
+            "<message xmlns='jabber:client'/>"
+        ));
+        assert!(!SmStanza::is_client_nonza_candidate("<r/>"));
     }
 
     #[test]
