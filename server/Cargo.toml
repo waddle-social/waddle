@@ -52,6 +52,7 @@ dashmap = "6.0"
 
 # XMPP Client
 xmpp = "0.6"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # Object Storage
 bytes = "1"

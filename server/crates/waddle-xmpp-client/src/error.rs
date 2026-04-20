@@ -107,9 +107,13 @@ pub enum StanzaErrorType {
 /// `<text/>` content.  Returns a best-effort `StanzaError` even if parts are missing.
 pub fn parse_stanza_error(element: &Element) -> StanzaError {
     const NS_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+    const NS_CLIENT_ALT: &str = "jabber:client";
 
     let ns = element.ns();
-    let error_el = element.get_child("error", ns.as_str());
+    let error_el = element
+        .get_child("error", ns.as_str())
+        .or_else(|| element.get_child("error", NS_CLIENT_ALT))
+        .or_else(|| element.get_child("error", ""));
 
     let error_type = error_el
         .and_then(|e| e.attr("type"))

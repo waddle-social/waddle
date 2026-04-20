@@ -17,7 +17,7 @@ minidom = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }

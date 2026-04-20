@@ -31,7 +31,6 @@ targets:
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
-        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/ios-arm64/Headers/waddle_xmpp_clientFFI.modulemap
   Waddle-macOS:
     type: application
     platform: macOS
@@ -50,7 +49,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: social.waddle.macos
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
-        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/macos-arm64_x86_64/Headers/waddle_xmpp_clientFFI.modulemap
 schemes:
   Waddle:
     build:

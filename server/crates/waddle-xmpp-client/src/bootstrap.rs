@@ -249,8 +249,8 @@ impl SaslFailure {
 
         let condition = element
             .children()
+            .find(|child| child.name() != "text")
             .map(|child| SaslFailureCondition::parse(child.name()))
-            .next()
             .unwrap_or(SaslFailureCondition::Unknown);
 
         Ok(Self { condition })

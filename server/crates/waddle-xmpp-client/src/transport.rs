@@ -1,11 +1,11 @@
 use futures::future::BoxFuture;
+use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use jid::BareJid;
 use minidom::Element;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -171,10 +171,13 @@ impl WebSocketTransportFactory for DefaultTransportFactory {
 }
 
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type ClientWebSocketSink = SplitSink<ClientWebSocket, Message>;
+type ClientWebSocketStream = SplitStream<ClientWebSocket>;
 
 #[derive(Debug)]
 struct ConnectedWebSocketTransport {
-    socket: Mutex<ClientWebSocket>,
+    sink: ClientWebSocketSink,
+    stream: ClientWebSocketStream,
     state: TransportState,
     pending_events: VecDeque<TransportEvent>,
 }
@@ -185,8 +188,11 @@ impl ConnectedWebSocketTransport {
         pending_events.push_back(TransportEvent::StateChanged(TransportState::Connecting));
         pending_events.push_back(TransportEvent::StateChanged(TransportState::Open));
 
+        let (sink, stream) = socket.split();
+
         Self {
-            socket: Mutex::new(socket),
+            sink,
+            stream,
             state: TransportState::Open,
             pending_events,
         }
@@ -222,10 +228,9 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             }
 
             let frame = encode_message(&message)?;
-            {
-                let mut socket = self.socket.lock().await;
-                socket.send(Message::Text(frame.into())).await?;
-            }
+            self.sink
+                .send(Message::Text(frame.into()))
+                .await?;
 
             if matches!(message, TransportMessage::Close(_)) {
                 self.queue_state_change(TransportState::Closing);
@@ -243,10 +248,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             }
 
             loop {
-                let inbound = {
-                    let mut socket = self.socket.lock().await;
-                    socket.next().await
-                };
+                let inbound = self.stream.next().await;
 
                 match inbound {
                     Some(Ok(Message::Text(text))) => {
@@ -259,8 +261,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
                         return Ok(self.pending_events.pop_front());
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        let mut socket = self.socket.lock().await;
-                        socket.send(Message::Pong(payload)).await?;
+                        self.sink.send(Message::Pong(payload)).await?;
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) => {
@@ -294,19 +295,15 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             if self.state != TransportState::Closing {
                 self.queue_state_change(TransportState::Closing);
                 let frame = encode_message(&TransportMessage::Close(StreamClose))?;
-                {
-                    let mut socket = self.socket.lock().await;
-                    socket.send(Message::Text(frame.into())).await?;
-                }
+                self.sink
+                    .send(Message::Text(frame.into()))
+                    .await?;
                 self.pending_events.push_back(TransportEvent::MessageSent(
                     TransportMessage::Close(StreamClose),
                 ));
             }
 
-            {
-                let mut socket = self.socket.lock().await;
-                socket.close(None).await?;
-            }
+            self.sink.close().await?;
             self.queue_closed();
             Ok(())
         })
@@ -535,10 +532,18 @@ fn scan_start_tag(xml: &str) -> Option<StartTagScan> {
             None if byte == b'x' && xml[idx..].starts_with("xmlns") => {
                 idx += "xmlns".len();
                 if idx < bytes.len() && bytes[idx] == b'=' {
-                    has_default_xmlns = true;
                     idx += 1;
                     if idx < bytes.len() && (bytes[idx] == b'"' || bytes[idx] == b'\'') {
-                        quote = Some(bytes[idx]);
+                        let q = bytes[idx];
+                        // Only count as a non-empty default namespace when the value
+                        // between the quotes is non-empty (i.e. not xmlns="").
+                        if idx + 1 < bytes.len() && bytes[idx + 1] != q {
+                            has_default_xmlns = true;
+                        }
+                        quote = Some(q);
+                    } else if idx < bytes.len() && bytes[idx] != b'>' {
+                        // Unquoted, non-empty value.
+                        has_default_xmlns = true;
                     }
                     continue;
                 }
