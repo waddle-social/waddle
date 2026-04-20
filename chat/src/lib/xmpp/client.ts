@@ -118,15 +118,6 @@ function isOptionalXmppFeatureError(error: unknown): boolean {
   return !!condition && OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS.has(condition);
 }
 
-function isLocalAvailabilityError(error: unknown): boolean {
-  return error instanceof Error
-    && (
-      error.message === "XMPP session is not ready"
-      || error.message.startsWith("Room is not ready:")
-      || error.message === "Reconnection timed out"
-    );
-}
-
 function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   if ((pres.type ?? "available") === "unavailable") return "offline";
   switch (pres.show ?? "available") {
@@ -473,10 +464,16 @@ export class BrowserXmppClient {
     const fullJid = `${roomJid}/${nick}`;
 
     return new Promise((resolve, reject) => {
+      // 4s was 10s. Past experience: when the server is healthy the
+      // self-presence arrives in under a second; at 10s a caller
+      // awaiting this (e.g. `performRoomSwitch`) blocks for a full
+      // beat before surfacing the failure. At 4s the surrounding room
+      // switch still gets its retry path and the next presence event
+      // caught by `muc:available` papers over any single-request lag.
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out waiting for self-presence in ${roomJid}`));
-      }, 10_000);
+      }, 4_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
@@ -708,32 +705,26 @@ export class BrowserXmppClient {
     if (!text && !hasFiles) return null;
 
     const roomJid = roomBareJidFor(this.session, w, c);
-    if (this.shouldQueueImmediately()) {
-      const queued = this.queueRoomMessage(roomJid, body, opts);
-      void this.connect()
-        .then(() => this.switchRoom(w, c))
-        .then(() => this.flushQueuedRoomMessages(roomJid))
-        .catch(() => undefined);
-      return queued;
-    }
 
-    try {
-      const { xmpp } = await this.requireJoinedRoom(w, c);
+    // Fast path: connected and already in this room — send directly,
+    // no awaits, no UI freeze. Any other state (offline, reconnecting,
+    // mid-room-switch, or just not joined yet) enqueues optimistically
+    // and recovers in the background. This is what stops the Send
+    // button from hanging on connect(15s) + switchRoom(10s→4s) while
+    // the user is staring at a spinner.
+    if (this.roomIsReady(roomJid) && this.xmpp) {
       return {
-        id: messaging.sendGroupMessage(xmpp, roomJid, body, opts),
+        id: messaging.sendGroupMessage(this.xmpp, roomJid, body, opts),
         state: "sending",
       };
-    } catch (error) {
-      if (isLocalAvailabilityError(error)) {
-        const queued = this.queueRoomMessage(roomJid, body, opts);
-        void this.connect()
-          .then(() => this.switchRoom(w, c))
-          .then(() => this.flushQueuedRoomMessages(roomJid))
-          .catch(() => undefined);
-        return queued;
-      }
-      throw error;
     }
+
+    const queued = this.queueRoomMessage(roomJid, body, opts);
+    void this.connect()
+      .then(() => this.switchRoom(w, c))
+      .then(() => this.flushQueuedRoomMessages(roomJid))
+      .catch(() => undefined);
+    return queued;
   }
 
   // -- File upload (XEP-0363 + XEP-0447/XEP-0448) --
@@ -794,26 +785,22 @@ export class BrowserXmppClient {
     if (!text && !hasFiles) return null;
 
     const normalizedPeerJid = barePeerJid(peerJid);
-    if (this.shouldQueueImmediately()) {
-      const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
-      this.nudgeReconnect();
-      return queued;
-    }
 
-    try {
-      const xmpp = await this.requireConnectedXmpp();
+    // Fast path: connected now — send directly. Any other state
+    // (offline, reconnecting, destroying) enqueues optimistically and
+    // nudges reconnect. Never await connect() from this entry point —
+    // the 15s `Reconnection timed out` path used to block the Send
+    // button under a bad network.
+    if (this.canUseConnectedSession() && this.xmpp) {
       return {
-        id: dmMessaging.sendDirectMessage(xmpp, normalizedPeerJid, body, opts),
+        id: dmMessaging.sendDirectMessage(this.xmpp, normalizedPeerJid, body, opts),
         state: "sending",
       };
-    } catch (error) {
-      if (isLocalAvailabilityError(error)) {
-        const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
-        this.nudgeReconnect();
-        return queued;
-      }
-      throw error;
     }
+
+    const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
+    this.nudgeReconnect();
+    return queued;
   }
 
   async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> {
