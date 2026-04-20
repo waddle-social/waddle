@@ -21,6 +21,12 @@ static BROADCAST_NOT_CONNECTED: AtomicU64 = AtomicU64::new(0);
 static BROADCAST_DROPPED_FULL: AtomicU64 = AtomicU64::new(0);
 static BROADCAST_DROPPED_CLOSED: AtomicU64 = AtomicU64::new(0);
 
+// XEP-0198 unacked-queue evictions (see `stream_management::UnackedQueue`).
+// A non-zero counter means at least one stanza was evicted from an SM
+// session's replay buffer while that session was still resumable — a
+// later `<resumed/>` will silently drop that stanza.
+static SM_UNACKED_EVICTED: AtomicU64 = AtomicU64::new(0);
+
 fn unix_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -86,6 +92,10 @@ pub fn increment_broadcast_dropped_closed() {
     BROADCAST_DROPPED_CLOSED.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_sm_unacked_evicted() {
+    SM_UNACKED_EVICTED.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn render_metrics() -> String {
     let now = unix_timestamp_secs();
     rotate_second_bucket(now);
@@ -98,6 +108,7 @@ pub fn render_metrics() -> String {
     let broadcast_not_connected = BROADCAST_NOT_CONNECTED.load(Ordering::Relaxed);
     let broadcast_dropped_full = BROADCAST_DROPPED_FULL.load(Ordering::Relaxed);
     let broadcast_dropped_closed = BROADCAST_DROPPED_CLOSED.load(Ordering::Relaxed);
+    let sm_unacked_evicted = SM_UNACKED_EVICTED.load(Ordering::Relaxed);
 
     format!(
         concat!(
@@ -125,6 +136,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_broadcast_dropped_closed_total Non-blocking broadcast attempts dropped because the recipient's outbound channel was closed.\n",
             "# TYPE waddle_broadcast_dropped_closed_total counter\n",
             "waddle_broadcast_dropped_closed_total {broadcast_dropped_closed}\n",
+            "# HELP waddle_sm_unacked_evicted_total XEP-0198 unacked-queue entries evicted because the queue hit capacity; each eviction will be missing from a later <resumed/> replay.\n",
+            "# TYPE waddle_sm_unacked_evicted_total counter\n",
+            "waddle_sm_unacked_evicted_total {sm_unacked_evicted}\n",
         ),
         connected_users = connected_users,
         room_count = room_count,
@@ -134,6 +148,7 @@ pub fn render_metrics() -> String {
         broadcast_not_connected = broadcast_not_connected,
         broadcast_dropped_full = broadcast_dropped_full,
         broadcast_dropped_closed = broadcast_dropped_closed,
+        sm_unacked_evicted = sm_unacked_evicted,
     )
 }
 
@@ -158,6 +173,7 @@ mod tests {
         BROADCAST_NOT_CONNECTED.store(0, Ordering::Release);
         BROADCAST_DROPPED_FULL.store(0, Ordering::Release);
         BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
+        SM_UNACKED_EVICTED.store(0, Ordering::Release);
     }
 
     #[test]
@@ -247,5 +263,18 @@ mod tests {
         assert!(rendered.contains("waddle_broadcast_not_connected_total 1"));
         assert!(rendered.contains("waddle_broadcast_dropped_full_total 3"));
         assert!(rendered.contains("waddle_broadcast_dropped_closed_total 1"));
+    }
+
+    #[test]
+    fn test_sm_unacked_evicted_counter_increments_and_renders() {
+        let _guard = test_lock().lock().unwrap();
+        reset_metrics_for_test();
+
+        increment_sm_unacked_evicted();
+        increment_sm_unacked_evicted();
+
+        let rendered = render_metrics();
+        assert!(rendered.contains("# TYPE waddle_sm_unacked_evicted_total counter"));
+        assert!(rendered.contains("waddle_sm_unacked_evicted_total 2"));
     }
 }
