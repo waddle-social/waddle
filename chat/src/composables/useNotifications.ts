@@ -5,6 +5,7 @@ import { getOrRegisterServiceWorker, registerServiceWorker as registerChatServic
 const STORAGE_KEY = "waddle.chat.notifications-enabled";
 const VAPID_PUBLIC_KEY = (import.meta.env.PUBLIC_WADDLE_WEB_PUSH_VAPID_PUBLIC_KEY ?? "").trim();
 const PUSH_SERVICE_JID = (import.meta.env.PUBLIC_WADDLE_XMPP_PUSH_SERVICE_JID ?? "").trim();
+const NOTIFICATION_ICON_URL = "/android-chrome-192x192.png";
 
 const hasNotificationApi =
   typeof window !== "undefined" && "Notification" in window;
@@ -60,7 +61,7 @@ export function useNotifications() {
     const notification = new Notification(title, {
       body,
       tag: opts.roomJid,
-      icon: "/favicon.svg",
+      icon: NOTIFICATION_ICON_URL,
     });
 
     notification.onclick = () => {
@@ -79,7 +80,7 @@ export function useNotifications() {
     const notification = new Notification(`Message from @${opts.senderUsername}`, {
       body,
       tag: opts.peerJid,
-      icon: "/favicon.svg",
+      icon: NOTIFICATION_ICON_URL,
     });
     notification.onclick = () => {
       window.focus();
