@@ -175,7 +175,24 @@ impl ConnectionRegistry {
     /// the same resource before the old connection is cleaned up.
     #[instrument(skip(self, sender), fields(jid = %jid))]
     pub fn register(&self, jid: FullJid, sender: mpsc::Sender<OutboundStanza>) -> Arc<AtomicBool> {
+        self.register_with_carbons(jid, sender, false)
+    }
+
+    /// Register a connection and seed its XEP-0280 carbons opt-in to
+    /// `carbons_enabled`. Used by the XEP-0198 stream-resume path so a
+    /// resumed stream keeps the carbons flag it negotiated before the
+    /// disconnect instead of silently reverting to the disabled default.
+    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled))]
+    pub fn register_with_carbons(
+        &self,
+        jid: FullJid,
+        sender: mpsc::Sender<OutboundStanza>,
+        carbons_enabled: bool,
+    ) -> Arc<AtomicBool> {
         let entry = ConnectionEntry::new(sender);
+        if carbons_enabled {
+            entry.carbons_enabled.store(true, Ordering::Relaxed);
+        }
         let carbons_handle = entry.carbons_handle();
         let existing = self.connections.insert(jid.clone(), entry);
         if existing.is_some() {
@@ -322,8 +339,10 @@ impl ConnectionRegistry {
 
     /// Get all connected resources for a bare JID, excluding a specific full JID.
     ///
-    /// Used by message carbons to find other connected clients for the same user.
     /// Returns all full JIDs that match the bare JID except the excluded one.
+    /// This does NOT filter by carbons status — callers that are routing
+    /// XEP-0280 carbon copies should use [`Self::get_other_carbon_resources_for_user`]
+    /// instead so that non-opted-in resources are not sent carbon-wrapped stanzas.
     pub fn get_other_resources_for_user(
         &self,
         bare_jid: &BareJid,
@@ -338,6 +357,39 @@ impl ConnectionRegistry {
             })
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// Get all resources for a bare JID that have XEP-0280 Message Carbons
+    /// enabled, excluding a specific full JID.
+    ///
+    /// Per XEP-0280 §5, carbons must be enabled per-resource. The server must
+    /// only deliver `<sent>` and `<received>` carbon copies to resources that
+    /// have explicitly opted in via `<enable xmlns='urn:xmpp:carbons:2'/>`.
+    pub fn get_other_carbon_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+        exclude_jid: &FullJid,
+    ) -> Vec<FullJid> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                let jid = entry.key();
+                jid.to_bare() == *bare_jid
+                    && jid != exclude_jid
+                    && entry.value().is_carbons_enabled()
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Check whether the given full JID has XEP-0280 Message Carbons enabled.
+    ///
+    /// Returns false if the JID is not connected.
+    pub fn is_carbons_enabled(&self, jid: &FullJid) -> bool {
+        self.connections
+            .get(jid)
+            .map(|entry| entry.value().is_carbons_enabled())
+            .unwrap_or(false)
     }
 
     /// Get all connected resources for a bare JID.
@@ -835,5 +887,39 @@ mod tests {
         // Clean up on unregister
         registry.unregister(&jid);
         assert!(registry.get_presence_state(&jid).is_none());
+    }
+
+    /// XEP-0198 + XEP-0280: when a stream resumes the client expects its
+    /// previous carbons opt-in to still be in effect. `register` creates a
+    /// fresh entry with carbons disabled, so the resume path needs a variant
+    /// that seeds the flag to the value captured when the session detached.
+    #[test]
+    fn test_register_with_carbons_seeds_initial_flag() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user1");
+        let (tx, _rx) = mpsc::channel(16);
+
+        let handle = registry.register_with_carbons(jid.clone(), tx, true);
+
+        assert!(
+            handle.load(Ordering::Relaxed),
+            "handle returned by register_with_carbons(.., true) should start enabled"
+        );
+        assert!(
+            registry.is_carbons_enabled(&jid),
+            "registry should report carbons as enabled for the seeded entry"
+        );
+    }
+
+    #[test]
+    fn test_register_with_carbons_false_leaves_disabled() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user2");
+        let (tx, _rx) = mpsc::channel(16);
+
+        let handle = registry.register_with_carbons(jid.clone(), tx, false);
+
+        assert!(!handle.load(Ordering::Relaxed));
+        assert!(!registry.is_carbons_enabled(&jid));
     }
 }
