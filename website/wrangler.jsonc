@@ -23,6 +23,12 @@
 			"database_id": "fd7af7f7-d271-4d90-a7df-7fe1fa6a3e42"
 		}
 	],
+	"kv_namespaces": [
+		{
+			"binding": "SESSION",
+			"id": "a6cde7c2af9141ca804120e4b3f8bbe2"
+		}
+	],
 	"observability": {
 		"enabled": true
 	}
