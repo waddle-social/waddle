@@ -35,18 +35,26 @@ export async function queryPersonalMam(
   selfBareJid: string,
   peerBareJid: string,
   max: number,
+  since?: string,
 ): Promise<LiveDmMessage[]> {
+  // XEP-0313 §4.1.5: when fetching the most recent page (no `since`), we use
+  // `paging.before: ""` to page backwards from the end of the archive.
+  // For catch-up (`since` set), we instead page forward from the cursor by
+  // adding a `start` form field and dropping `before`.
+  const baseFields = [
+    { name: "FORM_TYPE", type: "hidden" as const, value: "urn:xmpp:mam:2" },
+    { name: "with", value: peerBareJid },
+  ];
+  const fields = since
+    ? [...baseFields, { name: "start", value: since }]
+    : baseFields;
+  const paging = since ? { max } : { max, before: "" };
+
   let result;
   try {
     result = await xmpp.searchHistory(selfBareJid, {
-      paging: { max, before: "" },
-      form: {
-        type: "submit",
-        fields: [
-          { name: "FORM_TYPE", type: "hidden", value: "urn:xmpp:mam:2" },
-          { name: "with", value: peerBareJid },
-        ],
-      },
+      paging,
+      form: { type: "submit", fields },
     });
   } catch (err) {
     if (isItemNotFound(err)) return [];

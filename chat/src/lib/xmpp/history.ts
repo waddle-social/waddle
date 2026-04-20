@@ -14,13 +14,36 @@ function withArchivedMessageId(
   } as ReceivedMessage;
 }
 
-/** Query message archive for a room. Throws on IQ/transport errors. */
+/**
+ * Query message archive for a room.
+ *
+ * Without `since`: fetches the newest page (`before: ""`) for initial load.
+ * With `since`: XEP-0313 §4.1.5 catch-up — pages forward from the cursor via
+ * the `start` form field, used after a socket drop to pull anything missed.
+ *
+ * Throws on IQ/transport errors.
+ */
 export async function queryMam(
   xmpp: Agent,
   roomJid: string,
   max: number,
+  since?: string,
 ): Promise<LiveRoomMessage[]> {
-  const result = await xmpp.searchHistory(roomJid, { paging: { max, before: "" } });
+  const result = await xmpp.searchHistory(
+    roomJid,
+    since
+      ? {
+          paging: { max },
+          form: {
+            type: "submit",
+            fields: [
+              { name: "FORM_TYPE", type: "hidden" as const, value: "urn:xmpp:mam:2" },
+              { name: "start", value: since },
+            ],
+          },
+        }
+      : { paging: { max, before: "" } },
+  );
   const collected: LiveRoomMessage[] = [];
 
   if (result.results) {

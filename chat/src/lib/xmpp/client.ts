@@ -32,6 +32,11 @@ import {
 } from "../outbound-queue-store";
 import * as inboxApi from "./inbox";
 import * as pep from "./pep-publications";
+import { ReconnectCatchup } from "./reconnect-catchup";
+
+// Cap MAM catch-up per conversation so a long offline period can't drown the
+// client. In practice, web clients reconnect within minutes; 200 is generous.
+const CATCHUP_MAX_PER_CONVERSATION = 200;
 
 type StanzaSaslMechanism = { name: string };
 type StanzaSaslFactory = {
@@ -178,6 +183,9 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  // Slice A: MAM-on-reconnect tracker. Updated on every live room / DM /
+  // carbon message, consulted on every `session:started` after the first.
+  private readonly catchup = new ReconnectCatchup();
   private refreshSession: (() => Promise<WaddleSession | null>) | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
@@ -388,6 +396,8 @@ export class BrowserXmppClient {
     this.connected = false;
     this.currentRoom = null;
     this.uploadServiceJid = null;
+    // Intentional teardown — next connect is a fresh session, not a resume.
+    this.catchup.reset();
     try { xmpp.disconnect(); } catch { /* ignore */ }
   }
 
@@ -1001,6 +1011,62 @@ export class BrowserXmppClient {
 
   // -- Private --
 
+  /**
+   * XEP-0313 MAM catch-up after a `session:started`.
+   *
+   * Empty on the first session:started (initial login); for each subsequent
+   * resume it queries MAM with `start=<lastSeen>` for every tracked
+   * conversation and feeds the results through the same handlers as live
+   * messages. This closes the gap when mobile Safari (or any suspended tab)
+   * silently drops its WebSocket and reconnects after missing stanzas.
+   */
+  private async runReconnectCatchup(xmpp: Agent) {
+    const entries = this.catchup.onSessionStarted();
+    if (entries.length === 0) return;
+
+    const selfBare = barePeerJid(this.session.jid);
+    for (const entry of entries) {
+      // Bail if the agent has been swapped out mid-catch-up (e.g. user
+      // signed out during reconnect).
+      if (this.xmpp !== xmpp) return;
+      try {
+        if (entry.kind === "dm") {
+          const since = this.catchup.getDmLastSeen(entry.key);
+          const messages = await dmHistory.queryPersonalMam(
+            xmpp,
+            selfBare,
+            entry.key,
+            CATCHUP_MAX_PER_CONVERSATION,
+            since,
+          );
+          for (const m of messages) {
+            this.catchup.recordDmSeen(m.peerJid, m.createdAt);
+            this.directMessageHandler?.(m);
+          }
+        } else {
+          const since = this.catchup.getRoomLastSeen(entry.key);
+          const messages = await history.queryMam(
+            xmpp,
+            entry.key,
+            CATCHUP_MAX_PER_CONVERSATION,
+            since,
+          );
+          for (const m of messages) {
+            this.catchup.recordRoomSeen(m.roomJid, m.createdAt);
+            this.messageHandler?.(m);
+          }
+        }
+      } catch (error) {
+        if (!isOptionalXmppFeatureError(error)) {
+          console.warn(
+            `MAM catch-up failed for ${entry.kind}:${entry.key}`,
+            error,
+          );
+        }
+      }
+    }
+  }
+
   private startSelfPing() {
     this.stopSelfPing();
     this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60_000);
@@ -1113,6 +1179,11 @@ export class BrowserXmppClient {
           console.warn("Failed to rejoin room after reconnect", error);
         }
       }
+
+      // Slice A: MAM catch-up for every tracked conversation. Empty on the
+      // first session:started (initial login — nothing missed), populated on
+      // subsequent ones (resume after a dropped socket or Safari backgrounding).
+      await this.runReconnectCatchup(xmpp);
     });
     xmpp.on("stream:management:resumed", () => {
       if (this.xmpp !== xmpp) return;
@@ -1253,7 +1324,10 @@ export class BrowserXmppClient {
       () => ({
         currentRoom: this.currentRoom,
         selfNick: this.session.username,
-        onMessage: this.messageHandler,
+        onMessage: (m) => {
+          this.catchup.recordRoomSeen(m.roomJid, m.createdAt);
+          this.messageHandler?.(m);
+        },
         onChatState: this.chatStateHandler,
         onDisplayed: this.displayedHandler,
         onReaction: this.reactionHandler,
@@ -1261,7 +1335,10 @@ export class BrowserXmppClient {
       }),
       () => ({
         selfBareJid: barePeerJid(this.session.jid),
-        onMessage: this.directMessageHandler,
+        onMessage: (m) => {
+          this.catchup.recordDmSeen(m.peerJid, m.createdAt);
+          this.directMessageHandler?.(m);
+        },
         onChatState: this.dmChatStateHandler,
         onDisplayed: this.dmDisplayedHandler,
         onReaction: this.dmReactionHandler,
@@ -1275,7 +1352,10 @@ export class BrowserXmppClient {
       (forwarded as ReceivedMessage & { carbon?: unknown }).carbon = msg.carbon;
       dispatchChat(forwarded as ReceivedMessage, {
         selfBareJid: barePeerJid(this.session.jid),
-        onMessage: this.directMessageHandler,
+        onMessage: (m) => {
+          this.catchup.recordDmSeen(m.peerJid, m.createdAt);
+          this.directMessageHandler?.(m);
+        },
         onChatState: this.dmChatStateHandler,
         onDisplayed: this.dmDisplayedHandler,
         onReaction: this.dmReactionHandler,
