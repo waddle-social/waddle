@@ -76,14 +76,15 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
     ) {
       return;
     }
+    const targetWindow = window;
     const handler = (event: MouseEvent) => {
       event.stopPropagation();
       event.preventDefault();
     };
-    window.addEventListener("click", handler, { capture: true, once: true });
+    targetWindow.addEventListener("click", handler, { capture: true, once: true });
     // Safety net: if no click arrives, remove after a tick.
     setTimeout(() => {
-      window.removeEventListener("click", handler, { capture: true } as EventListenerOptions);
+      targetWindow.removeEventListener("click", handler, { capture: true } as EventListenerOptions);
     }, 400);
   }
 
