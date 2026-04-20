@@ -119,7 +119,10 @@ spec:
             }
           }
       # Inject Grafana Cloud creds from the ExternalSecret.
-      extraEnvFrom:
+      # Chart key is `envFrom` (not `extraEnvFrom`); helm silently drops
+      # unknown values, so the typo left the alloy container with no
+      # OTLP_/MIMIR_ env vars and the config failed to evaluate.
+      envFrom:
         - secretRef:
             name: grafana-cloud-credentials
       # Expose OTLP receivers so waddle-server (cluster-internal) can
