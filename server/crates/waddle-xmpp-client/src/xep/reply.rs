@@ -72,7 +72,7 @@ pub fn parse_reply(message: &Element) -> Option<ReplyMarker> {
 /// Only fallback elements scoped to the XEP-0461 reply namespace are
 /// recognised.
 pub fn parse_fallback(message: &Element) -> Option<FallbackRange> {
-    for fb in message.children().filter(|c| {
+    if let Some(fb) = message.children().find(|c| {
         c.name() == "fallback" && c.ns() == NS_FALLBACK && c.attr("for") == Some(NS_REPLY)
     }) {
         let body = fb.get_child("body", NS_FALLBACK)?;
@@ -81,9 +81,10 @@ pub fn parse_fallback(message: &Element) -> Option<FallbackRange> {
         if end < start {
             return None;
         }
-        return Some(FallbackRange { start, end });
+        Some(FallbackRange { start, end })
+    } else {
+        None
     }
-    None
 }
 
 #[cfg(test)]
