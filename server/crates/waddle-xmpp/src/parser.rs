@@ -7,6 +7,7 @@
 use minidom::Element;
 use std::collections::VecDeque;
 
+use crate::stream_management::SmStanza;
 use crate::XmppError;
 
 /// Namespace URIs used in XMPP
@@ -249,11 +250,13 @@ impl XmlParser {
             ("<iq", parse_iq_stanza),
             ("<message", parse_message_stanza),
             ("<presence", parse_presence_stanza),
-            // XEP-0198 Stream Management stanzas (order matters!)
-            ("<enable", parse_sm_enable),
-            ("<resume", parse_sm_resume), // Must come before <r
-            ("<r", parse_sm_request),
-            ("<a ", parse_sm_ack), // Note: space to avoid matching <auth
+            // XEP-0198 Stream Management stanzas. All routes funnel through
+            // `parse_sm_nonza` (which delegates to stream_management::SmStanza)
+            // so we maintain one parsing path across transports.
+            ("<enable", parse_sm_nonza),
+            ("<resume", parse_sm_nonza), // Must come before <r
+            ("<r", parse_sm_nonza),
+            ("<a ", parse_sm_nonza), // Note: space to avoid matching <auth
             // XEP-0220 Server Dialback stanzas
             ("<db:result", parse_dialback_result),
             ("<db:verify", parse_dialback_verify),
@@ -567,54 +570,26 @@ fn parse_presence_stanza(data: &str) -> Result<ParsedStanza, XmppError> {
     Ok(ParsedStanza::Presence(element))
 }
 
-/// Parse XEP-0198 Stream Management enable request.
-fn parse_sm_enable(data: &str) -> Result<ParsedStanza, XmppError> {
-    // Check for SM namespace
-    if !data.contains(ns::SM) {
-        return Err(XmppError::xml_parse("Invalid SM enable: wrong namespace"));
+/// Parse XEP-0198 Stream Management nonzas through the shared parser in
+/// `stream_management::SmStanza`.
+fn parse_sm_nonza(data: &str) -> Result<ParsedStanza, XmppError> {
+    let sm = SmStanza::parse(data).ok_or_else(|| XmppError::xml_parse("Invalid SM stanza"))?;
+
+    match sm {
+        SmStanza::Enable(enable) => Ok(ParsedStanza::SmEnable {
+            resume: enable.resume,
+            max: enable.max,
+        }),
+        SmStanza::Request => Ok(ParsedStanza::SmRequest),
+        SmStanza::Ack(ack) => Ok(ParsedStanza::SmAck { h: ack.h }),
+        SmStanza::Resume(resume) => Ok(ParsedStanza::SmResume {
+            previd: resume.previd,
+            h: resume.h,
+        }),
+        SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => Err(
+            XmppError::xml_parse("Invalid SM client stanza: server-origin nonza"),
+        ),
     }
-
-    let resume = data.contains("resume='true'") || data.contains("resume=\"true\"");
-    let max = extract_attribute(data, "max").and_then(|s| s.parse().ok());
-
-    Ok(ParsedStanza::SmEnable { resume, max })
-}
-
-/// Parse XEP-0198 Stream Management request (<r/>).
-fn parse_sm_request(data: &str) -> Result<ParsedStanza, XmppError> {
-    // Accept both with namespace and bare <r/>
-    if data.contains("<r")
-        && (data.contains(ns::SM) || data.trim() == "<r/>" || data.contains("<r/>"))
-    {
-        Ok(ParsedStanza::SmRequest)
-    } else {
-        Err(XmppError::xml_parse("Invalid SM request"))
-    }
-}
-
-/// Parse XEP-0198 Stream Management ack (<a h='N'/>).
-fn parse_sm_ack(data: &str) -> Result<ParsedStanza, XmppError> {
-    // Must have h attribute
-    let h = extract_attribute(data, "h")
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| XmppError::xml_parse("SM ack missing 'h' attribute"))?;
-
-    Ok(ParsedStanza::SmAck { h })
-}
-
-/// Parse XEP-0198 Stream Management resume request.
-fn parse_sm_resume(data: &str) -> Result<ParsedStanza, XmppError> {
-    if !data.contains(ns::SM) {
-        return Err(XmppError::xml_parse("Invalid SM resume: wrong namespace"));
-    }
-
-    let previd = extract_attribute(data, "previd")
-        .ok_or_else(|| XmppError::xml_parse("SM resume missing 'previd' attribute"))?;
-    let h = extract_attribute(data, "h")
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| XmppError::xml_parse("SM resume missing 'h' attribute"))?;
-
-    Ok(ParsedStanza::SmResume { previd, h })
 }
 
 /// Parse XEP-0220 Server Dialback result element.
@@ -951,6 +926,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parser_sm_enable_accepts_xs_boolean_canonical_true() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<enable xmlns='urn:xmpp:sm:3' resume='1' max='300'/>");
+
+        assert!(parser.has_complete_stanza());
+
+        let stanza = parser.next_stanza().unwrap();
+        if let Some(ParsedStanza::SmEnable { resume, max }) = stanza {
+            assert!(resume);
+            assert_eq!(max, Some(300));
+        } else {
+            panic!("Expected SmEnable with canonical xs:boolean true");
+        }
+    }
+
+    #[test]
     fn test_parser_sm_request() {
         let mut parser = XmlParser::new();
         parser.feed(b"<r xmlns='urn:xmpp:sm:3'/>");
@@ -990,6 +981,18 @@ mod tests {
         } else {
             panic!("Expected SmResume");
         }
+    }
+
+    #[test]
+    fn test_parser_sm_request_rejects_bare_nonza_without_namespace() {
+        let mut parser = XmlParser::new();
+        parser.feed(b"<r/>");
+
+        assert!(parser.has_complete_stanza());
+        assert!(
+            parser.next_stanza().is_err(),
+            "bare <r/> must not be treated as XEP-0198 without SM namespace"
+        );
     }
 
     #[test]

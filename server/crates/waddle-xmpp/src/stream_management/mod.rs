@@ -32,10 +32,40 @@ pub use session_registry::{
 };
 pub use unacked_queue::{UnackedQueue, UnackedStanza};
 
+use std::str::FromStr;
 use std::time::Instant;
+
+use minidom::Element;
 
 /// XEP-0198 Stream Management namespace (version 3)
 pub const SM_NS: &str = "urn:xmpp:sm:3";
+
+/// Namespace for XMPP stanza error conditions, used as the `<failed/>` child.
+const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+
+/// Parse an `xs:boolean` attribute value per W3C XML Schema Part 2 §3.2.2.
+///
+/// Both lexical forms are accepted for true (`"true"`, `"1"`) and false
+/// (`"false"`, `"0"`). The XMPP ecosystem uses both: `prosody` and `ejabberd`
+/// emit `"true"`, while `stanza.js` (our WebSocket client) emits the
+/// canonical `"1"` / `"0"`. Missing or unrecognised values are treated as
+/// `false`, matching the XMPP convention for optional boolean attributes.
+fn parse_xs_boolean(value: &str) -> bool {
+    matches!(value, "true" | "1")
+}
+
+/// Serialize a minidom `Element` to an XML string.
+///
+/// Writing to `Vec<u8>` is infallible (minidom only fails on I/O errors,
+/// which `Vec<u8>` cannot produce) and minidom is documented to emit valid
+/// UTF-8, so the two `expect`s are unreachable in practice.
+fn element_to_xml(element: Element) -> String {
+    let mut buf = Vec::new();
+    element
+        .write_to(&mut buf)
+        .expect("minidom Element::write_to(Vec<u8>) cannot fail");
+    String::from_utf8(buf).expect("minidom emits valid UTF-8")
+}
 
 /// Default maximum unacked queue size (stanzas)
 pub const DEFAULT_MAX_UNACKED_QUEUE_SIZE: usize = 1000;
@@ -71,16 +101,22 @@ impl SmEnable {
         }
     }
 
-    /// Parse an enable element from XML.
+    /// Parse an `<enable/>` element from XML.
     pub fn parse(xml: &str) -> Option<Self> {
-        if !xml.contains("<enable") || !xml.contains(SM_NS) {
+        let element = Element::from_str(xml).ok()?;
+        if element.name() != "enable" || element.ns() != SM_NS {
             return None;
         }
+        Some(Self::from_element(&element))
+    }
 
-        let resume = xml.contains("resume='true'") || xml.contains("resume=\"true\"");
-        let max = extract_attr(xml, "max").and_then(|s| s.parse().ok());
-
-        Some(Self { resume, max })
+    fn from_element(element: &Element) -> Self {
+        let resume = element
+            .attr("resume")
+            .map(parse_xs_boolean)
+            .unwrap_or(false);
+        let max = element.attr("max").and_then(|s| s.parse().ok());
+        Self { resume, max }
     }
 }
 
@@ -120,19 +156,19 @@ impl SmEnabled {
         }
     }
 
-    /// Serialize to XML string.
+    /// Serialize to an `<enabled/>` XML string.
     pub fn to_xml(&self) -> String {
-        let mut attrs = format!("id='{}'", self.id);
+        let mut builder = Element::builder("enabled", SM_NS).attr("id", self.id.as_str());
         if self.resume {
-            attrs.push_str(" resume='true'");
+            builder = builder.attr("resume", "true");
         }
         if let Some(max) = self.max {
-            attrs.push_str(&format!(" max='{}'", max));
+            builder = builder.attr("max", max.to_string());
         }
-        if let Some(ref loc) = self.location {
-            attrs.push_str(&format!(" location='{}'", loc));
+        if let Some(location) = self.location.as_deref() {
+            builder = builder.attr("location", location);
         }
-        format!("<enabled xmlns='{}' {}/>", SM_NS, attrs)
+        element_to_xml(builder.build())
     }
 }
 
@@ -148,15 +184,18 @@ pub struct SmResume {
 }
 
 impl SmResume {
-    /// Parse a resume element from XML.
+    /// Parse a `<resume/>` element from XML.
     pub fn parse(xml: &str) -> Option<Self> {
-        if !xml.contains("<resume") || !xml.contains(SM_NS) {
+        let element = Element::from_str(xml).ok()?;
+        if element.name() != "resume" || element.ns() != SM_NS {
             return None;
         }
+        Self::from_element(&element)
+    }
 
-        let previd = extract_attr(xml, "previd")?;
-        let h = extract_attr(xml, "h").and_then(|s| s.parse().ok())?;
-
+    fn from_element(element: &Element) -> Option<Self> {
+        let previd = element.attr("previd")?.to_string();
+        let h = element.attr("h").and_then(|s| s.parse().ok())?;
         Some(Self { previd, h })
     }
 }
@@ -176,11 +215,13 @@ impl SmResumed {
         Self { previd, h }
     }
 
-    /// Serialize to XML string.
+    /// Serialize to a `<resumed/>` XML string.
     pub fn to_xml(&self) -> String {
-        format!(
-            "<resumed xmlns='{}' previd='{}' h='{}'/>",
-            SM_NS, self.previd, self.h
+        element_to_xml(
+            Element::builder("resumed", SM_NS)
+                .attr("previd", self.previd.as_str())
+                .attr("h", self.h.to_string())
+                .build(),
         )
     }
 }
@@ -219,18 +260,16 @@ impl SmFailed {
         }
     }
 
-    /// Serialize to XML string.
+    /// Serialize to a `<failed/>` XML string.
     pub fn to_xml(&self) -> String {
-        let h_attr = self.h.map(|h| format!(" h='{}'", h)).unwrap_or_default();
-
-        if let Some(ref cond) = self.condition {
-            format!(
-                "<failed xmlns='{}'{}><{} xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></failed>",
-                SM_NS, h_attr, cond
-            )
-        } else {
-            format!("<failed xmlns='{}'{}/>", SM_NS, h_attr)
+        let mut builder = Element::builder("failed", SM_NS);
+        if let Some(h) = self.h {
+            builder = builder.attr("h", h.to_string());
         }
+        if let Some(condition) = self.condition.as_deref() {
+            builder = builder.append(Element::builder(condition, STANZA_ERROR_NS).build());
+        }
+        element_to_xml(builder.build())
     }
 }
 
@@ -249,14 +288,14 @@ pub struct SmRequest;
 impl SmRequest {
     /// Check if XML is an ack request.
     pub fn is_request(xml: &str) -> bool {
-        (xml.contains("<r") && xml.contains(SM_NS))
-            || xml.trim() == "<r/>"
-            || xml.contains("<r xmlns=")
+        Element::from_str(xml)
+            .map(|el| el.name() == "r" && el.ns() == SM_NS)
+            .unwrap_or(false)
     }
 
-    /// Serialize to XML string.
+    /// Serialize to an `<r/>` XML string.
     pub fn to_xml() -> String {
-        format!("<r xmlns='{}'/>", SM_NS)
+        element_to_xml(Element::builder("r", SM_NS).build())
     }
 }
 
@@ -275,19 +314,27 @@ impl SmAck {
         Self { h }
     }
 
-    /// Parse an ack element from XML.
+    /// Parse an `<a/>` ack element from XML.
     pub fn parse(xml: &str) -> Option<Self> {
-        if !xml.contains("<a") || !xml.contains(SM_NS) {
+        let element = Element::from_str(xml).ok()?;
+        if element.name() != "a" || element.ns() != SM_NS {
             return None;
         }
+        Self::from_element(&element)
+    }
 
-        let h = extract_attr(xml, "h").and_then(|s| s.parse().ok())?;
+    fn from_element(element: &Element) -> Option<Self> {
+        let h = element.attr("h").and_then(|s| s.parse().ok())?;
         Some(Self { h })
     }
 
-    /// Serialize to XML string.
+    /// Serialize to an `<a/>` XML string.
     pub fn to_xml(&self) -> String {
-        format!("<a xmlns='{}' h='{}'/>", SM_NS, self.h)
+        element_to_xml(
+            Element::builder("a", SM_NS)
+                .attr("h", self.h.to_string())
+                .build(),
+        )
     }
 }
 
@@ -475,21 +522,6 @@ impl StreamManagementState {
     }
 }
 
-/// Extract an attribute value from XML.
-fn extract_attr(xml: &str, name: &str) -> Option<String> {
-    // Try both single and double quotes
-    for quote in ['"', '\''] {
-        let pattern = format!("{}={}", name, quote);
-        if let Some(start) = xml.find(&pattern) {
-            let value_start = start + pattern.len();
-            if let Some(value_end) = xml[value_start..].find(quote) {
-                return Some(xml[value_start..value_start + value_end].to_string());
-            }
-        }
-    }
-    None
-}
-
 /// Parsed stream management stanza variants.
 #[derive(Debug, Clone)]
 pub enum SmStanza {
@@ -510,29 +542,33 @@ pub enum SmStanza {
 }
 
 impl SmStanza {
-    /// Try to parse a stream management stanza from XML.
+    /// Cheap lexical prefilter used by hot paths (e.g. WebSocket frame
+    /// routing) so we only pay full XML parsing for likely SM control nonzas.
+    pub fn is_client_nonza_candidate(xml: &str) -> bool {
+        let trimmed = xml.trim_start();
+        (trimmed.starts_with("<enable")
+            || trimmed.starts_with("<resume")
+            || trimmed.starts_with("<r")
+            || trimmed.starts_with("<a"))
+            && trimmed.contains(SM_NS)
+    }
+
+    /// Try to parse a stream management nonza from XML.
+    ///
+    /// Only parses client-origin nonzas: `<enable/>`, `<resume/>`, `<r/>`,
+    /// `<a/>`. Server-origin nonzas (`<enabled/>`, `<resumed/>`, `<failed/>`)
+    /// return `None` — the server authors those itself.
     pub fn parse(xml: &str) -> Option<Self> {
-        if !xml.contains(SM_NS) && !xml.trim().starts_with("<r/>") && !xml.trim().starts_with("<a ")
-        {
+        let element = Element::from_str(xml).ok()?;
+        if element.ns() != SM_NS {
             return None;
         }
-
-        if xml.contains("<enable") {
-            SmEnable::parse(xml).map(SmStanza::Enable)
-        } else if xml.contains("<enabled") {
-            // Server response, not typically parsed by server
-            None
-        } else if xml.contains("<resume") {
-            SmResume::parse(xml).map(SmStanza::Resume)
-        } else if xml.contains("<resumed") || xml.contains("<failed") {
-            // Server response, not typically parsed by server
-            None
-        } else if SmRequest::is_request(xml) {
-            Some(SmStanza::Request)
-        } else if xml.contains("<a ") || xml.contains("<a>") {
-            SmAck::parse(xml).map(SmStanza::Ack)
-        } else {
-            None
+        match element.name() {
+            "enable" => Some(SmStanza::Enable(SmEnable::from_element(&element))),
+            "resume" => SmResume::from_element(&element).map(SmStanza::Resume),
+            "a" => SmAck::from_element(&element).map(SmStanza::Ack),
+            "r" => Some(SmStanza::Request),
+            _ => None,
         }
     }
 }
@@ -540,6 +576,13 @@ impl SmStanza {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse the given XML through minidom and return the element. Used by
+    /// tests below to assert against serialized output without depending on
+    /// the quoting/attribute-order choices the serializer happens to make.
+    fn parse_element(xml: &str) -> Element {
+        Element::from_str(xml).expect("test fixture must be valid XML")
+    }
 
     #[test]
     fn test_sm_enable_parse() {
@@ -554,23 +597,57 @@ mod tests {
         assert_eq!(enable.max, Some(300));
     }
 
+    /// Regression guard for the `resume="1"` parsing bug. Stanza.js (the
+    /// WebSocket client library used by `chat/`) serializes `xs:boolean`
+    /// attributes in canonical form — `1`/`0`, not `true`/`false`. The old
+    /// string-match parser only recognised `resume='true'` / `resume="true"`,
+    /// so every real browser client ended up with a non-resumable SM
+    /// session and the entire XEP-0198 resume path was effectively disabled.
+    #[test]
+    fn test_sm_enable_parses_xs_boolean_canonical_forms() {
+        // Stanza.js wire format (double-quoted xs:boolean "1"):
+        let enable = SmEnable::parse(r#"<enable xmlns="urn:xmpp:sm:3" resume="1"/>"#).unwrap();
+        assert!(
+            enable.resume,
+            "resume=\"1\" is xs:boolean true — must parse as resume request"
+        );
+
+        // Single-quoted variant:
+        let enable = SmEnable::parse("<enable xmlns='urn:xmpp:sm:3' resume='1'/>").unwrap();
+        assert!(enable.resume);
+
+        // Canonical xs:boolean false (`0`) must remain false.
+        let enable = SmEnable::parse(r#"<enable xmlns="urn:xmpp:sm:3" resume="0"/>"#).unwrap();
+        assert!(!enable.resume);
+
+        // Unrecognised values fall back to false (XMPP convention for
+        // optional boolean attributes).
+        let enable = SmEnable::parse(r#"<enable xmlns="urn:xmpp:sm:3" resume="yes"/>"#).unwrap();
+        assert!(!enable.resume);
+    }
+
     #[test]
     fn test_sm_enabled_to_xml() {
         let enabled = SmEnabled::new("stream-123".to_string());
-        let xml = enabled.to_xml();
-        assert!(xml.contains("xmlns='urn:xmpp:sm:3'"));
-        assert!(xml.contains("id='stream-123'"));
+        let element = parse_element(&enabled.to_xml());
+        assert_eq!(element.name(), "enabled");
+        assert_eq!(element.ns(), SM_NS);
+        assert_eq!(element.attr("id"), Some("stream-123"));
+        assert_eq!(element.attr("resume"), None);
 
         let enabled = SmEnabled::with_resume("stream-456".to_string(), 300);
-        let xml = enabled.to_xml();
-        assert!(xml.contains("resume='true'"));
-        assert!(xml.contains("max='300'"));
+        let element = parse_element(&enabled.to_xml());
+        assert_eq!(element.attr("resume"), Some("true"));
+        assert_eq!(element.attr("max"), Some("300"));
     }
 
     #[test]
     fn test_sm_request() {
         assert!(SmRequest::is_request("<r xmlns='urn:xmpp:sm:3'/>"));
-        assert!(SmRequest::is_request("<r/>"));
+        // Bare `<r/>` (no xmlns) is NOT an SM request — the old parser
+        // accepted it, which mis-classified any `<r>` in another namespace
+        // as stream management.
+        assert!(!SmRequest::is_request("<r/>"));
         assert!(!SmRequest::is_request("<message/>"));
     }
 
@@ -580,19 +657,41 @@ mod tests {
         let ack = SmAck::parse(xml).unwrap();
         assert_eq!(ack.h, 5);
 
-        let serialized = ack.to_xml();
-        assert!(serialized.contains("h='5'"));
+        let element = parse_element(&ack.to_xml());
+        assert_eq!(element.name(), "a");
+        assert_eq!(element.ns(), SM_NS);
+        assert_eq!(element.attr("h"), Some("5"));
+    }
+
+    /// The old string-match parser used `xml.find("h=")`, which happily
+    /// matched the `h=` substring inside attributes like `bah="99"`. Proper
+    /// XML parsing rejects that ambiguity. Guard against regressing back to
+    /// substring search.
+    #[test]
+    fn test_sm_ack_is_not_fooled_by_attribute_name_prefix_collision() {
+        let xml = r#"<a xmlns="urn:xmpp:sm:3" bah="99" h="7"/>"#;
+        let ack = SmAck::parse(xml).expect("should parse");
+        assert_eq!(
+            ack.h, 7,
+            "must read the real `h` attribute, not a substring match of `bah`"
+        );
     }
 
     #[test]
     fn test_sm_failed() {
         let failed = SmFailed::with_condition("item-not-found");
-        let xml = failed.to_xml();
-        assert!(xml.contains("<item-not-found"));
+        let element = parse_element(&failed.to_xml());
+        assert_eq!(element.name(), "failed");
+        assert_eq!(element.ns(), SM_NS);
+        let condition = element
+            .children()
+            .find(|child| child.name() == "item-not-found")
+            .expect("condition child");
+        assert_eq!(condition.ns(), STANZA_ERROR_NS);
 
         let failed = SmFailed::resume_failed("item-not-found", 10);
-        let xml = failed.to_xml();
-        assert!(xml.contains("h='10'"));
+        let element = parse_element(&failed.to_xml());
+        assert_eq!(element.attr("h"), Some("10"));
     }
 
     #[test]
@@ -653,6 +752,27 @@ mod tests {
         // Non-SM stanza
         let other = SmStanza::parse("<message/>");
         assert!(other.is_none());
+    }
+
+    #[test]
+    fn test_sm_stanza_candidate_prefilter() {
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<enable xmlns='urn:xmpp:sm:3'/>"
+        ));
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<resume xmlns='urn:xmpp:sm:3' previd='id' h='1'/>"
+        ));
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<r xmlns='urn:xmpp:sm:3'/>"
+        ));
+        assert!(SmStanza::is_client_nonza_candidate(
+            "<a xmlns='urn:xmpp:sm:3' h='4'/>"
+        ));
+
+        assert!(!SmStanza::is_client_nonza_candidate(
+            "<message xmlns='jabber:client'/>"
+        ));
+        assert!(!SmStanza::is_client_nonza_candidate("<r/>"));
     }
 
     #[test]
