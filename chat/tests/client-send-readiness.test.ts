@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { EventEmitter } from "events";
+import type { Agent } from "stanza";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDmMessaging } from "../src/composables/useDmMessaging";
@@ -124,6 +126,35 @@ describe("client send readiness", () => {
       "Reconnection timed out",
     );
     expect(xmpp.sendMessage).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("client keepalive lifecycle", () => {
+  test("uses stanza keepalive and disables it when the transport disconnects", () => {
+    const originalConsoleError = console.error;
+    console.error = mock(() => undefined) as typeof console.error;
+    try {
+      const client = new BrowserXmppClient(session());
+      const xmpp = Object.assign(new EventEmitter(), {
+        enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
+        disableKeepAlive: mock(() => undefined),
+        enableCarbons: mock(async () => undefined),
+        getRoster: mock(async () => ({ items: [] })),
+      }) as unknown as Agent;
+      (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+      (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+      xmpp.emit("session:started");
+
+      expect(xmpp.disableKeepAlive).toHaveBeenCalledTimes(1);
+      expect(xmpp.enableKeepAlive).toHaveBeenCalledWith({ interval: 30, timeout: 15 });
+
+      xmpp.emit("disconnected");
+
+      expect(xmpp.disableKeepAlive).toHaveBeenCalledTimes(2);
+    } finally {
+      console.error = originalConsoleError;
+    }
   });
 });
 
