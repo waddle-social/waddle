@@ -5,6 +5,7 @@ import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { connectionStore } from "@/lib/connection-store";
 import { createServerAuth } from "@/lib/server-auth";
 import { $xmppStatus, OFFLINE_SNAPSHOT } from "@/stores/xmpp-status";
+import { installInstrumentation } from "@/lib/xmpp/xmpp-instrumentation";
 
 const props = defineProps<{
   serverBaseUrl: string;
@@ -27,6 +28,11 @@ async function bootstrap() {
 
   if (auth.appState.value === "ready" && auth.session.value) {
     const client = new BrowserXmppClient(auth.session.value);
+    // Wire Faro telemetry hooks before any handlers are set — the
+    // primary setStatusHandler below is unaffected, but the telemetry
+    // `onStatus` hook fires alongside it. Safe to install even when
+    // Faro isn't initialized; `@/lib/telemetry` no-ops until bootstrap.
+    installInstrumentation(client);
     const serverUrl = auth.activeServerUrl.value;
     client.setRefreshSession(async () => {
       const serverAuth = createServerAuth(serverUrl);

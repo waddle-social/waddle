@@ -27,6 +27,18 @@ spec:
       s3Bucket: "waddle-social-files"
     extraSecretRefs:
       - waddle-r2-credentials
+    # Ship traces + OTel-native metrics to Grafana Cloud via the
+    # in-cluster Alloy collector. `telemetry.rs` reads these env vars
+    # (default endpoint was `localhost:4317`, which silently dropped
+    # everything before this was wired up). Chart-modelled keys go in
+    # `telemetry`; `containerExtraEnv` is reserved for settings the
+    # chart doesn't model (currently just the OTLP protocol).
+    telemetry:
+      otlpEndpoint: "http://grafana-alloy.grafana-alloy.svc.cluster.local:4317"
+      serviceName: "waddle-server"
+    containerExtraEnv:
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "grpc"
     xmpp:
       domain: waddle.social
       mamDbPath: /data/mam.db

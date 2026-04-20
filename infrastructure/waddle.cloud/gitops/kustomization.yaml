@@ -7,6 +7,7 @@ resources:
   - kustomization-infra-onepassword-connect.yaml
   - kustomization-infra-cert-manager.yaml
   - kustomization-infra-external-dns.yaml
+  - kustomization-infra-grafana-alloy.yaml
   - kustomization-infra-cloudnative-pg.yaml
   - kustomization-infra-spicedb-operator-source.yaml
   - kustomization-infra-spicedb-operator.yaml

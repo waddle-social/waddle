@@ -23,6 +23,7 @@
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@fontsource-variable/outfit": "^5.2.8",
     "@fontsource-variable/syne": "^5.2.7",
+    "@grafana/faro-web-sdk": "^2.3.1",
     "@nanostores/vue": "^1.1.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tiptap/extension-bubble-menu": "^3.22.3",
