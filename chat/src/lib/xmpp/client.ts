@@ -192,6 +192,14 @@ export class BrowserXmppClient {
   private lastStanzaKickAt = 0;
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
+  // IDs of persisted-queue entries that have been handed to stanza.js on
+  // this connection and whose `message:acked` is still pending. The
+  // persisted localStorage entry only goes away when the ack arrives, so
+  // flushes that race with an ack must skip already-in-flight entries —
+  // otherwise resume + concurrent flush double-sends. Cleared on fresh
+  // session (session:started) because stanza.js drops its SM buffer
+  // there, so those stanzas need to be re-flushed from scratch.
+  private readonly inflightQueuedIds = new Set<string>();
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -601,6 +609,10 @@ export class BrowserXmppClient {
       );
       for (const entry of entries) {
         if (!this.canUseConnectedSession() || !this.xmpp) break;
+        // Skip entries we already handed to stanza.js on this connection —
+        // their ack is in flight. Removing them from the persisted queue
+        // happens on `message:acked`, not on synchronous send.
+        if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = dmMessaging.sendDirectMessage(
           this.xmpp,
@@ -614,7 +626,7 @@ export class BrowserXmppClient {
             id: entry.id,
           },
         );
-        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+        if (messageId) this.inflightQueuedIds.add(entry.id);
       }
     })();
     const trackedPromise = flushPromise.finally(() => {
@@ -635,6 +647,7 @@ export class BrowserXmppClient {
       const entries = listQueuedRoomMessages(this.queueScope, roomJid);
       for (const entry of entries) {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
+        if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
           ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
@@ -646,7 +659,7 @@ export class BrowserXmppClient {
           ...(entry.threadReply ? { threadReply: entry.threadReply } : {}),
           id: entry.id,
         });
-        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+        if (messageId) this.inflightQueuedIds.add(entry.id);
       }
     })();
 
@@ -1079,6 +1092,11 @@ export class BrowserXmppClient {
       // `session:started` fires on fresh bind only; SM resume short-circuits
       // feature negotiation and does not emit this event. So any time we see
       // it here, it's a fresh session — consumers may close MAM gaps.
+      //
+      // A fresh session also means stanza.js dropped its unacked-stanza
+      // buffer; anything we thought was in flight is gone. Clear the
+      // inflight set so the next flush re-sends all persisted entries.
+      this.inflightQueuedIds.clear();
       this.sessionLifecycleHandler?.({ type: "fresh" });
       void this.flushQueuedDirectMessages();
       try {
@@ -1133,17 +1151,35 @@ export class BrowserXmppClient {
     // stanzas against the ack count and emits message:acked with the original
     // outbound Message. Downstream uses stanza.id to move the optimistic
     // "sending" entry to "delivered".
+    //
+    // Also the canonical signal that a persisted queue entry has actually
+    // landed on the server. Removing the entry here instead of on the
+    // synchronous `sendMessage` return is what closes the "stanza.js
+    // buffered it but the wire write never went through" window that was
+    // wiping messages out of localStorage before they were durable.
     xmpp.on("message:acked", (msg) => {
       if (this.xmpp !== xmpp) return;
-      if (msg?.id) this.messageAckHandler?.(msg.id);
+      if (msg?.id) {
+        this.inflightQueuedIds.delete(msg.id);
+        removeQueuedMessage(this.queueScope, msg.id);
+        this.messageAckHandler?.(msg.id);
+      }
     });
 
     // XEP-0198: stanza.js emits message:failed when SM resume fails (server
     // drops the session) or when we tried to send with no transport and SM is
     // not resumable. The message was almost certainly not delivered.
+    //
+    // For a persisted-queue entry this means stanza.js won't try again on
+    // its own; drop it from the in-flight set so the next reconnect's
+    // flush picks it up. The persisted queue entry itself stays — it will
+    // get re-sent.
     xmpp.on("message:failed", (msg) => {
       if (this.xmpp !== xmpp) return;
-      if (msg?.id) this.messageDeliveryFailureHandler?.(msg.id);
+      if (msg?.id) {
+        this.inflightQueuedIds.delete(msg.id);
+        this.messageDeliveryFailureHandler?.(msg.id);
+      }
     });
 
     xmpp.on("disconnected", (err) => {
