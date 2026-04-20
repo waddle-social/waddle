@@ -10,10 +10,13 @@ on:
     - chat/../package.json
     - chat/astro.config.mjs
     - chat/env.cue
+    - chat/knip.json
     - chat/package.json
     - chat/public/**
     - chat/schema/**
+    - chat/scripts/**
     - chat/src/**
+    - chat/tests/**
     - chat/tsconfig.json
     - chat/wrangler.jsonc
     - cue.mod/**
