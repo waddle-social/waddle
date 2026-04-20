@@ -1147,8 +1147,15 @@ export class BrowserXmppClient {
     xmpp.on("message:acked", (msg) => {
       if (this.xmpp !== xmpp) return;
       if (msg?.id) {
-        this.inflightQueuedIds.delete(msg.id);
-        removeQueuedMessage(this.queueScope, msg.id);
+        // Only touch localStorage for ids that originated from the
+        // persisted queue. `inflightQueuedIds` is the authoritative
+        // set of handed-off-from-localStorage ids; anything else is a
+        // live-send ack and doesn't belong in the persistence layer.
+        // `Set.prototype.delete` returns true iff the id was present,
+        // so this gate is also the inflight-removal step.
+        if (this.inflightQueuedIds.delete(msg.id)) {
+          removeQueuedMessage(this.queueScope, msg.id);
+        }
         this.messageAckHandler?.(msg.id);
       }
     });
