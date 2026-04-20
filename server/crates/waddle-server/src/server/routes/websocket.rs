@@ -635,16 +635,24 @@ fn parse_sasl_auth_frame(frame: &str) -> Result<(String, String), String> {
 /// handled/sent counters. Only `<iq>`, `<message>`, `<presence>` qualify —
 /// stream headers, SASL frames, and SM control nonzas do not.
 ///
-/// Parses by element name rather than string-prefix: a substring match
-/// like `starts_with("<message")` would also accept future nonzas such
-/// as `<messages>` or `<presences>`. PR #164 (xs:boolean parsing) burned
-/// us on exactly this kind of substring assumption — do it by element
-/// name and never build a surprise in future.
+/// Matches on the element name rather than a string-prefix: a substring
+/// match like `starts_with("<message")` would also accept future nonzas
+/// such as `<messages>` or `<presences>`. PR #164 (xs:boolean parsing)
+/// burned us on exactly this kind of substring assumption.
+///
+/// Hot-path: called for every outbound frame when SM is enabled, so we
+/// do a byte-level scan of the element name instead of a full
+/// `minidom::Element::from_str` — the parse would allocate a whole
+/// DOM subtree every time only to read `.name()`.
 fn is_countable_stanza(frame: &str) -> bool {
-    let Ok(element) = Element::from_str(frame.trim_start()) else {
+    let trimmed = frame.trim_start();
+    let Some(after_lt) = trimmed.strip_prefix('<') else {
         return false;
     };
-    matches!(element.name(), "iq" | "message" | "presence")
+    let name_end = after_lt
+        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .unwrap_or(after_lt.len());
+    matches!(&after_lt[..name_end], "iq" | "message" | "presence")
 }
 
 /// Bundle the session-level borrows that XEP-0198 control handlers mutate.
@@ -2775,6 +2783,12 @@ async fn handle_message(
         // server can't reach right now (backpressured or stale) will pick up
         // the message on their next MAM catch-up. Blocking here is what
         // caused join cascades under zombie load.
+        //
+        // Accounting invariant for the broadcast log below:
+        //   `intended = delivered + dropped_full + dropped_closed + not_connected`
+        // The sender is always one of `occupants` in a groupchat send but is
+        // reached via the direct echo response (not `try_send_to`), so the
+        // echo path counts as one `delivered` to keep the invariant true.
         let mut echo_response = None;
         let mut delivered = 0u32;
         let mut dropped_full = 0u32;
@@ -2789,6 +2803,7 @@ async fn handle_message(
                     Stanza::Message(msg)
                 };
                 echo_response = Some(stanza_to_xml(&stanza));
+                delivered += 1;
             } else {
                 let mut msg = prototype.clone();
                 msg.to = Some(jid::Jid::from(occupant_jid.clone()));
@@ -2801,6 +2816,12 @@ async fn handle_message(
                 }
             }
         }
+
+        debug_assert_eq!(
+            occupants.len() as u32,
+            delivered + dropped_full + dropped_closed + not_connected,
+            "broadcast accounting must cover every occupant exactly once"
+        );
 
         info!(
             room = %room_jid,
