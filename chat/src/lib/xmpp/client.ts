@@ -183,7 +183,6 @@ export class BrowserXmppClient {
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
-  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private roomHats: RoomHats = {};
   private roomPresence: RoomPresence = {};
   private uploadServiceJid: string | null = null;
@@ -1016,29 +1015,25 @@ export class BrowserXmppClient {
   }
 
   /**
-   * Keep the websocket alive in the background by pinging the server every
-   * 30s while connected.  The "tab became visible" / "network back online"
-   * nudges live on their own listeners because they must survive disconnects
-   * to drive recovery; see startReconnectNudgeListeners.
+   * Keep the websocket alive through stanza's own SM-aware keepalive. When
+   * stream management is active stanza requests an SM ack instead of issuing a
+   * separate XMPP ping, and on timeout it drops the transport without marking
+   * the session as intentionally disconnected.
    */
-  private startKeepAlive() {
+  private startKeepAlive(xmpp: Agent) {
     this.stopKeepAlive();
-    this.keepAliveTimer = setInterval(() => { void this.pingServer(); }, 30_000);
+    xmpp.enableKeepAlive({ interval: 30, timeout: 15 });
   }
 
   private stopKeepAlive() {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
-    }
+    this.xmpp?.disableKeepAlive();
   }
 
   /**
    * Listen for "tab became visible" / "network back online" for the lifetime
-   * of the agent.  When fired while connected, ping the server.  When fired
-   * while disconnected, actively drive reconnection — without this the client
-   * relies entirely on stanza.js's internal backoff, which in practice leaves
-   * the socket broken until the user reloads.
+   * of the agent. When fired, connect() no-ops if already online; otherwise it
+   * actively drives reconnection so recovery doesn't rely only on stanza.js's
+   * internal backoff.
    */
   private startReconnectNudgeListeners() {
     this.stopReconnectNudgeListeners();
@@ -1047,8 +1042,7 @@ export class BrowserXmppClient {
       if (now - this.reconnectNudgeAt < 1500) return;
       this.reconnectNudgeAt = now;
       if (this.destroying || !this.xmpp) return;
-      if (this.connected) void this.pingServer();
-      else void this.connect().catch(() => undefined);
+      void this.connect().catch(() => undefined);
     };
     if (typeof document !== "undefined") {
       this.visibilityListener = () => {
@@ -1073,37 +1067,11 @@ export class BrowserXmppClient {
     this.onlineListener = null;
   }
 
-  private async pingServer() {
-    const xmpp = this.xmpp;
-    if (!xmpp || !this.connected || this.destroying) return;
-    const domain = jidDomain(this.session.jid);
-    if (!domain) return;
-    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-    try {
-      const timeout = new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => reject(new Error("ping timeout")), 10_000);
-      });
-      await Promise.race([
-        xmpp.sendIQ({ type: "get", to: domain, ping: true } as Parameters<Agent["sendIQ"]>[0]),
-        timeout,
-      ]);
-    } catch (err) {
-      // Server-side XMPP errors (e.g. service-unavailable) mean the connection
-      // is alive — don't tear it down.
-      if (xmppErrorCondition(err)) return;
-      // Transport-level failure — drop the socket so autoReconnect re-opens it.
-      if (this.xmpp !== xmpp) return;
-      try { xmpp.disconnect(); } catch { /* ignore */ }
-    } finally {
-      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
-    }
-  }
-
   private wireEvents(xmpp: Agent) {
     xmpp.on("session:started", async () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
-      this.startKeepAlive();
+      this.startKeepAlive(xmpp);
       this.statusHandler?.({
         state: "online",
         detail: countQueuedMessages(this.queueScope) > 0 ? "Reconnected — replaying queued messages" : "Connection ready",
@@ -1149,7 +1117,7 @@ export class BrowserXmppClient {
     xmpp.on("stream:management:resumed", () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
-      this.startKeepAlive();
+      this.startKeepAlive(xmpp);
       this.statusHandler?.({
         state: "online",
         detail: countQueuedMessages(this.queueScope) > 0 ? "Connection resumed — replaying queued messages" : "Connection resumed",
