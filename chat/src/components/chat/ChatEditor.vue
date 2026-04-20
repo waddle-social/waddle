@@ -2,9 +2,9 @@
 import { watch, onBeforeUnmount, computed } from "vue";
 import { useEditor, EditorContent } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
-import Link from "@tiptap/extension-link";
 import Image from "@tiptap/extension-image";
 import Placeholder from "@tiptap/extension-placeholder";
+import { ChatLink } from "@/lib/editor/chat-link";
 
 const props = withDefaults(
   defineProps<{
@@ -34,7 +34,7 @@ const extensions = computed(() => {
       horizontalRule: false,
       link: false,
     }),
-    Link.configure({
+    ChatLink.configure({
       openOnClick: false,
       autolink: true,
       HTMLAttributes: {
