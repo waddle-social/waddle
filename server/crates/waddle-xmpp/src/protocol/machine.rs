@@ -349,9 +349,9 @@ mod tests {
                     assert_eq!(reply.id, "ping-42");
                     assert!(matches!(reply.payload, IqType::Result(_)));
                 }
-                _ => panic!("expected Iq, got unexpected event type"),
+                _ => panic!("expected IQ reply stanza"),
             },
-            _ => panic!("expected SendStanza, got unexpected event type"),
+            _ => panic!("expected SendStanza event"),
         }
     }
 

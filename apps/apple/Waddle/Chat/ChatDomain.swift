@@ -85,6 +85,9 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     var replyToID: String?
     var replyToSenderName: String?
     var replyToBody: String?
+    /// XEP-0428 fallback range — the portion of `body` that is a compatibility
+    /// quote and should be hidden on this (supporting) client.
+    var replyFallbackRange: Range<Int>? = nil
     var markupSpans: [XMPPMarkupSpan]?
     var sharedFiles: [XMPPSharedFile]?
     var broadcastMention: String?
@@ -109,14 +112,32 @@ struct ChatTimelineMessage: Identifiable, Hashable {
     }
 
     var displayBody: String {
+        let stripped = stripReplyFallback(body, range: replyFallbackRange)
         if let files = sharedFiles, !files.isEmpty {
-            let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
             if files.contains(where: { $0.url == trimmed }) {
                 return ""
             }
         }
-        return body
+        return stripped
     }
+}
+
+/// Remove the characters identified by a XEP-0428 fallback range from `body`.
+/// Offsets count Unicode scalar values; `end` is exclusive. Out-of-range
+/// values are clamped so a malformed range can never crash rendering.
+func stripReplyFallback(_ body: String, range: Range<Int>?) -> String {
+    guard let range, range.lowerBound < range.upperBound else { return body }
+    let scalars = body.unicodeScalars
+    let count = scalars.count
+    let start = max(0, min(range.lowerBound, count))
+    let end = max(start, min(range.upperBound, count))
+    guard start < end else { return body }
+    let startIdx = scalars.index(scalars.startIndex, offsetBy: start)
+    let endIdx = scalars.index(scalars.startIndex, offsetBy: end)
+    var trimmed = String(scalars[..<startIdx])
+    trimmed.unicodeScalars.append(contentsOf: scalars[endIdx...])
+    return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 struct ChatRoomHistoryState: Hashable {
@@ -303,6 +324,44 @@ extension ChatTimelineMessage {
                 attributed[startAttr..<endAttr].link = url
             }
         }
+    }
+
+    /// URLs in the message body that point to image or GIF resources. Used
+    /// by the timeline to render an inline preview when the sender pasted a
+    /// plain image link (Tenor, Giphy, a CDN image, etc.) rather than
+    /// attaching via XEP-0385 file-sharing. URLs that are already attached
+    /// as `sharedFiles` are excluded to avoid duplicate previews.
+    var detectedImageURLs: [URL] {
+        let text = displayBody
+        guard !text.isEmpty else { return [] }
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        let existing = Set(sharedFiles?.map(\.url) ?? [])
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp"]
+        var urls: [URL] = []
+        var seen = Set<String>()
+        let nsRange = NSRange(text.startIndex..., in: text)
+        for match in detector.matches(in: text, range: nsRange) {
+            guard let url = match.url else { continue }
+            let abs = url.absoluteString
+            if existing.contains(abs) || seen.contains(abs) { continue }
+            // Check extension with query/fragment stripped.
+            let ext = url.pathExtension.lowercased()
+            let host = url.host?.lowercased() ?? ""
+            let looksLikeGifHost = host.contains("tenor.com") || host.contains("giphy.com") || host.contains("media.tenor") || host.contains("media.giphy")
+            guard imageExtensions.contains(ext) || (looksLikeGifHost && url.path.contains(".gif")) else { continue }
+            urls.append(url)
+            seen.insert(abs)
+        }
+        return urls
+    }
+
+    /// True when the message body is a single image URL with no surrounding
+    /// text. Used to hide the text line when we're about to render the same
+    /// URL as an image preview directly beneath.
+    var bodyIsSingleImageURL: Bool {
+        let stripped = displayBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = detectedImageURLs.first else { return false }
+        return stripped == first.absoluteString
     }
 
     var timelineSortDate: Date {

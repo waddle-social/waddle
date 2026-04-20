@@ -1335,16 +1335,8 @@ func phaseVerify(ctx context.Context, op *operation.Operation, cfg *config.Confi
 	_ = ctx
 	slog.Info("phase verify: running health checks")
 
-	nodeName := op.GetContextString("nodeName")
-	if nodeName == "" {
-		poolName := strings.TrimSpace(op.GetContextString("poolName"))
-		if poolName == "" {
-			poolName = "control-plane"
-		}
-		nodeName = controlPlaneNodeName(cfg.Environment, poolName, 1)
-	}
-
-	fmt.Printf("\nCluster %q created successfully!\n", cfg.Environment)
+	fmt.Printf("\nCluster %q created successfully.\n", cfg.Environment)
+	fmt.Println("Run `waddle.cloud cluster status` to inspect node, IP, and server details.")
 
 	return nil
 }

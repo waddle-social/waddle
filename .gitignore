@@ -7,10 +7,9 @@ xeps
 # Bun
 node_modules
 
-# Claude worktrees
+# AI
+.claude
 .worktrees/
-
-# Codex
 .codex
 
 # Cuenv

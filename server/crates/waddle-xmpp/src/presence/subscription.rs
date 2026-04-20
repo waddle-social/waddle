@@ -41,208 +41,24 @@
 //! - to → none
 //! - both → from
 
-use jid::{BareJid, Jid};
-use serde::{Deserialize, Serialize};
+use jid::BareJid;
 use tracing::debug;
-use xmpp_parsers::presence::{Presence, Type as PresenceType};
+use xmpp_parsers::presence::Presence;
 
 use crate::roster::{AskType, RosterItem, Subscription};
 use crate::XmppError;
-
-/// Presence subscription stanza type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubscriptionType {
-    /// Request to subscribe to another user's presence.
-    Subscribe,
-    /// Approval of a subscription request.
-    Subscribed,
-    /// Request to unsubscribe from another user's presence.
-    Unsubscribe,
-    /// Notification that subscription has been revoked.
-    Unsubscribed,
-}
-
-impl SubscriptionType {
-    /// Convert from xmpp_parsers presence type.
-    pub fn from_presence_type(ptype: &PresenceType) -> Option<Self> {
-        match ptype {
-            PresenceType::Subscribe => Some(SubscriptionType::Subscribe),
-            PresenceType::Subscribed => Some(SubscriptionType::Subscribed),
-            PresenceType::Unsubscribe => Some(SubscriptionType::Unsubscribe),
-            PresenceType::Unsubscribed => Some(SubscriptionType::Unsubscribed),
-            _ => None,
-        }
-    }
-
-    /// Convert to xmpp_parsers presence type.
-    pub fn to_presence_type(&self) -> PresenceType {
-        match self {
-            SubscriptionType::Subscribe => PresenceType::Subscribe,
-            SubscriptionType::Subscribed => PresenceType::Subscribed,
-            SubscriptionType::Unsubscribe => PresenceType::Unsubscribe,
-            SubscriptionType::Unsubscribed => PresenceType::Unsubscribed,
-        }
-    }
-
-    /// Get the string representation for the type attribute.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SubscriptionType::Subscribe => "subscribe",
-            SubscriptionType::Subscribed => "subscribed",
-            SubscriptionType::Unsubscribe => "unsubscribe",
-            SubscriptionType::Unsubscribed => "unsubscribed",
-        }
-    }
-}
-
-/// A parsed presence subscription request.
-#[derive(Debug, Clone)]
-pub struct PresenceSubscriptionRequest {
-    /// The type of subscription request.
-    pub subscription_type: SubscriptionType,
-    /// The sender's JID (from the connection, not the stanza).
-    pub from: BareJid,
-    /// The target JID of the subscription request.
-    pub to: BareJid,
-    /// Optional status message (for subscribe requests).
-    pub status: Option<String>,
-    /// Stanza ID for tracking.
-    pub id: Option<String>,
-    /// Arbitrary extension payloads that MUST be preserved when routing.
-    pub payloads: Vec<minidom::Element>,
-}
-
-impl PresenceSubscriptionRequest {
-    /// Create a new subscription request.
-    pub fn new(subscription_type: SubscriptionType, from: BareJid, to: BareJid) -> Self {
-        Self {
-            subscription_type,
-            from,
-            to,
-            status: None,
-            id: None,
-            payloads: Vec::new(),
-        }
-    }
-
-    /// Add a status message.
-    pub fn with_status(mut self, status: impl Into<String>) -> Self {
-        self.status = Some(status.into());
-        self
-    }
-
-    /// Add a stanza ID.
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
-        self
-    }
-}
-
-/// Result of parsing a presence stanza for subscription handling.
-#[derive(Debug)]
-pub enum PresenceAction {
-    /// This is a subscription-related presence stanza.
-    Subscription(PresenceSubscriptionRequest),
-    /// This is a regular presence update (available, unavailable, etc.).
-    PresenceUpdate(Presence),
-    /// This is a presence probe request.
-    Probe {
-        from: BareJid,
-        to: BareJid,
-        to_was_full: bool,
-    },
-}
+pub use waddle_xmpp_core::presence::subscription::{
+    build_subscription_presence, build_unavailable_presence, PendingSubscription, PresenceAction,
+    PresenceSubscriptionRequest, SubscriptionType,
+};
 
 /// Parse a presence stanza and determine if it's subscription-related.
-///
-/// Returns `PresenceAction::Subscription` for subscribe/subscribed/unsubscribe/unsubscribed,
-/// `PresenceAction::Probe` for probe requests, or `PresenceAction::PresenceUpdate` for
-/// regular presence updates.
 pub fn parse_subscription_presence(
     pres: &Presence,
     sender_jid: &BareJid,
 ) -> Result<PresenceAction, XmppError> {
-    // Check for probe first
-    if matches!(pres.type_, PresenceType::Probe) {
-        let to = pres.to.as_ref().ok_or_else(|| {
-            XmppError::bad_request(Some("Probe presence must have 'to' attribute".to_string()))
-        })?;
-        let (to_bare, to_was_full) = match to.clone().try_into_full() {
-            Ok(full) => (full.to_bare(), true),
-            Err(bare) => (bare, false),
-        };
-        return Ok(PresenceAction::Probe {
-            from: sender_jid.clone(),
-            to: to_bare,
-            to_was_full,
-        });
-    }
-
-    // Check for subscription types
-    if let Some(sub_type) = SubscriptionType::from_presence_type(&pres.type_) {
-        let to = pres.to.as_ref().ok_or_else(|| {
-            XmppError::bad_request(Some(
-                "Subscription presence must have 'to' attribute".to_string(),
-            ))
-        })?;
-
-        let to_bare = match to.clone().try_into_full() {
-            Ok(full) => full.to_bare(),
-            Err(bare) => bare,
-        };
-
-        let status = pres.statuses.values().next().cloned();
-
-        let request = PresenceSubscriptionRequest {
-            subscription_type: sub_type,
-            from: sender_jid.clone(),
-            to: to_bare,
-            status,
-            id: pres.id.clone(),
-            payloads: pres.payloads.clone(),
-        };
-
-        debug!(
-            subscription_type = ?sub_type,
-            from = %sender_jid,
-            to = %request.to,
-            "Parsed subscription presence"
-        );
-
-        return Ok(PresenceAction::Subscription(request));
-    }
-
-    // Not subscription-related, treat as regular presence
-    Ok(PresenceAction::PresenceUpdate(pres.clone()))
-}
-
-/// Build a subscription presence stanza.
-pub fn build_subscription_presence(
-    subscription_type: SubscriptionType,
-    from: &BareJid,
-    to: &BareJid,
-    status: Option<&str>,
-    payloads: &[minidom::Element],
-) -> Presence {
-    let mut pres = Presence::new(subscription_type.to_presence_type());
-    pres.from = Some(Jid::from(from.clone()));
-    pres.to = Some(Jid::from(to.clone()));
-
-    if let Some(status_text) = status {
-        pres.statuses.insert(String::new(), status_text.to_string());
-    }
-
-    pres.payloads.extend(payloads.iter().cloned());
-
-    pres
-}
-
-/// Build an unavailable presence stanza for broadcasting to subscribers.
-pub fn build_unavailable_presence(from: &BareJid, to: &BareJid) -> Presence {
-    let mut pres = Presence::new(PresenceType::Unavailable);
-    pres.from = Some(Jid::from(from.clone()));
-    pres.to = Some(Jid::from(to.clone()));
-    pres
+    waddle_xmpp_core::presence::subscription::parse_subscription_presence(pres, sender_jid)
+        .map_err(Into::into)
 }
 
 /// Build an available presence stanza for broadcasting to subscribers.
@@ -253,27 +69,10 @@ pub fn build_available_presence(
     status: Option<&str>,
     priority: i8,
 ) -> Presence {
-    let mut pres = Presence::new(PresenceType::None);
-    pres.from = Some(Jid::from(from.clone()));
-    pres.to = Some(Jid::from(to.clone()));
-    pres.priority = priority;
-
-    if let Some(show_str) = show {
-        pres.show = match show_str {
-            "away" => Some(xmpp_parsers::presence::Show::Away),
-            "chat" => Some(xmpp_parsers::presence::Show::Chat),
-            "dnd" => Some(xmpp_parsers::presence::Show::Dnd),
-            "xa" => Some(xmpp_parsers::presence::Show::Xa),
-            _ => None,
-        };
-    }
-
-    if let Some(status_text) = status {
-        pres.statuses.insert(String::new(), status_text.to_string());
-    }
-
+    let mut pres = waddle_xmpp_core::presence::subscription::build_available_presence(
+        from, to, show, status, priority,
+    );
     crate::xep::ensure_caps_payload(&mut pres.payloads);
-
     pres
 }
 
@@ -428,44 +227,11 @@ impl SubscriptionStateMachine {
     }
 }
 
-/// Storage for pending inbound subscription requests.
-///
-/// When a user receives a subscription request, it's stored here until
-/// the user approves or denies it. This enables offline handling of
-/// subscription requests.
-#[derive(Debug, Clone)]
-pub struct PendingSubscription {
-    /// JID of the user requesting subscription.
-    pub from: BareJid,
-    /// Optional status/reason for the request.
-    pub status: Option<String>,
-    /// Timestamp when the request was received.
-    pub received_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl PendingSubscription {
-    /// Create a new pending subscription.
-    pub fn new(from: BareJid) -> Self {
-        Self {
-            from,
-            status: None,
-            received_at: chrono::Utc::now(),
-        }
-    }
-
-    /// Create from a subscription request.
-    pub fn from_request(request: &PresenceSubscriptionRequest) -> Self {
-        Self {
-            from: request.from.clone(),
-            status: request.status.clone(),
-            received_at: chrono::Utc::now(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jid::Jid;
+    use xmpp_parsers::presence::Type as PresenceType;
 
     fn make_item(jid: &str, subscription: Subscription, ask: Option<AskType>) -> RosterItem {
         let mut item = RosterItem::new(jid.parse().unwrap());

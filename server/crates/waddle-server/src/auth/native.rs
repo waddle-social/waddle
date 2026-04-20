@@ -349,8 +349,8 @@ mod tests {
     use super::*;
     use crate::db::MigrationRunner;
 
-    fn test_password(label: &str) -> String {
-        format!("{}-{}", label, uuid::Uuid::new_v4())
+    fn test_password() -> String {
+        format!("{:x}{:x}", rand::random::<u64>(), rand::random::<u64>())
     }
 
     async fn create_test_db() -> Arc<Database> {
@@ -370,11 +370,12 @@ mod tests {
     async fn test_register_user() {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
+        let password = test_password();
 
         let request = RegisterRequest {
             username: "alice".to_string(),
             domain: "example.com".to_string(),
-            password: test_password("reg"),
+            password,
             email: Some("alice@email.com".to_string()),
         };
 
@@ -393,11 +394,12 @@ mod tests {
     async fn test_duplicate_user() {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
+        let password = test_password();
 
         let request = RegisterRequest {
             username: "bob".to_string(),
             domain: "example.com".to_string(),
-            password: test_password("reg"),
+            password,
             email: None,
         };
 
@@ -415,11 +417,12 @@ mod tests {
     async fn test_get_scram_credentials() {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
+        let password = test_password();
 
         let request = RegisterRequest {
             username: "charlie".to_string(),
             domain: "example.com".to_string(),
-            password: test_password("scram"),
+            password,
             email: None,
         };
 
@@ -444,12 +447,14 @@ mod tests {
     async fn test_verify_password() {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
+        let correct_password = test_password();
+        let wrong_password = test_password();
+        let missing_password = test_password();
 
-        let correct_pw = test_password("correct");
         let request = RegisterRequest {
             username: "dave".to_string(),
             domain: "example.com".to_string(),
-            password: correct_pw.clone(),
+            password: correct_password.clone(),
             email: None,
         };
 
@@ -457,21 +462,21 @@ mod tests {
 
         // Correct password should verify
         let verified = store
-            .verify_password("dave", "example.com", &correct_pw)
+            .verify_password("dave", "example.com", &correct_password)
             .await
             .unwrap();
         assert!(verified);
 
         // Wrong password should not verify
         let verified = store
-            .verify_password("dave", "example.com", &test_password("wrong"))
+            .verify_password("dave", "example.com", &wrong_password)
             .await
             .unwrap();
         assert!(!verified);
 
         // Non-existent user should not verify
         let verified = store
-            .verify_password("nonexistent", "example.com", &test_password("any"))
+            .verify_password("nonexistent", "example.com", &missing_password)
             .await
             .unwrap();
         assert!(!verified);
@@ -481,13 +486,13 @@ mod tests {
     async fn test_update_password() {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
+        let old_password = test_password();
+        let new_password = test_password();
 
-        let old_pw = test_password("old");
-        let new_pw = test_password("new");
         let request = RegisterRequest {
             username: "eve".to_string(),
             domain: "example.com".to_string(),
-            password: old_pw.clone(),
+            password: old_password.clone(),
             email: None,
         };
 
@@ -495,20 +500,20 @@ mod tests {
 
         // Update password
         store
-            .update_password("eve", "example.com", &new_pw)
+            .update_password("eve", "example.com", &new_password)
             .await
             .unwrap();
 
         // Old password should not work
         let verified = store
-            .verify_password("eve", "example.com", &old_pw)
+            .verify_password("eve", "example.com", &old_password)
             .await
             .unwrap();
         assert!(!verified);
 
         // New password should work
         let verified = store
-            .verify_password("eve", "example.com", &new_pw)
+            .verify_password("eve", "example.com", &new_password)
             .await
             .unwrap();
         assert!(verified);
@@ -518,11 +523,12 @@ mod tests {
     async fn test_delete_user() {
         let db = create_test_db().await;
         let store = NativeUserStore::new(db);
+        let password = test_password();
 
         let request = RegisterRequest {
             username: "frank".to_string(),
             domain: "example.com".to_string(),
-            password: test_password("delete"),
+            password,
             email: None,
         };
 

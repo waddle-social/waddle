@@ -500,6 +500,49 @@ impl waddle_xmpp::AppState for XmppAppState {
         }
     }
 
+    /// Look up the externally-hosted avatar URL for a JID (XEP-0084 `url=`).
+    ///
+    /// Reads `users.avatar_url` keyed on `xmpp_localpart`. The URL is the one
+    /// captured during OIDC login (e.g. a GitHub avatar). Missing or empty
+    /// values return `Ok(None)`.
+    async fn get_user_avatar_url(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
+        let Some(localpart) = jid.node().map(|n| n.to_string()) else {
+            return Ok(None);
+        };
+
+        let conn = self.db.guard().await.map_err(|e| {
+            warn!(jid = %jid, error = %e, "Failed to acquire DB connection for avatar lookup");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        let mut rows = conn
+            .query(
+                "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1",
+                libsql::params![localpart.clone()],
+            )
+            .await
+            .map_err(|e| {
+                warn!(jid = %jid, error = %e, "avatar_url query failed");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
+
+        let row = rows.next().await.map_err(|e| {
+            warn!(jid = %jid, error = %e, "avatar_url row read failed");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let url: Option<String> = row.get::<Option<String>>(0).map_err(|e| {
+            warn!(jid = %jid, error = %e, "avatar_url column decode failed");
+            XmppError::internal(format!("Database error: {}", e))
+        })?;
+
+        Ok(url.filter(|s| !s.is_empty()))
+    }
+
     /// Create an upload slot for XEP-0363 HTTP File Upload.
     async fn create_upload_slot(
         &self,

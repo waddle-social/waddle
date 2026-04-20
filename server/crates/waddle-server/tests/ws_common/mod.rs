@@ -40,12 +40,11 @@ impl TestServer {
     /// Start a waddle-server with test configuration on dynamic ports.
     pub fn start() -> Self {
         let bin = env!("CARGO_BIN_EXE_waddle-server");
+        let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
 
         // Temp file where the server writes its bound HTTP port
         let port_file =
             std::env::temp_dir().join(format!("waddle-test-port-{}", uuid::Uuid::new_v4()));
-
-        let fixed_account_password = format!("test-{}", uuid::Uuid::new_v4());
 
         let child = Command::new(bin)
             .env("WADDLE_CERTS_EPHEMERAL", "true")

@@ -1,6 +1,7 @@
 //! Error types for the XMPP server.
 
 use thiserror::Error;
+use waddle_xmpp_core::CoreError;
 
 use crate::parser::ns;
 
@@ -203,6 +204,18 @@ impl XmppError {
             condition: StanzaErrorCondition::NotAllowed,
             error_type: StanzaErrorType::Cancel,
             text,
+        }
+    }
+}
+
+impl From<CoreError> for XmppError {
+    fn from(value: CoreError) -> Self {
+        match value {
+            CoreError::BadRequest(text) => Self::bad_request(text),
+            CoreError::NotAcceptable(text) => Self::not_acceptable(text),
+            CoreError::NotImplemented => Self::feature_not_implemented(Some(
+                "waddle-xmpp-core scaffold is not implemented yet".to_string(),
+            )),
         }
     }
 }

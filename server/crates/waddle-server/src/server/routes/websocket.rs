@@ -3747,10 +3747,15 @@ mod tests {
         let expected_bare =
             localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
-        assert_eq!(jid.text(), format!("{expected_bare}/web"));
-        assert_eq!(
-            conn.session_jid.as_ref().map(ToString::to_string),
-            Some(format!("{expected_bare}/web"))
+        let expected_full = format!("{expected_bare}/web");
+        assert!(
+            jid.text() == expected_full,
+            "bound jid should match expected resource"
+        );
+        let session_jid = conn.session_jid.as_ref().map(ToString::to_string);
+        assert!(
+            session_jid.as_deref() == Some(expected_full.as_str()),
+            "connection state should store the bound jid"
         );
     }
 

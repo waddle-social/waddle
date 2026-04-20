@@ -8,6 +8,9 @@ settings:
     CURRENT_PROJECT_VERSION: 1
     GENERATE_INFOPLIST_FILE: YES
     ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    FRAMEWORK_SEARCH_PATHS:
+      - $(inherited)
+      - $(SRCROOT)/Generated
 targets:
   Waddle-iOS:
     type: application
@@ -17,6 +20,9 @@ targets:
       - path: Waddle
         excludes:
           - "**/*.md"
+    dependencies:
+      - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_NAME: Waddle
@@ -25,6 +31,7 @@ targets:
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/ios-arm64/Headers/waddle_xmpp_clientFFI.modulemap
   Waddle-macOS:
     type: application
     platform: macOS
@@ -34,12 +41,16 @@ targets:
         excludes:
           - "**/*.md"
           - LaunchScreen.storyboard
+    dependencies:
+      - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_NAME: Waddle
         PRODUCT_BUNDLE_IDENTIFIER: social.waddle.macos
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
+        OTHER_SWIFT_FLAGS: $(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/macos-arm64_x86_64/Headers/waddle_xmpp_clientFFI.modulemap
 schemes:
   Waddle:
     build:

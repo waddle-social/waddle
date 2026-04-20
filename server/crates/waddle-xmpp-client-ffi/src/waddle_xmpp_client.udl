@@ -1,0 +1,162 @@
+namespace waddle_xmpp_client {};
+
+// ── Connection config ────────────────────────────────────────────────────────
+dictionary WaddleConfig {
+    string server_url;
+    string jid;
+    string access_token;
+    string resource;
+};
+
+// ── Inbound message event (mirrors InboundMessage) ──────────────────────────
+dictionary WaddleMessage {
+    string? id;
+    string? from;
+    string? to;
+    string? body;
+    string message_type;
+    string? timestamp;
+    string? stanza_id;
+    string? origin_id;
+    string? replaces_id;
+    string? retracts_id;
+    boolean is_muc;
+    string? thread;
+    string? parent_thread_id;
+    string? reply_to_id;
+    string? reply_to_sender;
+    u32? reply_fallback_start;
+    u32? reply_fallback_end;
+};
+
+// ── Archived MAM message ─────────────────────────────────────────────────────
+dictionary WaddleArchivedMessage {
+    string mam_id;
+    string? query_id;
+    string? stanza_id;
+    string? timestamp;
+    string? from;
+    string? to;
+    string message_type;
+    string? body;
+    string? thread;
+    string? parent_thread_id;
+    string? reply_to_id;
+    string? reply_to_sender;
+    u32? reply_fallback_start;
+    u32? reply_fallback_end;
+};
+
+// ── Outbound send options (XEP-0461 / 0428 / 0201) ──────────────────────────
+dictionary WaddleReplyTarget {
+    string author_jid;
+    string message_id;
+};
+
+dictionary WaddleFallbackRange {
+    u32 start;
+    u32 end;
+};
+
+dictionary WaddleThreadTarget {
+    string id;
+    string? parent;
+};
+
+dictionary WaddleSendOptions {
+    WaddleReplyTarget? reply;
+    WaddleFallbackRange? fallback;
+    WaddleThreadTarget? thread;
+};
+
+// ── MAM page result ──────────────────────────────────────────────────────────
+dictionary WaddleMamPage {
+    sequence<WaddleArchivedMessage> messages;
+    string? first_id;
+    string? last_id;
+    boolean is_complete;
+};
+
+// ── Presence ─────────────────────────────────────────────────────────────────
+dictionary WaddlePresence {
+    string? from;
+    string? to;
+    string presence_type;
+    string? show;
+    string? status;
+};
+
+// ── Discovered items ─────────────────────────────────────────────────────────
+
+dictionary WaddleDiscoveredWaddle {
+    string id;
+    string name;
+    boolean is_public;
+};
+
+dictionary WaddleDiscoveredChannel {
+    string id;
+    string name;
+    string channel_type;
+    i32 position;
+};
+
+// ── XEP-0084 Avatar ──────────────────────────────────────────────────────────
+
+dictionary WaddleAvatar {
+    string jid;
+    string id;
+    string mime_type;
+    bytes data;
+};
+
+// ── Event callback (Swift implements this protocol) ──────────────────────────
+callback interface WaddleEventListener {
+    void on_message(WaddleMessage message);
+    void on_presence(WaddlePresence presence);
+    void on_mam_result(WaddleArchivedMessage message);
+    void on_connected();
+    void on_disconnected();
+    void on_error(string description);
+};
+
+// ── Main client object ───────────────────────────────────────────────────────
+interface WaddleClient {
+    constructor(WaddleConfig config, WaddleEventListener listener);
+
+    [Async]
+    void connect();
+
+    [Async]
+    void disconnect();
+
+    [Async]
+    WaddleMamPage fetch_room_history(string room_jid, u32 max_messages, string? before_id);
+
+    [Async]
+    WaddleMamPage fetch_dm_history(string peer_jid, u32 max_messages, string? before_id);
+
+    [Async]
+    void send_groupchat_message(string room_jid, string body, WaddleSendOptions? options);
+
+    [Async]
+    void send_chat_message(string peer_jid, string body, WaddleSendOptions? options);
+
+    [Async]
+    void join_room(string room_jid, string nick);
+
+    [Async]
+    void leave_room(string room_jid, string nick);
+
+    [Async]
+    sequence<WaddleDiscoveredWaddle> discover_waddles();
+
+    [Async]
+    sequence<WaddleDiscoveredChannel> discover_channels(string waddle_id);
+
+    [Async]
+    void send_presence(string? status, string? show);
+
+    [Async]
+    WaddleAvatar? request_avatar(string jid);
+};

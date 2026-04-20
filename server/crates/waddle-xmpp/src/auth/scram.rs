@@ -510,21 +510,25 @@ pub fn encode_sasl_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_secret() -> String {
+        format!("{:x}{:x}", rand::random::<u64>(), rand::random::<u64>())
+    }
+
     /// Test basic SCRAM key generation.
     #[test]
     fn test_generate_scram_keys() {
-        let password = format!("test-{}", uuid::Uuid::new_v4());
-        let salt = generate_salt();
+        let password = test_secret();
+        let salt = b"salt1234salt1234"; // 16 bytes
         let iterations = 4096;
 
-        let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
+        let (stored_key, server_key) = generate_scram_keys(&password, salt, iterations);
 
         // Keys should be 32 bytes (SHA-256 output)
         assert_eq!(stored_key.len(), 32);
         assert_eq!(server_key.len(), 32);
 
         // Keys should be deterministic
-        let (stored_key2, server_key2) = generate_scram_keys(&password, &salt, iterations);
+        let (stored_key2, server_key2) = generate_scram_keys(&password, salt, iterations);
         assert_eq!(stored_key, stored_key2);
         assert_eq!(server_key, server_key2);
     }
@@ -533,7 +537,7 @@ mod tests {
     #[test]
     fn test_scram_full_exchange() {
         // Setup: generate keys for a known password
-        let password = format!("test-{}", uuid::Uuid::new_v4());
+        let password = test_secret();
         let salt = generate_salt();
         let iterations = 4096;
         let (stored_key, server_key) = generate_scram_keys(&password, &salt, iterations);
@@ -673,7 +677,7 @@ mod tests {
     #[test]
     fn test_rfc_structure() {
         // This tests that our implementation follows the RFC structure
-        let password = format!("test-{}", uuid::Uuid::new_v4());
+        let password = test_secret();
         let salt = BASE64_STANDARD.decode("QSXCR+Q6sek8bf92").unwrap();
         let iterations = 4096;
 
@@ -718,8 +722,8 @@ mod tests {
     /// Test authentication failure with wrong password.
     #[test]
     fn test_wrong_password() {
-        let correct_password = format!("correct-{}", uuid::Uuid::new_v4());
-        let wrong_password = format!("wrong-{}", uuid::Uuid::new_v4());
+        let correct_password = test_secret();
+        let wrong_password = test_secret();
         let salt = generate_salt();
         let iterations = 4096;
 
