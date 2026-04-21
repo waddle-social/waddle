@@ -16,6 +16,31 @@ export interface XmppStatusSnapshot {
  */
 export type SessionLifecycleEvent = { type: "resumed" } | { type: "fresh" };
 
+/**
+ * Transport- or protocol-level failure classification, surfaced via
+ * `BrowserXmppClient.onError` for telemetry / diagnostics. Different
+ * from `XmppStatusSnapshot` which is the user-facing UI state — an
+ * error can fire without flipping UI state (e.g. a recoverable stream
+ * error while already reconnecting), and the UI can go to
+ * `reconnecting` without any discrete error (pure network drop).
+ */
+export type XmppErrorKind =
+  | "stream"
+  | "auth"
+  | "connect-timeout";
+
+export interface XmppErrorEvent {
+  kind: XmppErrorKind;
+  /** Whether the client expects to recover on its own without UI intervention. */
+  recoverable: boolean;
+  /** Short, human-readable reason. Safe to log in cleartext. */
+  detail: string;
+  /** Original error object if one was caught. */
+  cause?: unknown;
+  /** XMPP stream-error condition when `kind === "stream"`. */
+  condition?: string;
+}
+
 export interface ReplyPreview {
   /** Stanza id of the parent message being replied to. */
   id: string;

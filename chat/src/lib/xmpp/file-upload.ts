@@ -1,5 +1,6 @@
 /** XEP-0363: HTTP File Upload for sharing images and files in chat. */
 import type { Agent } from "stanza";
+import { reportError } from "@/lib/telemetry";
 
 export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 
@@ -217,10 +218,23 @@ async function uploadToSlot(
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve();
       } else {
-        reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        const err = new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`);
+        reportError("upload", err, {
+          recoverable: false,
+          detail: "XEP-0363 PUT failed",
+          status: xhr.status,
+        });
+        reject(err);
       }
     };
-    xhr.onerror = () => reject(new Error("Upload failed: network error"));
+    xhr.onerror = () => {
+      const err = new Error("Upload failed: network error");
+      reportError("upload", err, {
+        recoverable: false,
+        detail: "XEP-0363 PUT network error",
+      });
+      reject(err);
+    };
     xhr.send(file);
   });
 }

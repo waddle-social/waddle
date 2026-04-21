@@ -24,6 +24,14 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f7" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d12" />
+    <!-- Published here so the (bundled, static) Faro bootstrap script
+         below can read the Worker-runtime `SERVER_BASE_URL` without
+         hoisting it through Vite `define` — that would require the
+         origin to be known at build time, but it's environment-specific
+         (preview vs. prod) so it has to flow through the request-time
+         Worker `env`. Faro uses this to scope W3C traceparent injection
+         to just that origin. -->
+    <meta name="waddle:server-base-url" content={serverBaseUrl} />
     <script is:inline>
       (function () {
         try {
@@ -39,12 +47,36 @@ const serverBaseUrl = env.SERVER_BASE_URL;
       // Faro RUM bootstrap. `initTelemetry` is a no-op unless
       // `PUBLIC_FARO_URL` is set, so this ships on every build but
       // stays silent locally and in tests. Vite inlines
-      // `import.meta.env.PUBLIC_*` at build time.
+      // `import.meta.env.PUBLIC_*` at build time. The default server
+      // origin arrives via the `waddle:server-base-url` meta tag; the
+      // active server URL — which can differ after a user logs into a
+      // federated waddle server — is read from localStorage here so
+      // Faro's trace-header injection covers both at init time. (Faro
+      // does not support mutating `propagateTraceHeaderCorsUrls` after
+      // `TracingInstrumentation` is registered, so a mid-session
+      // switch to an entirely new server origin needs a page reload
+      // to be traced; the persisted key below keeps returning users
+      // covered, which is the common case.)
       import { initTelemetry } from "@/lib/telemetry";
+      const serverBaseUrl = document
+        .querySelector('meta[name="waddle:server-base-url"]')
+        ?.getAttribute("content") ?? "";
+      let activeServerUrl = "";
+      try {
+        activeServerUrl = window.localStorage.getItem(
+          "waddle.chat.active-server",
+        ) ?? "";
+      } catch {
+        // localStorage can throw in privacy mode; fall back to the default.
+      }
+      const propagateTraceHeadersTo = Array.from(
+        new Set([serverBaseUrl, activeServerUrl].filter((url) => url.length > 0)),
+      );
       initTelemetry({
         url: import.meta.env.PUBLIC_FARO_URL,
         appName: import.meta.env.PUBLIC_FARO_APP_NAME,
         release: import.meta.env.PUBLIC_COMMIT_SHA,
+        propagateTraceHeadersTo,
       });
     </script>
     <ClientRouter />
