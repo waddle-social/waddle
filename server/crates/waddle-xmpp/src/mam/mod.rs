@@ -9,103 +9,14 @@
 //!
 //! ## IQ Handling
 //!
-//! MAM queries are received as IQ stanzas with the `urn:xmpp:mam:2` namespace.
-//! The [`query`] module handles parsing and responding to these queries.
+//! Shared query/result models and reusable XML parsing/building helpers live in
+//! `waddle-xmpp-core` so server and client crates can share typed history
+//! primitives without runtime coupling.
 
-pub mod query;
 pub mod storage;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
-pub use query::{
-    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query, MAM_NS,
-    RSM_NS, STANZA_ID_NS,
-};
 pub use storage::{LibSqlMamStorage, MamStorage, MamStorageError};
-
-/// Archived message metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArchivedMessage {
-    /// Unique message ID
-    pub id: String,
-    /// Timestamp when the message was received
-    pub timestamp: DateTime<Utc>,
-    /// Sender JID
-    pub from: String,
-    /// Recipient JID (room JID for MUC, or contact bare JID for 1:1)
-    pub to: String,
-    /// Message body
-    pub body: String,
-    /// Original stanza ID (if present)
-    pub stanza_id: Option<String>,
-    /// RFC 6121 thread identifier for this message.
-    pub thread_id: Option<String>,
-    /// XEP-0461 reply target message ID.
-    pub reply_to_id: Option<String>,
-    /// XEP-0461 optional original sender JID.
-    pub reply_to_jid: Option<String>,
-    /// XEP-0359 origin-id supplied by client.
-    pub origin_id: Option<String>,
-    /// Message type ("chat", "groupchat", "normal", etc.)
-    /// Defaults to "chat" if not set.
-    #[serde(default = "default_message_type")]
-    pub message_type: String,
-    /// Preserved full stanza XML for faithful replay of archived timeline events.
-    pub stanza_xml: Option<String>,
-}
-
-fn default_message_type() -> String {
-    "chat".to_string()
-}
-
-impl Default for ArchivedMessage {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            timestamp: Utc::now(),
-            from: String::new(),
-            to: String::new(),
-            body: String::new(),
-            stanza_id: None,
-            thread_id: None,
-            reply_to_id: None,
-            reply_to_jid: None,
-            origin_id: None,
-            message_type: default_message_type(),
-            stanza_xml: None,
-        }
-    }
-}
-
-/// MAM query parameters.
-#[derive(Debug, Clone, Default)]
-pub struct MamQuery {
-    /// Start time filter
-    pub start: Option<DateTime<Utc>>,
-    /// End time filter
-    pub end: Option<DateTime<Utc>>,
-    /// Filter by sender
-    pub with: Option<String>,
-    /// Maximum results to return
-    pub max: Option<u32>,
-    /// Pagination: before this ID
-    pub before_id: Option<String>,
-    /// Pagination: after this ID
-    pub after_id: Option<String>,
-}
-
-/// MAM query result.
-#[derive(Debug, Clone)]
-pub struct MamResult {
-    /// Retrieved messages
-    pub messages: Vec<ArchivedMessage>,
-    /// Whether there are more messages available
-    pub complete: bool,
-    /// First message ID in the result set
-    pub first_id: Option<String>,
-    /// Last message ID in the result set
-    pub last_id: Option<String>,
-    /// Total count (if available)
-    pub count: Option<u32>,
-}
+pub use waddle_xmpp_core::mam::{
+    add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
+    ArchivedMessage, MamQuery, MamResult, MAM_NS, RSM_NS, STANZA_ID_NS,
+};

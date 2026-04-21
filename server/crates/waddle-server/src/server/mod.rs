@@ -770,10 +770,14 @@ async fn ensure_fixed_test_account(
     }
 
     let password = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD")
-        .map_err(|_| anyhow::anyhow!("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD must be set when WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true"))?;
-    if password.is_empty() {
-        anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD cannot be empty");
-    }
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "WADDLE_TEST_FIXED_ACCOUNT_PASSWORD must be set when WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true"
+            )
+        })?;
 
     let domain = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_DOMAIN")
         .ok()
@@ -1575,9 +1579,10 @@ mod tests {
     #[tokio::test]
     async fn test_seed_fixed_test_account_creates_user() {
         let state = create_test_state().await;
+        let password = format!("fixed-account-{}", rand::random::<u64>());
         let config = FixedTestAccountConfig {
             username: "admin".to_string(),
-            password: uuid::Uuid::new_v4().to_string(),
+            password: password.clone(),
             domain: "localhost".to_string(),
             email: Some("admin@localhost".to_string()),
         };
@@ -1601,14 +1606,14 @@ mod tests {
     async fn test_seed_fixed_test_account_replaces_existing_credentials() {
         let state = create_test_state().await;
         let native_user_store = NativeUserStore::new(Arc::new(state.db_pool.global().clone()));
+        let old_password = format!("fixed-account-old-{}", rand::random::<u64>());
+        let new_password = format!("fixed-account-new-{}", rand::random::<u64>());
 
-        let old_pass = uuid::Uuid::new_v4().to_string();
-        let new_pass = uuid::Uuid::new_v4().to_string();
         native_user_store
             .register(RegisterRequest {
                 username: "admin".to_string(),
                 domain: "localhost".to_string(),
-                password: old_pass.clone(),
+                password: old_password.clone(),
                 email: None,
             })
             .await
@@ -1616,7 +1621,7 @@ mod tests {
 
         let config = FixedTestAccountConfig {
             username: "admin".to_string(),
-            password: new_pass.clone(),
+            password: new_password.clone(),
             domain: "localhost".to_string(),
             email: None,
         };
@@ -1629,7 +1634,7 @@ mod tests {
             .await
             .unwrap());
         assert!(!native_user_store
-            .verify_password(&config.username, &config.domain, &old_pass)
+            .verify_password(&config.username, &config.domain, &old_password)
             .await
             .unwrap());
 

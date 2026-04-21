@@ -87,7 +87,8 @@ async fn establish_authenticated_session(
     );
     client.clear();
 
-    let auth_data = encode_sasl_plain(&format!("{username}@localhost"), &test_secret("auth"));
+    let auth_secret = test_secret("compliance-auth");
+    let auth_data = encode_sasl_plain(&format!("{username}@localhost"), &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -239,7 +240,8 @@ async fn test_starttls_auth_bind_regression_guard() {
     );
     client.clear();
 
-    let auth_data = encode_sasl_plain("startup@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("startup-auth");
+    let auth_data = encode_sasl_plain("startup@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

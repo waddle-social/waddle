@@ -258,6 +258,11 @@ impl AppState for MockAppState {
         Ok(())
     }
 
+    async fn get_user_avatar_url(&self, _jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
+        // Mock has no avatar URLs on file.
+        Ok(None)
+    }
+
     async fn create_upload_slot(
         &self,
         _requester_jid: &jid::BareJid,
@@ -901,7 +906,7 @@ pub fn encode_sasl_plain(jid: &str, password: &str) -> String {
 
 /// Generate a unique test credential (not a real secret).
 pub fn test_secret(label: &str) -> String {
-    format!("{}-{}", label, uuid::Uuid::new_v4())
+    format!("{label}-{}", uuid::Uuid::new_v4())
 }
 
 /// Helper to validate stream header attributes.
@@ -1006,10 +1011,8 @@ pub async fn establish_bound_session(
     client.clear();
 
     // SASL PLAIN auth.
-    let auth_data = encode_sasl_plain(
-        &format!("{}@{}", username, server.domain),
-        &test_secret("auth"),
-    );
+    let auth_secret = test_secret("bind-session");
+    let auth_data = encode_sasl_plain(&format!("{}@{}", username, server.domain), &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1163,10 +1166,10 @@ mod tests {
         client.clear();
         assert!(client.buffer.is_empty());
 
-        const SASL_TEST_INPUT: &str = "sasl-test-value";
+        let auth_secret = test_secret("plain-auth");
         assert_eq!(
-            encode_sasl_plain("alice@localhost", SASL_TEST_INPUT),
-            BASE64_STANDARD.encode(format!("\0alice@localhost\0{SASL_TEST_INPUT}").as_bytes())
+            encode_sasl_plain("alice@localhost", &auth_secret),
+            BASE64_STANDARD.encode(format!("\0alice@localhost\0{auth_secret}").as_bytes())
         );
         assert_eq!(
             extract_bound_jid("<jid>alice@localhost/desktop</jid>").as_deref(),

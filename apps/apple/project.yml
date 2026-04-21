@@ -8,6 +8,9 @@ settings:
     CURRENT_PROJECT_VERSION: 1
     GENERATE_INFOPLIST_FILE: YES
     ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    FRAMEWORK_SEARCH_PATHS:
+      - $(inherited)
+      - $(SRCROOT)/Generated
 targets:
   Waddle-iOS:
     type: application
@@ -17,6 +20,9 @@ targets:
       - path: Waddle
         excludes:
           - "**/*.md"
+    dependencies:
+      - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_NAME: Waddle
@@ -34,6 +40,9 @@ targets:
         excludes:
           - "**/*.md"
           - LaunchScreen.storyboard
+    dependencies:
+      - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_NAME: Waddle

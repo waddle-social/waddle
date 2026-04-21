@@ -405,7 +405,8 @@ async fn test_sasl_plain_auth_success() {
     client.clear();
 
     // Send SASL PLAIN auth
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-auth-success");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -482,7 +483,8 @@ async fn test_sasl_auth_failure() {
     client.clear();
 
     // Send SASL auth (will be rejected by MockAppState)
-    let auth_data = encode_sasl_plain("baduser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-auth-failure");
+    let auth_data = encode_sasl_plain("baduser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -588,7 +590,8 @@ async fn test_bind_feature_advertised() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-bind-feature");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -676,7 +679,8 @@ async fn test_resource_binding_returns_full_jid() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-bind-resource");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -793,7 +797,8 @@ async fn test_resource_binding_with_requested_resource() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-bind-requested-resource");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -926,7 +931,8 @@ async fn test_feature_negotiation_order() {
     client.clear();
 
     // After SASL, should have bind
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-feature-order");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1018,7 +1024,8 @@ async fn test_graceful_stream_close() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-graceful-close");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1161,7 +1168,8 @@ async fn test_disco_info_server() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-concurrent-auth");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1303,7 +1311,8 @@ async fn test_disco_items_server() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-pipeline-auth");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1421,7 +1430,8 @@ async fn test_disco_info_muc_service() {
         .unwrap();
     client.clear();
 
-    let auth_data = encode_sasl_plain("testuser@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-stanza-auth");
+    let auth_data = encode_sasl_plain("testuser@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1565,7 +1575,8 @@ async fn test_complete_session_establishment() {
     client.clear();
 
     // Step 5: SASL authentication
-    let auth_data = encode_sasl_plain("user@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("interop-ping-auth");
+    let auth_data = encode_sasl_plain("user@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -1690,7 +1701,8 @@ async fn establish_session(
     client.clear();
 
     // SASL PLAIN auth
-    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), &test_secret("auth"));
+    let auth_secret = test_secret("interop-session-auth");
+    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

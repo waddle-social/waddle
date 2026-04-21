@@ -7,12 +7,13 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::Utc;
-use jid::FullJid;
+use jid::{BareJid, FullJid};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, instrument, warn};
 use url::{Host, Url};
+pub use waddle_xmpp_core::Stanza;
 use xmpp_parsers::iq::IqType;
 use xmpp_parsers::message::MessageType;
 use xmpp_parsers::presence::Type as PresenceType;
@@ -395,6 +396,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
         }
+
+        // XEP-0084: Auto-publish URL-only avatar metadata from the user's
+        // OIDC-sourced `avatar_url` (e.g. GitHub) so XMPP clients can render
+        // avatars without any out-of-band API surface. No-op when the user
+        // already has an avatar published (binary or otherwise) or has no
+        // upstream URL on file.
+        self.auto_publish_oidc_avatar(&full_jid.to_bare()).await;
 
         // Auto-join all channels the user has access to (Slack-like semantics)
         // This runs after bind but before the main stanza loop so the user
@@ -2763,6 +2771,90 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         message.payloads.push(delay);
 
         self.stream.write_stanza(&Stanza::Message(message)).await
+    }
+
+    /// Auto-publish a URL-only XEP-0084 avatar metadata item from the user's
+    /// OIDC avatar URL (e.g. GitHub), so XMPP clients can render avatars for
+    /// users who never manually set a vCard photo.
+    ///
+    /// The URL sits in the `url="…"` attribute of `<info/>`; clients fetch
+    /// the bytes over HTTPS. Skipped when the node already has any item (a
+    /// user-uploaded binary avatar from a vCard PHOTO takes precedence) or
+    /// the user has no upstream URL. All failures are downgraded to a debug
+    /// log — avatars are cosmetic and must never block connection setup.
+    async fn auto_publish_oidc_avatar(&self, bare: &BareJid) {
+        let avatar_url = match self.app_state.get_user_avatar_url(bare).await {
+            Ok(Some(url)) => url,
+            Ok(None) => return,
+            Err(e) => {
+                debug!(jid = %bare, error = %e, "OIDC avatar lookup failed, skipping");
+                return;
+            }
+        };
+
+        match self
+            .pubsub_storage
+            .get_items(
+                bare,
+                crate::xep::xep0084::NODE_AVATAR_METADATA,
+                Some(1),
+                &[],
+            )
+            .await
+        {
+            Ok(existing) if !existing.is_empty() => {
+                debug!(
+                    jid = %bare,
+                    "avatar metadata already published, skipping OIDC auto-publish"
+                );
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                debug!(jid = %bare, error = %e, "avatar metadata probe failed, skipping");
+                return;
+            }
+        }
+
+        // Use a stable id derived from the URL — XEP-0084 normally uses
+        // SHA-1 of the image bytes, but for externally-hosted avatars we
+        // don't have the bytes on the server; hashing the URL keeps the id
+        // stable across republishes for the same upstream avatar.
+        let info = crate::xep::xep0084::AvatarInfo {
+            id: crate::xep::xep0084::compute_avatar_hash(avatar_url.as_bytes()),
+            mime_type: guess_avatar_mime_type(&avatar_url).to_string(),
+            width: None,
+            height: None,
+            bytes: None,
+            url: Some(avatar_url.clone()),
+        };
+
+        let metadata_elem = crate::xep::xep0084::build_avatar_metadata(&info);
+        let item = PubSubItem::new(Some(info.id.clone()), Some(metadata_elem));
+        if let Err(e) = self
+            .pubsub_storage
+            .publish_item(
+                bare,
+                crate::xep::xep0084::NODE_AVATAR_METADATA,
+                &item,
+                Some(bare),
+                true,
+            )
+            .await
+        {
+            debug!(
+                jid = %bare,
+                url = %avatar_url,
+                error = %e,
+                "failed to publish OIDC URL avatar metadata"
+            );
+        } else {
+            debug!(
+                jid = %bare,
+                url = %avatar_url,
+                "published OIDC URL avatar metadata"
+            );
+        }
     }
 
     /// Auto-join all channels the user has access to (Slack-like semantics).
@@ -7949,6 +8041,27 @@ fn isr_token_in_sasl_success_enabled() -> bool {
     )
 }
 
+/// Best-effort MIME type guess for an externally-hosted avatar URL.
+///
+/// XEP-0084 requires a `type` attribute on `<info/>`. For URLs without a
+/// recognizable extension (GitHub's `avatars.githubusercontent.com/u/…?v=4`
+/// is the common case), we default to `image/png` — GitHub actually serves
+/// them as PNG regardless of the query string, and the server rendering
+/// clients all sniff the bytes anyway.
+fn guess_avatar_mime_type(url: &str) -> &'static str {
+    let path = url.split('?').next().unwrap_or(url);
+    let lowered = path.to_ascii_lowercase();
+    if lowered.ends_with(".jpg") || lowered.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lowered.ends_with(".gif") {
+        "image/gif"
+    } else if lowered.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
 fn validate_push_endpoint(endpoint: &str) -> Result<(), XmppError> {
     let url = Url::parse(endpoint)
         .map_err(|_| XmppError::bad_request(Some("Invalid push endpoint URL".into())))?;
@@ -8035,34 +8148,6 @@ fn is_disallowed_push_ipv6(ip: std::net::Ipv6Addr) -> bool {
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
         || ip.is_multicast()
-}
-
-/// Parsed stanza types.
-#[derive(Debug, Clone)]
-pub enum Stanza {
-    Message(xmpp_parsers::message::Message),
-    Presence(xmpp_parsers::presence::Presence),
-    Iq(xmpp_parsers::iq::Iq),
-}
-
-impl Stanza {
-    /// Get the stanza type name for tracing.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Stanza::Message(_) => "message",
-            Stanza::Presence(_) => "presence",
-            Stanza::Iq(_) => "iq",
-        }
-    }
-
-    /// Convert the stanza to a minidom Element.
-    pub fn to_element(&self) -> minidom::Element {
-        match self {
-            Stanza::Message(m) => m.clone().into(),
-            Stanza::Presence(p) => p.clone().into(),
-            Stanza::Iq(i) => i.clone().into(),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -69,6 +69,7 @@ reqwest = { workspace = true }
 
 # Wasm extension runtime
 waddle-extensions = { path = "../waddle-extensions" }
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 
 # Ephemeral TLS certificate generation
 rcgen = "0.13"

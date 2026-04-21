@@ -147,7 +147,8 @@ async fn rfc6120_sasl_plain_auth_succeeds() {
     client.clear();
 
     // Auth
-    let auth_data = encode_sasl_plain("user@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("protocol-auth");
+    let auth_data = encode_sasl_plain("user@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -214,7 +215,8 @@ async fn rfc6120_sasl_auth_failure_returns_not_authorized() {
         .expect("features");
     client.clear();
 
-    let auth_data = encode_sasl_plain("user@localhost", &test_secret("invalid"));
+    let auth_secret = test_secret("protocol-auth-failure");
+    let auth_data = encode_sasl_plain("user@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",
@@ -306,7 +308,8 @@ async fn rfc6120_server_assigned_resource_when_none_requested() {
         .expect("features");
     client.clear();
 
-    let auth_data = encode_sasl_plain("norc@localhost", &test_secret("auth"));
+    let auth_secret = test_secret("protocol-bind");
+    let auth_data = encode_sasl_plain("norc@localhost", &auth_secret);
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

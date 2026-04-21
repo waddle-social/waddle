@@ -66,6 +66,28 @@ struct WaddleChatWorkspaceView: View {
             }
             .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: Binding(
+            get: { !store.activeThreadStack.isEmpty },
+            set: { isShown in if !isShown { store.closeThreadPanel() } }
+        )) {
+            if let root = store.threadPanelRoot {
+                ChatThreadPanelView(
+                    root: root,
+                    replies: store.threadPanelChildren,
+                    composerText: $store.threadComposerText,
+                    isSending: store.isSendingThreadMessage,
+                    canGoBack: store.canPopThreadPanel,
+                    threadChildCount: { id in store.threadChildCount(forRootID: id) },
+                    onOpenNestedThread: { msg in store.pushThreadPanel(forRootID: msg.id) },
+                    onBack: { store.popThreadPanel() },
+                    onSend: { Task { await store.sendThreadComposerMessage() } },
+                    onClose: { store.closeThreadPanel() },
+                    avatarDataBySenderID: { model.avatarData(forSenderID: $0) },
+                    onRequestAvatar: { model.requestAvatarIfNeeded(forSenderID: $0) }
+                )
+                .presentationDetents([.large])
+            }
+        }
         .sheet(isPresented: $showCreateChannelSheet) {
             createChannelSheet
         }
@@ -247,7 +269,7 @@ struct WaddleChatWorkspaceView: View {
 
                 compactSidebar
                     .frame(width: WaddleTheme.sidebarWidth)
-                    .compactChrome(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .waddleGlass(in: .rect)
                     .transition(.move(edge: .leading))
             }
         }
@@ -295,43 +317,56 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var compactChatHeader: some View {
-        HStack(spacing: 8) {
+        let activeCount = model.chatMembers.filter(isInteractivePresence).count
+        let totalCount = model.chatMembers.count
+        let topic = store.selectedRoom?.subtitle
+
+        return HStack(alignment: .center, spacing: 10) {
             Button { showChannelSidebar.toggle() } label: {
                 Image(systemName: "line.3.horizontal")
                     .font(.body.weight(.medium))
                     .frame(width: 36, height: 36)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(WaddleTheme.textSecondary)
-            .compactChrome(in: Circle())
+            .waddleInteractiveGlass(in: .circle)
 
-            HStack(spacing: 5) {
-                Image(systemName: "number")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(WaddleTheme.textMuted)
-                VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Image(systemName: "number")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(WaddleTheme.accent)
                     Text(store.selectedRoom?.title ?? "Select channel")
                         .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(WaddleTheme.textPrimary)
                         .lineLimit(1)
-                    Text("\(model.chatMembers.count) members")
+                }
+                if let topic, !topic.isEmpty {
+                    Text(topic)
                         .font(.caption2)
-                        .foregroundStyle(WaddleTheme.textMuted)
+                        .foregroundStyle(WaddleTheme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .compactChrome(in: Capsule())
 
-            Spacer()
+            Spacer(minLength: 4)
 
             Button { showMembersSheet = true } label: {
-                Image(systemName: "person.2")
-                    .font(.body)
-                    .frame(width: 36, height: 36)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(WaddleTheme.presenceOnline)
+                        .frame(width: 6, height: 6)
+                    Text("\(activeCount)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(WaddleTheme.textPrimary)
+                    Text("/\(totalCount)")
+                        .font(.caption)
+                        .foregroundStyle(WaddleTheme.textMuted)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(WaddleTheme.textSecondary)
-            .compactChrome(in: Circle())
+            .waddleInteractiveGlass(in: .capsule)
+            .accessibilityLabel("\(activeCount) of \(totalCount) members active")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -790,13 +825,18 @@ struct WaddleChatWorkspaceView: View {
     private var regularChatContent: some View {
         VStack(spacing: 0) {
             ChatTimelineView(
-                messages: store.messages,
+                messages: store.mainTimelineMessages,
                 historyState: store.roomHistoryState,
                 onLoadOlderMessages: store.roomHistoryState.canLoadOlderMessages ? {
                     Task { await store.loadOlderMessages() }
                 } : nil,
                 onReply: { message in store.setReplyingTo(message) },
                 onRetract: { message in Task { await model.retractMessage(message) } },
+                onOpenThread: { message in store.openThreadPanel(forRootID: message.id) },
+                childrenByThreadID: store.childrenByThreadID,
+                firstUnreadMessageID: store.firstUnreadMessageID,
+                avatarDataBySenderID: { model.avatarData(forSenderID: $0) },
+                onRequestAvatar: { model.requestAvatarIfNeeded(forSenderID: $0) },
                 usesOperationalDensity: true
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -854,13 +894,18 @@ struct WaddleChatWorkspaceView: View {
             return AnyView(
                 VStack(spacing: 0) {
                     ChatTimelineView(
-                        messages: store.messages,
+                        messages: store.mainTimelineMessages,
                         historyState: store.roomHistoryState,
                         onLoadOlderMessages: store.roomHistoryState.canLoadOlderMessages ? {
                             Task { await store.loadOlderMessages() }
                         } : nil,
                         onReply: { message in store.setReplyingTo(message) },
                         onRetract: { message in Task { await model.retractMessage(message) } },
+                        onOpenThread: { message in store.openThreadPanel(forRootID: message.id) },
+                        childrenByThreadID: store.childrenByThreadID,
+                        firstUnreadMessageID: store.firstUnreadMessageID,
+                        avatarDataBySenderID: { model.avatarData(forSenderID: $0) },
+                        onRequestAvatar: { model.requestAvatarIfNeeded(forSenderID: $0) },
                         usesCompactConversationStyle: compactStyle
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

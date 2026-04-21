@@ -85,7 +85,10 @@ async fn establish_session(
     client.clear();
 
     // SASL PLAIN auth
-    let auth_data = encode_sasl_plain(&format!("{}@localhost", username), &test_secret("auth"));
+    let auth_data = encode_sasl_plain(
+        &format!("{}@localhost", username),
+        &test_secret("messaging-auth"),
+    );
     client
         .send(&format!(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{}</auth>",

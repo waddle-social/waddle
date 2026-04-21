@@ -80,7 +80,7 @@ cuenv task dev
 - `WADDLE_CERTS_EPHEMERAL`: Generate ephemeral self-signed TLS certificates in memory at startup (also available as `--ephemeral-certs` CLI flag).
 - `WADDLE_TEST_FIXED_ACCOUNT_ENABLED`: Enable boot-time provisioning of a deterministic native XMPP account for integration tests.
 - `WADDLE_TEST_FIXED_ACCOUNT_USERNAME`: Native account username (default `admin`).
-- `WADDLE_TEST_FIXED_ACCOUNT_PASSWORD`: Native account password (default `admin`).
+- `WADDLE_TEST_FIXED_ACCOUNT_PASSWORD`: Native account password. Required when the fixed test account is enabled.
 - `WADDLE_TEST_FIXED_ACCOUNT_DOMAIN`: Optional domain override (defaults to `WADDLE_XMPP_DOMAIN`).
 - `WADDLE_TEST_FIXED_ACCOUNT_EMAIL`: Optional email for the fixed account.
 

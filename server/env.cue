@@ -45,6 +45,7 @@ schema.#Project & {
 	env: environment: test: {
 		WADDLE_CERTS_EPHEMERAL:            "true"
 		WADDLE_TEST_FIXED_ACCOUNT_ENABLED: "true"
+		WADDLE_TEST_FIXED_ACCOUNT_PASSWORD: "cuenv-test-password"
 		WADDLE_UPLOAD_DIR:                 "./uploads"
 	}
 

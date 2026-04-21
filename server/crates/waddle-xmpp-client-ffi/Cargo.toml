@@ -1,0 +1,29 @@
+[package]
+name = "waddle-xmpp-client-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "FFI scaffold for Waddle's native XMPP client"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["uniffi-bindgen-bin"]
+
+[features]
+uniffi-bindgen-bin = ["uniffi/cli"]
+
+[dependencies]
+waddle-xmpp-client = { path = "../waddle-xmpp-client" }
+uniffi = { version = "0.29", features = ["tokio"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+jid = { workspace = true }
+url = { workspace = true }
+
+[build-dependencies]
+uniffi = { version = "0.29", features = ["build"] }

@@ -12,8 +12,8 @@ const USERNAME: &str = "admin";
 /// Start an isolated server and connect an authenticated client.
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
-    let password = server.fixed_account_password().to_string();
     let resource = format!("test-{}", uuid::Uuid::new_v4());
+    let password = server.fixed_account_password().to_string();
     let client =
         WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, &resource)
             .await

@@ -6,6 +6,9 @@ members = [
     "crates/waddle-cli",
     "crates/waddle-xmpp",
     "crates/waddle-extensions",
+    "crates/waddle-xmpp-core",
+    "crates/waddle-xmpp-client",
+    "crates/waddle-xmpp-client-ffi",
     "tests/xmpp-e2e-suite",
 ]
 
@@ -50,6 +53,7 @@ dashmap = "6.0"
 
 # XMPP Client
 xmpp = "0.6"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # Object Storage
 bytes = "1"

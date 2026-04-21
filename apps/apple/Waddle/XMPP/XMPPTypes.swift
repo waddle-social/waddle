@@ -133,6 +133,9 @@ struct XMPPMessageEvent: Sendable, Equatable {
     let reactionEmojis: [String]
     let replyToID: String?
     let replyToSender: String?
+    /// XEP-0428 fallback range (char offsets, end exclusive) identifying the
+    /// quoted-reply prefix inside `body` that supporting clients should strip.
+    let replyFallbackRange: Range<Int>?
     let markupSpans: [XMPPMarkupSpan]
     let chatState: String?
     let displayedMarkerID: String?
@@ -283,4 +286,69 @@ func parseManagedRoomBareJID(_ roomJID: String) -> (waddleID: String, channelID:
     }
 
     return (waddleID, channelID)
+}
+
+// MARK: - Channel creation result
+
+struct CreateChannelResult: Sendable {
+    let channelID: String?
+    let channelJID: String?
+}
+
+// MARK: - XMPP session error (used in AppModel pending-join bookkeeping)
+
+enum XMPPServiceError: LocalizedError {
+    case notReady
+    case disconnected
+    case timeout(String)
+    case iqError(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notReady: return "XMPP session is not ready yet."
+        case .disconnected: return "The XMPP session disconnected before the request completed."
+        case .timeout(let message): return message
+        case .iqError(let message): return message
+        }
+    }
+}
+
+// MARK: - Markup parsing (moved from XMPPXML)
+
+func parseMarkdownToMarkupSpans(_ text: String) -> (plainText: String, spans: [XMPPMarkupSpan]) {
+    var spans: [XMPPMarkupSpan] = []
+    var result = ""
+    var i = text.startIndex
+
+    let patterns: [(marker: String, type: XMPPMarkupSpan.SpanType)] = [
+        ("```", .codeBlock),
+        ("`", .code),
+        ("*", .bold),
+        ("_", .italic),
+        ("~", .strikethrough),
+    ]
+
+    while i < text.endIndex {
+        var matched = false
+        for (marker, spanType) in patterns {
+            guard text[i...].hasPrefix(marker) else { continue }
+            let afterOpen = text.index(i, offsetBy: marker.count)
+            guard afterOpen < text.endIndex else { continue }
+            guard let closeRange = text[afterOpen...].range(of: marker) else { continue }
+            let content = String(text[afterOpen..<closeRange.lowerBound])
+            guard !content.isEmpty else { continue }
+            let start = result.utf8.count
+            result += content
+            let end = result.utf8.count
+            spans.append(XMPPMarkupSpan(type: spanType, start: start, end: end, uri: nil))
+            i = text.index(closeRange.lowerBound, offsetBy: marker.count)
+            matched = true
+            break
+        }
+        if !matched {
+            result.append(text[i])
+            i = text.index(after: i)
+        }
+    }
+    return (result, spans)
 }

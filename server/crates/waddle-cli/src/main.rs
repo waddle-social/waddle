@@ -528,6 +528,9 @@ async fn run_status() -> Result<()> {
     match login::load_credentials() {
         Ok(_) => {
             println!("Logged in.");
+            println!("Saved credentials are available for the CLI session.");
+            println!();
+            println!("Run 'waddle logout' to clear the saved session.");
         }
         Err(_) => {
             println!("Not logged in.");

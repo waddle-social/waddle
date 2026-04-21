@@ -76,6 +76,14 @@ final class AppModel: ObservableObject {
     @Published var isLoadingStructure = false
     @Published var isCreatingWaddle = false
 
+    /// XEP-0084 avatar cache keyed by bare JID (lowercase). A present-but-
+    /// empty `Data` value means "we asked and they have no avatar" — that
+    /// sentinel lets us avoid hammering the server with repeat requests.
+    @Published var avatarDataByJID: [String: Data] = [:]
+    /// Senders whose avatar fetch is currently in flight, to deduplicate
+    /// simultaneous row requests.
+    private var inFlightAvatarFetches: Set<String> = []
+
     let chatStore: ChatSurfaceStore
 
     private var serverURL: URL
@@ -86,7 +94,7 @@ final class AppModel: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var uploadServiceJID: String?
-    private var xmppService: XMPPService?
+    private var rustClient: RustXmppClient?
     private var xmppEventsTask: Task<Void, Never>?
     private var messagesByRoomJID: [String: [ChatTimelineMessage]] = [:]
     private var presenceByRoomJID: [String: [String: ChatPresenceState]] = [:]
@@ -103,15 +111,15 @@ final class AppModel: ObservableObject {
         serverURLText = persistedServerURL.absoluteString
         client = WaddleAPIClient(serverURL: persistedServerURL)
         chatStore = ChatSurfaceStore()
-        chatStore.setSendHandler { [weak self] text, room, replyTo in
+        chatStore.setSendHandler { [weak self] text, room, replyTo, threadRootID in
             guard let self else { return }
-            try await self.sendMessage(text, room: room, replyTo: replyTo)
+            try await self.sendMessage(text, room: room, replyTo: replyTo, threadRootID: threadRootID)
         }
         chatStore.setRoomHistoryLoadHandler { [weak self] room, before in
             guard let self else {
                 return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
             }
-            return try await self.loadRoomHistory(for: room, before: before)
+            return await self.loadRoomHistory(for: room, before: before)
         }
         updateChatSurfaceState()
         Task { await bootstrap() }
@@ -252,7 +260,7 @@ final class AppModel: ObservableObject {
             mergeVisibleWaddles()
             if previousSelection == nil,
                let selectedWaddleID,
-               xmppService?.connectionState == .ready {
+               rustClient?.connectionState == .ready {
                 await selectWaddle(selectedWaddleID)
             }
         } catch {
@@ -376,10 +384,9 @@ final class AppModel: ObservableObject {
         markDmRead(peerJID: bareJID)
         chatStore.dmMessages = dmMessagesByPeer[bareJID] ?? []
 
-        guard let xmppService, let session else { return }
-        do {
-            let archive = try await xmppService.fetchDmHistory(peerJID: bareJID, max: 50)
-            let messages = archive.messages.compactMap { archiveMsg -> ChatTimelineMessage? in
+        guard let rustClient, let session else { return }
+        let archive = await rustClient.fetchDmHistory(peerJID: bareJID, max: 50)
+        let messages = archive.messages.compactMap { archiveMsg -> ChatTimelineMessage? in
                 let event = archiveMsg.message
                 let text = (event.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
@@ -407,13 +414,10 @@ final class AppModel: ObservableObject {
             if chatStore.activeDmPeerJID == bareJID {
                 chatStore.dmMessages = dmMessagesByPeer[bareJID] ?? []
             }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
     }
 
     func sendDm(body: String) async {
-        guard let peerJID = chatStore.activeDmPeerJID, let xmppService, let session else { return }
+        guard let peerJID = chatStore.activeDmPeerJID, let rustClient, let session else { return }
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
@@ -437,12 +441,8 @@ final class AppModel: ObservableObject {
         dmMessagesByPeer[peerJID] = messages
         chatStore.dmMessages = messages
 
-        do {
-            try await xmppService.sendDirectMessage(peerJID: peerJID, body: text)
-            updateDmConversation(peerJID: peerJID, body: text, date: Date())
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await rustClient.sendDirectMessage(peerJID: peerJID, body: text)
+        updateDmConversation(peerJID: peerJID, body: text, date: Date())
     }
 
     func closeDm() {
@@ -540,21 +540,13 @@ final class AppModel: ObservableObject {
     }
 
     func sendForumTopic(title: String, body: String) async {
-        guard let roomJID = currentRoomJID, let xmppService else { return }
-        do {
-            try await xmppService.sendForumTopic(roomJID: roomJID, body: body, title: title)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let roomJID = currentRoomJID, let rustClient else { return }
+        await rustClient.sendForumTopic(roomJID: roomJID, body: body, title: title)
     }
 
     func sendForumReply(body: String, threadID: String) async {
-        guard let roomJID = currentRoomJID, let xmppService else { return }
-        do {
-            try await xmppService.sendForumReply(roomJID: roomJID, body: body, threadID: threadID)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let roomJID = currentRoomJID, let rustClient else { return }
+        await rustClient.sendForumReply(roomJID: roomJID, body: body, threadID: threadID)
     }
 
     var forumTopics: [ChatTimelineMessage] {
@@ -572,62 +564,38 @@ final class AppModel: ObservableObject {
     @Published var inboxEntries: [XMPPInboxEntry] = []
 
     func fetchInbox() async {
-        guard let xmppService else { return }
-        do {
-            inboxEntries = try await xmppService.fetchInbox()
-        } catch {
-            dlog(" inbox fetch error: \(error.localizedDescription)")
-        }
+        guard let rustClient else { return }
+        inboxEntries = await rustClient.fetchInbox()
     }
 
     func setMood(_ mood: String, text: String? = nil) async {
-        guard let xmppService else { return }
-        do {
-            try await xmppService.publishMood(mood, text: text)
-            currentMood = XMPPUserMood(mood: mood, text: text)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let rustClient else { return }
+        await rustClient.publishMood(mood, text: text)
+        currentMood = XMPPUserMood(mood: mood, text: text)
     }
 
     func clearMood() async {
-        guard let xmppService else { return }
-        do {
-            try await xmppService.clearMood()
-            currentMood = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let rustClient else { return }
+        await rustClient.clearMood()
+        currentMood = nil
     }
 
     func setActivity(_ activity: String, text: String? = nil) async {
-        guard let xmppService else { return }
-        do {
-            try await xmppService.publishActivity(activity, text: text)
-            currentActivity = XMPPUserActivity(activity: activity, text: text)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let rustClient else { return }
+        await rustClient.publishActivity(activity, text: text)
+        currentActivity = XMPPUserActivity(activity: activity, text: text)
     }
 
     func setTune(artist: String?, title: String?, source: String? = nil, uri: String? = nil) async {
-        guard let xmppService else { return }
-        do {
-            try await xmppService.publishTune(artist: artist, title: title, source: source, uri: uri)
-            currentTune = XMPPUserTune(artist: artist, title: title, source: source, length: nil, uri: uri)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let rustClient else { return }
+        await rustClient.publishTune(artist: artist, title: title, source: source, uri: uri)
+        currentTune = XMPPUserTune(artist: artist, title: title, source: source, length: nil, uri: uri)
     }
 
     func clearTune() async {
-        guard let xmppService else { return }
-        do {
-            try await xmppService.clearTune()
-            currentTune = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let rustClient else { return }
+        await rustClient.clearTune()
+        currentTune = nil
     }
 
     func requestPushNotificationPermission() {
@@ -645,21 +613,58 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Kick off a XEP-0084 avatar fetch for the given sender. Idempotent: if
+    /// the JID is already cached, currently being fetched, or resolves to the
+    /// local session, the call is a no-op. A missing/empty avatar is stored
+    /// as `Data()` so we don't re-request on every scroll.
+    func requestAvatarIfNeeded(forSenderID senderID: String) {
+        guard !senderID.isEmpty, let session, let rustClient else { return }
+        let key = avatarJID(forSenderID: senderID, session: session).lowercased()
+        guard !key.isEmpty else { return }
+        if avatarDataByJID[key] != nil { return }
+        if inFlightAvatarFetches.contains(key) { return }
+        inFlightAvatarFetches.insert(key)
+        Task { [weak self] in
+            let avatar = await rustClient.requestAvatar(jid: key)
+            guard let self else { return }
+            await MainActor.run {
+                self.inFlightAvatarFetches.remove(key)
+                // Always populate the cache — empty Data sentinel prevents
+                // repeat fetches for users without a published avatar.
+                self.avatarDataByJID[key] = avatar?.data ?? Data()
+            }
+        }
+    }
+
+    /// Resolve the bare JID we should query for an avatar from a timeline
+    /// message's `senderID`. MUC occupant ids arrive as bare nicknames; turn
+    /// those into `nick@domain` using the session's domain. DM/1:1 senders
+    /// already arrive as bare JIDs (`localpart@domain`).
+    private func avatarJID(forSenderID senderID: String, session: WaddleSession) -> String {
+        if senderID.contains("@") {
+            return senderID
+        }
+        let domain = jidDomain(session.jid)
+        return "\(senderID)@\(domain)"
+    }
+
+    /// Raw avatar image data for a given message `senderID`, or nil when the
+    /// fetch hasn't completed or the user has no avatar. Intended for use by
+    /// SwiftUI row renderers alongside an initials fallback.
+    func avatarData(forSenderID senderID: String) -> Data? {
+        guard !senderID.isEmpty, let session else { return nil }
+        let key = avatarJID(forSenderID: senderID, session: session).lowercased()
+        guard let data = avatarDataByJID[key], !data.isEmpty else { return nil }
+        return data
+    }
+
     func registerPushToken(_ tokenData: Data) async {
         let token = tokenData.map { String(format: "%02x", $0) }.joined()
-        guard let xmppService, let session else { return }
+        guard let rustClient, let session else { return }
         let pushServiceJID = "push.\(jidDomain(session.jid))"
         let node = "waddle-apple-\(session.userID)"
-        do {
-            try await xmppService.enablePushNotifications(
-                pushServiceJID: pushServiceJID,
-                node: node,
-                token: token
-            )
-            pushNotificationsEnabled = true
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await rustClient.enablePushNotifications(pushServiceJID: pushServiceJID, node: node, token: token)
+        pushNotificationsEnabled = true
     }
 
     func updateWaddle(name: String, description: String?) async {
@@ -731,7 +736,7 @@ final class AppModel: ObservableObject {
     @Published var isUploadingFile = false
 
     func uploadAndSendFile(data: Data, fileName: String, mediaType: String) async {
-        guard let roomJID = currentRoomJID, let xmppService else {
+        guard let roomJID = currentRoomJID, let rustClient else {
             errorMessage = "Select a channel before uploading."
             return
         }
@@ -739,22 +744,25 @@ final class AppModel: ObservableObject {
         isUploadingFile = true
         defer { isUploadingFile = false }
 
+        if uploadServiceJID == nil {
+            uploadServiceJID = await rustClient.discoverUploadService()
+        }
+        guard let serviceJID = uploadServiceJID else {
+            errorMessage = "File upload is not available on this server."
+            return
+        }
+
+        guard let slot = await rustClient.requestUploadSlot(
+            serviceJID: serviceJID,
+            filename: fileName,
+            size: data.count,
+            contentType: mediaType
+        ) else {
+            errorMessage = "Failed to request an upload slot."
+            return
+        }
+
         do {
-            if uploadServiceJID == nil {
-                uploadServiceJID = try await xmppService.discoverUploadService()
-            }
-            guard let serviceJID = uploadServiceJID else {
-                errorMessage = "File upload is not available on this server."
-                return
-            }
-
-            let slot = try await xmppService.requestUploadSlot(
-                serviceJID: serviceJID,
-                filename: fileName,
-                size: data.count,
-                contentType: mediaType
-            )
-
             var request = URLRequest(url: URL(string: slot.putURL)!)
             request.httpMethod = "PUT"
             request.setValue(mediaType, forHTTPHeaderField: "Content-Type")
@@ -768,30 +776,27 @@ final class AppModel: ObservableObject {
                 errorMessage = "File upload failed."
                 return
             }
-
-            try await xmppService.sendGroupchatFileMessage(
-                roomJID: roomJID,
-                fileURL: slot.getURL,
-                fileName: fileName,
-                mediaType: mediaType,
-                size: data.count
-            )
         } catch {
             errorMessage = error.localizedDescription
+            return
         }
+
+        await rustClient.sendGroupchatFileMessage(
+            roomJID: roomJID,
+            fileURL: slot.getURL,
+            fileName: fileName,
+            mediaType: mediaType,
+            size: data.count
+        )
     }
 
     func retractMessage(_ message: ChatTimelineMessage) async {
-        guard let roomJID = currentRoomJID, let xmppService else { return }
-        do {
-            try await xmppService.retractMessage(roomJID: roomJID, messageID: message.id)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        guard let roomJID = currentRoomJID, let rustClient else { return }
+        await rustClient.retractMessage(roomJID: roomJID, messageID: message.id)
     }
 
     func createChannel(name: String, description: String?, channelType: String) async {
-        guard let selectedWaddleID, let xmppService else { return }
+        guard let selectedWaddleID, let rustClient else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             errorMessage = "Channel name is required."
@@ -801,21 +806,17 @@ final class AppModel: ObservableObject {
         isCreatingChannel = true
         defer { isCreatingChannel = false }
 
-        do {
-            let position = channels.count
-            let result = try await xmppService.createChannel(
-                waddleID: selectedWaddleID,
-                name: trimmedName,
-                description: description,
-                channelType: channelType,
-                position: position
-            )
-            await loadStructure(for: selectedWaddleID)
-            if let channelID = result.channelID {
-                await selectChannel(channelID)
-            }
-        } catch {
-            errorMessage = error.localizedDescription
+        let position = channels.count
+        let result = await rustClient.createChannel(
+            waddleID: selectedWaddleID,
+            name: trimmedName,
+            description: description,
+            channelType: channelType,
+            position: position
+        )
+        await loadStructure(for: selectedWaddleID)
+        if let channelID = result?.channelID {
+            await selectChannel(channelID)
         }
     }
 
@@ -918,27 +919,28 @@ final class AppModel: ObservableObject {
         failPendingRoomJoins(with: XMPPServiceError.disconnected)
         joinedRoomJIDs.removeAll()
         presenceByRoomJID.removeAll()
-        if let xmppService {
-            await xmppService.disconnect(emitEvent: false)
+        if let rustClient {
+            await rustClient.disconnect()
         }
 
-        let service = XMPPService()
-        xmppService = service
+        let rustConfig = WaddleConfig(
+            serverUrl: session.xmppWebsocketURL,
+            jid: session.jid,
+            accessToken: session.sessionID,
+            resource: session.xmppCredentials.resource
+        )
+        rustClient = RustXmppClient(config: rustConfig)
+
         updateConnectionBanner(for: .connecting)
 
         xmppEventsTask = Task { [weak self] in
-            for await event in service.events {
-                await self?.handleXMPPEvent(event)
+            guard let self, let client = self.rustClient else { return }
+            for await event in client.events {
+                await self.handleXMPPEvent(event)
             }
         }
 
-        do {
-            try await service.connect(session: session)
-        } catch {
-            errorMessage = error.localizedDescription
-            chatStore.setBannerState(.error(message: error.localizedDescription))
-            updateChatSurfaceState()
-        }
+        await rustClient!.connect()
     }
 
     private func handleXMPPEvent(_ event: XMPPEvent) async {
@@ -957,23 +959,29 @@ final class AppModel: ObservableObject {
             reconnectTask?.cancel()
             reconnectTask = nil
             updateConnectionBanner(for: .ready)
-            do {
-                try await xmppService?.sendPresence()
-                dlog(" presence sent")
-            } catch {
-                dlog(" presence error: \(error)")
-                errorMessage = error.localizedDescription
-            }
+            await rustClient?.sendPresence()
+            dlog(" presence sent")
             await refreshAccessibleWaddles()
             dlog(" accessible waddles: \(self.accessibleWaddles.count), public: \(self.publicWaddles.count)")
-            if let selectedWaddleID {
-                dlog(" loading structure for \(selectedWaddleID)")
-                await loadStructure(for: selectedWaddleID)
-            } else if let nextWaddleID = publicWaddles.first?.id {
-                dlog(" selecting first waddle \(nextWaddleID)")
-                await selectWaddle(nextWaddleID)
-            } else {
-                updateChatSurfaceState()
+            // Fire structure/channel loading in a separate Task so this event-loop iteration
+            // completes and can process incoming events (e.g. the MUC self-presence that
+            // resolves the join) while the structure load is in flight. Without this, the
+            // event loop deadlocks: joinSelectedChannel waits for a self-presence event that
+            // can never be delivered because the event loop is blocked on joinSelectedChannel.
+            let waddleToLoad = selectedWaddleID ?? publicWaddles.first?.id
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let waddleID = waddleToLoad {
+                    if waddleID == self.selectedWaddleID {
+                        dlog(" loading structure for \(waddleID)")
+                        await self.loadStructure(for: waddleID)
+                    } else {
+                        dlog(" selecting first waddle \(waddleID)")
+                        await self.selectWaddle(waddleID)
+                    }
+                } else {
+                    self.updateChatSurfaceState()
+                }
             }
         case .message(let message):
             handleIncomingMessage(message)
@@ -1006,35 +1014,31 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshAccessibleWaddles() async {
-        guard let xmppService else { return }
+        guard let rustClient else { return }
 
-        do {
-            let discovered = try await xmppService.discoverWaddles()
-            accessibleWaddles = discovered.map {
-                WaddleSummary(
-                    id: $0.id,
-                    name: $0.name,
-                    description: nil,
-                    ownerUserID: nil,
-                    iconURL: nil,
-                    isPublic: $0.isPublic,
-                    role: nil,
-                    createdAt: nil,
-                    updatedAt: nil
-                )
-            }
-            joinedWaddleIDs.formUnion(discovered.map(\.id))
-            mergeVisibleWaddles()
-        } catch {
-            errorMessage = error.localizedDescription
+        let discovered = await rustClient.discoverWaddles()
+        accessibleWaddles = discovered.map {
+            WaddleSummary(
+                id: $0.id,
+                name: $0.name,
+                description: nil,
+                ownerUserID: nil,
+                iconURL: nil,
+                isPublic: $0.isPublic,
+                role: nil,
+                createdAt: nil,
+                updatedAt: nil
+            )
         }
+        joinedWaddleIDs.formUnion(discovered.map(\.id))
+        mergeVisibleWaddles()
     }
 
     private func loadStructure(for waddleID: String) async {
         dlog(" loadStructure for \(waddleID)")
         guard let session else { dlog(" loadStructure: no session"); return }
-        guard let xmppService else {
-            dlog(" loadStructure: no xmppService")
+        guard let rustClient else {
+            dlog(" loadStructure: no rustClient")
             updateChatSurfaceState()
             return
         }
@@ -1043,7 +1047,7 @@ final class AppModel: ObservableObject {
         updateChatSurfaceState()
 
         do {
-            async let discoveredChannels = xmppService.discoverChannels(waddleID: waddleID)
+            async let discoveredChannels = rustClient.discoverChannels(waddleID: waddleID)
             async let loadedMembers = client.listMembers(sessionID: session.sessionID, waddleID: waddleID)
 
             let (xmppChannels, loadedMembersValue) = try await (discoveredChannels, loadedMembers)
@@ -1098,7 +1102,7 @@ final class AppModel: ObservableObject {
         guard let session,
               let selectedWaddleID,
               let selectedChannelID,
-              let xmppService else {
+              let rustClient else {
             throw ChatSendError.noRoom
         }
 
@@ -1113,7 +1117,7 @@ final class AppModel: ObservableObject {
         }
 
         updateConnectionBanner(for: .ready)
-        try await xmppService.joinRoom(roomJID, nick: session.username)
+        await rustClient.joinRoom(roomJID, nick: session.username)
         try await waitForRoomJoin(roomJID: roomJID, nick: session.username)
 
         if roomJID == currentRoomJID {
@@ -1124,7 +1128,12 @@ final class AppModel: ObservableObject {
 
     private var pendingEchoBodies: Set<String> = []
 
-    private func sendMessage(_ text: String, room: ChatRoomSelection?, replyTo: ChatTimelineMessage? = nil) async throws {
+    private func sendMessage(
+        _ text: String,
+        room: ChatRoomSelection?,
+        replyTo: ChatTimelineMessage? = nil,
+        threadRootID: String? = nil
+    ) async throws {
         guard let session else {
             throw ChatSendError.noSession
         }
@@ -1137,11 +1146,16 @@ final class AppModel: ObservableObject {
             throw ChatSendError.noRoom
         }
 
-        guard let xmppService else {
+        guard let rustClient else {
             throw ChatSendError.noSession
         }
 
         let roomJID = roomBareJID(accountJID: session.jid, waddleID: selectedWaddleID, channelID: channelID)
+
+        // Build the wire body. For replies we prepend a XEP-0428 fallback
+        // quote (so non-supporting clients see the context) and compute the
+        // Unicode-scalar range that supporting clients will strip.
+        let (wireBody, fallbackRange) = composeWireBody(userText: text, replyTo: replyTo)
 
         let optimisticID = UUID().uuidString
         let optimistic = ChatTimelineMessage(
@@ -1149,7 +1163,7 @@ final class AppModel: ObservableObject {
             roomID: roomJID,
             senderID: session.username.lowercased(),
             senderDisplayName: session.username,
-            body: text,
+            body: wireBody,
             sentAt: Date(),
             editedAt: nil,
             deliveryState: .sending,
@@ -1160,44 +1174,109 @@ final class AppModel: ObservableObject {
             isRetracted: false,
             replyToID: replyTo?.id,
             replyToSenderName: replyTo?.senderDisplayName,
-            replyToBody: replyTo?.body
+            replyToBody: replyTo?.displayBody,
+            replyFallbackRange: fallbackRange,
+            threadID: threadRootID
         )
 
         let messages = (messagesByRoomJID[roomJID] ?? []).appendingTimelineMessages([optimistic])
         messagesByRoomJID[roomJID] = messages
-        pendingEchoBodies.insert(text)
+        pendingEchoBodies.insert(wireBody)
 
         if roomJID == currentRoomJID {
             syncChatMessages()
         }
 
-        let (plainText, markupSpans) = XMPPXML.parseMarkdownToMarkupSpans(text)
+        let (_, markupSpans) = parseMarkdownToMarkupSpans(text)
 
-        if let replyTo {
-            try await xmppService.sendGroupchatReplyMessage(
-                roomJID: roomJID,
-                body: plainText,
-                replyToID: replyTo.id,
-                replyToSender: replyTo.senderID,
-                replyToBody: replyTo.body
+        // Compose structured send-options once so reply, thread, and fallback
+        // metadata all travel together down the FFI in a single typed payload.
+        let replyTarget: WaddleReplyTarget? = replyTo.map { target in
+            // For MUC the reply `to` must be the occupant full JID
+            // (room@muc.domain/nick) per XEP-0461; senderDisplayName is the
+            // nick that will render as the resource.
+            WaddleReplyTarget(
+                authorJid: "\(roomJID)/\(target.senderDisplayName)",
+                messageId: target.id
             )
-        } else if !markupSpans.isEmpty {
-            try await xmppService.sendGroupchatMessageWithMarkup(
+        }
+        let fallbackOpt: WaddleFallbackRange? = fallbackRange.map { range in
+            WaddleFallbackRange(
+                start: UInt32(range.lowerBound),
+                end: UInt32(range.upperBound)
+            )
+        }
+        let threadTarget: WaddleThreadTarget? = threadRootID.map { rootID in
+            WaddleThreadTarget(id: rootID, parent: nil)
+        }
+
+        let hasOptions = replyTarget != nil || fallbackOpt != nil || threadTarget != nil
+        let options: WaddleSendOptions? = hasOptions
+            ? WaddleSendOptions(reply: replyTarget, fallback: fallbackOpt, thread: threadTarget)
+            : nil
+
+        if options == nil, !markupSpans.isEmpty {
+            await rustClient.sendGroupchatMessageWithMarkup(
                 roomJID: roomJID,
-                body: plainText,
+                body: wireBody,
                 spans: markupSpans
             )
         } else {
-            try await xmppService.sendGroupchatMessage(roomJID: roomJID, body: text)
+            await rustClient.sendGroupchatMessage(
+                roomJID: roomJID,
+                body: wireBody,
+                options: options
+            )
         }
     }
 
-    private func loadRoomHistory(for room: ChatRoomSelection, before: Date?) async throws -> ChatRoomHistoryPage {
+    /// Compose the outbound body for a send. For replies this prepends a
+    /// XEP-0428 fallback quote (so non-supporting clients still see what is
+    /// being quoted) and returns the Unicode-scalar range covering that
+    /// prefix. Supporting clients use the range to hide the quote and render
+    /// the structured reply-to indicator instead.
+    private func composeWireBody(
+        userText: String,
+        replyTo: ChatTimelineMessage?
+    ) -> (body: String, fallbackRange: Range<Int>?) {
+        guard let replyTo else {
+            return (userText, nil)
+        }
+        // Truncate quoted lines to keep fallback quotes readable when the
+        // original body is long; supporting clients hide it anyway.
+        let maxQuoteChars = 240
+        let sourceBody = replyTo.displayBody
+        let quoteBody: String = {
+            if sourceBody.unicodeScalars.count <= maxQuoteChars {
+                return sourceBody
+            }
+            let scalars = sourceBody.unicodeScalars
+            let cutoff = scalars.index(scalars.startIndex, offsetBy: maxQuoteChars)
+            return String(scalars[..<cutoff]) + "…"
+        }()
+
+        var quote = ""
+        quote += "> "
+        quote += replyTo.senderDisplayName
+        quote += " wrote:\n"
+        for line in quoteBody.split(separator: "\n", omittingEmptySubsequences: false) {
+            quote += "> "
+            quote += String(line)
+            quote += "\n"
+        }
+        quote += "\n"
+
+        let body = quote + userText
+        let fallbackEnd = quote.unicodeScalars.count
+        return (body, 0..<fallbackEnd)
+    }
+
+    private func loadRoomHistory(for room: ChatRoomSelection, before: Date?) async -> ChatRoomHistoryPage {
         dlog(" loadRoomHistory called for room.id=\(room.id) room.title=\(room.title) before=\(String(describing: before))")
         guard let session,
-              let xmppService,
+              let rustClient,
               let roomJID = roomJID(for: room.id) else {
-            dlog(" loadRoomHistory: guard failed — session=\(self.session != nil) xmppService=\(self.xmppService != nil) roomJID=\(self.roomJID(for: room.id) ?? "nil")")
+            dlog(" loadRoomHistory: guard failed — session=\(self.session != nil) rustClient=\(self.rustClient != nil) roomJID=\(self.roomJID(for: room.id) ?? "nil")")
             return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
         }
 
@@ -1208,9 +1287,9 @@ final class AppModel: ObservableObject {
             return ChatRoomHistoryPage(messages: [], hasMoreOlderMessages: false)
         }
 
-        let archivePage = try await xmppService.fetchRoomHistory(
+        let archivePage = await rustClient.fetchRoomHistory(
             roomJID: roomJID,
-            max: roomHistoryPageSize,
+            max: UInt32(roomHistoryPageSize),
             before: requestBefore
         )
 
@@ -1382,9 +1461,9 @@ final class AppModel: ObservableObject {
     }
 
     private func sendDisplayedMarkerForCurrentRoom(messageID: String) {
-        guard let roomJID = currentRoomJID, let xmppService else { return }
+        guard let roomJID = currentRoomJID, let rustClient else { return }
         Task {
-            try? await xmppService.sendDisplayedMarker(roomJID: roomJID, messageID: messageID)
+            await rustClient.sendDisplayedMarker(roomJID: roomJID, messageID: messageID)
         }
     }
 
@@ -1392,18 +1471,18 @@ final class AppModel: ObservableObject {
     private var lastSentChatState: String?
 
     func notifyComposing() {
-        guard let roomJID = currentRoomJID, let xmppService else { return }
+        guard let roomJID = currentRoomJID, let rustClient else { return }
         if lastSentChatState != "composing" {
             lastSentChatState = "composing"
-            Task { try? await xmppService.sendChatState(roomJID: roomJID, state: "composing") }
+            Task { await rustClient.sendChatState(roomJID: roomJID, state: "composing") }
         }
         composingTimer?.cancel()
         composingTimer = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard let self, self.lastSentChatState == "composing" else { return }
             self.lastSentChatState = "paused"
-            if let roomJID = self.currentRoomJID, let xmppService = self.xmppService {
-                try? await xmppService.sendChatState(roomJID: roomJID, state: "paused")
+            if let roomJID = self.currentRoomJID, let rustClient = self.rustClient {
+                await rustClient.sendChatState(roomJID: roomJID, state: "paused")
             }
         }
     }
@@ -1537,7 +1616,10 @@ final class AppModel: ObservableObject {
         if let replyToID = event.replyToID {
             if let parentMessage = messagesByRoomJID[roomJID]?.first(where: { $0.id == replyToID }) {
                 replyToSenderName = parentMessage.senderDisplayName
-                replyToBody = parentMessage.body
+                // Preview should reflect what the user saw on their screen,
+                // not the wire body (which may include a XEP-0428 fallback
+                // quote).
+                replyToBody = parentMessage.displayBody
             } else if let sender = event.replyToSender {
                 replyToSenderName = XMPPJID(string: sender)?.resource ?? sender
             }
@@ -1560,6 +1642,7 @@ final class AppModel: ObservableObject {
             replyToID: event.replyToID,
             replyToSenderName: replyToSenderName,
             replyToBody: replyToBody,
+            replyFallbackRange: event.replyFallbackRange,
             markupSpans: event.markupSpans.isEmpty ? nil : event.markupSpans,
             sharedFiles: event.sharedFiles.isEmpty ? nil : event.sharedFiles,
             broadcastMention: event.broadcastMention,
@@ -1628,10 +1711,18 @@ final class AppModel: ObservableObject {
                 failPendingRoomJoin(key: joinKey, error: XMPPServiceError.disconnected)
             } else {
                 joinedRoomJIDs.insert(roomJID)
-                finishPendingRoomJoin(key: joinKey)
+                let wasPending = finishPendingRoomJoin(key: joinKey)
                 if roomJID == currentRoomJID {
                     let roomTitle = chatStore.selectedRoom?.title ?? selectedChannel?.name ?? "chat"
                     chatStore.setBannerState(.connected(message: "Connected to #\(roomTitle)"))
+                    if !wasPending {
+                        // Self-presence arrived after the join timeout fired; load history now.
+                        Task {
+                            await chatStore.refreshSelectedRoomHistory()
+                            syncChatMessages()
+                            updateChatSurfaceState()
+                        }
+                    }
                 }
             }
         }
@@ -1706,12 +1797,12 @@ final class AppModel: ObservableObject {
             return
         }
 
-        guard xmppService != nil else {
+        guard rustClient != nil else {
             chatStore.setSurfaceState(.empty(title: "Live chat unavailable", message: "Reconnect to start the XMPP session."))
             return
         }
 
-        if let connectionState = xmppService?.connectionState {
+        if let connectionState = rustClient?.connectionState {
             switch connectionState {
             case .ready:
                 break
@@ -1785,10 +1876,10 @@ final class AppModel: ObservableObject {
         xmppEventsTask?.cancel()
         xmppEventsTask = nil
         failPendingRoomJoins(with: XMPPServiceError.disconnected)
-        if let xmppService {
-            await xmppService.disconnect(emitEvent: false)
+        if let rustClient {
+            await rustClient.disconnect()
         }
-        xmppService = nil
+        rustClient = nil
 
         session = nil
         publicCatalogWaddles = []
@@ -1813,11 +1904,11 @@ final class AppModel: ObservableObject {
 
     func handleAppBecameActive() {
         guard let session else { return }
-        guard let xmppService else {
+        guard let rustClient else {
             Task { await connectXMPP(using: session) }
             return
         }
-        switch xmppService.connectionState {
+        switch rustClient.connectionState {
         case .ready:
             break
         case .connecting, .negotiating, .authenticating, .binding:
@@ -1857,18 +1948,25 @@ final class AppModel: ObservableObject {
             roomJoinContinuations[key] = continuation
             roomJoinTimeoutTasks.removeValue(forKey: key)?.cancel()
             roomJoinTimeoutTasks[key] = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                } catch {
+                    // Task was cancelled (join completed or connection dropped); do not time out.
+                    return
+                }
                 await self?.handleRoomJoinTimeout(key: key, roomJID: roomJID)
             }
         }
     }
 
-    private func finishPendingRoomJoin(key: String) {
+    @discardableResult
+    private func finishPendingRoomJoin(key: String) -> Bool {
         roomJoinTimeoutTasks.removeValue(forKey: key)?.cancel()
         guard let continuation = roomJoinContinuations.removeValue(forKey: key) else {
-            return
+            return false
         }
         continuation.resume()
+        return true
     }
 
     private func failPendingRoomJoin(key: String, error: Error) {

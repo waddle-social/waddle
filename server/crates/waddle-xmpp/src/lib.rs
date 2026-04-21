@@ -61,6 +61,10 @@ pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter}
 pub use server::{generate_ephemeral_tls_config, XmppServer, XmppServerConfig};
 pub use stream::{PreAuthResult, SaslAuthResult};
 pub use types::*;
+pub use waddle_xmpp_core::{
+    managed_room_jid, managed_room_localpart, parse_managed_room_jid, parse_managed_room_localpart,
+    ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo, WaddleDetails, WaddleInfo,
+};
 pub use xep::xep0077::{RegistrationError, RegistrationRequest};
 
 use std::sync::Arc;
@@ -185,6 +189,20 @@ pub trait AppState: Send + Sync + 'static {
         jid: &jid::BareJid,
         vcard_xml: &str,
     ) -> impl std::future::Future<Output = Result<(), XmppError>> + Send;
+
+    /// Look up an externally-hosted avatar URL for a user.
+    ///
+    /// Returns the URL stored against the user record whose `xmpp_localpart`
+    /// matches `jid.node()` (typically sourced from an OIDC identity
+    /// provider, e.g. GitHub's `avatars.githubusercontent.com`). The URL is
+    /// republished as a XEP-0084 `<info url="…"/>` metadata item so XMPP
+    /// clients can render it without any out-of-band API surface.
+    ///
+    /// Returns `Ok(None)` when the user has no avatar URL on file.
+    fn get_user_avatar_url(
+        &self,
+        jid: &jid::BareJid,
+    ) -> impl std::future::Future<Output = Result<Option<String>, XmppError>> + Send;
 
     /// Create an upload slot for XEP-0363 HTTP File Upload.
     ///
@@ -465,168 +483,6 @@ pub trait AppState: Send + Sync + 'static {
         limit: usize,
         offset: usize,
     ) -> impl std::future::Future<Output = Result<Vec<WaddleDetails>, XmppError>> + Send;
-}
-
-/// Basic waddle information for auto-join enumeration.
-#[derive(Debug, Clone)]
-pub struct WaddleInfo {
-    /// Waddle ID
-    pub id: String,
-    /// Waddle name
-    pub name: String,
-}
-
-/// Basic channel information for auto-join enumeration.
-#[derive(Debug, Clone)]
-pub struct ChannelInfo {
-    /// Channel ID
-    pub id: String,
-    /// Channel name
-    pub name: String,
-    /// Channel type (e.g., "text", "forum")
-    pub channel_type: String,
-}
-
-/// Channel-backed MUC room metadata.
-#[derive(Debug, Clone)]
-pub struct ChannelRoomInfo {
-    /// Waddle ID that owns the channel.
-    pub waddle_id: String,
-    /// Channel metadata.
-    pub channel: ChannelInfo,
-}
-
-/// Supported managed channel types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelType {
-    /// Standard text chat channel.
-    Text,
-    /// XEP-0508 forum channel.
-    Forum,
-}
-
-impl ChannelType {
-    /// Parse a stored channel type into a supported managed channel type.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "text" => Some(Self::Text),
-            "forum" => Some(Self::Forum),
-            _ => None,
-        }
-    }
-
-    /// Convert this channel type to the canonical stored string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Text => "text",
-            Self::Forum => "forum",
-        }
-    }
-
-    /// Returns true when this channel should be exposed as a forum room.
-    pub fn is_forum(self) -> bool {
-        matches!(self, Self::Forum)
-    }
-}
-
-/// Build the canonical localpart for a managed channel room.
-pub fn managed_room_localpart(waddle_id: &str, channel_id: &str) -> String {
-    format!("{waddle_id}_{channel_id}")
-}
-
-/// Parse the canonical localpart for a managed channel room.
-pub fn parse_managed_room_localpart(localpart: &str) -> Option<(String, String)> {
-    let (waddle_id, channel_id) = localpart.split_once('_')?;
-    if waddle_id.is_empty() || channel_id.is_empty() {
-        return None;
-    }
-    Some((waddle_id.to_string(), channel_id.to_string()))
-}
-
-/// Parse a bare room JID into managed channel coordinates.
-pub fn parse_managed_room_jid(room_jid: &jid::BareJid) -> Option<(String, String)> {
-    parse_managed_room_localpart(room_jid.node()?.as_str())
-}
-
-/// Build the canonical bare JID for a managed channel room.
-pub fn managed_room_jid(
-    waddle_id: &str,
-    channel_id: &str,
-    muc_domain: &str,
-) -> Result<jid::BareJid, jid::Error> {
-    format!(
-        "{}@{}",
-        managed_room_localpart(waddle_id, channel_id),
-        muc_domain
-    )
-    .parse()
-}
-
-/// Detailed waddle information for XEP-0503 spaces service.
-#[derive(Debug, Clone)]
-pub struct WaddleDetails {
-    /// Waddle ID
-    pub id: String,
-    /// Waddle name
-    pub name: String,
-    /// Waddle description
-    pub description: Option<String>,
-    /// Owner user ID
-    pub owner_id: String,
-    /// Icon URL
-    pub icon_url: Option<String>,
-    /// Whether the waddle is public
-    pub is_public: bool,
-    /// When the waddle was created (ISO 8601)
-    pub created_at: String,
-}
-
-/// Information about a created upload slot (XEP-0363).
-#[derive(Debug, Clone)]
-pub struct UploadSlotInfo {
-    /// URL for uploading the file (HTTP PUT).
-    pub put_url: String,
-    /// URL for retrieving the file (HTTP GET).
-    pub get_url: String,
-    /// Optional headers to include with the PUT request.
-    pub put_headers: Vec<(String, String)>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn managed_room_helpers_round_trip() {
-        let localpart = managed_room_localpart("waddle-1", "channel-9");
-        assert_eq!(localpart, "waddle-1_channel-9");
-        assert_eq!(
-            parse_managed_room_localpart(&localpart),
-            Some(("waddle-1".to_string(), "channel-9".to_string()))
-        );
-
-        let room_jid =
-            managed_room_jid("waddle-1", "channel-9", "muc.example.com").expect("managed room jid");
-        assert_eq!(room_jid.to_string(), "waddle-1_channel-9@muc.example.com");
-        assert_eq!(
-            parse_managed_room_jid(&room_jid),
-            Some(("waddle-1".to_string(), "channel-9".to_string()))
-        );
-    }
-
-    #[test]
-    fn managed_room_parser_rejects_invalid_localparts() {
-        assert_eq!(parse_managed_room_localpart("single"), None);
-        assert_eq!(parse_managed_room_localpart("_channel"), None);
-        assert_eq!(parse_managed_room_localpart("waddle_"), None);
-    }
-
-    #[test]
-    fn supported_channel_types_are_explicit() {
-        assert_eq!(ChannelType::parse("text"), Some(ChannelType::Text));
-        assert_eq!(ChannelType::parse("forum"), Some(ChannelType::Forum));
-        assert_eq!(ChannelType::parse("voice"), None);
-    }
 }
 
 /// User session information.
