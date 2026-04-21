@@ -5,11 +5,13 @@
 //! spawns per-room `RoomActor` instances on demand.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use kameo::message::Context;
 use kameo::Actor;
+use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::room_actor::RoomActor;
@@ -23,6 +25,12 @@ use super::{MucRoom, RoomConfig};
 pub struct RoomRegistryActor {
     rooms: HashMap<BareJid, ActorRef<RoomActor>>,
     muc_domain: String,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum RoomRegistryError {
+    #[error("room {0} already exists")]
+    RoomAlreadyExists(BareJid),
 }
 
 impl RoomRegistryActor {
@@ -62,7 +70,7 @@ pub struct GetRoom {
 }
 
 impl kameo::message::Message<GetRoom> for RoomRegistryActor {
-    type Reply = Result<Option<ActorRef<RoomActor>>, String>;
+    type Reply = Result<Option<ActorRef<RoomActor>>, Infallible>;
 
     async fn handle(&mut self, msg: GetRoom, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         Ok(self.rooms.get(&msg.room_jid).cloned())
@@ -78,7 +86,7 @@ pub struct GetOrCreateRoom {
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, String>;
+    type Reply = Result<ActorRef<RoomActor>, Infallible>;
 
     async fn handle(
         &mut self,
@@ -91,8 +99,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
         }
 
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
-        let actor_ref = self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config);
-        Ok(actor_ref)
+        Ok(self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config))
     }
 }
 
@@ -105,7 +112,7 @@ pub struct CreateRoom {
 }
 
 impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, String>;
+    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -113,7 +120,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.rooms.contains_key(&msg.room_jid) {
-            return Err(format!("Room {} already exists", msg.room_jid));
+            return Err(RoomRegistryError::RoomAlreadyExists(msg.room_jid));
         }
 
         info!(room = %msg.room_jid, "Creating new room");
@@ -188,7 +195,7 @@ impl kameo::message::Message<IsMucJid> for RoomRegistryActor {
 pub struct ListRooms;
 
 impl kameo::message::Message<ListRooms> for RoomRegistryActor {
-    type Reply = Result<Vec<BareJid>, String>;
+    type Reply = Result<Vec<BareJid>, Infallible>;
 
     async fn handle(
         &mut self,
@@ -221,6 +228,7 @@ impl kameo::message::Message<RoomCount> for RoomRegistryActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kameo::error::SendError;
 
     fn test_room_jid(name: &str) -> BareJid {
         format!("{}@muc.example.com", name)
@@ -282,15 +290,18 @@ mod tests {
 
         let result = registry
             .ask(CreateRoom {
-                room_jid: jid,
+                room_jid: jid.clone(),
                 waddle_id: "w-1".to_string(),
                 channel_id: "c-1".to_string(),
                 config: RoomConfig::default(),
             })
             .await;
 
-        // Should fail with HandlerError (duplicate)
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomRegistryError::RoomAlreadyExists(room_jid)))
+                if room_jid == jid
+        ));
     }
 
     #[tokio::test]

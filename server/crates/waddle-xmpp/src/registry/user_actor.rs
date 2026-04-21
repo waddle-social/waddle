@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
+use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -29,6 +30,16 @@ pub struct UserActor {
     presence_states: HashMap<FullJid, PresenceState>,
     pending_subscriptions: Vec<Stanza>,
     carbons_enabled: HashMap<FullJid, bool>,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum UserActorError {
+    #[error("resource {0} not connected")]
+    ResourceNotConnected(FullJid),
+    #[error("outbound channel full for {0}")]
+    ChannelFull(FullJid),
+    #[error("outbound channel closed for {0}")]
+    ChannelClosed(FullJid),
 }
 
 impl UserActor {
@@ -111,7 +122,7 @@ pub struct RouteStanza {
 }
 
 impl kameo::message::Message<RouteStanza> for UserActor {
-    type Reply = Result<(), String>;
+    type Reply = Result<(), UserActorError>;
 
     async fn handle(
         &mut self,
@@ -120,19 +131,20 @@ impl kameo::message::Message<RouteStanza> for UserActor {
     ) -> Self::Reply {
         let sender = match self.resources.get(&msg.target) {
             Some(s) => s,
-            None => return Err(format!("Resource {} not connected", msg.target)),
+            None => return Err(UserActorError::ResourceNotConnected(msg.target)),
         };
+        let target = msg.target;
         let outbound = OutboundStanza::new(msg.stanza);
         match sender.try_send(outbound) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(target = %msg.target, "Outbound channel full");
-                Err("channel full".to_string())
+                warn!(target = %target, "Outbound channel full");
+                Err(UserActorError::ChannelFull(target))
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                warn!(target = %msg.target, "Outbound channel closed, removing stale resource");
-                self.remove_resource(&msg.target);
-                Err("channel closed".to_string())
+                warn!(target = %target, "Outbound channel closed, removing stale resource");
+                self.remove_resource(&target);
+                Err(UserActorError::ChannelClosed(target))
             }
         }
     }
@@ -390,6 +402,7 @@ impl kameo::message::Message<ResourceCount> for UserActor {
 mod tests {
     use super::*;
     use kameo::actor::ActorRef;
+    use kameo::error::SendError;
 
     fn bare(user: &str) -> BareJid {
         format!("{user}@example.com").parse().expect("bare jid")
@@ -706,11 +719,15 @@ mod tests {
         let msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(bare("alice"))));
         let result = actor
             .ask(RouteStanza {
-                target: jid,
+                target: jid.clone(),
                 stanza: Stanza::Message(msg),
             })
             .await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(UserActorError::ResourceNotConnected(target)))
+                if target == jid
+        ));
     }
 
     #[tokio::test]
@@ -737,7 +754,11 @@ mod tests {
                 stanza: Stanza::Message(msg),
             })
             .await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(UserActorError::ChannelClosed(target)))
+                if target == jid
+        ));
 
         // Resource should have been cleaned up
         let count: usize = actor.ask(ResourceCount).await.expect("count");

@@ -7,6 +7,8 @@
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
+use std::convert::Infallible;
+use thiserror::Error;
 
 use super::room_registry::RoomInfo;
 use super::{MucRoom, RoomConfig};
@@ -49,6 +51,16 @@ pub struct RoomActor {
     room: MucRoom,
 }
 
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum RoomActorError {
+    #[error("room is full")]
+    RoomFull,
+    #[error("nick '{0}' already in use")]
+    NickAlreadyInUse(String),
+    #[error("no occupant with nick '{0}'")]
+    OccupantNotFound(String),
+}
+
 impl RoomActor {
     /// Create a new `RoomActor` wrapping the given room.
     pub fn new(room: MucRoom) -> Self {
@@ -69,14 +81,14 @@ pub struct Join {
 }
 
 impl kameo::message::Message<Join> for RoomActor {
-    type Reply = Result<(), String>;
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if self.room.is_full() {
-            return Err("Room is full".to_string());
+            return Err(RoomActorError::RoomFull);
         }
         if self.room.get_occupant(&msg.nick).is_some() {
-            return Err(format!("Nick '{}' already in use", msg.nick));
+            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         }
         self.room.add_occupant(super::Occupant {
             real_jid: msg.real_jid,
@@ -96,13 +108,13 @@ pub struct Leave {
 }
 
 impl kameo::message::Message<Leave> for RoomActor {
-    type Reply = Result<(), String>;
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.room
             .remove_occupant(&msg.nick)
             .map(|_| ())
-            .ok_or_else(|| format!("No occupant with nick '{}'", msg.nick))
+            .ok_or(RoomActorError::OccupantNotFound(msg.nick))
     }
 }
 
@@ -148,7 +160,7 @@ impl kameo::message::Message<GetOccupantByNick> for RoomActor {
 pub struct GetInfo;
 
 impl kameo::message::Message<GetInfo> for RoomActor {
-    type Reply = Result<RoomInfo, String>;
+    type Reply = Result<RoomInfo, Infallible>;
 
     async fn handle(
         &mut self,
@@ -167,7 +179,7 @@ impl kameo::message::Message<GetInfo> for RoomActor {
 pub struct GetConfig;
 
 impl kameo::message::Message<GetConfig> for RoomActor {
-    type Reply = Result<RoomConfig, String>;
+    type Reply = Result<RoomConfig, Infallible>;
 
     async fn handle(
         &mut self,
@@ -219,7 +231,7 @@ pub struct GetAffiliation {
 }
 
 impl kameo::message::Message<GetAffiliation> for RoomActor {
-    type Reply = Result<Affiliation, String>;
+    type Reply = Result<Affiliation, Infallible>;
 
     async fn handle(
         &mut self,
@@ -283,7 +295,7 @@ impl kameo::message::Message<Destroy> for RoomActor {
 pub struct GetRoomJid;
 
 impl kameo::message::Message<GetRoomJid> for RoomActor {
-    type Reply = Result<BareJid, String>;
+    type Reply = Result<BareJid, Infallible>;
 
     async fn handle(
         &mut self,
@@ -302,6 +314,7 @@ impl kameo::message::Message<GetRoomJid> for RoomActor {
 mod tests {
     use super::*;
     use kameo::actor::ActorRef;
+    use kameo::error::SendError;
 
     fn test_room() -> MucRoom {
         let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
@@ -330,7 +343,6 @@ mod tests {
         let count = actor.ask(OccupantCount).await.expect("ask");
         assert_eq!(count, 0);
 
-        // Reply = Result<(), String> -- ask flattens to Result<(), SendError<..., String>>
         actor
             .ask(Join {
                 nick: "alice".to_string(),
@@ -359,8 +371,6 @@ mod tests {
             .await
             .expect("first join");
 
-        // The handler returns Err(String) which kameo surfaces as
-        // SendError::HandlerError, so .await produces Err(_).
         let result = actor
             .ask(Join {
                 nick: "alice".to_string(),
@@ -369,7 +379,11 @@ mod tests {
                 affiliation: Affiliation::Member,
             })
             .await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::NickAlreadyInUse(nick)))
+                if nick == "alice"
+        ));
     }
 
     #[tokio::test]
@@ -406,7 +420,11 @@ mod tests {
                 nick: "ghost".to_string(),
             })
             .await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::OccupantNotFound(nick)))
+                if nick == "ghost"
+        ));
     }
 
     #[tokio::test]

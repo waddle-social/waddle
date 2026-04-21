@@ -45,7 +45,9 @@ pub use presence::{
     HistoryRequest, MucJoinRequest, MucLeaveRequest, MucPresenceAction, MucPresenceUpdateRequest,
     OutboundMucPresence,
 };
+pub use room_actor::RoomActorError;
 pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
+pub use room_registry_actor::RoomRegistryError;
 
 use std::collections::HashMap;
 

@@ -6,6 +6,7 @@
 //! concerns (Phase 2 of the actor-model migration).
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 
 use jid::BareJid;
 use kameo::actor::ActorRef;
@@ -51,7 +52,7 @@ pub struct GetOrCreateUser {
 }
 
 impl kameo::message::Message<GetOrCreateUser> for UserRegistryActor {
-    type Reply = Result<ActorRef<UserActor>, String>;
+    type Reply = Result<ActorRef<UserActor>, Infallible>;
 
     async fn handle(
         &mut self,
@@ -77,7 +78,7 @@ pub struct GetUser {
 }
 
 impl kameo::message::Message<GetUser> for UserRegistryActor {
-    type Reply = Result<Option<ActorRef<UserActor>>, String>;
+    type Reply = Result<Option<ActorRef<UserActor>>, Infallible>;
 
     async fn handle(&mut self, msg: GetUser, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         Ok(self.users.get(&msg.bare_jid).cloned())
