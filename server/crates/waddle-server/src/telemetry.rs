@@ -7,19 +7,24 @@
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
+    logs::SdkLoggerProvider,
     metrics::{PeriodicReader, SdkMeterProvider},
     trace::SdkTracerProvider,
     Resource,
 };
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// The global tracer provider, stored for shutdown.
 static TRACER_PROVIDER: std::sync::OnceLock<SdkTracerProvider> = std::sync::OnceLock::new();
 
 /// The global meter provider, stored for shutdown.
 static METER_PROVIDER: std::sync::OnceLock<SdkMeterProvider> = std::sync::OnceLock::new();
+
+/// The global logger provider, stored for shutdown.
+static LOGGER_PROVIDER: std::sync::OnceLock<SdkLoggerProvider> = std::sync::OnceLock::new();
 
 /// Build the OpenTelemetry resource with service information.
 fn build_resource() -> Resource {
@@ -39,6 +44,42 @@ fn build_resource() -> Resource {
 fn default_filter() -> EnvFilter {
     // Keep historical defaults to avoid changing verbosity unexpectedly.
     EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug")
+}
+
+/// Filter for the OTLP log bridge.
+///
+/// The exporter itself uses `tonic` / `hyper` / `h2` / `reqwest`, and
+/// those crates emit `tracing` events internally. Without this filter
+/// the bridge would feed their output right back into the exporter,
+/// which would emit more events — a feedback loop that blows up the
+/// pipeline. Silencing those targets at the bridge layer keeps them
+/// visible on stdout (through the `fmt` layer) but out of OTLP.
+fn log_bridge_filter() -> EnvFilter {
+    EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug")
+        .add_directive("hyper=off".parse().expect("static directive must be valid"))
+        .add_directive(
+            "hyper_util=off"
+                .parse()
+                .expect("static directive must be valid"),
+        )
+        .add_directive("tonic=off".parse().expect("static directive must be valid"))
+        .add_directive("h2=off".parse().expect("static directive must be valid"))
+        .add_directive(
+            "reqwest=off"
+                .parse()
+                .expect("static directive must be valid"),
+        )
+        .add_directive("tower=off".parse().expect("static directive must be valid"))
+        .add_directive(
+            "opentelemetry=off"
+                .parse()
+                .expect("static directive must be valid"),
+        )
+        .add_directive(
+            "opentelemetry_sdk=off"
+                .parse()
+                .expect("static directive must be valid"),
+        )
 }
 
 fn build_log_filter() -> EnvFilter {
@@ -69,6 +110,7 @@ fn build_log_filter() -> EnvFilter {
 /// This sets up:
 /// - OTLP exporter for traces (to Jaeger, Grafana Tempo, etc.)
 /// - OTLP exporter for metrics
+/// - OTLP exporter for logs (bridged from `tracing` events)
 /// - tracing-subscriber with OpenTelemetry integration
 /// - Console output for local development
 ///
@@ -129,7 +171,7 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Build meter provider
     let meter_provider = SdkMeterProvider::builder()
         .with_reader(PeriodicReader::builder(metrics_exporter).build())
-        .with_resource(resource)
+        .with_resource(resource.clone())
         .build();
 
     // Store the meter provider for shutdown
@@ -137,6 +179,21 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Set global meter provider
     opentelemetry::global::set_meter_provider(meter_provider);
+
+    // Build OTLP logs exporter + provider. The tracing bridge below
+    // feeds every `tracing::{info,warn,error,debug,trace}!` event into
+    // this provider as an OTLP log record, in addition to stdout.
+    let log_exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(&otlp_endpoint)
+        .build()?;
+
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(log_exporter)
+        .with_resource(resource)
+        .build();
+
+    let _ = LOGGER_PROVIDER.set(logger_provider.clone());
 
     let filter = build_log_filter();
 
@@ -153,11 +210,18 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Build the OpenTelemetry tracing layer
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
+    // Bridge `tracing` events into the OTLP log pipeline. Scope its
+    // own filter so the HTTP/gRPC transports used by the OTLP exporter
+    // can't feed their logs back into themselves and loop.
+    let otel_log_layer =
+        OpenTelemetryTracingBridge::new(&logger_provider).with_filter(log_bridge_filter());
+
     // Combine layers and set as global subscriber
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)
         .with(telemetry_layer)
+        .with(otel_log_layer)
         .init();
 
     tracing::info!(
@@ -211,6 +275,13 @@ pub fn shutdown() {
     if let Some(provider) = METER_PROVIDER.get() {
         if let Err(e) = provider.shutdown() {
             tracing::error!(error = %e, "Error shutting down meter provider");
+        }
+    }
+
+    // Shutdown logger provider (flushes any buffered OTLP log records).
+    if let Some(provider) = LOGGER_PROVIDER.get() {
+        if let Err(e) = provider.shutdown() {
+            tracing::error!(error = %e, "Error shutting down logger provider");
         }
     }
 
