@@ -1,3 +1,6 @@
+// This integration test pulls in the shared test harness plus a large async
+// connection setup future, which needs a slightly higher query depth to
+// compile reliably in debug test builds.
 #![recursion_limit = "256"]
 
 use anyhow::{anyhow, Context, Result};
@@ -173,7 +176,7 @@ async fn handle_test_connection<S: AppState>(
     push_sender: Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync>,
     cmd_registry: Arc<CommandRegistry>,
 ) {
-    let _ = ConnectionActor::handle_connection(
+    if let Err(error) = ConnectionActor::handle_connection(
         stream,
         peer_addr,
         tls,
@@ -192,7 +195,10 @@ async fn handle_test_connection<S: AppState>(
         push_sender,
         cmd_registry,
     )
-    .await;
+    .await
+    {
+        eprintln!("test connection ended with error: {error:#}");
+    }
 }
 
 async fn establish_bound_session(
