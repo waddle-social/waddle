@@ -1,12 +1,7 @@
 import { describe, test, expect, mock } from "bun:test";
 import type { Agent } from "stanza";
 import { sendGroupMessage } from "../src/lib/xmpp/messaging";
-
-const encoder = new TextEncoder();
-
-function byteLen(input: string): number {
-  return encoder.encode(input).byteLength;
-}
+import { codePointLength } from "../src/lib/text-offsets";
 
 function makeAgent() {
   return {
@@ -116,21 +111,30 @@ describe("groupchat replies + threads", () => {
     sendGroupMessage(xmpp, "general@muc.waddle.social", body, {
       replyTo: { id: "msg-1", author: "general@muc.waddle.social/alice", body: "👋 hi" },
       markup: [
-        { type: "b", start: 0, end: byteLen("bold") },
-        { type: "code", start: byteLen("bold "), end: byteLen("bold code") },
-        { type: "link", start: byteLen("bold code "), end: byteLen(body), uri: "https://example.com/docs" },
+        { type: "span", start: 0, end: codePointLength("bold"), styles: ["strong"] },
+        { type: "span", start: codePointLength("bold "), end: codePointLength("bold code"), styles: ["code"] },
+      ],
+      references: [
+        { type: "data", begin: codePointLength("bold code "), end: codePointLength(body), uri: "https://example.com/docs" },
       ],
     });
 
     const call = (xmpp.sendMessage as ReturnType<typeof mock>).mock.calls[0][0] as Record<string, unknown>;
-    const prefixBytes = byteLen(prefix);
+    const prefixLength = codePointLength(prefix);
     expect(call.body).toBe(`${prefix}${body}`);
     expect(call.markup).toEqual({
       spans: [
-        { type: "b", start: prefixBytes, end: prefixBytes + byteLen("bold") },
-        { type: "code", start: prefixBytes + byteLen("bold "), end: prefixBytes + byteLen("bold code") },
-        { type: "link", start: prefixBytes + byteLen("bold code "), end: prefixBytes + byteLen(body), uri: "https://example.com/docs" },
+        { type: "span", start: prefixLength, end: prefixLength + codePointLength("bold"), styles: ["strong"] },
+        { type: "span", start: prefixLength + codePointLength("bold "), end: prefixLength + codePointLength("bold code"), styles: ["code"] },
       ],
     });
+    expect(call.references).toEqual([
+      {
+        type: "data",
+        uri: "https://example.com/docs",
+        begin: String(prefixLength + codePointLength("bold code ")),
+        end: String(prefixLength + codePointLength(body)),
+      },
+    ]);
   });
 });

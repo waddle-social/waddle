@@ -16,7 +16,7 @@ import {
   type RoomPresence,
 } from "@/lib/xmpp-client";
 import { $xmppStatus } from "@/stores/xmpp-status";
-import type { DeliveryStatus, MarkupSpan, TimelineMessage } from "@/lib/chat-ui";
+import type { DeliveryStatus, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import { MAX_IMAGE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
 import {
@@ -64,6 +64,9 @@ export function fromLiveMessage(
   }
   if (msg.markup && msg.markup.length > 0) {
     tm.markup = msg.markup;
+  }
+  if (msg.references && msg.references.length > 0) {
+    tm.references = msg.references;
   }
   if (msg.replyTo) {
     const parent = parentLookup?.(msg.replyTo.id);
@@ -129,12 +132,13 @@ function queuedRoomMessageToTimeline(
     id: queued.id,
     author: session.username,
     authorJid: `${roomJid}/${session.username}`,
-    body: queued.body.trim() || (queued.files?.[0]?.url ?? ""),
+    body: queued.body || (queued.files?.[0]?.url ?? ""),
     createdAt: queued.createdAt,
     isSelf: true,
     deliveryStatus: "queued",
   };
   if (queued.markup && queued.markup.length > 0) message.markup = queued.markup;
+  if (queued.references && queued.references.length > 0) message.references = queued.references;
   if (queued.replyTo) {
     message.replyTo = {
       id: queued.replyTo.id,
@@ -265,7 +269,7 @@ export function useMessaging(
 
         // XEP-0308: Handle message corrections
         if (msg.replacesId) {
-          applyCorrection(msg.replacesId, msg.body, msg.markup);
+          applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references);
           return;
         }
 
@@ -521,7 +525,7 @@ export function useMessaging(
     );
   }
 
-  function applyCorrection(replacesId: string, newBody: string, markup?: MarkupSpan[]) {
+  function applyCorrection(replacesId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     const idx = messages.value.findIndex((m) => matchMessageId(m, replacesId));
     if (idx === -1) return;
     messages.value = messages.value.map((m) => {
@@ -531,6 +535,11 @@ export function useMessaging(
         updated.markup = markup;
       } else {
         delete updated.markup;
+      }
+      if (references && references.length > 0) {
+        updated.references = references;
+      } else {
+        delete updated.references;
       }
       return updated;
     });
@@ -701,7 +710,7 @@ export function useMessaging(
       const regularMessages: LiveRoomMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
       const retractionUpdates: string[] = [];
-      const correctionUpdates: { targetId: string; body: string; markup?: MarkupSpan[] }[] = [];
+      const correctionUpdates: { targetId: string; body: string; markup?: MarkupSpan[]; references?: MessageReference[] }[] = [];
 
       for (const msg of mamResults) {
         if (msg._reactionTarget && msg._reactionEmojis) {
@@ -717,6 +726,7 @@ export function useMessaging(
             targetId: msg.replacesId,
             body: msg.body,
             markup: msg.markup,
+            references: msg.references,
           });
         } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker) {
           regularMessages.push(msg);
@@ -735,12 +745,17 @@ export function useMessaging(
       for (const update of correctionUpdates) {
         const target = findMessageById(timeline, update.targetId);
         if (!target) continue;
-        target.body = update.body.trim();
+        target.body = update.body;
         target.isEdited = true;
         if (update.markup && update.markup.length > 0) {
           target.markup = update.markup;
         } else {
           delete target.markup;
+        }
+        if (update.references && update.references.length > 0) {
+          target.references = update.references;
+        } else {
+          delete target.references;
         }
       }
 
@@ -852,6 +867,7 @@ export function useMessaging(
   async function sendMessage(
     body?: string,
     markup?: MarkupSpan[],
+    references?: MessageReference[],
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
     forumTitleOrThreadOverride?: string | { threadId: string; parentThreadId?: string },
@@ -924,6 +940,7 @@ export function useMessaging(
         : undefined;
       const result = await client.sendGroupMessage(waddleId, channelId, bodyText, {
         markup,
+        references,
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
@@ -943,11 +960,12 @@ export function useMessaging(
           id: msgId,
           author: session.value.username,
           authorJid: `${currentRoomJid.value}/${session.value.username}`,
-          body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
+          body: bodyText || (attachments?.[0]?.url ?? ""),
           createdAt: new Date().toISOString(),
           isSelf: true,
           deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
-          markup,
+          ...(markup && markup.length > 0 ? { markup } : {}),
+          ...(references && references.length > 0 ? { references } : {}),
         };
         if (replyTo && parent) {
           optimistic.replyTo = {
@@ -1079,7 +1097,7 @@ export function useMessaging(
     }
   }
 
-  async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[]) {
+  async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activeWaddleId.value || !activeChannelId.value || !newBody.trim())
       return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
@@ -1093,6 +1111,7 @@ export function useMessaging(
         newBody,
         targetId,
         markup,
+        references,
       );
     } catch (e) {
       actionError.value = normalizeError(e);

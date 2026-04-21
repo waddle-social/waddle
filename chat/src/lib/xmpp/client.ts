@@ -671,6 +671,7 @@ export class BrowserXmppClient {
       roomJid,
       body,
       ...(opts.markup && opts.markup.length > 0 ? { markup: opts.markup } : {}),
+      ...(opts.references && opts.references.length > 0 ? { references: opts.references } : {}),
       ...(opts.files && opts.files.length > 0 ? { files: opts.files } : {}),
       ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
       ...(opts.threadId ? { threadId: opts.threadId } : {}),
@@ -697,6 +698,8 @@ export class BrowserXmppClient {
       createdAt: new Date().toISOString(),
       peerJid: barePeerJid(peerJid),
       body,
+      ...(opts.markup && opts.markup.length > 0 ? { markup: opts.markup } : {}),
+      ...(opts.references && opts.references.length > 0 ? { references: opts.references } : {}),
       ...(opts.files && opts.files.length > 0 ? { files: opts.files } : {}),
       ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
       ...(opts.threadId ? { threadId: opts.threadId } : {}),
@@ -741,6 +744,8 @@ export class BrowserXmppClient {
           barePeerJid(entry.peerJid),
           entry.body,
           {
+            ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
+            ...(entry.references && entry.references.length > 0 ? { references: entry.references } : {}),
             ...(entry.files && entry.files.length > 0 ? { files: entry.files } : {}),
             ...(entry.replyTo ? { replyTo: entry.replyTo } : {}),
             ...(entry.threadId ? { threadId: entry.threadId } : {}),
@@ -776,6 +781,7 @@ export class BrowserXmppClient {
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
           ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
+          ...(entry.references && entry.references.length > 0 ? { references: entry.references } : {}),
           ...(entry.files && entry.files.length > 0 ? { files: entry.files } : {}),
           ...(entry.replyTo ? { replyTo: entry.replyTo } : {}),
           ...(entry.threadId ? { threadId: entry.threadId } : {}),
@@ -820,9 +826,16 @@ export class BrowserXmppClient {
     const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
     messaging.sendModeration(xmpp, roomJid, targetId, reason);
   }
-  async sendCorrection(w: string, c: string, body: string, replacesId: string, markup?: import("@/lib/chat-ui").MarkupSpan[]): Promise<string | null> {
+  async sendCorrection(
+    w: string,
+    c: string,
+    body: string,
+    replacesId: string,
+    markup?: import("@/lib/chat-ui").MarkupSpan[],
+    references?: import("@/lib/chat-ui").MessageReference[],
+  ): Promise<string | null> {
     const { xmpp, roomJid } = await this.requireJoinedRoom(w, c);
-    return messaging.sendCorrection(xmpp, roomJid, body, replacesId, markup);
+    return messaging.sendCorrection(xmpp, roomJid, body, replacesId, markup, references);
   }
   async sendGroupMessage(
     w: string,
@@ -947,9 +960,15 @@ export class BrowserXmppClient {
     dmMessaging.sendDmRetraction(xmpp, barePeerJid(peerJid), messageId);
   }
 
-  async sendDmCorrection(peerJid: string, body: string, replacesId: string): Promise<string | null> {
+  async sendDmCorrection(
+    peerJid: string,
+    body: string,
+    replacesId: string,
+    markup?: import("@/lib/chat-ui").MarkupSpan[],
+    references?: import("@/lib/chat-ui").MessageReference[],
+  ): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
-    return dmMessaging.sendDmCorrection(xmpp, barePeerJid(peerJid), body, replacesId);
+    return dmMessaging.sendDmCorrection(xmpp, barePeerJid(peerJid), body, replacesId, markup, references);
   }
 
   async sendDmReaction(peerJid: string, messageId: string, emojis: string[]): Promise<void> {

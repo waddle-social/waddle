@@ -2,12 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { dispatchGroupchat, type GroupchatHandlers } from "../src/lib/xmpp/message-parsing";
 import type { ReceivedMessage } from "stanza/protocol";
 import type { LiveRoomMessage } from "../src/lib/xmpp/types";
-
-const encoder = new TextEncoder();
-
-function byteLen(input: string): number {
-  return encoder.encode(input).byteLength;
-}
+import { codePointLength } from "../src/lib/text-offsets";
 
 function makeHandlers(overrides?: Partial<GroupchatHandlers>): GroupchatHandlers & {
   messages: LiveRoomMessage[];
@@ -204,24 +199,31 @@ describe("groupchat reply + thread parsing", () => {
     const h = makeHandlers();
     const body = "bold code link";
     const prefix = "> 👋 hi\n\n";
-    const prefixBytes = byteLen(prefix);
+    const prefixLength = codePointLength(prefix);
 
     dispatchGroupchat(
       makeMsg({
         id: "msg-5",
         body: `${prefix}${body}`,
         reply: { to: "general@muc.waddle.social/bob", id: "msg-1" },
-        fallbacks: [{ for: "urn:xmpp:reply:0", body: { start: 0, end: prefix.length } }],
+        fallbacks: [{ for: "urn:xmpp:reply:0", body: { start: 0, end: prefixLength } }],
         markup: {
           spans: [
-            { type: "b", start: prefixBytes, end: prefixBytes + byteLen("bold") },
-            { type: "code", start: prefixBytes + byteLen("bold "), end: prefixBytes + byteLen("bold code") },
-            { type: "link", start: prefixBytes + byteLen("bold code "), end: prefixBytes + byteLen(body), uri: "https://example.com/docs" },
-            { type: "i", start: prefixBytes - byteLen("hi\n\n"), end: prefixBytes + byteLen("bo") },
-            { type: "s", start: byteLen("> "), end: byteLen("> 👋") },
-            { type: "code", start: prefixBytes + byteLen("bold"), end: prefixBytes + byteLen("bold") },
+            { type: "span", start: prefixLength, end: prefixLength + codePointLength("bold"), styles: ["strong"] },
+            { type: "span", start: prefixLength + codePointLength("bold "), end: prefixLength + codePointLength("bold code"), styles: ["code"] },
+            { type: "span", start: prefixLength - codePointLength("hi\n\n"), end: prefixLength + codePointLength("bo"), styles: ["emphasis"] },
+            { type: "span", start: codePointLength("> "), end: codePointLength("> 👋"), styles: ["deleted"] },
+            { type: "span", start: prefixLength + codePointLength("bold"), end: prefixLength + codePointLength("bold"), styles: ["code"] },
           ],
         },
+        references: [
+          {
+            type: "data",
+            begin: String(prefixLength + codePointLength("bold code ")),
+            end: String(prefixLength + codePointLength(body)),
+            uri: "https://example.com/docs",
+          },
+        ],
       }),
       h,
     );
@@ -229,10 +231,17 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0].body).toBe(body);
     expect(h.messages[0].markup).toEqual([
-      { type: "b", start: 0, end: byteLen("bold") },
-      { type: "code", start: byteLen("bold "), end: byteLen("bold code") },
-      { type: "link", start: byteLen("bold code "), end: byteLen(body), uri: "https://example.com/docs" },
-      { type: "i", start: 0, end: byteLen("bo") },
+      { type: "span", start: 0, end: codePointLength("bold"), styles: ["strong"] },
+      { type: "span", start: codePointLength("bold "), end: codePointLength("bold code"), styles: ["code"] },
+      { type: "span", start: 0, end: codePointLength("bo"), styles: ["emphasis"] },
+    ]);
+    expect(h.messages[0].references).toEqual([
+      {
+        type: "data",
+        begin: codePointLength("bold code "),
+        end: codePointLength(body),
+        uri: "https://example.com/docs",
+      },
     ]);
   });
 });

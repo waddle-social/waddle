@@ -133,7 +133,7 @@ describe("forum composition", () => {
       },
     ];
 
-    await messaging.sendMessage("Agreed.", [], undefined, {
+    await messaging.sendMessage("Agreed.", [], [], undefined, {
       id: "reply-1",
       author: "Carol",
       body: "Start with onboarding.",

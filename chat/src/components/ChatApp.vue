@@ -34,7 +34,7 @@ import NewDmDialog from "@/components/modals/NewDmDialog.vue";
 import MemberManagement from "@/components/modals/MemberManagement.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import type { MemberSummary } from "@/lib/waddle-api";
-import type { MarkupSpan } from "@/lib/chat-ui";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 
 const props = defineProps<{
   tenorApiKey?: string;
@@ -335,25 +335,31 @@ const activeUploadProgress = computed(() =>
 async function sendActiveMessage(
   body?: string,
   markup?: MarkupSpan[],
+  references?: MessageReference[],
   files?: Array<File | Blob>,
   replyTo?: { id: string; author: string; body?: string },
   forumTitle?: string,
 ) {
   if (ui.sidebarMode.value === "dms") {
-    await dmMessaging.sendMessage(body, markup, files, replyTo);
+    await dmMessaging.sendMessage(body, markup, references, files, replyTo);
     return;
   }
-  await messaging.sendMessage(body, markup, files, replyTo, forumTitle);
+  await messaging.sendMessage(body, markup, references, files, replyTo, forumTitle);
 }
 
 async function sendThreadMessage(
   body: string,
   markup: MarkupSpan[],
+  references: MessageReference[],
   files: Array<File | Blob> | undefined,
   replyTo: { id: string; author: string; body?: string } | undefined,
   threadOverride: { threadId: string; parentThreadId?: string },
 ) {
-  await messaging.sendMessage(body, markup, files, replyTo, threadOverride);
+  await messaging.sendMessage(body, markup, references, files, replyTo, threadOverride);
+}
+
+function sendGif(url: string) {
+  void sendActiveMessage(url, [], []);
 }
 
 function openThread(threadId: string) {
@@ -415,12 +421,12 @@ function notifyActiveComposing() {
   activeTarget.value.notifyComposing();
 }
 
-function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[]) {
+function editActiveMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
   if (ui.sidebarMode.value === "dms") {
-    void dmMessaging.editMessage(messageId, newBody);
+    void dmMessaging.editMessage(messageId, newBody, markup, references);
     return;
   }
-  void messaging.editMessage(messageId, newBody, markup);
+  void messaging.editMessage(messageId, newBody, markup, references);
 }
 
 function retractActiveMessage(messageId: string) {

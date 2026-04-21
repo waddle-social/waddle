@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { buildReplyFallbackPrefix } from "../src/lib/xmpp/messaging";
+import { codePointLength } from "../src/lib/text-offsets";
 
 describe("buildReplyFallbackPrefix", () => {
   test("returns empty values when parent body is missing", () => {
@@ -22,7 +23,7 @@ describe("buildReplyFallbackPrefix", () => {
   test("length matches the returned prefix character count", () => {
     const parent = "hi 👋\nmultiline";
     const { prefix, length } = buildReplyFallbackPrefix(parent);
-    expect(length).toBe(prefix.length);
+    expect(length).toBe(codePointLength(prefix));
     expect(prefix.startsWith("> hi ")).toBe(true);
     expect(prefix.endsWith("\n\n")).toBe(true);
   });

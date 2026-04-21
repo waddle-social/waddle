@@ -2,12 +2,7 @@ import { describe, test, expect, mock } from "bun:test";
 import { dispatchChat, type DmHandlers } from "../src/lib/xmpp/dm-parsing";
 import type { ReceivedMessage } from "stanza/protocol";
 import type { LiveDmMessage, DmChatStateEvent, DmDisplayedEvent, DmReactionEvent } from "../src/lib/xmpp/types";
-
-const encoder = new TextEncoder();
-
-function byteLen(input: string): number {
-  return encoder.encode(input).byteLength;
-}
+import { codePointLength } from "../src/lib/text-offsets";
 
 function makeHandlers(overrides?: Partial<DmHandlers>): DmHandlers & {
   messages: LiveDmMessage[];
@@ -227,17 +222,17 @@ describe("dispatchChat", () => {
     const h = makeHandlers();
     const body = "reply code";
     const prefix = "> 👋 hi\n\n";
-    const prefixBytes = byteLen(prefix);
+    const prefixLength = codePointLength(prefix);
 
     dispatchChat(
       makeMsg({
         id: "reply-1",
         body: `${prefix}${body}`,
         reply: { to: "bob@example.com", id: "dm-1" },
-        fallbacks: [{ for: "urn:xmpp:reply:0", body: { start: 0, end: prefix.length } }],
+        fallbacks: [{ for: "urn:xmpp:reply:0", body: { start: 0, end: prefixLength } }],
         markup: {
           spans: [
-            { type: "code", start: prefixBytes + byteLen("reply "), end: prefixBytes + byteLen(body) },
+            { type: "span", start: prefixLength + codePointLength("reply "), end: prefixLength + codePointLength(body), styles: ["code"] },
           ],
         },
       }),
@@ -248,7 +243,7 @@ describe("dispatchChat", () => {
     expect(h.messages[0].body).toBe(body);
     expect(h.messages[0].replyTo).toEqual({ id: "dm-1", author: "bob@example.com" });
     expect(h.messages[0].markup).toEqual([
-      { type: "code", start: byteLen("reply "), end: byteLen(body) },
+      { type: "span", start: codePointLength("reply "), end: codePointLength(body), styles: ["code"] },
     ]);
   });
 });

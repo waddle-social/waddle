@@ -1,11 +1,12 @@
 /** Outbound message operations — all send* functions as standalone. */
 import type { Agent } from "stanza";
-import type { MarkupSpan } from "@/lib/chat-ui";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { WaddleFallback } from "./extensions/fallback";
 import type { WaddleThreadCreate, WaddleThreadReply } from "./extensions/forums";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { shiftMarkupSpans, type WaddleMarkupSpan } from "./extensions/markup";
 import type { ChatStateType } from "./types";
+import { codePointLength } from "@/lib/text-offsets";
 
 export interface OutboundFileAttachment {
   url: string;
@@ -24,12 +25,6 @@ export interface ReplyTarget {
   author: string;
   /** Original message body, used to build the > quoted fallback prefix. */
   body?: string;
-}
-
-const encoder = new TextEncoder();
-
-function byteLen(text: string): number {
-  return encoder.encode(text).byteLength;
 }
 
 /** Build one XEP-0447 <file-sharing> payload for a single attachment. */
@@ -65,7 +60,7 @@ export function buildReplyFallbackPrefix(parentBody: string | undefined): { pref
   const lines = parentBody.split("\n");
   const quoted = lines.map((line) => `> ${line}`).join("\n");
   const prefix = `${quoted}\n\n`;
-  return { prefix, length: prefix.length };
+  return { prefix, length: codePointLength(prefix) };
 }
 
 export function sendChatState(xmpp: Agent, roomJid: string, state: ChatStateType): void {
@@ -115,23 +110,51 @@ export function sendModeration(xmpp: Agent, roomJid: string, targetId: string, r
 }
 
 function toStanzaSpans(spans: MarkupSpan[]): WaddleMarkupSpan[] {
-  return spans.map(s => ({ type: s.type, start: s.start, end: s.end, ...(s.uri ? { uri: s.uri } : {}) }));
+  return spans;
 }
 
-export function sendCorrection(xmpp: Agent, roomJid: string, body: string, replacesId: string, markup?: MarkupSpan[]): string | null {
-  const text = body.trim();
-  if (!text) return null;
+function shiftReferences(references: readonly MessageReference[] | undefined, offset: number): MessageReference[] | undefined {
+  if (!references?.length) return undefined;
+  const shifted = references.flatMap((reference) => {
+    if (typeof reference.begin !== "number" || typeof reference.end !== "number") return [reference];
+    return [{ ...reference, begin: reference.begin + offset, end: reference.end + offset }];
+  });
+  return shifted.length > 0 ? shifted : undefined;
+}
+
+function toStanzaReferences(references: readonly MessageReference[]): Array<Record<string, string>> {
+  return references.map((reference) => ({
+    type: reference.type,
+    uri: reference.uri,
+    ...(typeof reference.begin === "number" ? { begin: String(reference.begin) } : {}),
+    ...(typeof reference.end === "number" ? { end: String(reference.end) } : {}),
+    ...(reference.anchor ? { anchor: reference.anchor } : {}),
+  }));
+}
+
+export function sendCorrection(
+  xmpp: Agent,
+  roomJid: string,
+  body: string,
+  replacesId: string,
+  markup?: MarkupSpan[],
+  references?: MessageReference[],
+): string | null {
+  if (!body.trim()) return null;
   const msgId = crypto.randomUUID();
   const msgData: Record<string, unknown> = {
     id: msgId,
     to: roomJid,
     type: "groupchat",
-    body: text,
+    body,
     replace: replacesId,
     processingHints: { store: true },
   };
   if (markup && markup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(markup) };
+  }
+  if (references && references.length > 0) {
+    msgData.references = toStanzaReferences(references);
   }
   xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
@@ -139,6 +162,7 @@ export function sendCorrection(xmpp: Agent, roomJid: string, body: string, repla
 
 export interface SendGroupMessageOptions {
   markup?: MarkupSpan[];
+  references?: MessageReference[];
   files?: OutboundFileAttachment[];
   replyTo?: ReplyTarget;
   threadId?: string;
@@ -166,39 +190,42 @@ export function sendGroupMessage(
   body: string,
   opts: SendGroupMessageOptions = {},
 ): string | null {
-  const { markup, files, replyTo, threadId, parentThreadId, id, threadCreate, threadReply } = opts;
-  const text = body.trim();
+  const { markup, references: richReferences, files, replyTo, threadId, parentThreadId, id, threadCreate, threadReply } = opts;
+  const text = body;
+  const hasText = text.trim().length > 0;
   const hasFiles = !!files && files.length > 0;
-  if (!text && !hasFiles) return null;
+  if (!hasText && !hasFiles) return null;
 
   const msgId = id ?? crypto.randomUUID();
   const { prefix, length: prefixLength } = replyTo
     ? buildReplyFallbackPrefix(replyTo.body)
     : { prefix: "", length: 0 };
-  const markupPrefixLength = byteLen(prefix);
-  const bodyText = text || (hasFiles ? files![0].url : "");
+  const markupPrefixLength = codePointLength(prefix);
+  const bodyText = hasText ? text : (hasFiles ? files![0].url : "");
   const effectiveBody = prefix + bodyText;
   const rebasedMarkup = markup && markup.length > 0
     ? shiftMarkupSpans(markup, markupPrefixLength)
     : undefined;
+  const rebasedRichReferences = shiftReferences(richReferences, markupPrefixLength);
 
   // XEP-0372: Build reference objects for @mentions (only scan user text)
-  const references: Array<{ type: string; uri: string; begin: string; end: string }> = [];
-  if (text) {
+  const references: MessageReference[] = rebasedRichReferences ? [...rebasedRichReferences] : [];
+  if (hasText) {
     const mentionRe = /(?:^|\s)@(\S+)/g;
     let match: RegExpExecArray | null;
     while ((match = mentionRe.exec(text)) !== null) {
       const nick = match[1]!;
-      const begin = prefixLength + match.index + (match[0].length - nick.length - 1);
-      const end = begin + nick.length + 1;
-      references.push({ type: "mention", begin: String(begin), end: String(end), uri: `xmpp:${nick}` });
+      const mentionStartCodeUnits = match.index + (match[0].length - nick.length - 1);
+      const begin = prefixLength + codePointLength(text.slice(0, mentionStartCodeUnits));
+      const end = begin + codePointLength(`@${nick}`);
+      references.push({ type: "mention", begin, end, uri: `xmpp:${nick}` });
     }
   }
 
   // XEP-0513: Explicit @everyone / @here
   const explicitMentionItems: Array<{ type: string }> = [];
-  if (text && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "everyone" });
-  if (text && /(?:^|\s)@here(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "here" });
+  if (hasText && /(?:^|\s)@everyone(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "everyone" });
+  if (hasText && /(?:^|\s)@here(?:\s|$)/i.test(text)) explicitMentionItems.push({ type: "here" });
 
   const fallbacks: WaddleFallback[] = [];
   if (replyTo && prefixLength > 0) {
@@ -211,7 +238,7 @@ export function sendGroupMessage(
     marker: { type: "markable" },
     processingHints: { store: true },
   };
-  if (references.length > 0) msgData.references = references;
+  if (references.length > 0) msgData.references = toStanzaReferences(references);
   if (explicitMentionItems.length > 0) msgData.explicitMentions = { items: explicitMentionItems };
   if (rebasedMarkup && rebasedMarkup.length > 0) {
     msgData.markup = { spans: toStanzaSpans(rebasedMarkup) };
@@ -238,7 +265,7 @@ export function sendGroupMessage(
     if (encryptedFiles.length > 0) {
       msgData.encryptedFiles = encryptedFiles;
     }
-    if (!text) {
+    if (!hasText) {
       // Body is acting as the SFS URL fallback — mark it so compliant clients skip it.
       fallbacks.push({ for: "urn:xmpp:sfs:0" });
     }

@@ -41,6 +41,8 @@ export interface LiveRoomMessage {
   mentions?: string[];
   /** XEP-0394 */
   markup?: import("@/lib/chat-ui").MarkupSpan[];
+  /** XEP-0372 */
+  references?: import("@/lib/chat-ui").MessageReference[];
   /** XEP-0446/0447 — zero or more attachments. */
   sharedFiles?: SharedFileInfo[];
   /** XEP-0449 */
@@ -75,6 +77,8 @@ export interface LiveDmMessage {
   mentions?: string[];
   /** XEP-0394 */
   markup?: import("@/lib/chat-ui").MarkupSpan[];
+  /** XEP-0372 */
+  references?: import("@/lib/chat-ui").MessageReference[];
   sharedFiles?: SharedFileInfo[];
   isSticker?: boolean;
   /** XEP-0461 */
