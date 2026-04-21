@@ -26,7 +26,7 @@
  */
 import { initializeFaro, getWebInstrumentations, type Faro } from "@grafana/faro-web-sdk";
 import { TracingInstrumentation } from "@grafana/faro-web-tracing";
-import { SpanStatusCode, trace, type Span } from "@opentelemetry/api";
+import { context, SpanStatusCode, trace, type Span } from "@opentelemetry/api";
 
 type MessageKind = "room" | "dm";
 
@@ -133,6 +133,13 @@ export function __setFaroForTesting(instance: Faro | null): void {
  * wrapping doesn't cover them) — XMPP connect, message send, room
  * join. When Faro isn't initialized, `fn` runs with no span overhead.
  *
+ * The span is also made the *active context* for the duration of
+ * `fn`, so any nested auto-instrumented work (a `fetch` called inside
+ * the callback, a further `withSpan`) attaches to this span instead
+ * of whatever root context was active outside. The backend therefore
+ * sees the manual span as the parent of the cross-origin HTTP span,
+ * not an orphaned sibling.
+ *
  * The returned span is exposed to the callback so callers can attach
  * domain attributes ("room.jid", "message.kind", etc.) without
  * needing their own tracer handle.
@@ -145,20 +152,23 @@ export async function withSpan<T>(
   if (!faro) return fn(null);
   const tracer = trace.getTracer(TRACER_NAME);
   const span = tracer.startSpan(name, { attributes });
-  try {
-    const result = await fn(span);
-    span.setStatus({ code: SpanStatusCode.OK });
-    return result;
-  } catch (err) {
-    span.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    if (err instanceof Error) span.recordException(err);
-    throw err;
-  } finally {
-    span.end();
-  }
+  const activeCtx = trace.setSpan(context.active(), span);
+  return context.with(activeCtx, async () => {
+    try {
+      const result = await fn(span);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      if (err instanceof Error) span.recordException(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 /**
