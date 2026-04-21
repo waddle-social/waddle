@@ -336,6 +336,17 @@ mod tests {
         kameo::spawn(RoomActor::new(test_room()))
     }
 
+    async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomActor> {
+        let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+        config.name = "Test Room".to_string();
+        kameo::spawn(RoomActor::new(MucRoom::new(
+            room_jid,
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            config,
+        )))
+    }
+
     #[tokio::test]
     async fn test_join_and_occupant_count() {
         let actor = spawn_room_actor().await;
@@ -383,6 +394,38 @@ mod tests {
             result,
             Err(SendError::HandlerError(RoomActorError::NickAlreadyInUse(nick)))
                 if nick == "alice"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_join_rejected_when_room_full() {
+        let actor = spawn_room_actor_with_config(RoomConfig {
+            max_occupants: 1,
+            ..RoomConfig::default()
+        })
+        .await;
+
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: test_full_jid("alice"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("first join");
+
+        let result = actor
+            .ask(Join {
+                nick: "bob".to_string(),
+                real_jid: test_full_jid("bob"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::RoomFull))
         ));
     }
 
