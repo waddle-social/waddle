@@ -1,7 +1,7 @@
 package xmpp_e2e_suite
 
 scenario: {
-	name: "first-proof-dm-delivery-and-mam"
+	name: "dm-delivery-and-mam"
 	domain: "localhost"
 	users: {
 		alice: #User & {
