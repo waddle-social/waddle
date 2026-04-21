@@ -1,6 +1,14 @@
 ---
 import { Font } from "astro:assets";
 import "../styles/global.css";
+
+const site = Astro.site ?? new URL("https://waddle.social");
+const title = "waddle.social";
+const description = "Open-source, XMPP-native social chat for the fediverse.";
+const canonicalUrl = new URL(Astro.url.pathname, site);
+const ogImageUrl = new URL("/og-image.png", site);
+const ogImageAlt =
+	"The waddle.social wordmark above three penguins sitting on an icy speech bubble.";
 ---
 
 <html lang="en">
@@ -8,10 +16,26 @@ import "../styles/global.css";
 		<meta charset="utf-8" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<link rel="icon" href="/favicon.ico" />
+		<link rel="canonical" href={canonicalUrl} />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-		<meta name="description" content="Waddle" />
-		<title>Waddle</title>
+		<meta name="description" content={description} />
+		<meta name="theme-color" content="#092025" />
+		<meta property="og:type" content="website" />
+		<meta property="og:site_name" content={title} />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={canonicalUrl} />
+		<meta property="og:image" content={ogImageUrl} />
+		<meta property="og:image:width" content="1200" />
+		<meta property="og:image:height" content="630" />
+		<meta property="og:image:alt" content={ogImageAlt} />
+		<meta name="twitter:card" content="summary_large_image" />
+		<meta name="twitter:title" content={title} />
+		<meta name="twitter:description" content={description} />
+		<meta name="twitter:image" content={ogImageUrl} />
+		<meta name="twitter:image:alt" content={ogImageAlt} />
+		<title>{title}</title>
 		<Font cssVariable="--font-inter" preload />
 		<Font cssVariable="--font-fredoka" preload />
 		<script is:inline>
