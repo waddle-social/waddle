@@ -45,6 +45,12 @@
   --ambient-1: light-dark(rgba(0, 180, 160, 0.03), rgba(0, 221, 192, 0.04));
   --ambient-2: light-dark(rgba(120, 80, 255, 0.02), rgba(120, 80, 255, 0.03));
   --ambient-3: light-dark(rgba(0, 120, 255, 0.02), rgba(0, 120, 255, 0.03));
+  --rich-code-bg: light-dark(rgba(15, 17, 21, 0.06), rgba(255, 255, 255, 0.075));
+  --rich-code-border: light-dark(rgba(15, 17, 21, 0.08), rgba(255, 255, 255, 0.08));
+  --rich-code-foreground: light-dark(#14171f, #e7e9f1);
+  --rich-quote-border: light-dark(rgba(0, 180, 160, 0.58), rgba(0, 221, 192, 0.55));
+  --rich-quote-foreground: light-dark(#4b5565, #a5abb8);
+  --rich-link: light-dark(#008f80, #35f0d4);
 }
 
 :root[data-theme="light"] {
@@ -321,30 +327,50 @@
   letter-spacing: 0.02em;
 }
 
-/* Styled message body — clean, luminous */
-.styled-body strong { font-weight: 600; }
-.styled-body em { font-style: italic; }
-.styled-body del { text-decoration: line-through; opacity: 0.4; }
-.styled-body code {
+/* Rich text rendered from XEP metadata and TipTap composer nodes. */
+:where(.styled-body, .chat-editor .ProseMirror) p {
+  margin: 0;
+}
+:where(.styled-body, .chat-editor .ProseMirror) p + p {
+  margin-top: 0.5rem;
+}
+:where(.styled-body, .chat-editor .ProseMirror) strong {
+  font-weight: 600;
+}
+:where(.styled-body, .chat-editor .ProseMirror) em {
+  font-style: italic;
+}
+:where(.styled-body, .chat-editor .ProseMirror) del,
+:where(.styled-body, .chat-editor .ProseMirror) s {
+  text-decoration: line-through;
+  opacity: 0.48;
+}
+:where(.styled-body, .chat-editor .ProseMirror) code {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 0.8em;
   padding: 0.15em 0.4em;
-  background: var(--muted);
+  color: var(--rich-code-foreground);
+  background: var(--rich-code-bg);
+  border: 1px solid var(--rich-code-border);
   border-radius: 5px;
 }
-.styled-body pre {
+:where(.styled-body, .chat-editor .ProseMirror) pre {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 0.8em;
   padding: 0.85em 1.1em;
-  background: var(--muted);
+  color: var(--rich-code-foreground);
+  background: var(--rich-code-bg);
+  border: 1px solid var(--rich-code-border);
   border-radius: 8px;
   overflow-x: auto;
   margin: 0.5em 0;
 }
-.styled-body pre code {
+:where(.styled-body, .chat-editor .ProseMirror) pre code {
   padding: 0;
   background: transparent;
+  border: 0;
   border-radius: 0;
+  color: inherit;
   font-size: inherit;
 }
 .styled-body pre.shiki,
@@ -355,34 +381,34 @@
 .styled-body pre.shiki {
   background-color: light-dark(var(--shiki-light-bg), var(--shiki-dark-bg)) !important;
 }
-.styled-body blockquote {
-  border-left: 2px solid var(--primary);
+:where(.styled-body, .chat-editor .ProseMirror) blockquote {
+  border-left: 2px solid var(--rich-quote-border);
+  color: var(--rich-quote-foreground);
   padding-left: 0.85em;
   margin: 0.5em 0;
-  opacity: 0.75;
 }
-.styled-body ul,
-.styled-body ol {
+:where(.styled-body, .chat-editor .ProseMirror) ul,
+:where(.styled-body, .chat-editor .ProseMirror) ol {
   margin: 0.35em 0;
   padding-left: 1.4em;
 }
-.styled-body ul {
+:where(.styled-body, .chat-editor .ProseMirror) ul {
   list-style-type: disc;
 }
-.styled-body ol {
+:where(.styled-body, .chat-editor .ProseMirror) ol {
   list-style-type: decimal;
 }
-.styled-body li {
+:where(.styled-body, .chat-editor .ProseMirror) li {
   margin: 0.15em 0;
 }
-.styled-body li > p {
+:where(.styled-body, .chat-editor .ProseMirror) li > p {
   margin: 0;
 }
-.styled-body a {
-  color: var(--primary);
+:where(.styled-body, .chat-editor .ProseMirror) a {
+  color: var(--rich-link);
   text-decoration: none;
   text-underline-offset: 2px;
 }
-.styled-body a:hover {
+:where(.styled-body, .chat-editor .ProseMirror) a:hover {
   text-decoration: underline;
 }

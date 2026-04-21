@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
-import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock, Send, X } from "lucide-vue-next";
+import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock } from "lucide-vue-next";
+import type { JSONContent } from "@tiptap/core";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
@@ -297,8 +298,7 @@ const forumThreadLabel = computed(() =>
 );
 
 const isEditing = ref(false);
-const editInitialContent = ref<Record<string, unknown> | undefined>(undefined);
-const editDraftDoc = ref<Record<string, unknown> | undefined>(undefined);
+const editInitialContent = ref<JSONContent | undefined>(undefined);
 const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editEditorRef.value = instance;
@@ -315,15 +315,6 @@ const editOriginalRich = computed(() =>
   })),
 );
 const editOriginalBody = computed(() => editOriginalRich.value.body.trim());
-const editCanSubmit = computed(() => {
-  if (!editDraftDoc.value) return false;
-  const { body, markup, references } = tiptapToRichMessage(editDraftDoc.value);
-  const trimmed = body.trim();
-  if (!trimmed) return false;
-  return trimmed !== editOriginalBody.value
-    || JSON.stringify(markup) !== JSON.stringify(editOriginalRich.value.markup)
-    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references);
-});
 
 function startEdit() {
   const content = richMessageToTiptap({
@@ -332,7 +323,6 @@ function startEdit() {
     references: props.message.references,
   });
   editInitialContent.value = content;
-  editDraftDoc.value = content;
   isEditing.value = true;
   void nextTick(() => editEditorRef.value?.focus());
 }
@@ -340,14 +330,9 @@ function startEdit() {
 function cancelEdit() {
   isEditing.value = false;
   editInitialContent.value = undefined;
-  editDraftDoc.value = undefined;
 }
 
-function updateEditDraft(doc: Record<string, unknown>) {
-  editDraftDoc.value = doc;
-}
-
-function submitEditFromEditor(doc: Record<string, unknown>) {
+function submitEditFromEditor(doc: JSONContent) {
   const { body, markup, references } = tiptapToRichMessage(doc);
   const trimmed = body.trim();
   const changed = trimmed !== editOriginalBody.value
@@ -358,12 +343,6 @@ function submitEditFromEditor(doc: Record<string, unknown>) {
   }
   isEditing.value = false;
   editInitialContent.value = undefined;
-  editDraftDoc.value = undefined;
-}
-
-function submitCurrentEdit() {
-  const doc = editEditorRef.value?.getJSON?.();
-  if (doc) submitEditFromEditor(doc);
 }
 
 function emitAvatarClick() {
@@ -620,28 +599,8 @@ watch(
         placeholder="Edit message..."
         @send="submitEditFromEditor"
         @cancel="cancelEdit"
-        @update="updateEditDraft"
         class="flex-1"
       />
-      <button
-        type="button"
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-all duration-200 hover:shadow-[0_0_14px_var(--glow-strong)] disabled:opacity-25 disabled:hover:shadow-none"
-        :disabled="!editCanSubmit"
-        title="Save edit"
-        aria-label="Save edit"
-        @click="submitCurrentEdit"
-      >
-        <Send class="h-3.5 w-3.5" aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/50 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
-        title="Cancel edit"
-        aria-label="Cancel edit"
-        @click="cancelEdit"
-      >
-        <X class="h-3.5 w-3.5" aria-hidden="true" />
-      </button>
       <EditorBubbleToolbar v-if="editTiptapEditor" :editor="editTiptapEditor" />
     </div>
 
@@ -987,22 +946,3 @@ watch(
     </div>
   </Teleport>
 </template>
-
-<style scoped>
-.styled-body :deep(p) {
-  margin: 0;
-}
-
-.styled-body :deep(p + p) {
-  margin-top: 0.5rem;
-}
-
-.styled-body :deep(pre.message-code-block) {
-  margin: 0.5rem 0;
-  padding: 0.75rem 0.9rem;
-  border-radius: 0.75rem;
-  border: 1px solid var(--border);
-  overflow-x: auto;
-}
-
-</style>

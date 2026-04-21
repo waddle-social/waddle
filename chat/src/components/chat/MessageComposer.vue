@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { Send, Image, X } from "lucide-vue-next";
+import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import { searchEmoji } from "@/lib/emoji";
+import { getComposerAutocompleteAction, getComposerEscapeAction } from "@/lib/reply-ux";
 import { tiptapToRichMessage } from "@/lib/rich-message";
-import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 
@@ -123,6 +124,15 @@ const activeResults = computed(() => {
   return [];
 });
 
+const autocompleteAction = computed(() =>
+  getComposerAutocompleteAction({
+    showMentions: showMentions.value,
+    mentionCount: mentionResults.value.length,
+    showEmoji: showEmoji.value,
+    emojiCount: emojiResults.value.length,
+  }),
+);
+
 /** Whether the composer has nothing sendable (no text and no pending attachments). */
 const isEmpty = computed(() => !draft.value.trim() && pendingAttachments.value.length === 0);
 const canSend = computed(() =>
@@ -145,12 +155,16 @@ const editorPlaceholder = computed(() => {
   return `Message #${props.channelName}`;
 });
 
-function onEditorUpdate(doc: Record<string, unknown>) {
-  // Keep draft in sync as a plain text representation
-  const serialized = tiptapToRichMessage(doc);
-  draft.value = serialized.body;
+function onEditorUpdate(doc: JSONContent) {
+  draft.value = tiptapToRichMessage(doc).body;
   emit("typing");
   checkAutocompleteFromEditor();
+}
+
+function clearAutocomplete() {
+  showMentions.value = false;
+  showEmoji.value = false;
+  triggerRange.value = null;
 }
 
 function checkAutocompleteFromEditor() {
@@ -164,6 +178,11 @@ function checkAutocompleteFromEditor() {
   if (!tiptapEditor?.state) return;
 
   const { selection, doc } = tiptapEditor.state;
+  if (!selection.empty) {
+    clearAutocomplete();
+    return;
+  }
+
   const pos = selection.from;
   const textBefore = doc.textBetween(0, pos, "\n", "\uFFFC");
 
@@ -173,10 +192,6 @@ function checkAutocompleteFromEditor() {
     selectedIndex.value = 0;
     showMentions.value = true;
     showEmoji.value = false;
-    // Calculate PM range for the trigger
-    const triggerLen = mentionMatch[0].length;
-    const triggerStart = textBefore.length - triggerLen;
-    // Map text offset back to PM position: find the PM pos for the trigger start
     triggerRange.value = {
       from: pos - mentionMatch[0].trimStart().length,
       to: pos,
@@ -196,7 +211,7 @@ function checkAutocompleteFromEditor() {
     };
     return;
   }
-  showEmoji.value = false;
+  clearAutocomplete();
 }
 
 function insertMention(username: string) {
@@ -227,16 +242,26 @@ function insertEmoji(emoji: string) {
   triggerRange.value = null;
 }
 
-function onSend(doc: Record<string, unknown>) {
-  if (showMentions.value || showEmoji.value) {
-    // If autocomplete is open, Enter selects instead of sending
-    if (showMentions.value && mentionResults.value.length > 0) {
-      insertMention(mentionResults.value[selectedIndex.value]);
-    } else if (showEmoji.value && emojiResults.value.length > 0) {
-      insertEmoji(emojiResults.value[selectedIndex.value].emoji);
-    }
+function selectAutocompleteResult(action = autocompleteAction.value): boolean {
+  if (action === "select-mention") {
+    insertMention(mentionResults.value[selectedIndex.value]);
+    return true;
+  }
+
+  if (action === "select-emoji") {
+    insertEmoji(emojiResults.value[selectedIndex.value].emoji);
+    return true;
+  }
+
+  return false;
+}
+
+function onSend(doc: JSONContent) {
+  const action = autocompleteAction.value;
+  if (selectAutocompleteResult(action)) {
     return;
   }
+  if (action === "dismiss-autocomplete") clearAutocomplete();
 
   const serialized = tiptapToRichMessage(doc);
   const text = serialized.body.trim();
@@ -276,9 +301,7 @@ function onEditorCancel() {
   });
 
   if (action === "dismiss-autocomplete") {
-    showMentions.value = false;
-    showEmoji.value = false;
-    triggerRange.value = null;
+    clearAutocomplete();
     return;
   }
 
@@ -305,21 +328,13 @@ function onKeydown(e: KeyboardEvent) {
     if (e.key === "Tab") {
       e.preventDefault();
       e.stopPropagation();
-      if (showMentions.value) {
-        insertMention(mentionResults.value[selectedIndex.value]);
-      } else if (showEmoji.value) {
-        insertEmoji(emojiResults.value[selectedIndex.value].emoji);
-      }
+      selectAutocompleteResult();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       e.stopPropagation();
-      if (showMentions.value) {
-        insertMention(mentionResults.value[selectedIndex.value]);
-      } else if (showEmoji.value) {
-        insertEmoji(emojiResults.value[selectedIndex.value].emoji);
-      }
+      selectAutocompleteResult();
       return;
     }
   }
@@ -342,6 +357,7 @@ function onPaste(e: ClipboardEvent) {
 watch(
   () => draft.value,
   (newVal) => {
+    if (newVal === "") clearAutocomplete();
     if (newVal === "" && editorRef.value && !editorRef.value.isEmpty()) {
       editorRef.value.clear();
     }
@@ -498,6 +514,7 @@ watch(
         :disabled="disabled || slowModeCooldown > 0"
         @send="onSend"
         @update="onEditorUpdate"
+        @selection-update="checkAutocompleteFromEditor"
         @cancel="onEditorCancel"
       />
       <button
@@ -505,7 +522,7 @@ watch(
         class="h-10 w-10 shrink-0 flex items-center justify-center bg-primary text-primary-foreground rounded-lg hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20"
         :disabled="!canSend"
         aria-label="Send message"
-        @click="editorRef?.getJSON?.() && onSend(editorRef.getJSON()!)"
+        @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"
       >
         <span v-if="slowModeCooldown > 0" class="text-[10px] font-bold font-mono tabular-nums">{{ slowModeCooldown }}</span>
         <Send v-else class="w-4 h-4" aria-hidden="true" />

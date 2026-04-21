@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Editor } from "@tiptap/vue-3";
+import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { ChatLink } from "../src/lib/editor/chat-link";
 
