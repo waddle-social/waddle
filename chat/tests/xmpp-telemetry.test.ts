@@ -53,9 +53,14 @@ function createFaroStub() {
     values: Record<string, number>;
     context?: Record<string, string>;
   }> = [];
+  const errors: Array<{
+    error: Error;
+    options?: { type?: string; context?: Record<string, string> };
+  }> = [];
   return {
     events,
     measurements,
+    errors,
     api: {
       pushEvent: (name: string, attributes?: Record<string, string>) => {
         events.push({ name, attributes });
@@ -66,6 +71,12 @@ function createFaroStub() {
         context?: Record<string, string>;
       }) => {
         measurements.push(payload);
+      },
+      pushError: (
+        error: Error,
+        options?: { type?: string; context?: Record<string, string> },
+      ) => {
+        errors.push({ error, options });
       },
     },
   };
@@ -256,6 +267,66 @@ describe("BrowserXmppClient telemetry hooks", () => {
     );
     expect(reconnectMeasurement).toBeDefined();
     expect(reconnectMeasurement?.values.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  test("client.onError forwards XMPP failures to Faro pushError with kind tagging", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    const internal = client as unknown as {
+      emitError: (event: {
+        kind: "stream" | "auth" | "connect-timeout";
+        recoverable: boolean;
+        detail: string;
+        cause?: unknown;
+        condition?: string;
+      }) => void;
+    };
+
+    // Fatal stream error with an XMPP condition.
+    const streamCause = new Error("peer closed stream");
+    internal.emitError({
+      kind: "stream",
+      recoverable: false,
+      detail: "not-authorized",
+      cause: streamCause,
+      condition: "not-authorized",
+    });
+
+    // Recoverable auth (treated as non-recoverable from the client's POV
+    // since refresh failed — but the shape is what we verify).
+    internal.emitError({
+      kind: "auth",
+      recoverable: false,
+      detail: "Session expired (no refresh available)",
+    });
+
+    // Recoverable connect-timeout (stanza.js stalled, client discards + retries).
+    internal.emitError({
+      kind: "connect-timeout",
+      recoverable: true,
+      detail: "stanza.js reconnect stalled past 15s; discarding agent",
+    });
+
+    expect(stub.errors).toHaveLength(3);
+
+    const streamErr = stub.errors[0];
+    expect(streamErr.error).toBe(streamCause);
+    expect(streamErr.options?.type).toBe("xmpp.stream");
+    expect(streamErr.options?.context?.kind).toBe("xmpp.stream");
+    expect(streamErr.options?.context?.recoverable).toBe("false");
+    expect(streamErr.options?.context?.condition).toBe("not-authorized");
+
+    const authErr = stub.errors[1];
+    expect(authErr.options?.type).toBe("xmpp.auth");
+    expect(authErr.options?.context?.recoverable).toBe("false");
+
+    const timeoutErr = stub.errors[2];
+    expect(timeoutErr.options?.type).toBe("xmpp.disconnect");
+    expect(timeoutErr.options?.context?.recoverable).toBe("true");
   });
 
   test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {

@@ -8,10 +8,17 @@ import type {
   ChatStateEvent, ChatStateType, DiscoveredChannel, DiscoveredWaddle, DisplayedEvent,
   DmChatStateEvent, DmDisplayedEvent, DmReactionEvent, LiveDmMessage, LiveRoomMessage,
   OccupantPresence, PresenceUpdateEvent, ReactionEvent, RoomActivityEvent,
-  RoomHats, RoomPresence, SessionLifecycleEvent, XmppStatusSnapshot,
+  RoomHats, RoomPresence, SessionLifecycleEvent, XmppErrorEvent, XmppStatusSnapshot,
 } from "./types";
 import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
+// `withSpan` is a no-op when Faro isn't initialized, so including
+// it here doesn't add overhead to tests or non-telemetry builds.
+// When Faro IS initialized it wraps the connect handshake in an
+// OpenTelemetry span that joins the backend trace via the same
+// traceparent header that TracingInstrumentation injects into the
+// WebSocket upgrade's HTTP request.
+import { withSpan } from "@/lib/telemetry";
 import { ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
 import { buildMessageDispatcher } from "./message-dispatch";
@@ -220,6 +227,7 @@ export class BrowserXmppClient {
   private readonly statusHooks: Array<(status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void> = [];
   private readonly sendEnqueuedHooks: Array<(info: { kind: "room" | "dm"; reason: string }) => void> = [];
   private readonly queueDepthHooks: Array<(depth: { persisted: number; inflight: number }) => void> = [];
+  private readonly errorHooks: Array<(event: XmppErrorEvent) => void> = [];
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -273,6 +281,20 @@ export class BrowserXmppClient {
   }
   onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) {
     this.queueDepthHooks.push(hook);
+  }
+  /**
+   * Fires for transport-layer or protocol-layer failures — stream
+   * errors, auth failures, fatal disconnects. UI status still flows
+   * through `onStatus`; this hook exists so telemetry can distinguish
+   * "we hit an error and surfaced it" from "we rolled into the
+   * reconnecting state" without regex-matching status detail strings.
+   */
+  onError(hook: (event: XmppErrorEvent) => void) {
+    this.errorHooks.push(hook);
+  }
+
+  private emitError(event: XmppErrorEvent) {
+    this.fireHook(this.errorHooks, event);
   }
 
   private fireHook<Args extends unknown[]>(hooks: Array<(...args: Args) => void>, ...args: Args) {
@@ -376,7 +398,7 @@ export class BrowserXmppClient {
     // because feature negotiation is short-circuited.
     if (this.xmpp && !this.destroying) {
       const xmpp = this.xmpp;
-      const reconnectPromise = new Promise<void>((resolve, reject) => {
+      const rawReconnect = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           cleanup();
           this.connectPromise = null;
@@ -404,6 +426,11 @@ export class BrowserXmppClient {
         xmpp.on("stream:management:resumed", onReady);
         xmpp.on("disconnected", onDisconnected);
       });
+      const reconnectPromise = withSpan(
+        "xmpp.reconnect",
+        { "waddle.reconnect.path": "existing-agent" },
+        () => rawReconnect,
+      );
       this.connectPromise = reconnectPromise.catch(async (error): Promise<void> => {
         if (
           error instanceof Error
@@ -411,6 +438,12 @@ export class BrowserXmppClient {
           && !this.destroying
           && this.xmpp === xmpp
         ) {
+          this.emitError({
+            kind: "connect-timeout",
+            recoverable: true,
+            detail: "stanza.js reconnect stalled past 15s; discarding agent",
+            cause: error,
+          });
           this.discardDisconnectedAgent(xmpp);
           return this.connect();
         }
@@ -459,7 +492,7 @@ export class BrowserXmppClient {
     // Wait for session:started (fresh bind) or stream:management:resumed (SM
     // resume). Initial connects always take the fresh path, but subsequent
     // auto-reconnects may resume — only one of the two will fire.
-    const promise = new Promise<void>((resolve, reject) => {
+    const rawConnect = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
         xmpp.off("session:started", onReady);
         xmpp.off("stream:management:resumed", onReady);
@@ -479,6 +512,14 @@ export class BrowserXmppClient {
       xmpp.on("stream:management:resumed", onReady);
       xmpp.on("disconnected", onFail);
     });
+    const promise = withSpan(
+      "xmpp.connect",
+      {
+        "waddle.xmpp.jid": this.session.jid,
+        "waddle.xmpp.transport": "websocket",
+      },
+      () => rawConnect,
+    );
     this.connectPromise = promise;
     xmpp.connect();
     return promise;
@@ -1460,6 +1501,7 @@ export class BrowserXmppClient {
       }
       const detail = err?.message ?? condition ?? "Stream error";
       this.emitStatus({ state: fatal ? "error" : "reconnecting", detail });
+      this.emitError({ kind: "stream", recoverable: !fatal, detail, cause: err, condition });
       console.error("XMPP stream error", detail);
     });
     xmpp.on("auth:failed" as any, async () => {
@@ -1467,6 +1509,11 @@ export class BrowserXmppClient {
       if (!this.refreshSession) {
         this.destroying = true;
         this.emitStatus({ state: "error", detail: "Session expired. Please log in again." });
+        this.emitError({
+          kind: "auth",
+          recoverable: false,
+          detail: "Session expired (no refresh available)",
+        });
         return;
       }
       try {
@@ -1476,10 +1523,21 @@ export class BrowserXmppClient {
         } else {
           this.destroying = true;
           this.emitStatus({ state: "error", detail: "Session expired. Please log in again." });
+          this.emitError({
+            kind: "auth",
+            recoverable: false,
+            detail: "Session expired (refresh returned null)",
+          });
         }
-      } catch {
+      } catch (err) {
         this.destroying = true;
         this.emitStatus({ state: "error", detail: "Session expired. Please log in again." });
+        this.emitError({
+          kind: "auth",
+          recoverable: false,
+          detail: "Session refresh threw",
+          cause: err,
+        });
       }
     });
 

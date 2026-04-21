@@ -24,6 +24,14 @@ const serverBaseUrl = env.SERVER_BASE_URL;
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f7" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d12" />
+    <!-- Published here so the (bundled, static) Faro bootstrap script
+         below can read the Worker-runtime `SERVER_BASE_URL` without
+         hoisting it through Vite `define` — that would require the
+         origin to be known at build time, but it's environment-specific
+         (preview vs. prod) so it has to flow through the request-time
+         Worker `env`. Faro uses this to scope W3C traceparent injection
+         to just that origin. -->
+    <meta name="waddle:server-base-url" content={serverBaseUrl} />
     <script is:inline>
       (function () {
         try {
@@ -39,12 +47,19 @@ const serverBaseUrl = env.SERVER_BASE_URL;
       // Faro RUM bootstrap. `initTelemetry` is a no-op unless
       // `PUBLIC_FARO_URL` is set, so this ships on every build but
       // stays silent locally and in tests. Vite inlines
-      // `import.meta.env.PUBLIC_*` at build time.
+      // `import.meta.env.PUBLIC_*` at build time. The server origin
+      // arrives via the `waddle:server-base-url` meta tag above so
+      // Faro knows which cross-origin calls should carry traceparent
+      // headers.
       import { initTelemetry } from "@/lib/telemetry";
+      const serverBaseUrl = document
+        .querySelector('meta[name="waddle:server-base-url"]')
+        ?.getAttribute("content") ?? "";
       initTelemetry({
         url: import.meta.env.PUBLIC_FARO_URL,
         appName: import.meta.env.PUBLIC_FARO_APP_NAME,
         release: import.meta.env.PUBLIC_COMMIT_SHA,
+        propagateTraceHeadersTo: serverBaseUrl ? [serverBaseUrl] : [],
       });
     </script>
     <ClientRouter />

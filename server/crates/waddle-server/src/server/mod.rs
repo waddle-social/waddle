@@ -5,12 +5,14 @@ use crate::inbox::build_inbox_storage;
 use anyhow::Result;
 use axum::{
     extract::State,
-    http::{header, Method, StatusCode},
+    http::{header, HeaderName, Method, StatusCode},
     response::{IntoResponse, Json},
     routing::get,
     Router,
 };
 use futures::StreamExt;
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry_http::HeaderExtractor;
 use routes::auth::AuthState;
 use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
@@ -27,9 +29,10 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    trace::{DefaultOnResponse, TraceLayer},
 };
-use tracing::{info, warn, Level};
+use tracing::{info, info_span, warn, Level, Span};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::XmppServerConfig;
@@ -873,6 +876,13 @@ fn build_cors(origins: Option<&str>) -> CorsLayer {
                         header::AUTHORIZATION,
                         header::CONTENT_TYPE,
                         header::ORIGIN,
+                        // W3C Trace Context — browsers won't send these
+                        // cross-origin unless explicitly allowed, which
+                        // would silently break end-to-end traces from
+                        // the chat frontend into the server.
+                        HeaderName::from_static("traceparent"),
+                        HeaderName::from_static("tracestate"),
+                        HeaderName::from_static("baggage"),
                     ])
                     .allow_credentials(true)
             }
@@ -1096,11 +1106,35 @@ async fn create_router(
         .merge(upload_router)
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .make_span_with(make_request_span)
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .layer(CompressionLayer::new())
         .layer(configure_cors())
+}
+
+/// Build the per-request `tracing` span and attach the inbound W3C
+/// trace context (if any) as its OpenTelemetry parent.
+///
+/// `opentelemetry_http::HeaderExtractor` implements the `Extractor`
+/// trait the propagator expects; `TraceContextExt::has_active_span`
+/// lets us tell "frontend gave us a traceparent" from "browser /
+/// internal caller with no propagation" — we only call `set_parent`
+/// in the former case so internal calls still get a fresh root span.
+fn make_request_span(request: &axum::http::Request<axum::body::Body>) -> Span {
+    let span = info_span!(
+        "http_request",
+        method = %request.method(),
+        uri = %request.uri(),
+        version = ?request.version(),
+    );
+    let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    });
+    if parent_cx.span().span_context().is_valid() {
+        span.set_parent(parent_cx);
+    }
+    span
 }
 
 /// Handler for the /api/v1/server-info endpoint

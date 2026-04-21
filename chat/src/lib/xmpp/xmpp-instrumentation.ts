@@ -7,7 +7,10 @@
  * without any beacon traffic.
  */
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
+import type { ErrorKind } from "@/lib/telemetry";
+import type { XmppErrorKind } from "@/lib/xmpp/types";
 import {
+  reportError,
   reportMessageAcked,
   reportMessageFailed,
   reportQueueDepthChange,
@@ -15,6 +18,12 @@ import {
   reportSessionLifecycle,
   reportStatusChange,
 } from "@/lib/telemetry";
+
+const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
+  "stream": "xmpp.stream",
+  "auth": "xmpp.auth",
+  "connect-timeout": "xmpp.disconnect",
+};
 
 export function installInstrumentation(client: BrowserXmppClient): void {
   client.onMessageAcked((id, meta) => {
@@ -38,5 +47,14 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   });
   client.onQueueDepthChange((depth) => {
     reportQueueDepthChange(depth);
+  });
+  client.onError((event) => {
+    const kind = ERROR_KIND_MAP[event.kind];
+    const cause = event.cause ?? new Error(event.detail);
+    reportError(kind, cause, {
+      recoverable: event.recoverable,
+      detail: event.detail,
+      ...(event.condition ? { condition: event.condition } : {}),
+    });
   });
 }

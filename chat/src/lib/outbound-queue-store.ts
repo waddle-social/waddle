@@ -1,5 +1,6 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/messaging";
+import { reportError } from "@/lib/telemetry";
 
 const PREFIX = "waddle.chat.outbound-queue";
 
@@ -82,7 +83,15 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return sortQueue(parsed.filter(isPersistedQueuedMessage));
-  } catch {
+  } catch (err) {
+    // Storage read failure usually means corrupt JSON or privacy-mode
+    // localStorage. Surface to Faro but keep the app working — we just
+    // treat it as an empty queue.
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "outbound-queue read failed",
+      accountKey,
+    });
     return [];
   }
 }
@@ -97,9 +106,19 @@ function writeQueue(accountKey: string, messages: PersistedQueuedMessage[]): voi
       return;
     }
     s.setItem(queueKey(accountKey), JSON.stringify(sorted));
-  } catch {
+  } catch (err) {
     // Best effort only — if storage is unavailable the in-memory optimistic
     // state still reflects the queued send for the current page lifetime.
+    // Still worth reporting: localStorage quota errors are a leading cause
+    // of silent message-loss across reloads.
+    const name = err instanceof Error ? err.name : "";
+    const kind = name === "QuotaExceededError" ? "storage.quota" : "storage.write";
+    reportError(kind, err, {
+      recoverable: true,
+      detail: "outbound-queue write failed",
+      accountKey,
+      queueSize: messages.length,
+    });
   }
 }
 

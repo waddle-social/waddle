@@ -5640,6 +5640,7 @@ dependencies = [
  "object_store",
  "opentelemetry",
  "opentelemetry-appender-tracing",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "p256",

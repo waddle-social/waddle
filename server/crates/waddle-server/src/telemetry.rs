@@ -140,6 +140,16 @@ fn build_log_filter() -> EnvFilter {
 /// }
 /// ```
 pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Register the W3C Trace Context propagator globally so inbound
+    // `traceparent` / `tracestate` headers from the browser (injected by
+    // the chat frontend's Faro `TracingInstrumentation`) join their
+    // spans into the trace we're about to start. The tower-http
+    // `TraceLayer` in `server/mod.rs` reads this propagator in its
+    // `make_span_with` closure.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
     // Get configuration from environment
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_string());
