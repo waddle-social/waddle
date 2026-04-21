@@ -75,9 +75,10 @@ dirs = "5.0"
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-opentelemetry = "0.28"
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "metrics"] }
+opentelemetry = { version = "0.28", features = ["logs"] }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "logs"] }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "metrics", "logs"] }
+opentelemetry-appender-tracing = "0.28"
 tracing-opentelemetry = "0.29"
 
 # Security/Crypto
