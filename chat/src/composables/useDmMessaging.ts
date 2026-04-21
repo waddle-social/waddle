@@ -1,5 +1,5 @@
 import { nextTick, ref, watch, type Ref } from "vue";
-import type { DeliveryStatus, TimelineMessage } from "@/lib/chat-ui";
+import type { DeliveryStatus, MarkupSpan, MessageReference, TimelineMessage } from "@/lib/chat-ui";
 import type {
   BrowserXmppClient,
   ChatStateType,
@@ -44,6 +44,7 @@ function fromLiveDmMessage(
   if (msg.wireIds?.length) tm.wireIds = msg.wireIds;
   if (msg.mentions?.length) tm.mentions = msg.mentions;
   if (msg.markup?.length) tm.markup = msg.markup;
+  if (msg.references?.length) tm.references = msg.references;
   if (msg.sharedFiles && msg.sharedFiles.length > 0) tm.sharedFiles = msg.sharedFiles;
   if (msg.isSticker) tm.isSticker = true;
   if (msg.replyTo) {
@@ -67,11 +68,13 @@ function queuedDmMessageToTimeline(
     id: queued.id,
     author: session.username,
     authorJid: session.jid,
-    body: queued.body.trim() || (queued.files?.[0]?.url ?? ""),
+    body: queued.body || (queued.files?.[0]?.url ?? ""),
     createdAt: queued.createdAt,
     isSelf: true,
     deliveryStatus: "queued",
   };
+  if (queued.markup?.length) message.markup = queued.markup;
+  if (queued.references?.length) message.references = queued.references;
   if (queued.replyTo) {
     message.replyTo = {
       id: queued.replyTo.id,
@@ -263,7 +266,12 @@ export function useDmMessaging(
     messages.value = messages.value.map((m) => (matchMessageId(m, retractsId) ? { ...m, body: "", isRetracted: true } : m));
   }
 
-  function applyCorrection(replacesId: string, newBody: string, markup?: LiveDmMessage["markup"]) {
+  function applyCorrection(
+    replacesId: string,
+    newBody: string,
+    markup?: LiveDmMessage["markup"],
+    references?: LiveDmMessage["references"],
+  ) {
     messages.value = messages.value.map((m) => {
       if (!matchMessageId(m, replacesId)) return m;
       const updated: TimelineMessage = { ...m, body: newBody.trim(), isEdited: true };
@@ -271,6 +279,11 @@ export function useDmMessaging(
         updated.markup = markup;
       } else {
         delete updated.markup;
+      }
+      if (references && references.length > 0) {
+        updated.references = references;
+      } else {
+        delete updated.references;
       }
       return updated;
     });
@@ -384,7 +397,7 @@ export function useDmMessaging(
       const regular: LiveDmMessage[] = [];
       const reactionUpdates: { targetId: string; nick: string; emojis: string[] }[] = [];
       const retractionUpdates: string[] = [];
-      const correctionUpdates: { targetId: string; body: string; markup?: LiveDmMessage["markup"] }[] = [];
+      const correctionUpdates: { targetId: string; body: string; markup?: LiveDmMessage["markup"]; references?: LiveDmMessage["references"] }[] = [];
       for (const msg of mamResults) {
         if (msg._reactionTarget && msg._reactionEmojis) {
           reactionUpdates.push({
@@ -399,6 +412,7 @@ export function useDmMessaging(
             targetId: msg.replacesId,
             body: msg.body,
             markup: msg.markup,
+            references: msg.references,
           });
         } else if (msg.body || (msg.sharedFiles && msg.sharedFiles.length > 0) || msg.isSticker) {
           regular.push(msg);
@@ -413,12 +427,17 @@ export function useDmMessaging(
       for (const update of correctionUpdates) {
         const target = findMessageById(timeline, update.targetId);
         if (!target) continue;
-        target.body = update.body.trim();
+        target.body = update.body;
         target.isEdited = true;
         if (update.markup && update.markup.length > 0) {
           target.markup = update.markup;
         } else {
           delete target.markup;
+        }
+        if (update.references && update.references.length > 0) {
+          target.references = update.references;
+        } else {
+          delete target.references;
         }
       }
       for (const retractsId of retractionUpdates) {
@@ -474,12 +493,13 @@ export function useDmMessaging(
 
   async function sendMessage(
     explicitBody?: string,
-    _markup?: unknown,
+    markup?: MarkupSpan[],
+    references?: MessageReference[],
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
   ) {
     const bodyText = explicitBody ?? draft.value;
-    const fromComposer = _markup !== undefined;
+    const fromComposer = markup !== undefined;
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     const hasFiles = !!files && files.length > 0;
@@ -521,6 +541,8 @@ export function useDmMessaging(
         : undefined;
       const threadId = parent ? (parent.threadId ?? parent.id) : undefined;
       const result = await client.sendDirectMessage(peerJid, bodyText, {
+        markup,
+        references,
         files: attachments,
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),
         ...(threadId ? { threadId } : {}),
@@ -534,10 +556,12 @@ export function useDmMessaging(
             id: msgId,
             author: session.value.username,
             authorJid: session.value.jid,
-            body: bodyText.trim() || (attachments?.[0]?.url ?? ""),
+            body: bodyText || (attachments?.[0]?.url ?? ""),
             createdAt: new Date().toISOString(),
             isSelf: true,
             deliveryStatus: (result?.state ?? "sending") as DeliveryStatus,
+            ...(markup && markup.length > 0 ? { markup } : {}),
+            ...(references && references.length > 0 ? { references } : {}),
           };
           if (replyTo && parent) {
             optimistic.replyTo = {
@@ -610,12 +634,12 @@ export function useDmMessaging(
     }
   }
 
-  async function editMessage(messageId: string, newBody: string) {
+  async function editMessage(messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]) {
     if (!xmppClient.value || !activePeerJid.value || !newBody.trim()) return;
     const targetId = findMessageById(messages.value, messageId)?.id ?? messageId;
     clearActionError();
     try {
-      await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, targetId);
+      await xmppClient.value.sendDmCorrection(activePeerJid.value, newBody, targetId, markup, references);
     } catch (e) {
       actionError.value = normalizeError(e);
     }
@@ -700,7 +724,7 @@ export function useDmMessaging(
       return;
     }
     if (msg.replacesId) {
-      applyCorrection(msg.replacesId, msg.body, msg.markup);
+      applyCorrection(msg.replacesId, msg.body, msg.markup, msg.references);
       return;
     }
     mergeLiveMessage(

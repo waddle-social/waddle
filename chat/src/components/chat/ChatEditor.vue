@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { watch, onBeforeUnmount } from "vue";
 import { useEditor, EditorContent } from "@tiptap/vue-3";
-import StarterKit from "@tiptap/starter-kit";
-import Image from "@tiptap/extension-image";
-import Placeholder from "@tiptap/extension-placeholder";
 import { shouldSendOnEnter } from "@/lib/editor/chat-enter-key";
-import { ChatLink } from "@/lib/editor/chat-link";
+import { createChatEditorExtensions } from "@/lib/editor/chat-editor-extensions";
 
 const props = withDefaults(
   defineProps<{
@@ -28,38 +25,6 @@ const emit = defineEmits<{
   update: [doc: Record<string, unknown>];
 }>();
 
-function createExtensions() {
-  const exts = [
-    StarterKit.configure({
-      heading: false,
-      horizontalRule: false,
-      link: false,
-      underline: false,
-    }),
-    ChatLink.configure({
-      openOnClick: false,
-      autolink: true,
-      HTMLAttributes: {
-        class: "text-primary underline decoration-primary/40 hover:decoration-primary transition-colors",
-      },
-    }),
-    Placeholder.configure({
-      placeholder: () => props.placeholder,
-    }),
-  ];
-
-  if (!props.compact) {
-    exts.push(
-      Image.configure({
-        inline: false,
-        allowBase64: false,
-      }),
-    );
-  }
-
-  return exts;
-}
-
 function handleSend() {
   if (!editor.value || editor.value.isEmpty) return;
   emit("send", editor.value.getJSON());
@@ -68,7 +33,7 @@ function handleSend() {
 }
 
 const editor = useEditor({
-  extensions: createExtensions(),
+  extensions: createChatEditorExtensions({ placeholder: () => props.placeholder }),
   immediatelyRender: false,
   editable: !props.disabled,
   content: props.initialContent ?? "",
@@ -218,15 +183,6 @@ defineExpose({
 
 .chat-editor .ProseMirror li {
   margin: 0.1em 0;
-}
-
-/* Images */
-.chat-editor .ProseMirror img {
-  max-width: 100%;
-  max-height: 14rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  margin: 0.5em 0;
 }
 
 /* Links */

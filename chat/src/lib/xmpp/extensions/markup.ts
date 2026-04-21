@@ -1,15 +1,11 @@
 /** XEP-0394: Message Markup — stanza.js extension. */
 import type { DefinitionOptions, FieldDefinition } from "stanza/jxt";
 import XMLElement from "stanza/jxt/Element";
+import type { MarkupSpan } from "@/lib/chat-ui";
 
 const NS_MARKUP_0 = "urn:xmpp:markup:0";
 
-export interface WaddleMarkupSpan {
-  type: string;
-  start: number;
-  end: number;
-  uri?: string;
-}
+export type WaddleMarkupSpan = MarkupSpan;
 
 type MarkupSpanWithOffsets = {
   start: number;
@@ -24,7 +20,14 @@ export function shiftMarkupSpans<T extends MarkupSpanWithOffsets>(spans: readonl
   if (!Number.isFinite(offset)) return [];
   return spans.flatMap((span) => {
     if (!hasValidOffsets(span)) return [];
-    const shifted = { ...span, start: span.start + offset, end: span.end + offset };
+    const shifted = {
+      ...span,
+      start: span.start + offset,
+      end: span.end + offset,
+      ...("items" in span && Array.isArray(span.items)
+        ? { items: span.items.map((item) => item + offset) }
+        : {}),
+    };
     return hasValidOffsets(shifted) ? [shifted] : [];
   });
 }
@@ -43,31 +46,70 @@ export function stripMarkupRange<T extends MarkupSpanWithOffsets>(spans: readonl
       ...span,
       start: rebaseOffsetAfterRemoval(span.start, start, end),
       end: rebaseOffsetAfterRemoval(span.end, start, end),
+      ...("items" in span && Array.isArray(span.items)
+        ? { items: span.items.map((item) => rebaseOffsetAfterRemoval(item, start, end)) }
+        : {}),
     };
     return hasValidOffsets(rebased) ? [rebased] : [];
   });
 }
 
-const VALID_TYPES = new Set(["b", "i", "s", "code", "code-block", "blockquote", "link"]);
+const STYLE_NAMES = new Set(["strong", "emphasis", "deleted", "code"]);
 
-/** Custom field: reads/writes child span elements inside <markup>. */
+function parseOffset(value: string | undefined | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function childName(el: XMLElement): string {
+  return el.getName?.() ?? (el as unknown as Record<string, string>).name;
+}
+
+/** Custom field: reads/writes child markup elements inside <markup>. */
 const spansField: FieldDefinition<WaddleMarkupSpan[]> = {
   importer(xml: XMLElement): WaddleMarkupSpan[] | undefined {
     const spans: WaddleMarkupSpan[] = [];
     for (const child of xml.children) {
       if (typeof child === "string") continue;
       const el = child as XMLElement;
-      const tag = el.getName?.() ?? (el as unknown as Record<string, string>).name;
-      if (!tag || !VALID_TYPES.has(tag)) continue;
-      const start = Number(el.getAttribute("start"));
-      const end = Number(el.getAttribute("end"));
-      if (Number.isNaN(start) || Number.isNaN(end)) continue;
-      const span: WaddleMarkupSpan = { type: tag, start, end };
-      if (tag === "link") {
-        const uri = el.getAttribute("uri");
-        if (uri) span.uri = uri;
+      const tag = childName(el);
+      const start = parseOffset(el.getAttribute("start"));
+      const end = parseOffset(el.getAttribute("end"));
+      if (!tag || start === null || end === null) continue;
+
+      if (tag === "span") {
+        const styles = el.children.flatMap((styleChild) => {
+          if (typeof styleChild === "string") return [];
+          const name = childName(styleChild as XMLElement);
+          return STYLE_NAMES.has(name) ? [name as "strong" | "emphasis" | "deleted" | "code"] : [];
+        });
+        if (styles.length > 0) spans.push({ type: "span", start, end, styles });
+        continue;
       }
-      spans.push(span);
+
+      if (tag === "bcode") {
+        const language = el.getAttribute("language");
+        spans.push({ type: "bcode", start, end, ...(language ? { language } : {}) });
+        continue;
+      }
+
+      if (tag === "bquote") {
+        spans.push({ type: "bquote", start, end });
+        continue;
+      }
+
+      if (tag === "list") {
+        const ordered = el.getAttribute("ordered") === "true";
+        const items = el.children.flatMap((itemChild) => {
+          if (typeof itemChild === "string") return [];
+          const itemEl = itemChild as XMLElement;
+          if (childName(itemEl) !== "li") return [];
+          const itemStart = parseOffset(itemEl.getAttribute("start"));
+          return itemStart === null ? [] : [itemStart];
+        });
+        if (items.length > 0) spans.push({ type: "list", start, end, ordered, items });
+      }
     }
     return spans.length > 0 ? spans : undefined;
   },
@@ -78,11 +120,27 @@ const spansField: FieldDefinition<WaddleMarkupSpan[]> = {
         start: String(span.start),
         end: String(span.end),
       };
-      if (span.type === "link" && span.uri) {
-        attrs.uri = span.uri;
+      if (span.type === "span") {
+        const child = new XMLElement("span", attrs);
+        for (const style of span.styles) {
+          child.appendChild(new XMLElement(style));
+        }
+        xml.appendChild(child);
+      } else if (span.type === "bcode") {
+        if (span.language) attrs.language = span.language;
+        xml.appendChild(new XMLElement("bcode", attrs));
+      } else if (span.type === "bquote") {
+        xml.appendChild(new XMLElement("bquote", attrs));
+      } else if (span.type === "list") {
+        const child = new XMLElement("list", {
+          ...attrs,
+          ordered: span.ordered ? "true" : "false",
+        });
+        for (const itemStart of span.items) {
+          child.appendChild(new XMLElement("li", { start: String(itemStart) }));
+        }
+        xml.appendChild(child);
       }
-      const child = new XMLElement(span.type, attrs);
-      xml.appendChild(child);
     }
   },
 };

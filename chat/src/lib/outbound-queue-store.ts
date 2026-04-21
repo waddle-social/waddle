@@ -1,4 +1,4 @@
-import type { MarkupSpan } from "@/lib/chat-ui";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { OutboundFileAttachment, ReplyTarget } from "@/lib/xmpp/messaging";
 
 const PREFIX = "waddle.chat.outbound-queue";
@@ -7,6 +7,8 @@ interface PersistedQueuedMessageBase {
   id: string;
   createdAt: string;
   body: string;
+  markup?: MarkupSpan[];
+  references?: MessageReference[];
   files?: OutboundFileAttachment[];
   replyTo?: ReplyTarget;
   threadId?: string;
@@ -16,7 +18,6 @@ interface PersistedQueuedMessageBase {
 export interface PersistedQueuedRoomMessage extends PersistedQueuedMessageBase {
   kind: "room";
   roomJid: string;
-  markup?: MarkupSpan[];
   threadCreate?: { title: string };
   threadReply?: { threadId: string };
 }

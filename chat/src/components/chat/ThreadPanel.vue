@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { X, CornerDownRight, MessageSquarePlus, ChevronRight, ChevronLeft } from "lucide-vue-next";
 import MessageCard from "@/components/chat/MessageCard.vue";
 import MessageComposer from "@/components/chat/MessageComposer.vue";
-import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
+import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { OccupantHat, OccupantPresence, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import type { ThreadEntry, ThreadIndex } from "@/composables/useThreads";
 import { useScrollDirection } from "@/composables/useScrollDirection";
@@ -44,11 +44,12 @@ const emit = defineEmits<{
   send: [
     body: string,
     markup: MarkupSpan[],
+    references: MessageReference[],
     files: Array<File | Blob> | undefined,
     replyTo: { id: string; author: string; body?: string } | undefined,
     threadOverride: { threadId: string; parentThreadId?: string },
   ];
-  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
+  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
@@ -136,7 +137,7 @@ function cancelReplyInThread() {
   replyingTo.value = null;
 }
 
-function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) {
+function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
   const threadId = activeThreadId.value;
   if (!threadId) return;
   const entry = activeEntry.value;
@@ -151,7 +152,7 @@ function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) 
       : undefined;
   const override: { threadId: string; parentThreadId?: string } = { threadId };
   if (parentThreadId.value) override.parentThreadId = parentThreadId.value;
-  emit("send", body, markup, files, effectiveReply, override);
+  emit("send", body, markup, references, files, effectiveReply, override);
   replyingTo.value = null;
   draft.value = "";
 }
@@ -227,7 +228,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
           :author-jid="authorJidByNick?.[activeEntry.root.author]"
           :thread-reply-count="activeEntry.count"
           hide-thread-chip
-          @edit="(id, body, m) => emit('editMessage', id, body, m)"
+          @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
           @retract="(id) => emit('retractMessage', id)"
           @react="(id, emoji) => emit('reactMessage', id, emoji)"
           @reply="beginReplyInThread"
@@ -249,7 +250,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             :author-jid="authorJidByNick?.[child.author]"
             :thread-reply-count="threadIndex.get(child.id)?.count ?? 0"
             hide-thread-chip
-            @edit="(id, body, m) => emit('editMessage', id, body, m)"
+            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReplyInThread"

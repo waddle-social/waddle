@@ -8,6 +8,9 @@ import {
 } from "./messaging";
 import type { WaddleFallback } from "./extensions/fallback";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
+import { shiftMarkupSpans } from "./extensions/markup";
+import { codePointLength } from "@/lib/text-offsets";
 
 export function sendDmChatState(xmpp: Agent, peerJid: string, state: ChatStateType): void {
   xmpp.sendMessage({ to: peerJid, type: "chat", chatState: state, processingHints: { noStore: true } });
@@ -43,15 +46,51 @@ export function sendDmRetraction(xmpp: Agent, peerJid: string, retractsId: strin
   } as Record<string, unknown>);
 }
 
-export function sendDmCorrection(xmpp: Agent, peerJid: string, body: string, replacesId: string): string | null {
-  const text = body.trim();
-  if (!text) return null;
+function shiftReferences(references: readonly MessageReference[] | undefined, offset: number): MessageReference[] | undefined {
+  if (!references?.length) return undefined;
+  return references.map((reference) => {
+    if (typeof reference.begin !== "number" || typeof reference.end !== "number") return reference;
+    return { ...reference, begin: reference.begin + offset, end: reference.end + offset };
+  });
+}
+
+function toStanzaReferences(references: readonly MessageReference[]): Array<Record<string, string>> {
+  return references.map((reference) => ({
+    type: reference.type,
+    uri: reference.uri,
+    ...(typeof reference.begin === "number" ? { begin: String(reference.begin) } : {}),
+    ...(typeof reference.end === "number" ? { end: String(reference.end) } : {}),
+    ...(reference.anchor ? { anchor: reference.anchor } : {}),
+  }));
+}
+
+export function sendDmCorrection(
+  xmpp: Agent,
+  peerJid: string,
+  body: string,
+  replacesId: string,
+  markup?: MarkupSpan[],
+  references?: MessageReference[],
+): string | null {
+  if (!body.trim()) return null;
   const msgId = crypto.randomUUID();
-  xmpp.sendMessage({ id: msgId, to: peerJid, type: "chat", body: text, replace: replacesId, processingHints: { store: true } });
+  const msgData: Record<string, unknown> = {
+    id: msgId,
+    to: peerJid,
+    type: "chat",
+    body,
+    replace: replacesId,
+    processingHints: { store: true },
+  };
+  if (markup?.length) msgData.markup = { spans: markup };
+  if (references?.length) msgData.references = toStanzaReferences(references);
+  xmpp.sendMessage(msgData as Parameters<Agent["sendMessage"]>[0]);
   return msgId;
 }
 
 export interface SendDirectMessageOptions {
+  markup?: MarkupSpan[];
+  references?: MessageReference[];
   files?: OutboundFileAttachment[];
   replyTo?: ReplyTarget;
   threadId?: string;
@@ -77,17 +116,21 @@ export function sendDirectMessage(
   body: string,
   opts: SendDirectMessageOptions = {},
 ): string | null {
-  const { files, replyTo, threadId, parentThreadId, id } = opts;
-  const text = body.trim();
+  const { markup, references, files, replyTo, threadId, parentThreadId, id } = opts;
+  const text = body;
+  const hasText = text.trim().length > 0;
   const hasFiles = !!files && files.length > 0;
-  if (!text && !hasFiles) return null;
+  if (!hasText && !hasFiles) return null;
 
   const msgId = id ?? crypto.randomUUID();
   const { prefix, length: prefixLength } = replyTo
     ? buildReplyFallbackPrefix(replyTo.body)
     : { prefix: "", length: 0 };
-  const bodyText = text || (hasFiles ? files![0].url : "");
+  const markupPrefixLength = codePointLength(prefix);
+  const bodyText = hasText ? text : (hasFiles ? files![0].url : "");
   const effectiveBody = prefix + bodyText;
+  const rebasedMarkup = markup?.length ? shiftMarkupSpans(markup, markupPrefixLength) : undefined;
+  const rebasedReferences = shiftReferences(references, markupPrefixLength);
   const fallbacks: WaddleFallback[] = [];
   if (replyTo && prefixLength > 0) {
     fallbacks.push({ for: "urn:xmpp:reply:0", body: { start: 0, end: prefixLength } });
@@ -102,6 +145,8 @@ export function sendDirectMessage(
     marker: { type: "markable" },
     processingHints: { store: true },
   };
+  if (rebasedMarkup?.length) msgData.markup = { spans: rebasedMarkup };
+  if (rebasedReferences?.length) msgData.references = toStanzaReferences(rebasedReferences);
   if (replyTo) {
     msgData.reply = { to: replyTo.author, id: replyTo.id };
   }
@@ -125,7 +170,7 @@ export function sendDirectMessage(
     if (encryptedFiles.length > 0) {
       msgData.encryptedFiles = encryptedFiles;
     }
-    if (!text) {
+    if (!hasText) {
       fallbacks.push({ for: "urn:xmpp:sfs:0" });
     }
   }

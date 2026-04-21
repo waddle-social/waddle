@@ -45,7 +45,7 @@ describe("reply addressing", () => {
       },
     ];
 
-    await messaging.sendMessage("sounds good", [], undefined, {
+    await messaging.sendMessage("sounds good", [], [], undefined, {
       id: "parent-1",
       author: "Friendly Bob",
       body: "hello there",
@@ -96,7 +96,7 @@ describe("reply addressing", () => {
       },
     ];
 
-    await messaging.sendMessage("sure!", undefined, undefined, {
+    await messaging.sendMessage("sure!", undefined, undefined, undefined, {
       id: "parent-1",
       author: "Bob",
       body: "want to grab lunch?",
@@ -149,7 +149,7 @@ describe("reply addressing", () => {
       },
     ];
 
-    await messaging.sendMessage("fresh message", [], undefined, {
+    await messaging.sendMessage("fresh message", [], [], undefined, {
       id: "stale-parent",
       author: "Friendly Bob",
       body: "hello there",
@@ -189,7 +189,7 @@ describe("reply addressing", () => {
       },
     ];
 
-    await messaging.sendMessage("fresh dm", undefined, undefined, {
+    await messaging.sendMessage("fresh dm", undefined, undefined, undefined, {
       id: "stale-parent",
       author: "Bob",
       body: "want to grab lunch?",

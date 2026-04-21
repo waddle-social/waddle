@@ -3,6 +3,8 @@ import type { ReceivedMessage } from "stanza/protocol";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
 import { splitMessageIds } from "@/lib/message-ids";
 import { stripMarkupRange } from "./extensions/markup";
+import { codePointLength, codePointToCodeUnitIndex } from "@/lib/text-offsets";
+import type { MessageReference } from "@/lib/chat-ui";
 import type {
   ChatStateEvent, ChatStateType, DisplayedEvent,
   LiveDmMessage, LiveRoomMessage, ReactionEvent, RoomActivityEvent, SharedFileInfo,
@@ -14,6 +16,7 @@ type MessageExtensionsTarget = Pick<
   | "wireIds"
   | "body"
   | "mentions"
+  | "references"
   | "broadcastMention"
   | "sharedFiles"
   | "isSticker"
@@ -30,12 +33,6 @@ type MessageExtensionsTarget = Pick<
 /** Access custom JXT extension fields that TypeScript doesn't know about. */
 export function ext(msg: unknown): Record<string, unknown> {
   return msg as Record<string, unknown>;
-}
-
-const encoder = new TextEncoder();
-
-function byteLen(text: string): number {
-  return encoder.encode(text).byteLength;
 }
 
 interface OriginIdPayload {
@@ -133,25 +130,58 @@ function stripReplyFallback(msg: ReceivedMessage, base: MessageExtensionsTarget)
   if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd) || rawStart < 0 || rawEnd < 0) {
     return;
   }
-  const start = Math.max(0, Math.min(rawStart, base.body.length));
-  const end = Math.max(start, Math.min(rawEnd, base.body.length));
+  const bodyLength = codePointLength(base.body);
+  const start = Math.max(0, Math.min(rawStart, bodyLength));
+  const end = Math.max(start, Math.min(rawEnd, bodyLength));
   if (end <= start) return;
-  const prefixText = base.body.slice(0, start);
-  const strippedText = base.body.slice(start, end);
-  const markupRangeStart = byteLen(prefixText);
-  const markupRangeEnd = markupRangeStart + byteLen(strippedText);
-  base.body = base.body.slice(0, start) + base.body.slice(end);
-  if (!base.markup?.length) return;
-  const rebasedMarkup = stripMarkupRange(base.markup, markupRangeStart, markupRangeEnd);
-  if (rebasedMarkup.length > 0) {
-    base.markup = rebasedMarkup;
-    return;
+  const startIndex = codePointToCodeUnitIndex(base.body, start);
+  const endIndex = codePointToCodeUnitIndex(base.body, end);
+  const prefixText = base.body.slice(0, startIndex);
+  const strippedText = base.body.slice(startIndex, endIndex);
+  const markupRangeStart = codePointLength(prefixText);
+  const markupRangeEnd = markupRangeStart + codePointLength(strippedText);
+  base.body = base.body.slice(0, startIndex) + base.body.slice(endIndex);
+  if (base.markup?.length) {
+    const rebasedMarkup = stripMarkupRange(base.markup, markupRangeStart, markupRangeEnd);
+    if (rebasedMarkup.length > 0) {
+      base.markup = rebasedMarkup;
+    } else {
+      delete base.markup;
+    }
   }
-  delete base.markup;
+  if (!base.references?.length) return;
+  const rebasedReferences = stripReferenceRange(base.references, markupRangeStart, markupRangeEnd);
+  if (rebasedReferences.length > 0) {
+    base.references = rebasedReferences;
+  } else {
+    delete base.references;
+  }
+}
+
+function rebaseOffsetAfterRemoval(offset: number, start: number, end: number): number {
+  if (offset <= start) return offset;
+  if (offset >= end) return offset - (end - start);
+  return start;
+}
+
+function stripReferenceRange(references: readonly MessageReference[], start: number, end: number): MessageReference[] {
+  return references.flatMap((reference) => {
+    if (typeof reference.begin !== "number" || typeof reference.end !== "number") return [reference];
+    const begin = rebaseOffsetAfterRemoval(reference.begin, start, end);
+    const rebasedEnd = rebaseOffsetAfterRemoval(reference.end, start, end);
+    return rebasedEnd > begin ? [{ ...reference, begin, end: rebasedEnd }] : [];
+  });
+}
+
+function parseReferenceOffset(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string" || !value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const refs = ext(msg).references as Array<{ type?: string; uri?: string }> | undefined;
+  const refs = ext(msg).references as Array<{ type?: string; uri?: string; begin?: string | number; end?: string | number; anchor?: string }> | undefined;
   if (!refs?.length) return;
 
   const mentionUris = refs
@@ -160,6 +190,20 @@ function extractReferences(msg: ReceivedMessage, base: MessageExtensionsTarget):
   if (mentionUris.length > 0) {
     base.mentions = mentionUris;
   }
+
+  const references = refs.flatMap((r) => {
+    if (!r.type || !r.uri) return [];
+    const begin = parseReferenceOffset(r.begin);
+    const end = parseReferenceOffset(r.end);
+    return [{
+      type: r.type,
+      uri: r.uri,
+      ...(begin !== undefined ? { begin } : {}),
+      ...(end !== undefined ? { end } : {}),
+      ...(r.anchor ? { anchor: r.anchor } : {}),
+    }];
+  });
+  if (references.length > 0) base.references = references;
 }
 
 function extractExplicitMentions(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
@@ -305,13 +349,8 @@ function extractFileSharing(msg: ReceivedMessage, base: MessageExtensionsTarget)
 
 /** XEP-0394: Extract Message Markup annotations. */
 function extractMarkup(msg: ReceivedMessage, base: MessageExtensionsTarget): void {
-  const markupData = ext(msg).markup as { spans?: Array<{ type: string; start: number; end: number; uri?: string }> } | undefined;
+  const markupData = ext(msg).markup as { spans?: import("@/lib/chat-ui").MarkupSpan[] } | undefined;
   if (!markupData?.spans || markupData.spans.length === 0) return;
 
-  base.markup = markupData.spans.map(s => ({
-    type: s.type as import("@/lib/chat-ui").MarkupSpan["type"],
-    start: s.start,
-    end: s.end,
-    ...(s.uri ? { uri: s.uri } : {}),
-  }));
+  base.markup = markupData.spans;
 }

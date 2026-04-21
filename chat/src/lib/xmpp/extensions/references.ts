@@ -13,6 +13,7 @@ const definitions: DefinitionOptions[] = [
       uri: attribute("uri"),
       begin: attribute("begin"),
       end: attribute("end"),
+      anchor: attribute("anchor"),
     },
     namespace: NS_REFERENCE_0,
   },

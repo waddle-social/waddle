@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Editor } from "@tiptap/vue-3";
-import StarterKit from "@tiptap/starter-kit";
 import { shouldSendOnEnter } from "../src/lib/editor/chat-enter-key";
-import { parseXep0393ToTiptap } from "../src/lib/editor/xep0393-parser";
-import { serializeTiptapToXep0393 } from "../src/lib/editor/xep0393-serializer";
+import { createChatEditorExtensions } from "../src/lib/editor/chat-editor-extensions";
+import { richMessageToTiptap, tiptapToRichMessage, type MarkupSpan } from "../src/lib/rich-message";
 
 if (typeof globalThis.requestAnimationFrame !== "function") {
   globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
@@ -23,14 +22,7 @@ const enter = {
 
 function createEditor(content: Record<string, unknown>) {
   return new Editor({
-    extensions: [
-      StarterKit.configure({
-        heading: false,
-        horizontalRule: false,
-        link: false,
-        underline: false,
-      }),
-    ],
+    extensions: createChatEditorExtensions({ includePlaceholder: false }),
     content,
   });
 }
@@ -78,11 +70,127 @@ describe("message input editor", () => {
     }
   });
 
-  test("round-trips bullet and ordered lists through edit content", () => {
-    const bulletDoc = parseXep0393ToTiptap("- one\n- *two*");
-    const orderedDoc = parseXep0393ToTiptap("3. one\n4. two");
+  test("uses Tiptap default list item schema and keymap", () => {
+    const editor = createEditor({ type: "doc", content: [{ type: "paragraph" }] });
 
-    expect(serializeTiptapToXep0393(bulletDoc as any).body).toBe("- one\n- *two*");
-    expect(serializeTiptapToXep0393(orderedDoc as any).body).toBe("3. one\n4. two");
+    try {
+      expect(editor.schema.nodes.listItem.spec.content).toBe("paragraph block*");
+      expect(editor.extensionManager.extensions.some((extension) => extension.name === "listKeymap")).toBe(true);
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  test("serializes lists without blank lines between sibling items", () => {
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "one" }] }] },
+            { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "two" }] }] },
+          ],
+        },
+      ],
+    };
+
+    const serialized = tiptapToRichMessage(doc);
+
+    expect(serialized.body).toBe("- one\n- two");
+    expect(serialized.markup).toEqual([
+      { type: "list", start: 0, end: 11, ordered: false, items: [0, 6] },
+    ]);
+  });
+
+  test("round-trips nested lists through rich markup", () => {
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "parent" }] },
+                {
+                  type: "bulletList",
+                  content: [
+                    { type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "child" }] }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const serialized = tiptapToRichMessage(doc);
+    const hydrated = richMessageToTiptap(serialized);
+
+    expect(serialized.body).toBe("- parent\n  - child");
+    expect(tiptapToRichMessage(hydrated).body).toBe(serialized.body);
+  });
+
+  test("removing a list item keeps the following item as a sibling after save", () => {
+    const body = "- one\n- three";
+    const markup: MarkupSpan[] = [
+      { type: "list", start: 0, end: body.length, ordered: false, items: [0, 6] },
+    ];
+
+    const editor = createEditor(richMessageToTiptap({ body, markup }));
+
+    try {
+      expect(tiptapToRichMessage(editor.getJSON() as any).body).toBe(body);
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  test("serializes inline marks and links as XMPP metadata", () => {
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "Hi " },
+            { type: "text", text: "there", marks: [{ type: "bold" }, { type: "italic" }] },
+            { type: "text", text: " docs", marks: [{ type: "link", attrs: { href: "https://example.com/docs" } }] },
+          ],
+        },
+      ],
+    };
+
+    const serialized = tiptapToRichMessage(doc);
+
+    expect(serialized.body).toBe("Hi there docs");
+    expect(serialized.markup).toEqual([
+      { type: "span", start: 3, end: 8, styles: ["emphasis", "strong"] },
+    ]);
+    expect(serialized.references).toEqual([
+      { type: "data", uri: "https://example.com/docs", begin: 8, end: 13 },
+    ]);
+  });
+
+  test("uses code point offsets for emoji", () => {
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "👋 " },
+            { type: "text", text: "bold", marks: [{ type: "bold" }] },
+          ],
+        },
+      ],
+    };
+
+    expect(tiptapToRichMessage(doc).markup).toEqual([
+      { type: "span", start: 2, end: 6, styles: ["strong"] },
+    ]);
   });
 });

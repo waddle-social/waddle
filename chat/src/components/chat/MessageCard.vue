@@ -6,9 +6,8 @@ import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
-import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan, type TimelineSharedFile } from "@/lib/chat-ui";
-import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
-import { parseXep0393ToTiptap } from "@/lib/editor/xep0393-parser";
+import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan, type MessageReference, type TimelineSharedFile } from "@/lib/chat-ui";
+import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
@@ -44,7 +43,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  edit: [messageId: string, newBody: string, markup?: MarkupSpan[]];
+  edit: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
   retract: [messageId: string];
   react: [messageId: string, emoji: string];
   reply: [message: TimelineMessage];
@@ -55,7 +54,7 @@ const emit = defineEmits<{
 
 const quickEmojis = ["👍", "❤️", "😂", "🎉", "👀"];
 
-const styledHtml = computed(() => renderStyledBody(displayBody.value, props.message.markup));
+const styledHtml = computed(() => renderStyledBody(displayBody.value, props.message.markup, props.message.references));
 const styledBodyRef = ref<HTMLDivElement | null>(null);
 const setStyledBodyRef = (el: HTMLDivElement | null) => {
   styledBodyRef.value = el;
@@ -308,15 +307,30 @@ const editTiptapEditor = computed(() => {
   const e = editEditorRef.value as any;
   return e?.editor?.value ?? e?.editor ?? null;
 });
+const editOriginalRich = computed(() =>
+  tiptapToRichMessage(richMessageToTiptap({
+    body: props.message.body,
+    markup: props.message.markup,
+    references: props.message.references,
+  })),
+);
+const editOriginalBody = computed(() => editOriginalRich.value.body.trim());
 const editCanSubmit = computed(() => {
   if (!editDraftDoc.value) return false;
-  const { body } = serializeTiptapToXep0393(editDraftDoc.value);
+  const { body, markup, references } = tiptapToRichMessage(editDraftDoc.value);
   const trimmed = body.trim();
-  return !!trimmed && trimmed !== props.message.body;
+  if (!trimmed) return false;
+  return trimmed !== editOriginalBody.value
+    || JSON.stringify(markup) !== JSON.stringify(editOriginalRich.value.markup)
+    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references);
 });
 
 function startEdit() {
-  const content = parseXep0393ToTiptap(props.message.body);
+  const content = richMessageToTiptap({
+    body: props.message.body,
+    markup: props.message.markup,
+    references: props.message.references,
+  });
   editInitialContent.value = content;
   editDraftDoc.value = content;
   isEditing.value = true;
@@ -334,10 +348,13 @@ function updateEditDraft(doc: Record<string, unknown>) {
 }
 
 function submitEditFromEditor(doc: Record<string, unknown>) {
-  const { body, markup } = serializeTiptapToXep0393(doc);
+  const { body, markup, references } = tiptapToRichMessage(doc);
   const trimmed = body.trim();
-  if (trimmed && trimmed !== props.message.body) {
-    emit("edit", props.message.id, trimmed, markup);
+  const changed = trimmed !== editOriginalBody.value
+    || JSON.stringify(markup) !== JSON.stringify(editOriginalRich.value.markup)
+    || JSON.stringify(references) !== JSON.stringify(editOriginalRich.value.references);
+  if (trimmed && changed) {
+    emit("edit", props.message.id, body, markup, references);
   }
   isEditing.value = false;
   editInitialContent.value = undefined;
@@ -606,27 +623,25 @@ watch(
         @update="updateEditDraft"
         class="flex-1"
       />
-      <div class="inline-flex h-9 shrink-0 items-center gap-0.5 rounded-lg border border-border bg-muted/50 p-0.5">
-        <button
-          type="button"
-          class="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground transition-all duration-200 hover:shadow-[0_0_14px_var(--glow-strong)] disabled:opacity-25 disabled:hover:shadow-none"
-          :disabled="!editCanSubmit"
-          title="Save edit"
-          aria-label="Save edit"
-          @click="submitCurrentEdit"
-        >
-          <Send class="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
-          title="Cancel edit"
-          aria-label="Cancel edit"
-          @click="cancelEdit"
-        >
-          <X class="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-      </div>
+      <button
+        type="button"
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-all duration-200 hover:shadow-[0_0_14px_var(--glow-strong)] disabled:opacity-25 disabled:hover:shadow-none"
+        :disabled="!editCanSubmit"
+        title="Save edit"
+        aria-label="Save edit"
+        @click="submitCurrentEdit"
+      >
+        <Send class="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/50 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+        title="Cancel edit"
+        aria-label="Cancel edit"
+        @click="cancelEdit"
+      >
+        <X class="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
       <EditorBubbleToolbar v-if="editTiptapEditor" :editor="editTiptapEditor" />
     </div>
 

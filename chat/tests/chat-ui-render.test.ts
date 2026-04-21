@@ -1,78 +1,69 @@
 import { describe, expect, test } from "bun:test";
-import { renderStyledBody, type MarkupSpan } from "../src/lib/chat-ui";
-
-const encoder = new TextEncoder();
-
-function byteLen(input: string): number {
-  return encoder.encode(input).byteLength;
-}
+import { renderStyledBody, type MarkupSpan, type MessageReference } from "../src/lib/chat-ui";
 
 describe("renderStyledBody", () => {
-  test("renders XEP-0393 bold + inline code without leaking markers", () => {
-    const html = renderStyledBody("Hello *again!* and `fn main()`");
-    expect(html).toContain("<strong>again!</strong>");
-    expect(html).toContain("<code");
-    expect(html).not.toContain("*again!*");
+  test("renders plain text literally instead of parsing Markdown", () => {
+    expect(renderStyledBody("Hello **again**")).toBe("<p>Hello **again**</p>");
+    expect(renderStyledBody("# heading")).toBe("<p># heading</p>");
+    expect(renderStyledBody("![alt](https://example.com/image.png)")).toBe("<p>![alt](https://example.com/image.png)</p>");
   });
 
-  test("renders markdown-style double-asterisk bold", () => {
-    const html = renderStyledBody("**ss**");
-    expect(html).toContain("<strong>ss</strong>");
-  });
-
-  test("renders single-newline messages as visible line breaks", () => {
-    const html = renderStyledBody("line one\nline two");
-    expect(html).toContain("line one<br>line two");
-  });
-
-  test("renders blank-line-separated messages as paragraphs", () => {
-    const html = renderStyledBody("line one\n\nline two");
-    expect(html).toContain("<p>line one</p>");
-    expect(html).toContain("<p>line two</p>");
-  });
-
-  test("renders bullet and ordered lists", () => {
-    const bulletHtml = renderStyledBody("- one\n- two");
-    const orderedHtml = renderStyledBody("3. one\n4. two");
-
-    expect(bulletHtml).toContain("<ul>");
-    expect(bulletHtml).toContain("<li>one</li>");
-    expect(orderedHtml).toContain('<ol start="3">');
-    expect(orderedHtml).toContain("<li>two</li>");
-  });
-
-  test("synthesizes styling from markup-only payloads", () => {
-    const body = "Hello world";
+  test("renders inline XEP-0394 spans with code point offsets", () => {
+    const body = "Hi 👋 world";
     const markup: MarkupSpan[] = [
-      { type: "b", start: byteLen("Hello "), end: byteLen(body) },
+      { type: "span", start: 5, end: 10, styles: ["strong"] },
+      { type: "span", start: 3, end: 4, styles: ["code"] },
     ];
+
     const html = renderStyledBody(body, markup);
-    expect(html).toContain("Hello <strong>world</strong>");
+
+    expect(html).toContain("Hi <code");
+    expect(html).toContain("<strong>world</strong>");
   });
 
-  test("prefers body markers when body already contains formatting markers", () => {
-    const body = "Hello *again!*";
+  test("renders code blocks, blockquotes, and lists from markup metadata", () => {
+    const code = renderStyledBody("const x = 1", [
+      { type: "bcode", start: 0, end: 11, language: "ts" },
+    ]);
+    const quote = renderStyledBody("> quoted", [
+      { type: "bquote", start: 0, end: 8 },
+    ]);
+    const list = renderStyledBody("- one\n- two", [
+      { type: "list", start: 0, end: 11, ordered: false, items: [0, 6] },
+    ]);
+
+    expect(code).toContain('data-code-block="true"');
+    expect(code).toContain('data-language="ts"');
+    expect(quote).toContain("<blockquote");
+    expect(quote).toContain("<p>quoted</p>");
+    expect(list).toContain("<ul>");
+    expect(list).toContain("<li><p>one</p></li>");
+    expect(list).toContain("<li><p>two</p></li>");
+    expect(list).not.toContain("- one");
+  });
+
+  test("renders ordered lists and links through XEP-0372 references", () => {
+    const body = "3. docs\n4. more";
     const markup: MarkupSpan[] = [
-      { type: "b", start: byteLen("Hello "), end: byteLen(body) },
+      { type: "list", start: 0, end: body.length, ordered: true, items: [0, 8] },
     ];
-    const html = renderStyledBody(body, markup);
-    expect(html).toContain("<strong>again!</strong>");
-    expect(html).not.toContain("*again!*");
+    const references: MessageReference[] = [
+      { type: "data", uri: "https://example.com/docs", begin: 3, end: 7 },
+    ];
+
+    const html = renderStyledBody(body, markup, references);
+
+    expect(html).toContain('<ol start="3">');
+    expect(html).toContain('<a href="https://example.com/docs"');
+    expect(html).toContain(">docs</a>");
   });
 
-  test("preserves fenced code language for downstream highlighting", () => {
-    const html = renderStyledBody("```rust\nfn main() {}\n```");
-    expect(html).toContain('data-code-block="true"');
-    expect(html).toContain('data-language="rust"');
-  });
+  test("escapes unsafe HTML and rejects unsafe links", () => {
+    const html = renderStyledBody("<script>x</script>", undefined, [
+      { type: "data", uri: "javascript:alert(1)", begin: 0, end: 8 },
+    ]);
 
-  test("synthesizes inline code from markup-only payloads", () => {
-    const body = "fn main() {}";
-    const markup: MarkupSpan[] = [
-      { type: "code", start: 0, end: byteLen(body) },
-    ];
-    const html = renderStyledBody(body, markup);
-    expect(html).toContain("<code");
-    expect(html).toContain("fn main() {}");
+    expect(html).toBe("<p>&lt;script&gt;x&lt;/script&gt;</p>");
+    expect(html).not.toContain("javascript:");
   });
 });

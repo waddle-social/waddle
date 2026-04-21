@@ -11,7 +11,7 @@ import {
 } from "@/lib/scroll-direction";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
 import type { ChannelSummary, WaddleSummary } from "@/lib/waddle-api";
-import type { TimelineMessage, MarkupSpan } from "@/lib/chat-ui";
+import type { TimelineMessage, MarkupSpan, MessageReference } from "@/lib/chat-ui";
 import type { BrowserXmppClient, XmppStatusSnapshot, RoomHats, RoomPresence } from "@/lib/xmpp-client";
 import { useScrollDirection } from "@/composables/useScrollDirection";
 import type { ThreadIndex } from "@/composables/useThreads";
@@ -59,12 +59,13 @@ const emit = defineEmits<{
   send: [
     body: string,
     markup: MarkupSpan[],
+    references: MessageReference[],
     files?: Array<File | Blob>,
     replyTo?: { id: string; author: string; body?: string },
     forumTitle?: string,
   ];
   typing: [];
-  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[]];
+  editMessage: [messageId: string, newBody: string, markup?: MarkupSpan[], references?: MessageReference[]];
   retractMessage: [messageId: string];
   reactMessage: [messageId: string, emoji: string];
   displayed: [messageId: string];
@@ -184,12 +185,13 @@ function scrollToMessage(messageId: string) {
   showReplyJumpNotice(notice);
 }
 
-function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) {
+function onSend(body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>) {
   const pending = replyingTo.value;
   emit(
     "send",
     body,
     markup,
+    references,
     files,
     pending ? { id: pending.id, author: pending.author, ...(pending.body ? { body: pending.body } : {}) } : undefined,
     !pending && detectForumChannel(props.channel) ? forumTitle.value : undefined,
@@ -198,7 +200,7 @@ function onSend(body: string, markup: MarkupSpan[], files?: Array<File | Blob>) 
 }
 
 function onSelectGif(url: string) {
-  onSend(url, []);
+  onSend(url, [], []);
 }
 
 const messagesContainer = ref<HTMLDivElement | null>(null);
@@ -723,7 +725,7 @@ function showDividerAfter(messageId: string): boolean {
             :last-seen="roomLastSeen[msg.author]"
             :author-jid="authorJidByNick?.[msg.author]"
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
-            @edit="(id, body, m) => emit('editMessage', id, body, m)"
+            @edit="(id, body, m, r) => emit('editMessage', id, body, m, r)"
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReply"

@@ -5,10 +5,10 @@ import GifPicker from "@/components/chat/GifPicker.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import { searchEmoji } from "@/lib/emoji";
-import { serializeTiptapToXep0393 } from "@/lib/editor/xep0393-serializer";
+import { tiptapToRichMessage } from "@/lib/rich-message";
 import { getComposerEscapeAction } from "@/lib/reply-ux";
 import { extractImagesFromEvent } from "@/lib/xmpp/file-upload";
-import type { MarkupSpan } from "@/lib/chat-ui";
+import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
 
 interface PendingAttachment {
   id: string;
@@ -34,7 +34,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  send: [body: string, markup: MarkupSpan[], files?: Array<File | Blob>];
+  send: [body: string, markup: MarkupSpan[], references: MessageReference[], files?: Array<File | Blob>];
   typing: [];
   selectGif: [url: string];
   cancelReply: [];
@@ -147,7 +147,7 @@ const editorPlaceholder = computed(() => {
 
 function onEditorUpdate(doc: Record<string, unknown>) {
   // Keep draft in sync as a plain text representation
-  const serialized = serializeTiptapToXep0393(doc as any);
+  const serialized = tiptapToRichMessage(doc);
   draft.value = serialized.body;
   emit("typing");
   checkAutocompleteFromEditor();
@@ -238,7 +238,7 @@ function onSend(doc: Record<string, unknown>) {
     return;
   }
 
-  const serialized = serializeTiptapToXep0393(doc as any);
+  const serialized = tiptapToRichMessage(doc);
   const text = serialized.body.trim();
   const attachments = pendingAttachments.value;
 
@@ -253,7 +253,13 @@ function onSend(doc: Record<string, unknown>) {
     for (const a of attachments) URL.revokeObjectURL(a.previewUrl);
   }
 
-  emit("send", serialized.body, serialized.markup, files.length > 0 ? files : undefined);
+  emit(
+    "send",
+    serialized.body,
+    serialized.markup,
+    serialized.references,
+    files.length > 0 ? files : undefined,
+  );
 }
 
 function focus() {
