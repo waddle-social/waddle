@@ -19,3 +19,20 @@ export function getComposerEscapeAction(state: {
 
   return "none";
 }
+
+export function getComposerAutocompleteAction(state: {
+  showMentions: boolean;
+  mentionCount: number;
+  showEmoji: boolean;
+  emojiCount: number;
+}): "select-mention" | "select-emoji" | "dismiss-autocomplete" | "none" {
+  if (state.showMentions) {
+    return state.mentionCount > 0 ? "select-mention" : "dismiss-autocomplete";
+  }
+
+  if (state.showEmoji) {
+    return state.emojiCount > 0 ? "select-emoji" : "dismiss-autocomplete";
+  }
+
+  return "none";
+}

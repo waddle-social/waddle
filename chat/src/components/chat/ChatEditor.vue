@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { watch, onBeforeUnmount } from "vue";
 import { useEditor, EditorContent } from "@tiptap/vue-3";
-import { shouldSendOnEnter } from "@/lib/editor/chat-enter-key";
+import type { JSONContent } from "@tiptap/core";
 import { createChatEditorExtensions } from "@/lib/editor/chat-editor-extensions";
 
 const props = withDefaults(
@@ -9,7 +9,7 @@ const props = withDefaults(
     placeholder?: string;
     disabled?: boolean;
     compact?: boolean;
-    initialContent?: Record<string, unknown>;
+    initialContent?: JSONContent;
   }>(),
   {
     placeholder: "Type a message...",
@@ -19,31 +19,29 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  send: [doc: Record<string, unknown>];
+  send: [doc: JSONContent];
   typing: [];
   cancel: [];
-  update: [doc: Record<string, unknown>];
+  update: [doc: JSONContent];
+  selectionUpdate: [];
 }>();
 
-function handleSend() {
-  if (!editor.value || editor.value.isEmpty) return;
-  emit("send", editor.value.getJSON());
-  // Don't clear here — let the parent call clear() after a successful send
-  // to avoid losing content on send failures.
-}
-
 const editor = useEditor({
-  extensions: createChatEditorExtensions({ placeholder: () => props.placeholder }),
+  enableCoreExtensions: { keymap: false },
+  extensions: createChatEditorExtensions({
+    placeholder: () => props.placeholder,
+    onSubmit: (doc) => {
+      emit("send", doc);
+      // Don't clear here — let the parent call clear() after a successful send
+      // to avoid losing content on send failures.
+      return true;
+    },
+  }),
   immediatelyRender: false,
   editable: !props.disabled,
   content: props.initialContent ?? "",
   editorProps: {
     handleKeyDown: (_view, event) => {
-      if (editor.value && shouldSendOnEnter(editor.value, event)) {
-        event.preventDefault();
-        handleSend();
-        return true;
-      }
       if (event.key === "Escape") {
         emit("cancel");
         return true;
@@ -57,6 +55,9 @@ const editor = useEditor({
   onUpdate: ({ editor: ed }) => {
     emit("typing");
     emit("update", ed.getJSON());
+  },
+  onSelectionUpdate: () => {
+    emit("selectionUpdate");
   },
 });
 
@@ -122,14 +123,6 @@ defineExpose({
   overflow-wrap: anywhere;
 }
 
-.chat-editor .ProseMirror p {
-  margin: 0;
-}
-
-.chat-editor .ProseMirror p + p {
-  margin-top: 0.25em;
-}
-
 /* Placeholder */
 .chat-editor .ProseMirror p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
@@ -138,57 +131,6 @@ defineExpose({
   float: left;
   height: 0;
   pointer-events: none;
-}
-
-/* Inline code */
-.chat-editor .ProseMirror code {
-  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
-  font-size: 0.8em;
-  padding: 0.15em 0.4em;
-  background: var(--muted);
-  border-radius: 5px;
-}
-
-/* Code blocks */
-.chat-editor .ProseMirror pre {
-  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
-  font-size: 0.8em;
-  padding: 0.85em 1.1em;
-  background: var(--muted);
-  border-radius: 8px;
-  overflow-x: auto;
-  margin: 0.5em 0;
-}
-
-/* Blockquote */
-.chat-editor .ProseMirror blockquote {
-  border-left: 2px solid var(--primary);
-  padding-left: 0.85em;
-  margin: 0.5em 0;
-  opacity: 0.75;
-}
-
-/* Lists */
-.chat-editor .ProseMirror ul {
-  list-style-type: disc;
-  padding-left: 1.25em;
-  margin: 0.25em 0;
-}
-
-.chat-editor .ProseMirror ol {
-  list-style-type: decimal;
-  padding-left: 1.25em;
-  margin: 0.25em 0;
-}
-
-.chat-editor .ProseMirror li {
-  margin: 0.1em 0;
-}
-
-/* Links */
-.chat-editor .ProseMirror a {
-  color: var(--primary);
-  text-underline-offset: 2px;
 }
 
 /* Compact mode — tighter max-height */
