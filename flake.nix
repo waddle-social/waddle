@@ -35,6 +35,7 @@
               pkgs.just
               pkgs.jujutsu
               pkgs.cargo-chef
+              pkgs.teleport
             ];
 
             shellHook = ''

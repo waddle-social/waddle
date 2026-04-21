@@ -9,7 +9,8 @@ Benchmark suite for XMPP stanza database backends. Simulates the Waddle MAM
 crates/
   bench-core      # shared types, StanzaStore trait, workload generator, metrics
   bench-sqlite    # rusqlite WAL backend (writer thread + reader pool) -- DONE
-  bench-postgres  # TODO
+  bench-postgres  # sqlx + postgres backend
+  bench-clickhouse # clickhouse backend
   bench-duckdb    # TODO
   bench-runner    # CLI
 ```
@@ -28,8 +29,18 @@ cargo test
 ## Run
 
 ```
-# 10 concurrent users, 10s measured window
+# SQLite, 10 concurrent users, 10s measured window
 ./target/release/bench-runner --backend sqlite --scale 10 --duration 10s
+
+# Postgres
+./target/release/bench-runner --backend postgres \
+  --postgres-url postgres://postgres:postgres@127.0.0.1:5432/postgres \
+  --scale 10k --duration 60s
+
+# ClickHouse
+./target/release/bench-runner --backend clickhouse \
+  --clickhouse-url http://127.0.0.1:8123 \
+  --scale 10k --duration 60s
 
 # 10 000 users
 ./target/release/bench-runner --backend sqlite --scale 10k --duration 60s
@@ -48,6 +59,12 @@ Useful flags:
 | `--ops-per-user-per-min` | `1.0` | Poisson arrival rate per session |
 | `--p-write` | `0.2` | write probability (0.2 = 80/20 read/write) |
 | `--reader-pool` | `32` | SQLite reader pool size |
+| `--postgres-url` | unset | required when `--backend postgres` |
+| `--postgres-max-connections` | `64` | Postgres pool size |
+| `--clickhouse-url` | `http://127.0.0.1:8123` | ClickHouse HTTP endpoint |
+| `--clickhouse-database` | `default` | ClickHouse database |
+| `--clickhouse-user` | `default` | ClickHouse user |
+| `--clickhouse-password` | empty | ClickHouse password |
 | `--out` | `results` | output directory for `*.json` + `*.db` |
 
 Each run drops two files in `--out`: a `*.db` SQLite file and a
@@ -78,5 +95,5 @@ SQLite serialises writes through a single writer. At 1 M users × 0.2 write
 probability × 1 op/user/min ≈ 3.3 k writes/sec — well within SQLite's NVMe
 range. Pushing `--ops-per-user-per-min` higher will eventually saturate the
 writer queue; the runner reports `backpressure` count in the JSON report
-rather than crashing. That saturation point is what the Postgres and DuckDB
+rather than crashing. That saturation point is what the Postgres and ClickHouse
 backends need to beat.

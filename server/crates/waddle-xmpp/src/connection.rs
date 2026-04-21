@@ -1698,11 +1698,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let remote_count = federated_messages.remote_count();
 
         // XEP-0357: Collect occupant bare JIDs for broadcast mention push (before dropping room lock)
+        let sender_jid_for_filter = sender_jid.clone();
         let occupant_bare_jids: Vec<String> = room
             .occupants
             .values()
-            .filter(|o| o.real_jid != sender_jid)
-            .map(|o| o.real_jid.to_bare().to_string())
+            .flat_map(|o| {
+                room.get_occupant_sessions(&o.nick)
+                    .into_iter()
+                    .filter(|jid| *jid != sender_jid_for_filter)
+            })
+            .map(|jid| jid.to_bare().to_string())
             .collect();
 
         drop(room); // Release the read lock before archival and sending
@@ -2561,23 +2566,34 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             )));
         }
 
-        // Check if nick is already taken by another user
+        let mut is_same_bare_multi_session_join = false;
+
+        // XEP-0045 §7.2.8: same-nick same-bare joins SHOULD be allowed.
         if let Some(existing) = room.get_occupant(&join_req.nick) {
             if existing.real_jid != join_req.sender_jid {
-                return Err(XmppError::conflict(Some(format!(
-                    "Nickname {} is already in use",
-                    join_req.nick
-                ))));
+                if existing.real_jid.to_bare() == join_req.sender_jid.to_bare() {
+                    is_same_bare_multi_session_join = true;
+                } else {
+                    return Err(XmppError::conflict(Some(format!(
+                        "Nickname {} is already in use",
+                        join_req.nick
+                    ))));
+                }
+            } else {
+                // User is already in the room with this nick - treat as presence refresh.
+                debug!("User already in room, refreshing presence");
             }
-            // User is already in the room with this nick - treat as presence refresh
-            debug!("User already in room, refreshing presence");
         }
 
         // Get existing occupants before adding the new one (for presence broadcast)
         let existing_occupants: Vec<(FullJid, String, Affiliation, Role)> = room
             .occupants
             .values()
-            .map(|o| (o.real_jid.clone(), o.nick.clone(), o.affiliation, o.role))
+            .flat_map(|o| {
+                room.get_occupant_sessions(&o.nick)
+                    .into_iter()
+                    .map(move |jid| (jid, o.nick.clone(), o.affiliation, o.role))
+            })
             .collect();
 
         // Add the occupant to the room (uses affiliation from the updated list)
@@ -2632,19 +2648,23 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // History comes after other occupants' presence but before self-presence
         self.send_muc_history(&join_req).await;
 
-        // Send the new occupant's presence to all existing occupants
-        for (existing_jid, _, _, _) in &existing_occupants {
-            let presence = build_occupant_presence(
-                &new_occupant_room_jid,
-                existing_jid,
-                new_occupant_affiliation,
-                new_occupant_role,
-                false, // not self
-                Some(&join_req.sender_jid),
-            );
+        // Send the new occupant's presence to all existing occupants.
+        // For same-bare multi-session joins, the occupant roster does not change,
+        // so don't broadcast a new join to other resources/occupants.
+        if !is_same_bare_multi_session_join {
+            for (existing_jid, _, _, _) in &existing_occupants {
+                let presence = build_occupant_presence(
+                    &new_occupant_room_jid,
+                    existing_jid,
+                    new_occupant_affiliation,
+                    new_occupant_role,
+                    false, // not self
+                    Some(&join_req.sender_jid),
+                );
 
-            let stanza = Stanza::Presence(presence);
-            let _ = self.connection_registry.send_to(existing_jid, stanza).await;
+                let stanza = Stanza::Presence(presence);
+                let _ = self.connection_registry.send_to(existing_jid, stanza).await;
+            }
         }
 
         // Send self-presence to the joining user (with status code 110)
@@ -2988,22 +3008,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     "Prepared managed room for auto-join"
                 );
 
-                // Build a MUC join request
-                // Use nick with suffix if there's a conflict
-                let mut effective_nick = nick.clone();
-                if let Some(room_data) = self.room_registry.get_room_data(&room_jid) {
-                    let room = room_data.read().await;
-                    if let Some(existing) = room.get_occupant(&effective_nick) {
-                        if existing.real_jid != full_jid {
-                            // Nick conflict — append a suffix to make unique
-                            effective_nick = format!("{}_2", nick);
-                        }
-                    }
-                }
-
+                // Build a MUC join request.
                 let join_req = MucJoinRequest {
                     room_jid: room_jid.clone(),
-                    nick: effective_nick.clone(),
+                    nick: nick.clone(),
                     sender_jid: full_jid.clone(),
                     password: None,
                     history: Some(crate::muc::HistoryRequest {
@@ -3152,16 +3160,19 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .with_resource_str(&nick)
             .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
 
-        // Get remaining occupants (excluding the one leaving)
+        // Get remaining active sessions (excluding the one leaving).
         let remaining_occupants: Vec<FullJid> = room
             .occupants
             .values()
-            .filter(|o| o.real_jid != leave_req.sender_jid)
-            .map(|o| o.real_jid.clone())
+            .flat_map(|o| room.get_occupant_sessions(&o.nick))
+            .filter(|jid| *jid != leave_req.sender_jid)
             .collect();
 
-        // Remove the occupant
-        room.remove_occupant(&nick);
+        // Remove only the leaving resource session. If this was the last
+        // session for the nick, the occupant is removed from the room.
+        let removed_last_session = room
+            .remove_occupant_session(&nick, &leave_req.sender_jid)
+            .unwrap_or(false);
         let occupant_count = room.occupant_count();
 
         drop(room); // Release the write lock
@@ -3170,17 +3181,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         record_muc_presence("leave", &leave_req.room_jid.to_string());
         record_muc_occupant_count(occupant_count as i64, &leave_req.room_jid.to_string());
 
-        // Send unavailable presence to all remaining occupants
-        for occupant_jid in &remaining_occupants {
-            let presence = build_leave_presence(
-                &leaving_room_jid,
-                occupant_jid,
-                affiliation,
-                false, // not self
-            );
+        // Only broadcast unavailable presence to others if this nick has no
+        // remaining sessions in the room.
+        if removed_last_session {
+            for occupant_jid in &remaining_occupants {
+                let presence = build_leave_presence(
+                    &leaving_room_jid,
+                    occupant_jid,
+                    affiliation,
+                    false, // not self
+                );
 
-            let stanza = Stanza::Presence(presence);
-            let _ = self.connection_registry.send_to(occupant_jid, stanza).await;
+                let stanza = Stanza::Presence(presence);
+                let _ = self.connection_registry.send_to(occupant_jid, stanza).await;
+            }
         }
 
         // Send self-presence unavailable to the leaving user
@@ -3259,7 +3273,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let recipients: Vec<FullJid> = room
             .occupants
             .values()
-            .map(|o| o.real_jid.clone())
+            .flat_map(|o| room.get_occupant_sessions(&o.nick))
             .collect();
         drop(room);
 

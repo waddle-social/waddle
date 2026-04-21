@@ -629,24 +629,26 @@ impl MucRoom {
             Err(_) => return result, // Invalid nick
         };
 
-        // Build message for each occupant
+        // Build message for each active occupant session.
         for recipient in self.occupants.values() {
-            let mut broadcast_msg = message.clone();
-            broadcast_msg.type_ = MessageType::Groupchat;
-            broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
-            broadcast_msg.to = Some(Jid::from(recipient.real_jid.clone()));
+            for recipient_jid in self.get_occupant_sessions(&recipient.nick) {
+                let mut broadcast_msg = message.clone();
+                broadcast_msg.type_ = MessageType::Groupchat;
+                broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
+                broadcast_msg.to = Some(Jid::from(recipient_jid.clone()));
 
-            let outbound = OutboundMucMessage::new(recipient.real_jid.clone(), broadcast_msg);
+                let outbound = OutboundMucMessage::new(recipient_jid.clone(), broadcast_msg);
 
-            // Route based on whether recipient is local or remote
-            if recipient.is_remote {
-                let domain = recipient
-                    .home_server
-                    .clone()
-                    .unwrap_or_else(|| recipient.real_jid.domain().as_str().to_string());
-                result.add_remote(domain, outbound);
-            } else {
-                result.add_local(outbound);
+                // Route based on whether recipient is local or remote
+                if recipient.is_remote {
+                    let domain = recipient
+                        .home_server
+                        .clone()
+                        .unwrap_or_else(|| recipient_jid.domain().as_str().to_string());
+                    result.add_remote(domain, outbound);
+                } else {
+                    result.add_local(outbound);
+                }
             }
         }
 

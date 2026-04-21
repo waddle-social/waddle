@@ -169,6 +169,8 @@ pub struct MucRoom {
     pub config: RoomConfig,
     /// Current occupants (nick -> Occupant)
     pub occupants: HashMap<String, Occupant>,
+    /// Active sessions for each room nick (nick -> full JIDs).
+    occupant_sessions: HashMap<String, Vec<FullJid>>,
     /// Persistent affiliation list (synced with Zanzibar)
     affiliation_list: AffiliationList,
 }
@@ -187,23 +189,74 @@ impl MucRoom {
             channel_id,
             config,
             occupants: HashMap::new(),
+            occupant_sessions: HashMap::new(),
             affiliation_list: AffiliationList::new(),
         }
     }
 
     /// Add an occupant to the room.
     pub fn add_occupant(&mut self, occupant: Occupant) {
+        self.occupant_sessions
+            .insert(occupant.nick.clone(), vec![occupant.real_jid.clone()]);
         self.occupants.insert(occupant.nick.clone(), occupant);
     }
 
     /// Remove an occupant from the room.
     pub fn remove_occupant(&mut self, nick: &str) -> Option<Occupant> {
+        self.occupant_sessions.remove(nick);
         self.occupants.remove(nick)
     }
 
     /// Get an occupant by nickname.
     pub fn get_occupant(&self, nick: &str) -> Option<&Occupant> {
         self.occupants.get(nick)
+    }
+
+    /// Get all active sessions for a nickname.
+    pub fn get_occupant_sessions(&self, nick: &str) -> Vec<FullJid> {
+        self.occupant_sessions
+            .get(nick)
+            .cloned()
+            .or_else(|| self.occupants.get(nick).map(|o| vec![o.real_jid.clone()]))
+            .unwrap_or_default()
+    }
+
+    /// Remove a specific full-JID session for a nickname.
+    ///
+    /// Returns `Some(true)` if that session was the last one for the nick and
+    /// the occupant was removed, `Some(false)` if the nick still has active
+    /// sessions, and `None` if the nickname doesn't exist in the room.
+    pub fn remove_occupant_session(&mut self, nick: &str, jid: &FullJid) -> Option<bool> {
+        if !self.occupants.contains_key(nick) {
+            return None;
+        }
+
+        let fallback_real_jid = self.occupants.get(nick).map(|o| o.real_jid.clone());
+        let sessions = self
+            .occupant_sessions
+            .entry(nick.to_string())
+            .or_insert_with(|| fallback_real_jid.into_iter().collect());
+
+        let previous_len = sessions.len();
+        sessions.retain(|candidate| candidate != jid);
+
+        if previous_len == sessions.len() {
+            return Some(false);
+        }
+
+        if sessions.is_empty() {
+            self.occupant_sessions.remove(nick);
+            self.occupants.remove(nick);
+            return Some(true);
+        }
+
+        if let Some(occupant) = self.occupants.get_mut(nick) {
+            if occupant.real_jid == *jid {
+                occupant.real_jid = sessions[0].clone();
+            }
+        }
+
+        Some(false)
     }
 
     /// Get the number of occupants.
@@ -333,6 +386,22 @@ impl MucRoom {
         nick: String,
         local_domain: Option<&str>,
     ) -> &Occupant {
+        if let Some(existing) = self.occupants.get(&nick) {
+            if existing.real_jid.to_bare() == real_jid.to_bare() {
+                let sessions = self
+                    .occupant_sessions
+                    .entry(nick.clone())
+                    .or_insert_with(|| vec![existing.real_jid.clone()]);
+                if !sessions.iter().any(|session| session == &real_jid) {
+                    sessions.push(real_jid);
+                }
+                return self
+                    .occupants
+                    .get(&nick)
+                    .expect("occupant exists while adding same-bare session");
+            }
+        }
+
         let bare_jid = real_jid.to_bare();
         let affiliation = self.affiliation_list.get(&bare_jid);
         let role = self.derive_role_from_affiliation(affiliation);
@@ -353,7 +422,7 @@ impl MucRoom {
         };
 
         let occupant = Occupant {
-            real_jid,
+            real_jid: real_jid.clone(),
             nick: nick.clone(),
             role,
             affiliation,
@@ -361,6 +430,7 @@ impl MucRoom {
             home_server,
         };
 
+        self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);
         self.occupants
             .get(&nick)
@@ -431,15 +501,14 @@ impl MucRoom {
         let mut outbound = Vec::with_capacity(self.occupants.len());
 
         for occupant in self.occupants.values() {
-            let mut broadcast_msg = message.clone();
-            broadcast_msg.type_ = MessageType::Groupchat;
-            broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
-            broadcast_msg.to = Some(Jid::from(occupant.real_jid.clone()));
+            for recipient_jid in self.get_occupant_sessions(&occupant.nick) {
+                let mut broadcast_msg = message.clone();
+                broadcast_msg.type_ = MessageType::Groupchat;
+                broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
+                broadcast_msg.to = Some(Jid::from(recipient_jid.clone()));
 
-            outbound.push(OutboundMucMessage::new(
-                occupant.real_jid.clone(),
-                broadcast_msg,
-            ));
+                outbound.push(OutboundMucMessage::new(recipient_jid, broadcast_msg));
+            }
         }
 
         debug!(
@@ -454,7 +523,11 @@ impl MucRoom {
     ///
     /// Useful for routing incoming messages to find the sender's nick.
     pub fn find_occupant_by_real_jid(&self, jid: &FullJid) -> Option<&Occupant> {
-        self.occupants.values().find(|o| &o.real_jid == jid)
+        self.occupants.values().find(|occupant| {
+            self.get_occupant_sessions(&occupant.nick)
+                .iter()
+                .any(|session| session == jid)
+        })
     }
 
     /// Find the occupant's nick by their real JID.
@@ -637,13 +710,12 @@ impl MucRoom {
         let mut outbound = Vec::with_capacity(self.occupants.len());
 
         for occupant in self.occupants.values() {
-            let mut broadcast_msg = base_msg.clone();
-            broadcast_msg.to = Some(Jid::from(occupant.real_jid.clone()));
+            for recipient_jid in self.get_occupant_sessions(&occupant.nick) {
+                let mut broadcast_msg = base_msg.clone();
+                broadcast_msg.to = Some(Jid::from(recipient_jid.clone()));
 
-            outbound.push(OutboundMucMessage::new(
-                occupant.real_jid.clone(),
-                broadcast_msg,
-            ));
+                outbound.push(OutboundMucMessage::new(recipient_jid, broadcast_msg));
+            }
         }
 
         Ok(outbound)
