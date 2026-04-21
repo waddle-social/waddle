@@ -59,6 +59,12 @@ pub struct DetachedSession {
     pub max_resume_time: Option<u32>,
     /// When the session was detached
     pub detached_at: Instant,
+    /// XEP-0280 Message Carbons opt-in at detach time.
+    ///
+    /// XEP-0198 §5 defines `<resumed/>` as continuing the same stream, so any
+    /// per-stream add-ons the client previously enabled (here: carbons) must
+    /// survive resumption without requiring the client to re-negotiate them.
+    pub carbons_enabled: bool,
 }
 
 impl DetachedSession {
@@ -335,6 +341,7 @@ mod tests {
             ],
             max_resume_time: Some(300),
             detached_at: Instant::now(),
+            carbons_enabled: false,
         }
     }
 

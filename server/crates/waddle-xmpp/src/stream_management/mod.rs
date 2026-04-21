@@ -508,8 +508,14 @@ impl StreamManagementState {
 
     /// Create a detached session for storage in the registry.
     ///
-    /// This captures all the state needed to resume this stream later.
-    pub fn to_detached_session(&self, jid: jid::FullJid) -> Option<DetachedSession> {
+    /// `carbons_enabled` is the actor's current XEP-0280 opt-in value.
+    /// Carbons opt-in is per-stream, so XEP-0198 resumption must preserve
+    /// it — storing it on the detached session is what makes that possible.
+    pub fn to_detached_session(
+        &self,
+        jid: jid::FullJid,
+        carbons_enabled: bool,
+    ) -> Option<DetachedSession> {
         if !self.is_resumable() {
             return None;
         }
@@ -523,6 +529,7 @@ impl StreamManagementState {
             unacked_stanzas: self.unacked_queue.get_all_unacked(),
             max_resume_time: self.max_resume_time,
             detached_at: Instant::now(),
+            carbons_enabled,
         })
     }
 
@@ -862,5 +869,35 @@ mod tests {
 
         state.enable("test-id".to_string(), true, Some(300));
         assert!(state.is_resumable());
+    }
+
+    /// XEP-0198 §5 stream resumption is meant to continue the exact same
+    /// stream — the client doesn't expect to re-negotiate per-stream add-ons
+    /// like XEP-0280 carbons after a successful `<resumed/>`. So the
+    /// detached session the server stashes at disconnect MUST carry the
+    /// carbons opt-in flag, and a resumed actor must be able to read it
+    /// back. If this regresses, every SM-resume will silently disable
+    /// carbons until the client re-enables them.
+    #[test]
+    fn test_to_detached_session_carries_carbons_flag() {
+        let mut state = StreamManagementState::new();
+        state.enable("stream-carb".to_string(), true, Some(300));
+        let jid: jid::FullJid = "user@example.com/resource".parse().unwrap();
+
+        let detached_off = state
+            .to_detached_session(jid.clone(), false)
+            .expect("resumable state must produce detached session");
+        assert!(
+            !detached_off.carbons_enabled,
+            "carbons_enabled=false must round-trip through DetachedSession"
+        );
+
+        let detached_on = state
+            .to_detached_session(jid, true)
+            .expect("resumable state must produce detached session");
+        assert!(
+            detached_on.carbons_enabled,
+            "carbons_enabled=true must round-trip so resume preserves opt-in"
+        );
     }
 }
