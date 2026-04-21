@@ -561,6 +561,10 @@ async fn execute_step(
                 ));
             }
         }
+        // `read_until` returns the full retained buffer; clear after each
+        // assertion so later expectStanza steps on the same actor only inspect
+        // newly delivered stanzas.
+        client.clear();
         return Ok(());
     }
 

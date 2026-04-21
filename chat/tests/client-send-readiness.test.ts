@@ -152,6 +152,7 @@ describe("client keepalive lifecycle", () => {
       const xmpp = Object.assign(new EventEmitter(), {
         enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
         disableKeepAlive: mock(() => undefined),
+        getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
         enableCarbons: mock(async () => undefined),
         getRoster: mock(async () => ({ items: [] })),
       }) as unknown as Agent;
@@ -169,6 +170,36 @@ describe("client keepalive lifecycle", () => {
     } finally {
       console.error = originalConsoleError;
     }
+  });
+
+  test("runs reconnect catch-up on stream-management resume", async () => {
+    const client = new BrowserXmppClient(session());
+    const catchup = (client as unknown as { catchup: { recordDmSeen: (peer: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
+    catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
+    // Prime initial login marker so the next reconnect path performs catch-up.
+    catchup.onSessionStarted();
+    const searchHistory = mock(async () => ({ results: [] }));
+
+    const xmpp = Object.assign(new EventEmitter(), {
+      enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
+      disableKeepAlive: mock(() => undefined),
+      getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
+      searchHistory,
+    }) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("stream:management:resumed");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(searchHistory).toHaveBeenCalledTimes(1);
+    expect(searchHistory).toHaveBeenCalledWith(
+      "alice@example.com",
+      expect.objectContaining({
+        paging: { max: 200 },
+      }),
+    );
   });
 });
 

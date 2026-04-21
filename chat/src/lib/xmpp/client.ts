@@ -1214,13 +1214,14 @@ export class BrowserXmppClient {
   }
 
   /**
-   * XEP-0313 MAM catch-up after a `session:started`.
+   * XEP-0313 MAM catch-up after reconnect.
    *
-   * Empty on the first session:started (initial login); for each subsequent
-   * resume it queries MAM with `start=<lastSeen>` for every tracked
-   * conversation and feeds the results through the same handlers as live
-   * messages. This closes the gap when mobile Safari (or any suspended tab)
-   * silently drops its WebSocket and reconnects after missing stanzas.
+   * Empty on the first `session:started` (initial login); on subsequent fresh
+   * sessions and stream-management resumes it queries MAM with
+   * `start=<lastSeen>` for every tracked conversation and feeds the results
+   * through the same handlers as live messages. This closes the gap when
+   * mobile Safari (or any suspended tab) silently drops its WebSocket and
+   * reconnects after missing stanzas.
    */
   private async runReconnectCatchup(xmpp: Agent) {
     const entries = this.catchup.onSessionStarted();
@@ -1396,7 +1397,7 @@ export class BrowserXmppClient {
       // subsequent ones (resume after a dropped socket or Safari backgrounding).
       await this.runReconnectCatchup(xmpp);
     });
-    xmpp.on("stream:management:resumed", () => {
+    xmpp.on("stream:management:resumed", async () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.startKeepAlive(xmpp);
@@ -1406,10 +1407,11 @@ export class BrowserXmppClient {
       });
       this.emitSessionLifecycle({ type: "resumed" });
       void this.flushQueuedDirectMessages();
-      void this.syncServerClockOffset(xmpp);
+      await this.syncServerClockOffset(xmpp);
       if (this.currentRoom) {
         void this.flushQueuedRoomMessages(this.currentRoom);
       }
+      await this.runReconnectCatchup(xmpp);
     });
 
     // XEP-0198: per-stanza ack from the server. stanza.js resolves individual
