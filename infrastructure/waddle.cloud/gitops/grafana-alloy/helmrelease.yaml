@@ -104,24 +104,23 @@ spec:
 
           prometheus.scrape "waddle_server" {
             targets         = discovery.relabel.waddle_server.output
-            forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+            forward_to      = [otelcol.receiver.prometheus.waddle_server.receiver]
             metrics_path    = "/metrics"
             scrape_interval = "30s"
           }
 
-          prometheus.remote_write "grafana_cloud" {
-            endpoint {
-              url = sys.env("MIMIR_URL")
-              basic_auth {
-                username = sys.env("MIMIR_USERNAME")
-                password = sys.env("MIMIR_PASSWORD")
-              }
+          // Bridge Prometheus scrape samples into the OTLP pipeline so
+          // they ship through the Grafana Cloud OTLP gateway alongside
+          // traces and logs — one credential, one egress path.
+          otelcol.receiver.prometheus "waddle_server" {
+            output {
+              metrics = [otelcol.processor.batch.default.input]
             }
           }
-      # Inject Grafana Cloud creds from the ExternalSecret.
-      # Chart key is `envFrom` (not `extraEnvFrom`); helm silently drops
-      # unknown values, so the typo left the alloy container with no
-      # OTLP_/MIMIR_ env vars and the config failed to evaluate.
+      # Inject Grafana Cloud creds from the ExternalSecret. The chart key
+      # is `envFrom` (not `extraEnvFrom`); helm silently drops unknown
+      # values, so the typo would leave the alloy container with no
+      # OTLP_* env vars.
       envFrom:
         - secretRef:
             name: grafana-cloud-credentials
