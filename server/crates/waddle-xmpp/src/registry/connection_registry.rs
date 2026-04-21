@@ -392,6 +392,21 @@ impl ConnectionRegistry {
             .unwrap_or(false)
     }
 
+    /// Update the XEP-0280 Message Carbons opt-in flag for a connected resource.
+    ///
+    /// Returns false when the resource is not currently connected.
+    pub fn set_carbons_enabled(&self, jid: &FullJid, enabled: bool) -> bool {
+        if let Some(entry) = self.connections.get(jid) {
+            entry
+                .value()
+                .carbons_enabled
+                .store(enabled, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get all connected resources for a bare JID.
     ///
     /// Returns all full JIDs that match the given bare JID.
@@ -921,5 +936,26 @@ mod tests {
 
         assert!(!handle.load(Ordering::Relaxed));
         assert!(!registry.is_carbons_enabled(&jid));
+    }
+
+    #[test]
+    fn test_set_carbons_enabled_updates_existing_entry() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user3");
+        let (tx, _rx) = mpsc::channel(16);
+        registry.register(jid.clone(), tx);
+
+        assert!(registry.set_carbons_enabled(&jid, true));
+        assert!(registry.is_carbons_enabled(&jid));
+
+        assert!(registry.set_carbons_enabled(&jid, false));
+        assert!(!registry.is_carbons_enabled(&jid));
+    }
+
+    #[test]
+    fn test_set_carbons_enabled_returns_false_for_missing_entry() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("missing");
+        assert!(!registry.set_carbons_enabled(&jid, true));
     }
 }

@@ -36,6 +36,7 @@ export async function queryPersonalMam(
   peerBareJid: string,
   max: number,
   since?: string,
+  until?: string,
 ): Promise<LiveDmMessage[]> {
   // XEP-0313 §4.1.5: when fetching the most recent page (no `since`), we use
   // `paging.before: ""` to page backwards from the end of the archive.
@@ -46,7 +47,11 @@ export async function queryPersonalMam(
     { name: "with", value: peerBareJid },
   ];
   const fields = since
-    ? [...baseFields, { name: "start", value: since }]
+    ? [
+        ...baseFields,
+        { name: "start", value: since },
+        ...(until ? [{ name: "end", value: until }] : []),
+      ]
     : baseFields;
   const paging = since ? { max } : { max, before: "" };
 

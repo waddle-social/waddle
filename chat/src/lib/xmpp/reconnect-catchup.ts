@@ -18,7 +18,7 @@
  * Kept as a tiny pure class so the orchestration in `BrowserXmppClient` has
  * zero state of its own and the logic is trivially testable.
  */
-export type CatchupEntry =
+type CatchupEntry =
   | { kind: "dm"; key: string }
   | { kind: "room"; key: string };
 

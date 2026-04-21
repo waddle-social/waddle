@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
+    carbons::CARBONS_NS,
     commands::{CommandContext, CommandRegistry, CommandResult},
     connection::Stanza,
     disco::{
@@ -148,6 +149,10 @@ struct LegacyConnState {
     /// loop (when `pending_tx.take()` fires after authenticated+bound
     /// become true), regardless of the path that set those flags.
     resumed: bool,
+    /// Per-connection XEP-0280 opt-in state. Updated when this resource
+    /// sends `<enable/>` / `<disable/>` and restored from detached SM state
+    /// on resume so re-registration preserves carbons behavior.
+    carbons_enabled: bool,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -168,6 +173,7 @@ impl LegacyConnState {
             pending_scram: None,
             sm_state: StreamManagementState::new(),
             resumed: false,
+            carbons_enabled: false,
             suppress_sm_record_next_batch: false,
         }
     }
@@ -241,8 +247,17 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
                         if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() {
                             if let (Some(jid), Some(tx)) = (conn.session_jid.as_ref(), pending_tx.take()) {
-                                state.connection_registry.register(jid.clone(), tx);
-                                info!(jid = %jid, resumed = conn.resumed, "WebSocket connection registered");
+                                state.connection_registry.register_with_carbons(
+                                    jid.clone(),
+                                    tx,
+                                    conn.carbons_enabled,
+                                );
+                                info!(
+                                    jid = %jid,
+                                    resumed = conn.resumed,
+                                    carbons_enabled = conn.carbons_enabled,
+                                    "WebSocket connection registered"
+                                );
                             }
                         }
 
@@ -364,7 +379,11 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     if !superseded {
         if let Some(jid) = conn.session_jid.clone() {
             if conn.sm_state.is_resumable() {
-                if let Some(detached) = conn.sm_state.to_detached_session(jid.clone()) {
+                let carbons_enabled = conn.carbons_enabled;
+                if let Some(detached) = conn
+                    .sm_state
+                    .to_detached_session(jid.clone(), carbons_enabled)
+                {
                     let stream_id = detached.stream_id.clone();
                     if let Some(session) = conn.authenticated_session.clone() {
                         state.resumable_sessions.insert(stream_id.clone(), session);
@@ -651,6 +670,7 @@ struct SmCtx<'a> {
     resource_bound: &'a mut bool,
     authenticated_session: &'a mut Option<Session>,
     resumed: &'a mut bool,
+    carbons_enabled: &'a mut bool,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
     /// the responses it returns — those are replay stanzas already tracked
     /// in the unacked queue.
@@ -718,6 +738,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         resource_bound,
         authenticated_session,
         resumed,
+        carbons_enabled,
         suppress_sm_record_next_batch,
     } = ctx;
 
@@ -766,6 +787,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *resource_bound = true;
     *authenticated_session = restored_session;
     *resumed = true;
+    *carbons_enabled = detached.carbons_enabled;
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —
     // the main loop must NOT push them through `record_outbound` again.
@@ -812,6 +834,7 @@ async fn handle_xmpp_frame(
         pending_scram,
         sm_state,
         resumed,
+        carbons_enabled,
         suppress_sm_record_next_batch,
     } = conn;
     let frame = frame.trim();
@@ -897,6 +920,7 @@ async fn handle_xmpp_frame(
                 resource_bound,
                 authenticated_session,
                 resumed,
+                carbons_enabled,
                 suppress_sm_record_next_batch,
             };
             return handle_sm_stanza(sm, state, ctx).await;
@@ -935,6 +959,7 @@ async fn handle_xmpp_frame(
             session_jid,
             *authenticated,
             *resource_bound,
+            carbons_enabled,
         )
         .await;
     }
@@ -1536,6 +1561,9 @@ async fn handle_iq(
     let resource_bound = session_jid
         .as_ref()
         .is_some_and(|jid| jid.resource().as_str() != "pending");
+    let mut carbons_enabled = session_jid
+        .as_ref()
+        .is_some_and(|jid| state.connection_registry.is_carbons_enabled(jid));
     handle_iq_with_conn_state(
         frame,
         domain,
@@ -1545,6 +1573,7 @@ async fn handle_iq(
         session_jid,
         authenticated,
         resource_bound,
+        &mut carbons_enabled,
     )
     .await
 }
@@ -1558,6 +1587,7 @@ async fn handle_iq_with_conn_state(
     session_jid: &Option<FullJid>,
     authenticated: bool,
     resource_bound: bool,
+    carbons_enabled: &mut bool,
 ) -> Vec<String> {
     let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
@@ -1616,6 +1646,14 @@ async fn handle_iq_with_conn_state(
             }
             _ => None,
         };
+        let carbons_toggle = match &iq.payload {
+            xmpp_parsers::iq::IqType::Set(e)
+                if e.ns() == CARBONS_NS && (e.name() == "enable" || e.name() == "disable") =>
+            {
+                Some(e.name() == "enable")
+            }
+            _ => None,
+        };
         if let Some(ns) = payload_ns {
             if state.dispatcher.has_iq_handler(&ns) {
                 if !authenticated || !resource_bound {
@@ -1626,6 +1664,12 @@ async fn handle_iq_with_conn_state(
                         "auth",
                         "not-authorized",
                     )];
+                }
+                if let Some(enabled) = carbons_toggle {
+                    *carbons_enabled = enabled;
+                    let _ = state
+                        .connection_registry
+                        .set_carbons_enabled(full_jid, enabled);
                 }
                 let ctx = ProtocolStanzaContext { domain, full_jid };
                 let events = state.dispatcher.dispatch_iq(iq, &ctx);
@@ -3965,6 +4009,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_iq_carbons_toggle_updates_registry_flag() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        state.connection_registry.register(jid.clone(), tx);
+        assert!(!state.connection_registry.is_carbons_enabled(&jid));
+
+        let enable = r#"<iq xmlns="jabber:client" id="carbons-enable" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
+        let enable_responses = handle_iq(
+            enable,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid.clone()),
+        )
+        .await;
+        assert_eq!(enable_responses.len(), 1);
+        assert!(state.connection_registry.is_carbons_enabled(&jid));
+
+        let disable = r#"<iq xmlns="jabber:client" id="carbons-disable" type="set"><disable xmlns="urn:xmpp:carbons:2"/></iq>"#;
+        let disable_responses = handle_iq(
+            disable,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid.clone()),
+        )
+        .await;
+        assert_eq!(disable_responses.len(), 1);
+        assert!(!state.connection_registry.is_carbons_enabled(&jid));
+    }
+
+    #[tokio::test]
     async fn handle_iq_unknown_includes_routing_addresses_in_error() {
         let state = create_test_websocket_state().await;
         let frame = r#"<iq xmlns="jabber:client" id="unknown-1" type="get" from="alice@example.com/web" to="example.com"><foo xmlns="urn:waddle:test:0"/></iq>"#;
@@ -5147,6 +5226,7 @@ mod tests {
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
         };
         state
             .sm_session_registry
@@ -5180,6 +5260,7 @@ mod tests {
         assert!(conn.resource_bound);
         assert_eq!(conn.session_jid, Some(jid));
         assert!(conn.resumed);
+        assert!(conn.carbons_enabled);
     }
 
     #[tokio::test]
@@ -5221,6 +5302,7 @@ mod tests {
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
         };
         state
             .sm_session_registry
@@ -5281,6 +5363,7 @@ mod tests {
                 unacked_stanzas: Vec::new(),
                 max_resume_time: Some(0), // already expired
                 detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
             })
             .await
             .expect("store");

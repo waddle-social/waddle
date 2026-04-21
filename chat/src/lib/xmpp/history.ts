@@ -28,6 +28,7 @@ export async function queryMam(
   roomJid: string,
   max: number,
   since?: string,
+  until?: string,
 ): Promise<LiveRoomMessage[]> {
   const result = await xmpp.searchHistory(
     roomJid,
@@ -39,6 +40,7 @@ export async function queryMam(
             fields: [
               { name: "FORM_TYPE", type: "hidden" as const, value: "urn:xmpp:mam:2" },
               { name: "start", value: since },
+              ...(until ? [{ name: "end", value: until }] : []),
             ],
           },
         }

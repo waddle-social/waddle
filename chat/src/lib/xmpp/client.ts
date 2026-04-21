@@ -198,6 +198,7 @@ export class BrowserXmppClient {
   private onlineListener: (() => void) | null = null;
   private reconnectNudgeAt = 0;
   private lastStanzaKickAt = 0;
+  private serverClockOffsetMs = 0;
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
 
@@ -1011,6 +1012,26 @@ export class BrowserXmppClient {
 
   // -- Private --
 
+  private catchupTimestampIso(msg: ReceivedMessage): string {
+    return msg.delay?.timestamp?.toISOString()
+      ?? new Date(Date.now() + this.serverClockOffsetMs).toISOString();
+  }
+
+  private async syncServerClockOffset(xmpp: Agent) {
+    const domain = jidDomain(this.session.jid);
+    if (!domain) return;
+    try {
+      const time = await xmpp.getTime(domain);
+      if (time.utc && !Number.isNaN(time.utc.getTime())) {
+        this.serverClockOffsetMs = time.utc.getTime() - Date.now();
+      }
+    } catch (error) {
+      if (!isOptionalXmppFeatureError(error)) {
+        console.warn("Failed to sync XEP-0202 server time", error);
+      }
+    }
+  }
+
   /**
    * XEP-0313 MAM catch-up after a `session:started`.
    *
@@ -1025,6 +1046,7 @@ export class BrowserXmppClient {
     if (entries.length === 0) return;
 
     const selfBare = barePeerJid(this.session.jid);
+    const catchupEnd = new Date(Date.now() + this.serverClockOffsetMs).toISOString();
     for (const entry of entries) {
       // Bail if the agent has been swapped out mid-catch-up (e.g. user
       // signed out during reconnect).
@@ -1038,6 +1060,7 @@ export class BrowserXmppClient {
             entry.key,
             CATCHUP_MAX_PER_CONVERSATION,
             since,
+            catchupEnd,
           );
           for (const m of messages) {
             this.catchup.recordDmSeen(m.peerJid, m.createdAt);
@@ -1050,6 +1073,7 @@ export class BrowserXmppClient {
             entry.key,
             CATCHUP_MAX_PER_CONVERSATION,
             since,
+            catchupEnd,
           );
           for (const m of messages) {
             this.catchup.recordRoomSeen(m.roomJid, m.createdAt);
@@ -1147,6 +1171,7 @@ export class BrowserXmppClient {
       // it here, it's a fresh session — consumers may close MAM gaps.
       this.sessionLifecycleHandler?.({ type: "fresh" });
       void this.flushQueuedDirectMessages();
+      await this.syncServerClockOffset(xmpp);
       try {
         await xmpp.enableCarbons();
       } catch (error) {
@@ -1195,6 +1220,7 @@ export class BrowserXmppClient {
       });
       this.sessionLifecycleHandler?.({ type: "resumed" });
       void this.flushQueuedDirectMessages();
+      void this.syncServerClockOffset(xmpp);
       if (this.currentRoom) {
         void this.flushQueuedRoomMessages(this.currentRoom);
       }
@@ -1321,11 +1347,12 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("message", buildMessageDispatcher(
-      () => ({
+      (msg) => ({
         currentRoom: this.currentRoom,
         selfNick: this.session.username,
         onMessage: (m) => {
-          this.catchup.recordRoomSeen(m.roomJid, m.createdAt);
+          if (!msg) return;
+          this.catchup.recordRoomSeen(m.roomJid, this.catchupTimestampIso(msg));
           this.messageHandler?.(m);
         },
         onChatState: this.chatStateHandler,
@@ -1333,10 +1360,11 @@ export class BrowserXmppClient {
         onReaction: this.reactionHandler,
         onActivity: this.activityHandler,
       }),
-      () => ({
+      (msg) => ({
         selfBareJid: barePeerJid(this.session.jid),
         onMessage: (m) => {
-          this.catchup.recordDmSeen(m.peerJid, m.createdAt);
+          if (!msg) return;
+          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(msg));
           this.directMessageHandler?.(m);
         },
         onChatState: this.dmChatStateHandler,
@@ -1353,7 +1381,7 @@ export class BrowserXmppClient {
       dispatchChat(forwarded as ReceivedMessage, {
         selfBareJid: barePeerJid(this.session.jid),
         onMessage: (m) => {
-          this.catchup.recordDmSeen(m.peerJid, m.createdAt);
+          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(forwarded as ReceivedMessage));
           this.directMessageHandler?.(m);
         },
         onChatState: this.dmChatStateHandler,

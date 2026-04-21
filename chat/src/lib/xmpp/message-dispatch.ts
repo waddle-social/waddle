@@ -17,20 +17,20 @@ import { dispatchGroupchat, type GroupchatHandlers } from "./message-parsing";
  * `carbon:received` listeners unwrap and forward them separately.
  */
 export function buildMessageDispatcher(
-  groupchatHandlers: () => GroupchatHandlers,
-  chatHandlers: () => DmHandlers,
+  groupchatHandlers: (msg?: ReceivedMessage) => GroupchatHandlers,
+  chatHandlers: (msg?: ReceivedMessage) => DmHandlers,
 ): (msg: ReceivedMessage) => void {
   return (msg) => {
     if (msg.type === "error") return;
     if ((msg as { carbon?: unknown }).carbon) return;
 
     if (msg.type === "groupchat") {
-      dispatchGroupchat(msg, groupchatHandlers());
+      dispatchGroupchat(msg, groupchatHandlers(msg));
       return;
     }
 
     if (msg.type === "chat" || msg.type === "normal" || !msg.type) {
-      dispatchChat(msg, chatHandlers());
+      dispatchChat(msg, chatHandlers(msg));
     }
   };
 }
