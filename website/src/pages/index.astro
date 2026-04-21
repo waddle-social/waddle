@@ -14,13 +14,26 @@ const ogImageAlt =
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
+		<link rel="icon" type="image/svg+xml" href="/waddle-logo.svg" />
+		<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+		<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+		<link rel="shortcut icon" href="/favicon.ico" />
 		<link rel="canonical" href={canonicalUrl} />
-		<meta name="viewport" content="width=device-width" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover"
+		/>
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+		<meta name="apple-mobile-web-app-title" content="Waddle" />
+		<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="color-scheme" content="light dark" />
 		<meta name="generator" content={Astro.generator} />
 		<meta name="description" content={description} />
-		<meta name="theme-color" content="#092025" />
+		<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f7" />
+		<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d12" />
 		<meta property="og:type" content="website" />
 		<meta property="og:site_name" content={title} />
 		<meta property="og:title" content={title} />
