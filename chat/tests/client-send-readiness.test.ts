@@ -203,6 +203,87 @@ describe("client keepalive lifecycle", () => {
   });
 });
 
+describe("carbon forwarding", () => {
+  test("ignores carbon-wrapped payloads on generic message event", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("message", {
+      type: "chat",
+      from: "alice@example.com",
+      to: "bob@example.com",
+      body: "wrapper should be ignored here",
+      carbon: { sent: true },
+    });
+
+    expect(dmHandler).toHaveBeenCalledTimes(0);
+  });
+
+  test("forwards carbon:sent messages to the DM handler", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("carbon:sent", {
+      carbon: {
+        forward: {
+          message: {
+            id: "c-sent-1",
+            type: "chat",
+            from: "alice@example.com/phone",
+            to: "bob@example.com/desktop",
+            body: "hello from sibling sender",
+          },
+        },
+      },
+    });
+
+    expect(dmHandler).toHaveBeenCalledTimes(1);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
+      id: "c-sent-1",
+      peerJid: "bob@example.com",
+      body: "hello from sibling sender",
+    }));
+  });
+
+  test("forwards carbon:received messages to the DM handler", () => {
+    const client = new BrowserXmppClient(session());
+    const dmHandler = mock(() => undefined);
+    client.setDirectMessageHandler(dmHandler);
+    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    (client as unknown as { xmpp: Agent }).xmpp = xmpp;
+    (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
+
+    xmpp.emit("carbon:received", {
+      carbon: {
+        forward: {
+          message: {
+            id: "c-recv-1",
+            type: "chat",
+            from: "bob@example.com/phone",
+            to: "alice@example.com/desktop",
+            body: "hello from another resource path",
+          },
+        },
+      },
+    });
+
+    expect(dmHandler).toHaveBeenCalledTimes(1);
+    expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
+      id: "c-recv-1",
+      peerJid: "bob@example.com",
+      body: "hello from another resource path",
+    }));
+  });
+});
+
 describe("optimistic UI waits for successful sends", () => {
   test("room composer keeps queued messages visible and durable", async () => {
     const sendGroupMessage = mock(async () => ({ id: "queued-room-1", state: "queued" as const }));

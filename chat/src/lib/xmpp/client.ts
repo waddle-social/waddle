@@ -22,9 +22,8 @@ import { registerWaddleExtensions } from "./extensions";
 // the span IS propagated (via traceparent on fetch/XHR) and will
 // correctly parent backend spans.
 import { withSpan } from "@/lib/telemetry";
-import { ext } from "./message-parsing";
+import { dispatchGroupchat, ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";
-import { buildMessageDispatcher } from "./message-dispatch";
 import * as messaging from "./messaging";
 import * as history from "./history";
 import * as dmMessaging from "./dm-messaging";
@@ -1198,6 +1197,83 @@ export class BrowserXmppClient {
       ?? new Date(Date.now() + this.serverClockOffsetMs).toISOString();
   }
 
+  private dispatchInboundChatMessage(
+    msg: ReceivedMessage,
+    timestampSource: ReceivedMessage = msg,
+    options: { allowCarbonWrapped?: boolean } = {},
+  ) {
+    if (msg.type === "error") return;
+    if (!options.allowCarbonWrapped && (msg as { carbon?: unknown }).carbon) return;
+
+    if (msg.type === "groupchat") {
+      dispatchGroupchat(msg, {
+        currentRoom: this.currentRoom,
+        selfNick: this.session.username,
+        onMessage: (m) => {
+          this.catchup.recordRoomSeen(m.roomJid, this.catchupTimestampIso(timestampSource));
+          this.messageHandler?.(m);
+        },
+        onChatState: this.chatStateHandler,
+        onDisplayed: this.displayedHandler,
+        onReaction: this.reactionHandler,
+        onActivity: this.activityHandler,
+      });
+      return;
+    }
+
+    if (msg.type === "chat" || msg.type === "normal" || !msg.type) {
+      dispatchChat(msg, {
+        selfBareJid: barePeerJid(this.session.jid),
+        onMessage: (m) => {
+          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(timestampSource));
+          this.directMessageHandler?.(m);
+        },
+        onChatState: this.dmChatStateHandler,
+        onDisplayed: this.dmDisplayedHandler,
+        onReaction: this.dmReactionHandler,
+      });
+    }
+  }
+
+  private handleInboundMessageStanza(
+    msg: ReceivedMessage,
+    timestampSource: ReceivedMessage = msg,
+    options: { allowCarbonWrapped?: boolean } = {},
+  ) {
+    this.dispatchInboundChatMessage(msg, timestampSource, options);
+
+    const push = (msg as ReceivedMessage & {
+      inboxPush?: {
+        partner?: string;
+        kind?: string;
+        lastStanzaId?: string;
+        lastUpdated?: number;
+        unread?: number;
+        preview?: string;
+      };
+    }).inboxPush;
+    if (!push?.partner) return;
+    this.inboxPushHandler?.({
+      partner: push.partner,
+      kind: push.kind === "muc" ? "muc" : "direct",
+      lastStanzaId: push.lastStanzaId ?? "",
+      lastUpdated: typeof push.lastUpdated === "number" ? push.lastUpdated : 0,
+      unread: typeof push.unread === "number" ? push.unread : 0,
+      preview: push.preview || undefined,
+    });
+  }
+
+  private handleInboundCarbonStanza(msg: { carbon?: { forward?: { message?: ReceivedMessage } } }) {
+    const forwarded = msg.carbon?.forward?.message;
+    if (!forwarded) return;
+    if (!forwarded.from || !forwarded.to) return;
+    this.handleInboundMessageStanza(
+      forwarded as ReceivedMessage,
+      forwarded as ReceivedMessage,
+      { allowCarbonWrapped: true },
+    );
+  }
+
   private async syncServerClockOffset(xmpp: Agent) {
     const domain = jidDomain(this.session.jid);
     if (!domain) return;
@@ -1588,61 +1664,16 @@ export class BrowserXmppClient {
       }
     });
 
-    xmpp.on("message", buildMessageDispatcher(
-      (msg) => ({
-        currentRoom: this.currentRoom,
-        selfNick: this.session.username,
-        onMessage: (m) => {
-          if (!msg) return;
-          this.catchup.recordRoomSeen(m.roomJid, this.catchupTimestampIso(msg));
-          this.messageHandler?.(m);
-        },
-        onChatState: this.chatStateHandler,
-        onDisplayed: this.displayedHandler,
-        onReaction: this.reactionHandler,
-        onActivity: this.activityHandler,
-      }),
-      (msg) => ({
-        selfBareJid: barePeerJid(this.session.jid),
-        onMessage: (m) => {
-          if (!msg) return;
-          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(msg));
-          this.directMessageHandler?.(m);
-        },
-        onChatState: this.dmChatStateHandler,
-        onDisplayed: this.dmDisplayedHandler,
-        onReaction: this.dmReactionHandler,
-      }),
-    ));
-
-    xmpp.on("carbon:sent", (msg) => {
-      const forwarded = msg.carbon?.forward?.message;
-      if (!forwarded) return;
-      if (!forwarded.from || !forwarded.to) return;
-      (forwarded as ReceivedMessage & { carbon?: unknown }).carbon = msg.carbon;
-      dispatchChat(forwarded as ReceivedMessage, {
-        selfBareJid: barePeerJid(this.session.jid),
-        onMessage: (m) => {
-          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(forwarded as ReceivedMessage));
-          this.directMessageHandler?.(m);
-        },
-        onChatState: this.dmChatStateHandler,
-        onDisplayed: this.dmDisplayedHandler,
-        onReaction: this.dmReactionHandler,
-      });
+    xmpp.on("message", (msg: ReceivedMessage) => {
+      this.handleInboundMessageStanza(msg);
     });
 
-    xmpp.on("message", (msg: ReceivedMessage) => {
-      const push = (msg as ReceivedMessage & { inboxPush?: { partner?: string; kind?: string; lastStanzaId?: string; lastUpdated?: number; unread?: number; preview?: string } }).inboxPush;
-      if (!push?.partner) return;
-      this.inboxPushHandler?.({
-        partner: push.partner,
-        kind: push.kind === "muc" ? "muc" : "direct",
-        lastStanzaId: push.lastStanzaId ?? "",
-        lastUpdated: typeof push.lastUpdated === "number" ? push.lastUpdated : 0,
-        unread: typeof push.unread === "number" ? push.unread : 0,
-        preview: push.preview || undefined,
-      });
+    xmpp.on("carbon:sent", (msg) => {
+      this.handleInboundCarbonStanza(msg as { carbon?: { forward?: { message?: ReceivedMessage } } });
+    });
+
+    xmpp.on("carbon:received", (msg) => {
+      this.handleInboundCarbonStanza(msg as { carbon?: { forward?: { message?: ReceivedMessage } } });
     });
 
     xmpp.on("presence", (pres: ReceivedPresence) => {
