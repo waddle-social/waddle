@@ -54,32 +54,34 @@ fn default_filter() -> EnvFilter {
 /// which would emit more events — a feedback loop that blows up the
 /// pipeline. Silencing those targets at the bridge layer keeps them
 /// visible on stdout (through the `fmt` layer) but out of OTLP.
+///
+/// Built on top of `default_filter()` so the base verbosity stays in
+/// lockstep with the primary subscriber filter.
 fn log_bridge_filter() -> EnvFilter {
-    EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug")
-        .add_directive("hyper=off".parse().expect("static directive must be valid"))
-        .add_directive(
-            "hyper_util=off"
-                .parse()
-                .expect("static directive must be valid"),
-        )
-        .add_directive("tonic=off".parse().expect("static directive must be valid"))
-        .add_directive("h2=off".parse().expect("static directive must be valid"))
-        .add_directive(
-            "reqwest=off"
-                .parse()
-                .expect("static directive must be valid"),
-        )
-        .add_directive("tower=off".parse().expect("static directive must be valid"))
-        .add_directive(
-            "opentelemetry=off"
-                .parse()
-                .expect("static directive must be valid"),
-        )
-        .add_directive(
-            "opentelemetry_sdk=off"
-                .parse()
-                .expect("static directive must be valid"),
-        )
+    // Every crate in the OTLP export path. If any of these starts
+    // emitting `tracing` events that land back in the exporter, the
+    // pipeline loops. Keep this list exhaustive.
+    const OFF_TARGETS: &[&str] = &[
+        "hyper",
+        "hyper_util",
+        "tonic",
+        "h2",
+        "reqwest",
+        "tower",
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry_otlp",
+        "opentelemetry_http",
+        "opentelemetry_proto",
+        "opentelemetry_appender_tracing",
+    ];
+
+    OFF_TARGETS.iter().fold(default_filter(), |filter, target| {
+        let directive = format!("{target}=off")
+            .parse()
+            .expect("static `<target>=off` directive must be valid");
+        filter.add_directive(directive)
+    })
 }
 
 fn build_log_filter() -> EnvFilter {
@@ -401,5 +403,14 @@ mod tests {
         // Note: Can only initialize once per process
         // This test just verifies the function compiles
         // let _ = super::init_local();
+    }
+
+    #[test]
+    fn test_log_bridge_filter_directives_parse() {
+        // Constructing the filter parses every `<target>=off` directive
+        // via `.expect(...)`. If any entry in OFF_TARGETS drifts into an
+        // invalid form, this test panics here instead of at process init
+        // in production.
+        let _filter = super::log_bridge_filter();
     }
 }
