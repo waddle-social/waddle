@@ -20,9 +20,16 @@
  * `traceparent` / `tracestate` headers on outbound calls to that
  * origin. The Rust server's tower-http trace layer extracts those
  * headers (see `waddle-server`'s `telemetry.rs`), so frontend spans
- * become parents of backend spans in Tempo. `withSpan` below is for
- * work that isn't a fetch — e.g. the XMPP-over-WebSocket connect
- * handshake — so it still shows up in the same trace.
+ * become parents of backend spans in Tempo for every HTTP call.
+ *
+ * `withSpan` below is for work that isn't a fetch — e.g. the XMPP
+ * connect handshake over WebSocket, outbound message bookkeeping —
+ * so we still get client-side timing and failure attribution. The
+ * browser WebSocket API does not allow custom headers on the upgrade
+ * request, so these manual spans are NOT trace-parented to the
+ * server's XMPP session by themselves. Any `fetch` issued inside a
+ * `withSpan` callback IS propagated (via the active context set by
+ * `context.with`) and will cross-link into backend spans correctly.
  */
 import { initializeFaro, getWebInstrumentations, type Faro } from "@grafana/faro-web-sdk";
 import { TracingInstrumentation } from "@grafana/faro-web-tracing";
@@ -38,6 +45,7 @@ export type ErrorKind =
   | "xmpp.send"
   | "xmpp.receive"
   | "storage.quota"
+  | "storage.read"
   | "storage.write"
   | "http.fetch"
   | "upload";

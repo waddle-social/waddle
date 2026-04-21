@@ -14,10 +14,13 @@ import { barePeerJid, jidDomain, roomBareJidFor } from "./jid";
 import { registerWaddleExtensions } from "./extensions";
 // `withSpan` is a no-op when Faro isn't initialized, so including
 // it here doesn't add overhead to tests or non-telemetry builds.
-// When Faro IS initialized it wraps the connect handshake in an
-// OpenTelemetry span that joins the backend trace via the same
-// traceparent header that TracingInstrumentation injects into the
-// WebSocket upgrade's HTTP request.
+// When Faro IS initialized it wraps the connect handshake in a
+// client-side OpenTelemetry span that captures timing and failure
+// modes. The browser WebSocket API does not allow custom headers
+// on the upgrade request, so this span is NOT trace-parented to
+// the server's XMPP session span — any HTTP fetch issued inside
+// the span IS propagated (via traceparent on fetch/XHR) and will
+// correctly parent backend spans.
 import { withSpan } from "@/lib/telemetry";
 import { ext } from "./message-parsing";
 import { dispatchChat } from "./dm-parsing";

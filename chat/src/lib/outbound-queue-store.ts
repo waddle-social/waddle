@@ -87,7 +87,7 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     // Storage read failure usually means corrupt JSON or privacy-mode
     // localStorage. Surface to Faro but keep the app working — we just
     // treat it as an empty queue.
-    reportError("storage.write", err, {
+    reportError("storage.read", err, {
       recoverable: true,
       detail: "outbound-queue read failed",
       accountKey,

@@ -93,15 +93,19 @@ export function createServerAuth(serverBaseUrl: string) {
 
       const response = await fetch(`${baseUrl}/api/auth/logout`, init);
 
-      if (!response.ok && response.status !== 204) {
-        const err = new Error(`Failed to log out (${response.status})`);
-        reportError("http.fetch", err, {
-          recoverable: true,
-          detail: "POST /api/auth/logout",
-          status: response.status,
-        });
-        throw err;
-      }
+      // 204 is the success shape. 401/404 both mean "nothing to log
+      // out" (session already expired / never existed) — mirror the
+      // getSession() treatment and stay silent, no telemetry noise.
+      if (response.ok || response.status === 204) return;
+      if (response.status === 401 || response.status === 404) return;
+
+      const err = new Error(`Failed to log out (${response.status})`);
+      reportError("http.fetch", err, {
+        recoverable: true,
+        detail: "POST /api/auth/logout",
+        status: response.status,
+      });
+      throw err;
     },
   };
 }

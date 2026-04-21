@@ -1117,10 +1117,13 @@ async fn create_router(
 /// trace context (if any) as its OpenTelemetry parent.
 ///
 /// `opentelemetry_http::HeaderExtractor` implements the `Extractor`
-/// trait the propagator expects; `TraceContextExt::has_active_span`
-/// lets us tell "frontend gave us a traceparent" from "browser /
-/// internal caller with no propagation" — we only call `set_parent`
-/// in the former case so internal calls still get a fresh root span.
+/// trait the propagator expects. After extraction, we only call
+/// `set_parent` when the extracted span context is valid
+/// (`parent_cx.span().span_context().is_valid()`), which
+/// distinguishes a propagated request from an internal / non-browser
+/// caller carrying no headers — the latter keeps starting a fresh
+/// root span instead of being silently re-parented to whatever the
+/// extractor returns for the empty case.
 fn make_request_span(request: &axum::http::Request<axum::body::Body>) -> Span {
     let span = info_span!(
         "http_request",
