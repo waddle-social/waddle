@@ -31,6 +31,16 @@ describe("renderStyledBody", () => {
     expect(html).toContain("<p>line two</p>");
   });
 
+  test("renders bullet and ordered lists", () => {
+    const bulletHtml = renderStyledBody("- one\n- two");
+    const orderedHtml = renderStyledBody("3. one\n4. two");
+
+    expect(bulletHtml).toContain("<ul>");
+    expect(bulletHtml).toContain("<li>one</li>");
+    expect(orderedHtml).toContain('<ol start="3">');
+    expect(orderedHtml).toContain("<li>two</li>");
+  });
+
   test("synthesizes styling from markup-only payloads", () => {
     const body = "Hello world";
     const markup: MarkupSpan[] = [

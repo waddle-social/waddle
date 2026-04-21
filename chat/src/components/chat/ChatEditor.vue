@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { watch, onBeforeUnmount, computed } from "vue";
+import { watch, onBeforeUnmount } from "vue";
 import { useEditor, EditorContent } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
 import Placeholder from "@tiptap/extension-placeholder";
+import { shouldSendOnEnter } from "@/lib/editor/chat-enter-key";
 import { ChatLink } from "@/lib/editor/chat-link";
 
 const props = withDefaults(
@@ -27,12 +28,13 @@ const emit = defineEmits<{
   update: [doc: Record<string, unknown>];
 }>();
 
-const extensions = computed(() => {
+function createExtensions() {
   const exts = [
     StarterKit.configure({
       heading: false,
       horizontalRule: false,
       link: false,
+      underline: false,
     }),
     ChatLink.configure({
       openOnClick: false,
@@ -42,7 +44,7 @@ const extensions = computed(() => {
       },
     }),
     Placeholder.configure({
-      placeholder: props.placeholder,
+      placeholder: () => props.placeholder,
     }),
   ];
 
@@ -56,7 +58,7 @@ const extensions = computed(() => {
   }
 
   return exts;
-});
+}
 
 function handleSend() {
   if (!editor.value || editor.value.isEmpty) return;
@@ -66,13 +68,13 @@ function handleSend() {
 }
 
 const editor = useEditor({
-  extensions: extensions.value,
+  extensions: createExtensions(),
   immediatelyRender: false,
   editable: !props.disabled,
   content: props.initialContent ?? "",
   editorProps: {
     handleKeyDown: (_view, event) => {
-      if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      if (editor.value && shouldSendOnEnter(editor.value, event)) {
         event.preventDefault();
         handleSend();
         return true;

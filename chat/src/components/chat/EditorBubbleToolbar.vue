@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
+import { computed } from "vue";
 import type { Editor } from "@tiptap/vue-3";
-import { BubbleMenuPlugin } from "@tiptap/extension-bubble-menu";
-import { Bold, Italic, Strikethrough, Code, Link } from "lucide-vue-next";
+import { BubbleMenu } from "@tiptap/vue-3/menus";
+import { Bold, Italic, Strikethrough, Code, Link, List, ListOrdered, TextQuote, SquareCode } from "lucide-vue-next";
 
 const props = defineProps<{
   editor: Editor;
 }>();
-
-const menuRef = ref<HTMLDivElement | null>(null);
 
 const items = computed(() => [
   {
@@ -40,6 +38,34 @@ const items = computed(() => [
     isActive: () => props.editor.isActive("code"),
   },
   {
+    name: "bullet-list",
+    icon: List,
+    title: "Bullet list",
+    action: () => props.editor.chain().focus().toggleBulletList().run(),
+    isActive: () => props.editor.isActive("bulletList"),
+  },
+  {
+    name: "ordered-list",
+    icon: ListOrdered,
+    title: "Numbered list",
+    action: () => props.editor.chain().focus().toggleOrderedList().run(),
+    isActive: () => props.editor.isActive("orderedList"),
+  },
+  {
+    name: "blockquote",
+    icon: TextQuote,
+    title: "Quote",
+    action: () => props.editor.chain().focus().toggleBlockquote().run(),
+    isActive: () => props.editor.isActive("blockquote"),
+  },
+  {
+    name: "code-block",
+    icon: SquareCode,
+    title: "Code block",
+    action: () => props.editor.chain().focus().toggleCodeBlock().run(),
+    isActive: () => props.editor.isActive("codeBlock"),
+  },
+  {
     name: "link",
     icon: Link,
     title: "Link (⌘K)",
@@ -56,50 +82,12 @@ const items = computed(() => [
     isActive: () => props.editor.isActive("link"),
   },
 ]);
-
-let pluginInstance: ReturnType<typeof BubbleMenuPlugin> | null = null;
-
-onMounted(() => {
-  if (!menuRef.value || !props.editor) return;
-
-  pluginInstance = BubbleMenuPlugin({
-    pluginKey: "waddleBubbleMenu",
-    editor: props.editor,
-    element: menuRef.value,
-    appendTo: () => document.body,
-    updateDelay: 150,
-    options: {
-      strategy: "fixed",
-      placement: "top",
-      offset: 8,
-      flip: true,
-      shift: { padding: 8 },
-    },
-    shouldShow: ({ editor, state }) => {
-      const { selection } = state;
-      const { empty } = selection;
-      return !empty && editor.isEditable;
-    },
-  });
-
-  props.editor.registerPlugin(pluginInstance);
-});
-
-onBeforeUnmount(() => {
-  if (pluginInstance && props.editor) {
-    props.editor.unregisterPlugin("waddleBubbleMenu");
-  }
-});
 </script>
 
 <template>
-  <div
-    ref="menuRef"
-    class="fixed left-0 top-0 z-50 w-max"
-    style="visibility: hidden"
-  >
+  <BubbleMenu :editor="editor">
     <div
-      class="flex items-center gap-0.5 px-1.5 py-1 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"
+      class="z-50 flex items-center gap-0.5 px-1.5 py-1 glass-panel border border-border rounded-lg shadow-xl animate-fade-in"
     >
       <button
         v-for="item in items"
@@ -116,5 +104,5 @@ onBeforeUnmount(() => {
         <component :is="item.icon" class="w-3.5 h-3.5" />
       </button>
     </div>
-  </div>
+  </BubbleMenu>
 </template>

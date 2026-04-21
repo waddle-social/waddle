@@ -306,6 +306,16 @@ function onKeydown(e: KeyboardEvent) {
       }
       return;
     }
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (showMentions.value) {
+        insertMention(mentionResults.value[selectedIndex.value]);
+      } else if (showEmoji.value) {
+        insertEmoji(emojiResults.value[selectedIndex.value].emoji);
+      }
+      return;
+    }
   }
 }
 
@@ -334,7 +344,7 @@ watch(
 </script>
 
 <template>
-  <div class="relative px-4 py-3 flex-shrink-0" :class="isTopPinned ? 'border-b border-border' : ''" @keydown="onKeydown" @paste="onPaste">
+  <div class="relative px-4 py-3 flex-shrink-0" :class="isTopPinned ? 'border-b border-border' : ''" @keydown.capture="onKeydown" @paste="onPaste">
     <!-- Reply context chip -->
     <div
       v-if="replyingTo"
