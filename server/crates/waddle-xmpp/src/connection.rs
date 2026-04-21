@@ -1,6 +1,7 @@
 //! Connection actor for handling individual XMPP client connections.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -205,8 +206,12 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     sm_state: StreamManagementState,
     /// XEP-0198 Stream Management session registry (for resumption)
     sm_session_registry: Arc<dyn SmSessionRegistry>,
-    /// XEP-0280 Message Carbons enabled state
-    carbons_enabled: bool,
+    /// XEP-0280 Message Carbons enabled state.
+    ///
+    /// Shared with the `ConnectionRegistry`'s `ConnectionEntry` so that other
+    /// actors routing messages can gate carbon delivery on this resource's
+    /// per-resource opt-in (XEP-0280 §5 requires this to be per-resource).
+    carbons_enabled: Arc<AtomicBool>,
     /// XEP-0397 ISR token store for instant stream resumption
     isr_token_store: SharedIsrTokenStore,
     /// Current ISR token for this connection (if any)
@@ -286,7 +291,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             outbound_rx: None,
             sm_state: StreamManagementState::new(),
             sm_session_registry,
-            carbons_enabled: false,
+            carbons_enabled: Arc::new(AtomicBool::new(false)),
             isr_token_store,
             current_isr_token: None,
             stanza_router: None, // Federation routing disabled by default; can be set via set_stanza_router()
@@ -362,9 +367,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.jid = Some(full_jid.clone());
         self.state = ConnectionState::Established;
 
-        // Register this connection with the connection registry for message routing
+        // Register this connection with the connection registry for message routing.
+        // The returned handle shares the registry entry's carbons flag so we can
+        // toggle per-resource XEP-0280 opt-in from this actor.
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
-        self.connection_registry
+        self.carbons_enabled = self
+            .connection_registry
             .register(full_jid.clone(), outbound_tx);
         self.outbound_rx = Some(outbound_rx);
 
@@ -408,7 +416,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Store SM session for potential resumption (if enabled and resumable)
         if let Some(ref jid) = self.jid {
-            if let Some(detached) = self.sm_state.to_detached_session(jid.clone()) {
+            // Capture XEP-0280 carbons opt-in so resume restores it instead of
+            // creating a fresh entry with carbons disabled.
+            let carbons_enabled = self.carbons_enabled.load(Ordering::Relaxed);
+            if let Some(detached) = self
+                .sm_state
+                .to_detached_session(jid.clone(), carbons_enabled)
+            {
                 debug!(
                     stream_id = %detached.stream_id,
                     jid = %jid,
@@ -1365,9 +1379,17 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     self.stream.write_raw(&stanza_xml).await?;
                 }
 
-                // Re-register in connection registry with the restored JID
+                // Re-register in connection registry with the restored JID.
+                // XEP-0198 §5: `<resumed/>` continues the same stream, so the
+                // pre-detach XEP-0280 carbons opt-in must be preserved —
+                // seed the fresh `ConnectionEntry` with the flag that was
+                // captured when the session detached.
                 let (tx, rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
-                self.connection_registry.register(session.jid.clone(), tx);
+                self.carbons_enabled = self.connection_registry.register_with_carbons(
+                    session.jid.clone(),
+                    tx,
+                    session.carbons_enabled,
+                );
                 self.outbound_rx = Some(rx);
 
                 info!(
@@ -4744,7 +4766,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     async fn handle_carbons_enable(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         debug!("Enabling message carbons for connection");
 
-        self.carbons_enabled = true;
+        // Relaxed is sufficient: the registry's `get_other_carbon_resources_for_user`
+        // only needs eventual visibility; there's no happens-before ordering we
+        // depend on with any other memory.
+        self.carbons_enabled.store(true, Ordering::Relaxed);
 
         // Send success response
         let response = build_carbons_result(&iq);
@@ -4761,7 +4786,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     async fn handle_carbons_disable(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         debug!("Disabling message carbons for connection");
 
-        self.carbons_enabled = false;
+        self.carbons_enabled.store(false, Ordering::Relaxed);
 
         // Send success response
         let response = build_carbons_result(&iq);
@@ -5790,10 +5815,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Get the bare JID to find all resources
         let bare_jid = sender_jid.to_bare();
 
-        // Get all other resources for this user with carbons enabled
+        // Get all other resources for this user with carbons enabled.
+        // XEP-0280 §5: only resources that opted in (via `<enable/>`) receive
+        // carbon-wrapped copies.
         let other_resources = self
             .connection_registry
-            .get_other_resources_for_user(&bare_jid, sender_jid);
+            .get_other_carbon_resources_for_user(&bare_jid, sender_jid);
 
         if other_resources.is_empty() {
             return;
@@ -5836,10 +5863,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Get the bare JID to find all resources
         let bare_jid = recipient_jid.to_bare();
 
-        // Get all other resources for this user
+        // Get all other carbons-opted-in resources for this user (XEP-0280 §5).
         let other_resources = self
             .connection_registry
-            .get_other_resources_for_user(&bare_jid, recipient_jid);
+            .get_other_carbon_resources_for_user(&bare_jid, recipient_jid);
 
         if other_resources.is_empty() {
             return;
@@ -5905,10 +5932,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return;
         }
 
-        // Find resources that didn't get the original message
+        // Find resources that didn't get the original message and have
+        // opted into carbons (XEP-0280 §5: carbons are per-resource opt-in).
         let other_resources: Vec<&FullJid> = all_resources
             .iter()
-            .filter(|r| !delivered_resources.contains(r))
+            .filter(|r| {
+                !delivered_resources.contains(r) && self.connection_registry.is_carbons_enabled(r)
+            })
             .collect();
 
         if other_resources.is_empty() {

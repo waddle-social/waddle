@@ -228,9 +228,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             }
 
             let frame = encode_message(&message)?;
-            self.sink
-                .send(Message::Text(frame.into()))
-                .await?;
+            self.sink.send(Message::Text(frame.into())).await?;
 
             if matches!(message, TransportMessage::Close(_)) {
                 self.queue_state_change(TransportState::Closing);
@@ -295,9 +293,7 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             if self.state != TransportState::Closing {
                 self.queue_state_change(TransportState::Closing);
                 let frame = encode_message(&TransportMessage::Close(StreamClose))?;
-                self.sink
-                    .send(Message::Text(frame.into()))
-                    .await?;
+                self.sink.send(Message::Text(frame.into())).await?;
                 self.pending_events.push_back(TransportEvent::MessageSent(
                     TransportMessage::Close(StreamClose),
                 ));

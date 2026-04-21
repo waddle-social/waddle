@@ -175,6 +175,91 @@ describe("MAM history parsing", () => {
       }),
     );
   });
+
+  // Reconnect catch-up: an iPhone/Safari session that drops its websocket
+  // and resumes must be able to request "everything after my last-seen stanza"
+  // via XEP-0313 §4.1.5's `start` form field. These tests fix the shape of
+  // the outgoing MAM query so the client can drive MAM-on-reconnect.
+  test("MAM DM query includes a `start` form field when a since cursor is given", async () => {
+    const xmpp = makeMamAgent([]);
+
+    await queryPersonalMam(
+      xmpp,
+      "alice@example.com",
+      "bob@example.com",
+      20,
+      "2024-01-02T03:04:05.000Z",
+    );
+
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    expect(callArgs?.[0]).toBe("alice@example.com");
+    const form = (callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form;
+    const fields = form?.fields ?? [];
+    const startField = fields.find((f) => f.name === "start");
+    expect(startField?.value).toBe("2024-01-02T03:04:05.000Z");
+    // Catch-up page wants oldest-first with no `before`, not newest-first.
+    expect(
+      (callArgs?.[1] as { paging?: { before?: string } })?.paging?.before,
+    ).toBeUndefined();
+  });
+
+  test("MAM DM catch-up query includes an `end` form field when until is given", async () => {
+    const xmpp = makeMamAgent([]);
+    await queryPersonalMam(
+      xmpp,
+      "alice@example.com",
+      "bob@example.com",
+      20,
+      "2024-01-02T03:04:05.000Z",
+      "2024-01-02T03:05:00.000Z",
+    );
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    const fields =
+      ((callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form?.fields) ?? [];
+    const endField = fields.find((f) => f.name === "end");
+    expect(endField?.value).toBe("2024-01-02T03:05:00.000Z");
+  });
+
+  test("MAM DM query omits `start` when no since cursor is given", async () => {
+    const xmpp = makeMamAgent([]);
+    await queryPersonalMam(xmpp, "alice@example.com", "bob@example.com", 20);
+
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    const fields =
+      ((callArgs?.[1] as { form?: { fields?: { name: string }[] } })?.form?.fields) ?? [];
+    expect(fields.find((f) => f.name === "start")).toBeUndefined();
+  });
+
+  test("MAM room query includes a `start` form field when a since cursor is given", async () => {
+    const xmpp = makeMamAgent([]);
+
+    await queryMam(xmpp, "general@muc.example.com", 20, "2024-01-02T03:04:05.000Z");
+
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    expect(callArgs?.[0]).toBe("general@muc.example.com");
+    const form = (callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form;
+    const fields = form?.fields ?? [];
+    const formType = fields.find((f) => f.name === "FORM_TYPE");
+    expect(formType?.value).toBe("urn:xmpp:mam:2");
+    const startField = fields.find((f) => f.name === "start");
+    expect(startField?.value).toBe("2024-01-02T03:04:05.000Z");
+  });
+
+  test("MAM room catch-up query includes an `end` form field when until is given", async () => {
+    const xmpp = makeMamAgent([]);
+    await queryMam(
+      xmpp,
+      "general@muc.example.com",
+      20,
+      "2024-01-02T03:04:05.000Z",
+      "2024-01-02T03:05:00.000Z",
+    );
+    const callArgs = xmpp.searchHistory.mock.calls[0];
+    const fields =
+      ((callArgs?.[1] as { form?: { fields?: { name: string; value?: string }[] } })?.form?.fields) ?? [];
+    const endField = fields.find((f) => f.name === "end");
+    expect(endField?.value).toBe("2024-01-02T03:05:00.000Z");
+  });
 });
 
 describe("MAM history application", () => {

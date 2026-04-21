@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
-import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock } from "lucide-vue-next";
+import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock, Send, X } from "lucide-vue-next";
 import AppAvatar from "@/components/ui/AppAvatar.vue";
 import ChatEditor from "@/components/chat/ChatEditor.vue";
+import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
 import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan, type TimelineSharedFile } from "@/lib/chat-ui";
@@ -298,19 +299,38 @@ const forumThreadLabel = computed(() =>
 
 const isEditing = ref(false);
 const editInitialContent = ref<Record<string, unknown> | undefined>(undefined);
+const editDraftDoc = ref<Record<string, unknown> | undefined>(undefined);
 const editEditorRef = ref<InstanceType<typeof ChatEditor> | null>(null);
 const setEditEditorRef = (instance: InstanceType<typeof ChatEditor> | null) => {
   editEditorRef.value = instance;
 };
+const editTiptapEditor = computed(() => {
+  const e = editEditorRef.value as any;
+  return e?.editor?.value ?? e?.editor ?? null;
+});
+const editCanSubmit = computed(() => {
+  if (!editDraftDoc.value) return false;
+  const { body } = serializeTiptapToXep0393(editDraftDoc.value);
+  const trimmed = body.trim();
+  return !!trimmed && trimmed !== props.message.body;
+});
 
 function startEdit() {
-  editInitialContent.value = parseXep0393ToTiptap(props.message.body);
+  const content = parseXep0393ToTiptap(props.message.body);
+  editInitialContent.value = content;
+  editDraftDoc.value = content;
   isEditing.value = true;
+  void nextTick(() => editEditorRef.value?.focus());
 }
 
 function cancelEdit() {
   isEditing.value = false;
   editInitialContent.value = undefined;
+  editDraftDoc.value = undefined;
+}
+
+function updateEditDraft(doc: Record<string, unknown>) {
+  editDraftDoc.value = doc;
 }
 
 function submitEditFromEditor(doc: Record<string, unknown>) {
@@ -321,6 +341,12 @@ function submitEditFromEditor(doc: Record<string, unknown>) {
   }
   isEditing.value = false;
   editInitialContent.value = undefined;
+  editDraftDoc.value = undefined;
+}
+
+function submitCurrentEdit() {
+  const doc = editEditorRef.value?.getJSON?.();
+  if (doc) submitEditFromEditor(doc);
 }
 
 function emitAvatarClick() {
@@ -569,7 +595,7 @@ watch(
     </div>
 
     <!-- Edit mode -->
-    <div v-if="isEditing" class="flex gap-2 mt-1 items-end">
+    <div v-if="isEditing" class="mt-1 flex min-w-0 items-end gap-1.5">
       <ChatEditor
         :ref="setEditEditorRef"
         compact
@@ -577,12 +603,31 @@ watch(
         placeholder="Edit message..."
         @send="submitEditFromEditor"
         @cancel="cancelEdit"
+        @update="updateEditDraft"
         class="flex-1"
       />
-      <button
-        class="text-[12px] font-medium px-3 h-9 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200 shrink-0"
-        @click="cancelEdit"
-      >Cancel</button>
+      <div class="inline-flex h-9 shrink-0 items-center gap-0.5 rounded-lg border border-border bg-muted/50 p-0.5">
+        <button
+          type="button"
+          class="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground transition-all duration-200 hover:shadow-[0_0_14px_var(--glow-strong)] disabled:opacity-25 disabled:hover:shadow-none"
+          :disabled="!editCanSubmit"
+          title="Save edit"
+          aria-label="Save edit"
+          @click="submitCurrentEdit"
+        >
+          <Send class="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+          title="Cancel edit"
+          aria-label="Cancel edit"
+          @click="cancelEdit"
+        >
+          <X class="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      </div>
+      <EditorBubbleToolbar v-if="editTiptapEditor" :editor="editTiptapEditor" />
     </div>
 
     <!-- Sticker -->

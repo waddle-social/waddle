@@ -7,13 +7,18 @@ xeps
 # Bun
 node_modules
 
-# AI
-.claude
+# Claude
+.claude/
+
+# Claude worktrees
 .worktrees/
 .codex
 
 # Cuenv
 .cuenv
+
+# Cloudflare
+.wrangler/
 
 # Editor state
 .vscode/

@@ -96,6 +96,37 @@ pub enum SendResult {
     ChannelClosed,
 }
 
+/// Outcome of a non-blocking fan-out send via `try_send_to`.
+///
+/// Returning a typed outcome (rather than `bool`) forces callers to
+/// distinguish delivery, absence, and the two silent-drop cases — the
+/// previous `bool` API conflated them and they were all observed as
+/// "just didn't get the message" from the recipient side. Each variant
+/// bumps the matching Prometheus counter inside `try_send_to` so
+/// per-site aggregation is optional for callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastOutcome {
+    /// Stanza enqueued on the recipient's outbound channel.
+    Delivered,
+    /// No registry entry for the recipient (e.g. disconnected or SM-detached).
+    NotConnected,
+    /// Recipient's outbound channel is full; stanza dropped. The consumer
+    /// is backpressured — a persistent non-zero rate of this outcome is
+    /// the silent-message-loss symptom that PR #160's fan-out
+    /// fire-and-forget path introduced.
+    DroppedFull,
+    /// Recipient's outbound channel was closed; stanza dropped and the
+    /// stale registry entry has been evicted.
+    DroppedClosed,
+}
+
+impl BroadcastOutcome {
+    /// True iff the stanza was enqueued for delivery.
+    pub fn is_delivered(self) -> bool {
+        matches!(self, BroadcastOutcome::Delivered)
+    }
+}
+
 /// Registry for tracking active XMPP connections.
 ///
 /// Thread-safe registry that maps full JIDs to connection entries.
@@ -175,7 +206,24 @@ impl ConnectionRegistry {
     /// the same resource before the old connection is cleaned up.
     #[instrument(skip(self, sender), fields(jid = %jid))]
     pub fn register(&self, jid: FullJid, sender: mpsc::Sender<OutboundStanza>) -> Arc<AtomicBool> {
+        self.register_with_carbons(jid, sender, false)
+    }
+
+    /// Register a connection and seed its XEP-0280 carbons opt-in to
+    /// `carbons_enabled`. Used by the XEP-0198 stream-resume path so a
+    /// resumed stream keeps the carbons flag it negotiated before the
+    /// disconnect instead of silently reverting to the disabled default.
+    #[instrument(skip(self, sender), fields(jid = %jid, carbons = carbons_enabled))]
+    pub fn register_with_carbons(
+        &self,
+        jid: FullJid,
+        sender: mpsc::Sender<OutboundStanza>,
+        carbons_enabled: bool,
+    ) -> Arc<AtomicBool> {
         let entry = ConnectionEntry::new(sender);
+        if carbons_enabled {
+            entry.carbons_enabled.store(true, Ordering::Relaxed);
+        }
         let carbons_handle = entry.carbons_handle();
         let existing = self.connections.insert(jid.clone(), entry);
         if existing.is_some() {
@@ -243,7 +291,8 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Non-blocking send. Returns true iff the stanza was queued.
+    /// Non-blocking send. Returns a typed `BroadcastOutcome` describing
+    /// delivery, absence, or which silent-drop path was taken.
     ///
     /// Intended for fan-out paths (MUC broadcasts) where a slow or zombied
     /// consumer must never stall the producer task. On `Closed` the stale
@@ -252,23 +301,44 @@ impl ConnectionRegistry {
     /// installed a fresh, live sender between our `get` and `try_send`, and
     /// we must not wipe the newcomer. On `Full` the stanza is dropped
     /// without touching the registry (the consumer may just be catching up).
-    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> bool {
+    ///
+    /// Every outcome bumps a Prometheus counter so production drop rates
+    /// are visible even when callers discard the return value.
+    pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
-            None => return false,
+            None => {
+                prometheus::increment_broadcast_not_connected();
+                return BroadcastOutcome::NotConnected;
+            }
         };
 
         let outbound = OutboundStanza::new(stanza);
 
         match sender.try_send(outbound) {
-            Ok(()) => true,
+            Ok(()) => {
+                prometheus::increment_broadcast_delivered();
+                BroadcastOutcome::Delivered
+            }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                debug!(jid = %jid, "Outbound channel full; dropping broadcast stanza");
-                false
+                prometheus::increment_broadcast_dropped_full();
+                // Keep per-recipient detail at debug only — the
+                // aggregated broadcast log at the call site already
+                // reports a per-send `dropped_full` total, and
+                // `waddle_broadcast_dropped_full_total` is always on.
+                // A `warn!` here would turn into a log storm under
+                // sustained fan-out backpressure (125+/s) and drown
+                // out every other signal on the pod.
+                debug!(
+                    jid = %jid,
+                    "Outbound channel full; broadcast stanza dropped"
+                );
+                BroadcastOutcome::DroppedFull
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                prometheus::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed(jid);
-                false
+                BroadcastOutcome::DroppedClosed
             }
         }
     }
@@ -322,8 +392,10 @@ impl ConnectionRegistry {
 
     /// Get all connected resources for a bare JID, excluding a specific full JID.
     ///
-    /// Used by message carbons to find other connected clients for the same user.
     /// Returns all full JIDs that match the bare JID except the excluded one.
+    /// This does NOT filter by carbons status — callers that are routing
+    /// XEP-0280 carbon copies should use [`Self::get_other_carbon_resources_for_user`]
+    /// instead so that non-opted-in resources are not sent carbon-wrapped stanzas.
     pub fn get_other_resources_for_user(
         &self,
         bare_jid: &BareJid,
@@ -338,6 +410,54 @@ impl ConnectionRegistry {
             })
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// Get all resources for a bare JID that have XEP-0280 Message Carbons
+    /// enabled, excluding a specific full JID.
+    ///
+    /// Per XEP-0280 §5, carbons must be enabled per-resource. The server must
+    /// only deliver `<sent>` and `<received>` carbon copies to resources that
+    /// have explicitly opted in via `<enable xmlns='urn:xmpp:carbons:2'/>`.
+    pub fn get_other_carbon_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+        exclude_jid: &FullJid,
+    ) -> Vec<FullJid> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                let jid = entry.key();
+                jid.to_bare() == *bare_jid
+                    && jid != exclude_jid
+                    && entry.value().is_carbons_enabled()
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Check whether the given full JID has XEP-0280 Message Carbons enabled.
+    ///
+    /// Returns false if the JID is not connected.
+    pub fn is_carbons_enabled(&self, jid: &FullJid) -> bool {
+        self.connections
+            .get(jid)
+            .map(|entry| entry.value().is_carbons_enabled())
+            .unwrap_or(false)
+    }
+
+    /// Update the XEP-0280 Message Carbons opt-in flag for a connected resource.
+    ///
+    /// Returns false when the resource is not currently connected.
+    pub fn set_carbons_enabled(&self, jid: &FullJid, enabled: bool) -> bool {
+        if let Some(entry) = self.connections.get(jid) {
+            entry
+                .value()
+                .carbons_enabled
+                .store(enabled, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get all connected resources for a bare JID.
@@ -835,5 +955,60 @@ mod tests {
         // Clean up on unregister
         registry.unregister(&jid);
         assert!(registry.get_presence_state(&jid).is_none());
+    }
+
+    /// XEP-0198 + XEP-0280: when a stream resumes the client expects its
+    /// previous carbons opt-in to still be in effect. `register` creates a
+    /// fresh entry with carbons disabled, so the resume path needs a variant
+    /// that seeds the flag to the value captured when the session detached.
+    #[test]
+    fn test_register_with_carbons_seeds_initial_flag() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user1");
+        let (tx, _rx) = mpsc::channel(16);
+
+        let handle = registry.register_with_carbons(jid.clone(), tx, true);
+
+        assert!(
+            handle.load(Ordering::Relaxed),
+            "handle returned by register_with_carbons(.., true) should start enabled"
+        );
+        assert!(
+            registry.is_carbons_enabled(&jid),
+            "registry should report carbons as enabled for the seeded entry"
+        );
+    }
+
+    #[test]
+    fn test_register_with_carbons_false_leaves_disabled() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user2");
+        let (tx, _rx) = mpsc::channel(16);
+
+        let handle = registry.register_with_carbons(jid.clone(), tx, false);
+
+        assert!(!handle.load(Ordering::Relaxed));
+        assert!(!registry.is_carbons_enabled(&jid));
+    }
+
+    #[test]
+    fn test_set_carbons_enabled_updates_existing_entry() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("user3");
+        let (tx, _rx) = mpsc::channel(16);
+        registry.register(jid.clone(), tx);
+
+        assert!(registry.set_carbons_enabled(&jid, true));
+        assert!(registry.is_carbons_enabled(&jid));
+
+        assert!(registry.set_carbons_enabled(&jid, false));
+        assert!(!registry.is_carbons_enabled(&jid));
+    }
+
+    #[test]
+    fn test_set_carbons_enabled_returns_false_for_missing_entry() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("missing");
+        assert!(!registry.set_carbons_enabled(&jid, true));
     }
 }

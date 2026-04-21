@@ -73,12 +73,26 @@ describe("client send readiness", () => {
     const xmpp = { sendMessage: mock(() => undefined) };
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "w1", "c1");
-    (client as unknown as { switchRoom: ReturnType<typeof mock> }).switchRoom = mock(async () => {
-      (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
-      (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).connected = true;
-      (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).currentRoom =
-        roomJid;
-    });
+    // Pre-set the ready state: sendGroupMessage takes the fast path
+    // (no awaits, no switchRoom call) when `roomIsReady` is already
+    // true at call time. Anything else enqueues optimistically and
+    // drives recovery in the background — that's covered by the next
+    // test.
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string | null;
+    }).xmpp = xmpp;
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string | null;
+    }).connected = true;
+    (client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      currentRoom: string | null;
+    }).currentRoom = roomJid;
 
     const result = await client.sendGroupMessage("w1", "c1", "hello room");
 

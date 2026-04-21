@@ -41,7 +41,23 @@ interface BlockquoteNode {
   content: ParagraphNode[];
 }
 
-type BlockNode = ParagraphNode | CodeBlockNode | BlockquoteNode;
+interface ListItemNode {
+  type: "listItem";
+  content: ParagraphNode[];
+}
+
+interface BulletListNode {
+  type: "bulletList";
+  content: ListItemNode[];
+}
+
+interface OrderedListNode {
+  type: "orderedList";
+  attrs?: { start: number };
+  content: ListItemNode[];
+}
+
+type BlockNode = ParagraphNode | CodeBlockNode | BlockquoteNode | BulletListNode | OrderedListNode;
 
 interface DocNode {
   type: "doc";
@@ -320,6 +336,13 @@ function makeParagraph(line: string): ParagraphNode {
   return { type: "paragraph", content };
 }
 
+const BULLET_LIST_RE = /^\s*[-*+]\s+(.*)$/;
+const ORDERED_LIST_RE = /^\s*(\d+)[.)]\s+(.*)$/;
+
+function makeListItem(line: string): ListItemNode {
+  return { type: "listItem", content: [makeParagraph(line)] };
+}
+
 /**
  * Top-level entry: parse an XEP-0393 body into a TipTap-compatible document.
  */
@@ -369,6 +392,37 @@ export function parseXep0393ToTiptap(body: string): Record<string, unknown> {
         i++;
       }
       blocks.push({ type: "blockquote", content: quoteParas });
+      continue;
+    }
+
+    const bulletMatch = line.match(BULLET_LIST_RE);
+    if (bulletMatch) {
+      const items: ListItemNode[] = [];
+      while (i < lines.length) {
+        const match = lines[i].match(BULLET_LIST_RE);
+        if (!match) break;
+        items.push(makeListItem(match[1]));
+        i++;
+      }
+      blocks.push({ type: "bulletList", content: items });
+      continue;
+    }
+
+    const orderedMatch = line.match(ORDERED_LIST_RE);
+    if (orderedMatch) {
+      const start = Number(orderedMatch[1]);
+      const items: ListItemNode[] = [];
+      while (i < lines.length) {
+        const match = lines[i].match(ORDERED_LIST_RE);
+        if (!match) break;
+        items.push(makeListItem(match[2]));
+        i++;
+      }
+      blocks.push({
+        type: "orderedList",
+        ...(start !== 1 ? { attrs: { start } } : {}),
+        content: items,
+      });
       continue;
     }
 

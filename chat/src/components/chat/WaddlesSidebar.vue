@@ -65,7 +65,13 @@ function waddleColor(waddle: WaddleSummary): string {
   >
     <!-- Logo -->
     <div class="w-10 h-10 flex items-center justify-center flex-shrink-0" :class="horizontal ? '' : 'mb-2'">
-      <span class="text-xl">🐧</span>
+      <img
+        src="/waddle-logo.svg"
+        alt="Waddle"
+        width="40"
+        height="40"
+        class="h-10 w-10 rounded-lg object-contain"
+      />
     </div>
 
     <!-- Divider -->

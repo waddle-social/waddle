@@ -32,6 +32,11 @@ import {
 } from "../outbound-queue-store";
 import * as inboxApi from "./inbox";
 import * as pep from "./pep-publications";
+import { ReconnectCatchup } from "./reconnect-catchup";
+
+// Cap MAM catch-up per conversation so a long offline period can't drown the
+// client. In practice, web clients reconnect within minutes; 200 is generous.
+const CATCHUP_MAX_PER_CONVERSATION = 200;
 
 type StanzaSaslMechanism = { name: string };
 type StanzaSaslFactory = {
@@ -118,15 +123,6 @@ function isOptionalXmppFeatureError(error: unknown): boolean {
   return !!condition && OPTIONAL_XMPP_FEATURE_ERROR_CONDITIONS.has(condition);
 }
 
-function isLocalAvailabilityError(error: unknown): boolean {
-  return error instanceof Error
-    && (
-      error.message === "XMPP session is not ready"
-      || error.message.startsWith("Room is not ready:")
-      || error.message === "Reconnection timed out"
-    );
-}
-
 function mapPresenceShow(pres: ReceivedPresence): PresenceUpdateEvent["show"] {
   if ((pres.type ?? "available") === "unavailable") return "offline";
   switch (pres.show ?? "available") {
@@ -178,6 +174,9 @@ export class BrowserXmppClient {
   private connectPromise: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  // Slice A: MAM-on-reconnect tracker. Updated on every live room / DM /
+  // carbon message, consulted on every `session:started` after the first.
+  private readonly catchup = new ReconnectCatchup();
   private refreshSession: (() => Promise<WaddleSession | null>) | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
@@ -190,8 +189,37 @@ export class BrowserXmppClient {
   private onlineListener: (() => void) | null = null;
   private reconnectNudgeAt = 0;
   private lastStanzaKickAt = 0;
+  private serverClockOffsetMs = 0;
   private directQueueFlushPromise: Promise<void> | null = null;
   private readonly roomQueueFlushes = new Map<string, Promise<void>>();
+  // IDs of persisted-queue entries that have been handed to stanza.js on
+  // this connection and whose `message:acked` is still pending. The
+  // persisted localStorage entry only goes away when the ack arrives, so
+  // flushes that race with an ack must skip already-in-flight entries —
+  // otherwise resume + concurrent flush double-sends. Cleared on fresh
+  // session (session:started) because stanza.js drops its SM buffer
+  // there, so those stanzas need to be re-flushed from scratch.
+  private readonly inflightQueuedIds = new Set<string>();
+  // Send-latency bookkeeping keyed by stanza id. Populated on every
+  // outbound message (live-send or queue flush); cleared on ack / fail.
+  // Values are `performance.now()` at send time; the `message:acked`
+  // handler subtracts to compute latency for telemetry. Independent of
+  // `inflightQueuedIds` because it covers both persistent-queue and
+  // live-send ids.
+  private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
+  // Timestamp of the last transition INTO `reconnecting` state, used to
+  // compute reconnect duration when we transition back to `online`.
+  private reconnectStartedAt: number | null = null;
+  // Telemetry hook arrays. These fire ALONGSIDE the primary `*Handler`
+  // methods set by the app — never replacing them — so UI state and
+  // telemetry evolve independently. Any exception thrown by a hook is
+  // swallowed per-call to keep instrumentation from breaking chat.
+  private readonly messageAckHooks: Array<(id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void> = [];
+  private readonly messageFailHooks: Array<(id: string, meta: { kind: "room" | "dm" }) => void> = [];
+  private readonly sessionLifecycleHooks: Array<(event: SessionLifecycleEvent) => void> = [];
+  private readonly statusHooks: Array<(status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void> = [];
+  private readonly sendEnqueuedHooks: Array<(info: { kind: "room" | "dm"; reason: string }) => void> = [];
+  private readonly queueDepthHooks: Array<(depth: { persisted: number; inflight: number }) => void> = [];
 
   constructor(session: WaddleSession) { this.session = session; }
 
@@ -221,6 +249,92 @@ export class BrowserXmppClient {
   }
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.sessionLifecycleHandler = h; }
   setRefreshSession(fn: () => Promise<WaddleSession | null>) { this.refreshSession = fn; }
+
+  // -- Telemetry hooks --
+  //
+  // Hooks fire in addition to (never replacing) the primary `set*Handler`
+  // callbacks. They exist so external telemetry code (Faro / any future
+  // backend) can observe message-drop events without fighting the UI for
+  // ownership of the single primary handler slot.
+  onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) {
+    this.messageAckHooks.push(hook);
+  }
+  onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) {
+    this.messageFailHooks.push(hook);
+  }
+  onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) {
+    this.sessionLifecycleHooks.push(hook);
+  }
+  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) {
+    this.statusHooks.push(hook);
+  }
+  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) {
+    this.sendEnqueuedHooks.push(hook);
+  }
+  onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) {
+    this.queueDepthHooks.push(hook);
+  }
+
+  private fireHook<Args extends unknown[]>(hooks: Array<(...args: Args) => void>, ...args: Args) {
+    for (const hook of hooks) {
+      try { hook(...args); }
+      catch (err) { console.error("xmpp telemetry hook threw", err); }
+    }
+  }
+
+  private emitQueueDepth() {
+    if (this.queueDepthHooks.length === 0) return;
+    const depth = {
+      persisted: countQueuedMessages(this.queueScope),
+      inflight: this.inflightQueuedIds.size,
+    };
+    this.fireHook(this.queueDepthHooks, depth);
+  }
+
+  private recordPendingSend(id: string | null, kind: "room" | "dm") {
+    if (!id) return;
+    this.pendingSendAt.set(id, { at: performance.now(), kind });
+  }
+
+  private emitStatus(snap: XmppStatusSnapshot) {
+    this.statusHandler?.(snap);
+    if (this.statusHooks.length === 0) {
+      this.updateReconnectTimer(snap);
+      return;
+    }
+    const meta = this.updateReconnectTimer(snap);
+    this.fireHook(this.statusHooks, snap, meta);
+  }
+
+  /**
+   * Track `reconnecting → online` transitions for telemetry latency.
+   * Called from `emitStatus` so every status transition is observed.
+   * Only returns `{ reconnectDurationMs }` on a successful resumption
+   * (reconnecting → online). Transitions to `offline` / `error` just
+   * reset the timer without emitting, so failed reconnect attempts
+   * don't skew `chat.xmpp.reconnect.duration_ms`.
+   */
+  private updateReconnectTimer(snap: XmppStatusSnapshot): { reconnectDurationMs?: number } {
+    if (snap.state === "reconnecting") {
+      if (this.reconnectStartedAt === null) {
+        this.reconnectStartedAt = performance.now();
+      }
+      return {};
+    }
+    if (this.reconnectStartedAt === null) return {};
+    if (snap.state === "online") {
+      const durationMs = performance.now() - this.reconnectStartedAt;
+      this.reconnectStartedAt = null;
+      return { reconnectDurationMs: durationMs };
+    }
+    this.reconnectStartedAt = null;
+    return {};
+  }
+
+  private emitSessionLifecycle(event: SessionLifecycleEvent) {
+    this.sessionLifecycleHandler?.(event);
+    this.fireHook(this.sessionLifecycleHooks, event);
+  }
 
   private updateSession(session: WaddleSession, xmpp: Agent | null = this.xmpp) {
     this.session = session;
@@ -388,6 +502,8 @@ export class BrowserXmppClient {
     this.connected = false;
     this.currentRoom = null;
     this.uploadServiceJid = null;
+    // Intentional teardown — next connect is a fresh session, not a resume.
+    this.catchup.reset();
     try { xmpp.disconnect(); } catch { /* ignore */ }
   }
 
@@ -465,10 +581,16 @@ export class BrowserXmppClient {
     const fullJid = `${roomJid}/${nick}`;
 
     return new Promise((resolve, reject) => {
+      // 4s was 10s. Past experience: when the server is healthy the
+      // self-presence arrives in under a second; at 10s a caller
+      // awaiting this (e.g. `performRoomSwitch`) blocks for a full
+      // beat before surfacing the failure. At 4s the surrounding room
+      // switch still gets its retry path and the next presence event
+      // caught by `muc:available` papers over any single-request lag.
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out waiting for self-presence in ${roomJid}`));
-      }, 10_000);
+      }, 4_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
@@ -525,16 +647,12 @@ export class BrowserXmppClient {
     return this.canUseConnectedSession() && this.currentRoom === roomJid;
   }
 
-  private shouldQueueImmediately(): boolean {
-    return this.browserOffline() || this.destroying || (!!this.xmpp && !this.connected);
-  }
-
   private noteQueuedMessage() {
     const queueCount = countQueuedMessages(this.queueScope);
     const detail = queueCount === 1
       ? "Message queued until the connection returns"
       : `${queueCount} messages queued until the connection returns`;
-    this.statusHandler?.({
+    this.emitStatus({
       state: this.browserOffline() ? "offline" : "reconnecting",
       detail,
     });
@@ -562,6 +680,8 @@ export class BrowserXmppClient {
     });
     this.queuedMessageStatusHandler?.(queuedId, "queued");
     this.noteQueuedMessage();
+    this.fireHook(this.sendEnqueuedHooks, { kind: "room", reason: this.enqueueReason() });
+    this.emitQueueDepth();
     return { id: queuedId, state: "queued" };
   }
 
@@ -584,7 +704,17 @@ export class BrowserXmppClient {
     });
     this.queuedMessageStatusHandler?.(queuedId, "queued");
     this.noteQueuedMessage();
+    this.fireHook(this.sendEnqueuedHooks, { kind: "dm", reason: this.enqueueReason() });
+    this.emitQueueDepth();
     return { id: queuedId, state: "queued" };
+  }
+
+  private enqueueReason(): string {
+    if (this.browserOffline()) return "offline";
+    if (this.destroying) return "destroying";
+    if (!this.xmpp) return "no-client";
+    if (!this.connected) return "reconnecting";
+    return "not-ready";
   }
 
   private nudgeReconnect() {
@@ -601,6 +731,10 @@ export class BrowserXmppClient {
       );
       for (const entry of entries) {
         if (!this.canUseConnectedSession() || !this.xmpp) break;
+        // Skip entries we already handed to stanza.js on this connection —
+        // their ack is in flight. Removing them from the persisted queue
+        // happens on `message:acked`, not on synchronous send.
+        if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = dmMessaging.sendDirectMessage(
           this.xmpp,
@@ -614,7 +748,10 @@ export class BrowserXmppClient {
             id: entry.id,
           },
         );
-        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+        if (messageId) {
+          this.inflightQueuedIds.add(entry.id);
+          this.recordPendingSend(entry.id, "dm");
+        }
       }
     })();
     const trackedPromise = flushPromise.finally(() => {
@@ -635,6 +772,7 @@ export class BrowserXmppClient {
       const entries = listQueuedRoomMessages(this.queueScope, roomJid);
       for (const entry of entries) {
         if (!this.roomIsReady(roomJid) || !this.xmpp) break;
+        if (this.inflightQueuedIds.has(entry.id)) continue;
         this.queuedMessageStatusHandler?.(entry.id, "sending");
         const messageId = messaging.sendGroupMessage(this.xmpp, roomJid, entry.body, {
           ...(entry.markup && entry.markup.length > 0 ? { markup: entry.markup } : {}),
@@ -646,7 +784,10 @@ export class BrowserXmppClient {
           ...(entry.threadReply ? { threadReply: entry.threadReply } : {}),
           id: entry.id,
         });
-        if (messageId) removeQueuedMessage(this.queueScope, entry.id);
+        if (messageId) {
+          this.inflightQueuedIds.add(entry.id);
+          this.recordPendingSend(entry.id, "room");
+        }
       }
     })();
 
@@ -695,32 +836,25 @@ export class BrowserXmppClient {
     if (!text && !hasFiles) return null;
 
     const roomJid = roomBareJidFor(this.session, w, c);
-    if (this.shouldQueueImmediately()) {
-      const queued = this.queueRoomMessage(roomJid, body, opts);
-      void this.connect()
-        .then(() => this.switchRoom(w, c))
-        .then(() => this.flushQueuedRoomMessages(roomJid))
-        .catch(() => undefined);
-      return queued;
+
+    // Fast path: connected and already in this room — send directly,
+    // no awaits, no UI freeze. Any other state (offline, reconnecting,
+    // mid-room-switch, or just not joined yet) enqueues optimistically
+    // and recovers in the background. This is what stops the Send
+    // button from hanging on connect(15s) + switchRoom(10s→4s) while
+    // the user is staring at a spinner.
+    if (this.roomIsReady(roomJid) && this.xmpp) {
+      const id = messaging.sendGroupMessage(this.xmpp, roomJid, body, opts);
+      this.recordPendingSend(id, "room");
+      return { id, state: "sending" };
     }
 
-    try {
-      const { xmpp } = await this.requireJoinedRoom(w, c);
-      return {
-        id: messaging.sendGroupMessage(xmpp, roomJid, body, opts),
-        state: "sending",
-      };
-    } catch (error) {
-      if (isLocalAvailabilityError(error)) {
-        const queued = this.queueRoomMessage(roomJid, body, opts);
-        void this.connect()
-          .then(() => this.switchRoom(w, c))
-          .then(() => this.flushQueuedRoomMessages(roomJid))
-          .catch(() => undefined);
-        return queued;
-      }
-      throw error;
-    }
+    const queued = this.queueRoomMessage(roomJid, body, opts);
+    void this.connect()
+      .then(() => this.switchRoom(w, c))
+      .then(() => this.flushQueuedRoomMessages(roomJid))
+      .catch(() => undefined);
+    return queued;
   }
 
   // -- File upload (XEP-0363 + XEP-0447/XEP-0448) --
@@ -781,26 +915,21 @@ export class BrowserXmppClient {
     if (!text && !hasFiles) return null;
 
     const normalizedPeerJid = barePeerJid(peerJid);
-    if (this.shouldQueueImmediately()) {
-      const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
-      this.nudgeReconnect();
-      return queued;
+
+    // Fast path: connected now — send directly. Any other state
+    // (offline, reconnecting, destroying) enqueues optimistically and
+    // nudges reconnect. Never await connect() from this entry point —
+    // the 15s `Reconnection timed out` path used to block the Send
+    // button under a bad network.
+    if (this.canUseConnectedSession() && this.xmpp) {
+      const id = dmMessaging.sendDirectMessage(this.xmpp, normalizedPeerJid, body, opts);
+      this.recordPendingSend(id, "dm");
+      return { id, state: "sending" };
     }
 
-    try {
-      const xmpp = await this.requireConnectedXmpp();
-      return {
-        id: dmMessaging.sendDirectMessage(xmpp, normalizedPeerJid, body, opts),
-        state: "sending",
-      };
-    } catch (error) {
-      if (isLocalAvailabilityError(error)) {
-        const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
-        this.nudgeReconnect();
-        return queued;
-      }
-      throw error;
-    }
+    const queued = this.queueDirectMessage(normalizedPeerJid, body, opts);
+    this.nudgeReconnect();
+    return queued;
   }
 
   async sendDmChatState(peerJid: string, state: ChatStateType): Promise<void> {
@@ -1001,6 +1130,85 @@ export class BrowserXmppClient {
 
   // -- Private --
 
+  private catchupTimestampIso(msg: ReceivedMessage): string {
+    return msg.delay?.timestamp?.toISOString()
+      ?? new Date(Date.now() + this.serverClockOffsetMs).toISOString();
+  }
+
+  private async syncServerClockOffset(xmpp: Agent) {
+    const domain = jidDomain(this.session.jid);
+    if (!domain) return;
+    try {
+      const time = await xmpp.getTime(domain);
+      if (time.utc && !Number.isNaN(time.utc.getTime())) {
+        this.serverClockOffsetMs = time.utc.getTime() - Date.now();
+      }
+    } catch (error) {
+      if (!isOptionalXmppFeatureError(error)) {
+        console.warn("Failed to sync XEP-0202 server time", error);
+      }
+    }
+  }
+
+  /**
+   * XEP-0313 MAM catch-up after a `session:started`.
+   *
+   * Empty on the first session:started (initial login); for each subsequent
+   * resume it queries MAM with `start=<lastSeen>` for every tracked
+   * conversation and feeds the results through the same handlers as live
+   * messages. This closes the gap when mobile Safari (or any suspended tab)
+   * silently drops its WebSocket and reconnects after missing stanzas.
+   */
+  private async runReconnectCatchup(xmpp: Agent) {
+    const entries = this.catchup.onSessionStarted();
+    if (entries.length === 0) return;
+
+    const selfBare = barePeerJid(this.session.jid);
+    const catchupEnd = new Date(Date.now() + this.serverClockOffsetMs).toISOString();
+    for (const entry of entries) {
+      // Bail if the agent has been swapped out mid-catch-up (e.g. user
+      // signed out during reconnect).
+      if (this.xmpp !== xmpp) return;
+      try {
+        if (entry.kind === "dm") {
+          const since = this.catchup.getDmLastSeen(entry.key);
+          const messages = await dmHistory.queryPersonalMam(
+            xmpp,
+            selfBare,
+            entry.key,
+            CATCHUP_MAX_PER_CONVERSATION,
+            since,
+            catchupEnd,
+          );
+          for (const m of messages) {
+            this.catchup.recordDmSeen(m.peerJid, m.createdAt);
+            this.directMessageHandler?.(m);
+          }
+        } else {
+          const since = this.catchup.getRoomLastSeen(entry.key);
+          const messages = await history.queryMam(
+            xmpp,
+            entry.key,
+            CATCHUP_MAX_PER_CONVERSATION,
+            since,
+            catchupEnd,
+          );
+          for (const m of messages) {
+            this.catchup.recordRoomSeen(m.roomJid, m.createdAt);
+            this.messageHandler?.(m);
+          }
+        }
+      } catch (error) {
+        if (!isOptionalXmppFeatureError(error)) {
+          console.warn(
+            `MAM catch-up failed for ${entry.kind}:${entry.key}`,
+            error,
+          );
+        }
+      }
+    }
+  }
+
   private startSelfPing() {
     this.stopSelfPing();
     this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60_000);
@@ -1072,15 +1280,21 @@ export class BrowserXmppClient {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.startKeepAlive(xmpp);
-      this.statusHandler?.({
+      this.emitStatus({
         state: "online",
         detail: countQueuedMessages(this.queueScope) > 0 ? "Reconnected — replaying queued messages" : "Connection ready",
       });
       // `session:started` fires on fresh bind only; SM resume short-circuits
       // feature negotiation and does not emit this event. So any time we see
       // it here, it's a fresh session — consumers may close MAM gaps.
-      this.sessionLifecycleHandler?.({ type: "fresh" });
+      //
+      // A fresh session also means stanza.js dropped its unacked-stanza
+      // buffer; anything we thought was in flight is gone. Clear the
+      // inflight set so the next flush re-sends all persisted entries.
+      this.inflightQueuedIds.clear();
+      this.emitSessionLifecycle({ type: "fresh" });
       void this.flushQueuedDirectMessages();
+      await this.syncServerClockOffset(xmpp);
       try {
         await xmpp.enableCarbons();
       } catch (error) {
@@ -1113,17 +1327,23 @@ export class BrowserXmppClient {
           console.warn("Failed to rejoin room after reconnect", error);
         }
       }
+
+      // Slice A: MAM catch-up for every tracked conversation. Empty on the
+      // first session:started (initial login — nothing missed), populated on
+      // subsequent ones (resume after a dropped socket or Safari backgrounding).
+      await this.runReconnectCatchup(xmpp);
     });
     xmpp.on("stream:management:resumed", () => {
       if (this.xmpp !== xmpp) return;
       this.connected = true;
       this.startKeepAlive(xmpp);
-      this.statusHandler?.({
+      this.emitStatus({
         state: "online",
         detail: countQueuedMessages(this.queueScope) > 0 ? "Connection resumed — replaying queued messages" : "Connection resumed",
       });
-      this.sessionLifecycleHandler?.({ type: "resumed" });
+      this.emitSessionLifecycle({ type: "resumed" });
       void this.flushQueuedDirectMessages();
+      void this.syncServerClockOffset(xmpp);
       if (this.currentRoom) {
         void this.flushQueuedRoomMessages(this.currentRoom);
       }
@@ -1133,17 +1353,54 @@ export class BrowserXmppClient {
     // stanzas against the ack count and emits message:acked with the original
     // outbound Message. Downstream uses stanza.id to move the optimistic
     // "sending" entry to "delivered".
+    //
+    // Also the canonical signal that a persisted queue entry has actually
+    // landed on the server. Removing the entry here instead of on the
+    // synchronous `sendMessage` return is what closes the "stanza.js
+    // buffered it but the wire write never went through" window that was
+    // wiping messages out of localStorage before they were durable.
     xmpp.on("message:acked", (msg) => {
       if (this.xmpp !== xmpp) return;
-      if (msg?.id) this.messageAckHandler?.(msg.id);
+      if (!msg?.id) return;
+      // Only touch localStorage for ids that originated from the
+      // persisted queue. `inflightQueuedIds` is the authoritative
+      // set of handed-off-from-localStorage ids; anything else is a
+      // live-send ack and doesn't belong in the persistence layer.
+      // `Set.prototype.delete` returns true iff the id was present,
+      // so this gate is also the inflight-removal step.
+      const wasQueued = this.inflightQueuedIds.delete(msg.id);
+      if (wasQueued) {
+        removeQueuedMessage(this.queueScope, msg.id);
+      }
+      this.messageAckHandler?.(msg.id);
+      const pending = this.pendingSendAt.get(msg.id);
+      if (pending) {
+        this.pendingSendAt.delete(msg.id);
+        const latencyMs = performance.now() - pending.at;
+        this.fireHook(this.messageAckHooks, msg.id, { kind: pending.kind, latencyMs });
+      }
+      if (wasQueued) this.emitQueueDepth();
     });
 
     // XEP-0198: stanza.js emits message:failed when SM resume fails (server
     // drops the session) or when we tried to send with no transport and SM is
     // not resumable. The message was almost certainly not delivered.
+    //
+    // For a persisted-queue entry this means stanza.js won't try again on
+    // its own; drop it from the in-flight set so the next reconnect's
+    // flush picks it up. The persisted queue entry itself stays — it will
+    // get re-sent.
     xmpp.on("message:failed", (msg) => {
       if (this.xmpp !== xmpp) return;
-      if (msg?.id) this.messageDeliveryFailureHandler?.(msg.id);
+      if (!msg?.id) return;
+      const wasQueued = this.inflightQueuedIds.delete(msg.id);
+      this.messageDeliveryFailureHandler?.(msg.id);
+      const pending = this.pendingSendAt.get(msg.id);
+      if (pending) {
+        this.pendingSendAt.delete(msg.id);
+        this.fireHook(this.messageFailHooks, msg.id, { kind: pending.kind });
+      }
+      if (wasQueued) this.emitQueueDepth();
     });
 
     xmpp.on("disconnected", (err) => {
@@ -1164,10 +1421,10 @@ export class BrowserXmppClient {
         this.hatsHandler?.({});
         this.roomPresence = {};
         this.presenceHandler?.({});
-        this.statusHandler?.({ state: "offline", detail: err?.message ?? "Disconnected" });
+        this.emitStatus({ state: "offline", detail: err?.message ?? "Disconnected" });
       } else {
         // Unexpected drop — keep xmpp + currentRoom alive for auto-reconnect.
-        this.statusHandler?.({
+        this.emitStatus({
           state: "reconnecting",
           detail: countQueuedMessages(this.queueScope) > 0
             ? "Connection lost — queued messages will send when reconnected"
@@ -1183,14 +1440,14 @@ export class BrowserXmppClient {
         this.destroying = true;
       }
       const detail = err?.message ?? condition ?? "Stream error";
-      this.statusHandler?.({ state: fatal ? "error" : "reconnecting", detail });
+      this.emitStatus({ state: fatal ? "error" : "reconnecting", detail });
       console.error("XMPP stream error", detail);
     });
     xmpp.on("auth:failed" as any, async () => {
       if (this.xmpp !== xmpp) return;
       if (!this.refreshSession) {
         this.destroying = true;
-        this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
+        this.emitStatus({ state: "error", detail: "Session expired. Please log in again." });
         return;
       }
       try {
@@ -1199,11 +1456,11 @@ export class BrowserXmppClient {
           this.updateSession(refreshed, xmpp);
         } else {
           this.destroying = true;
-          this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
+          this.emitStatus({ state: "error", detail: "Session expired. Please log in again." });
         }
       } catch {
         this.destroying = true;
-        this.statusHandler?.({ state: "error", detail: "Session expired. Please log in again." });
+        this.emitStatus({ state: "error", detail: "Session expired. Please log in again." });
       }
     });
 
@@ -1250,18 +1507,26 @@ export class BrowserXmppClient {
     });
 
     xmpp.on("message", buildMessageDispatcher(
-      () => ({
+      (msg) => ({
         currentRoom: this.currentRoom,
         selfNick: this.session.username,
-        onMessage: this.messageHandler,
+        onMessage: (m) => {
+          if (!msg) return;
+          this.catchup.recordRoomSeen(m.roomJid, this.catchupTimestampIso(msg));
+          this.messageHandler?.(m);
+        },
         onChatState: this.chatStateHandler,
         onDisplayed: this.displayedHandler,
         onReaction: this.reactionHandler,
         onActivity: this.activityHandler,
       }),
-      () => ({
+      (msg) => ({
         selfBareJid: barePeerJid(this.session.jid),
-        onMessage: this.directMessageHandler,
+        onMessage: (m) => {
+          if (!msg) return;
+          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(msg));
+          this.directMessageHandler?.(m);
+        },
         onChatState: this.dmChatStateHandler,
         onDisplayed: this.dmDisplayedHandler,
         onReaction: this.dmReactionHandler,
@@ -1275,7 +1540,10 @@ export class BrowserXmppClient {
       (forwarded as ReceivedMessage & { carbon?: unknown }).carbon = msg.carbon;
       dispatchChat(forwarded as ReceivedMessage, {
         selfBareJid: barePeerJid(this.session.jid),
-        onMessage: this.directMessageHandler,
+        onMessage: (m) => {
+          this.catchup.recordDmSeen(m.peerJid, this.catchupTimestampIso(forwarded as ReceivedMessage));
+          this.directMessageHandler?.(m);
+        },
         onChatState: this.dmChatStateHandler,
         onDisplayed: this.dmDisplayedHandler,
         onReaction: this.dmReactionHandler,

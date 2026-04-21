@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
+    carbons::CARBONS_NS,
     commands::{CommandContext, CommandRegistry, CommandResult},
     connection::Stanza,
     disco::{
@@ -44,7 +45,7 @@ use waddle_xmpp::{
         frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
-    registry::{ConnectionRegistry, OutboundStanza},
+    registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza},
     stream_management::{
         InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
         StreamManagementState, SM_NS,
@@ -148,6 +149,10 @@ struct LegacyConnState {
     /// loop (when `pending_tx.take()` fires after authenticated+bound
     /// become true), regardless of the path that set those flags.
     resumed: bool,
+    /// Per-connection XEP-0280 opt-in state. Updated when this resource
+    /// sends `<enable/>` / `<disable/>` and restored from detached SM state
+    /// on resume so re-registration preserves carbons behavior.
+    carbons_enabled: bool,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -168,6 +173,7 @@ impl LegacyConnState {
             pending_scram: None,
             sm_state: StreamManagementState::new(),
             resumed: false,
+            carbons_enabled: false,
             suppress_sm_record_next_batch: false,
         }
     }
@@ -241,8 +247,17 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
                         if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() {
                             if let (Some(jid), Some(tx)) = (conn.session_jid.as_ref(), pending_tx.take()) {
-                                state.connection_registry.register(jid.clone(), tx);
-                                info!(jid = %jid, resumed = conn.resumed, "WebSocket connection registered");
+                                state.connection_registry.register_with_carbons(
+                                    jid.clone(),
+                                    tx,
+                                    conn.carbons_enabled,
+                                );
+                                info!(
+                                    jid = %jid,
+                                    resumed = conn.resumed,
+                                    carbons_enabled = conn.carbons_enabled,
+                                    "WebSocket connection registered"
+                                );
                             }
                         }
 
@@ -364,7 +379,11 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     if !superseded {
         if let Some(jid) = conn.session_jid.clone() {
             if conn.sm_state.is_resumable() {
-                if let Some(detached) = conn.sm_state.to_detached_session(jid.clone()) {
+                let carbons_enabled = conn.carbons_enabled;
+                if let Some(detached) = conn
+                    .sm_state
+                    .to_detached_session(jid.clone(), carbons_enabled)
+                {
                     let stream_id = detached.stream_id.clone();
                     if let Some(session) = conn.authenticated_session.clone() {
                         state.resumable_sessions.insert(stream_id.clone(), session);
@@ -634,11 +653,25 @@ fn parse_sasl_auth_frame(frame: &str) -> Result<(String, String), String> {
 /// Returns true if the frame is an XMPP stanza that counts toward XEP-0198
 /// handled/sent counters. Only `<iq>`, `<message>`, `<presence>` qualify —
 /// stream headers, SASL frames, and SM control nonzas do not.
+///
+/// Matches on the element name rather than a string-prefix: a substring
+/// match like `starts_with("<message")` would also accept future nonzas
+/// such as `<messages>` or `<presences>`. PR #164 (xs:boolean parsing)
+/// burned us on exactly this kind of substring assumption.
+///
+/// Hot-path: called for every outbound frame when SM is enabled, so we
+/// do a byte-level scan of the element name instead of a full
+/// `minidom::Element::from_str` — the parse would allocate a whole
+/// DOM subtree every time only to read `.name()`.
 fn is_countable_stanza(frame: &str) -> bool {
     let trimmed = frame.trim_start();
-    trimmed.starts_with("<iq")
-        || trimmed.starts_with("<message")
-        || trimmed.starts_with("<presence")
+    let Some(after_lt) = trimmed.strip_prefix('<') else {
+        return false;
+    };
+    let name_end = after_lt
+        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .unwrap_or(after_lt.len());
+    matches!(&after_lt[..name_end], "iq" | "message" | "presence")
 }
 
 /// Bundle the session-level borrows that XEP-0198 control handlers mutate.
@@ -651,6 +684,7 @@ struct SmCtx<'a> {
     resource_bound: &'a mut bool,
     authenticated_session: &'a mut Option<Session>,
     resumed: &'a mut bool,
+    carbons_enabled: &'a mut bool,
     /// Set by `handle_sm_resume` so the main loop skips SM recording for
     /// the responses it returns — those are replay stanzas already tracked
     /// in the unacked queue.
@@ -718,6 +752,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         resource_bound,
         authenticated_session,
         resumed,
+        carbons_enabled,
         suppress_sm_record_next_batch,
     } = ctx;
 
@@ -766,6 +801,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *resource_bound = true;
     *authenticated_session = restored_session;
     *resumed = true;
+    *carbons_enabled = detached.carbons_enabled;
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —
     // the main loop must NOT push them through `record_outbound` again.
@@ -812,6 +848,7 @@ async fn handle_xmpp_frame(
         pending_scram,
         sm_state,
         resumed,
+        carbons_enabled,
         suppress_sm_record_next_batch,
     } = conn;
     let frame = frame.trim();
@@ -897,6 +934,7 @@ async fn handle_xmpp_frame(
                 resource_bound,
                 authenticated_session,
                 resumed,
+                carbons_enabled,
                 suppress_sm_record_next_batch,
             };
             return handle_sm_stanza(sm, state, ctx).await;
@@ -935,6 +973,7 @@ async fn handle_xmpp_frame(
             session_jid,
             *authenticated,
             *resource_bound,
+            carbons_enabled,
         )
         .await;
     }
@@ -1428,11 +1467,14 @@ async fn handle_muc_join(
     // Broadcast the new occupant's presence to all existing occupants.
     // Non-blocking: a zombied/slow consumer must never stall the join path,
     // which is how "Timed out waiting for self-presence" cascades start.
+    // Drop accounting is handled inside `try_send_to` (logs + metrics);
+    // per-occupant outcome is discarded here because a missed join
+    // presence self-heals via the next MUC presence/probe round-trip.
     for (existing_jid, _, _, _) in &existing_occupants {
         let presence_stanza =
             create_presence_stanza(room_jid, nick, sender_jid, existing_jid, false);
         let stanza = Stanza::Presence(presence_stanza);
-        let _ = state.connection_registry.try_send_to(existing_jid, stanza);
+        let _outcome = state.connection_registry.try_send_to(existing_jid, stanza);
     }
 
     // Send self-presence to the joining user (with status code 110)
@@ -1506,6 +1548,7 @@ async fn handle_muc_leave(
     drop(room);
 
     // Broadcast unavailable presence to remaining occupants (non-blocking).
+    // Drop accounting is handled inside `try_send_to`.
     for occupant_jid in &remaining_occupants {
         let from_jid = room_jid
             .clone()
@@ -1516,7 +1559,7 @@ async fn handle_muc_leave(
         presence.from = Some(jid::Jid::from(from_jid));
         presence.to = Some(jid::Jid::from(occupant_jid.clone()));
         let stanza = Stanza::Presence(presence);
-        let _ = state.connection_registry.try_send_to(occupant_jid, stanza);
+        let _outcome = state.connection_registry.try_send_to(occupant_jid, stanza);
     }
 
     // Send self-presence unavailable to the leaving user
@@ -1536,6 +1579,9 @@ async fn handle_iq(
     let resource_bound = session_jid
         .as_ref()
         .is_some_and(|jid| jid.resource().as_str() != "pending");
+    let mut carbons_enabled = session_jid
+        .as_ref()
+        .is_some_and(|jid| state.connection_registry.is_carbons_enabled(jid));
     handle_iq_with_conn_state(
         frame,
         domain,
@@ -1545,6 +1591,7 @@ async fn handle_iq(
         session_jid,
         authenticated,
         resource_bound,
+        &mut carbons_enabled,
     )
     .await
 }
@@ -1558,6 +1605,7 @@ async fn handle_iq_with_conn_state(
     session_jid: &Option<FullJid>,
     authenticated: bool,
     resource_bound: bool,
+    carbons_enabled: &mut bool,
 ) -> Vec<String> {
     let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
@@ -1616,6 +1664,14 @@ async fn handle_iq_with_conn_state(
             }
             _ => None,
         };
+        let carbons_toggle = match &iq.payload {
+            xmpp_parsers::iq::IqType::Set(e)
+                if e.ns() == CARBONS_NS && (e.name() == "enable" || e.name() == "disable") =>
+            {
+                Some(e.name() == "enable")
+            }
+            _ => None,
+        };
         if let Some(ns) = payload_ns {
             if state.dispatcher.has_iq_handler(&ns) {
                 if !authenticated || !resource_bound {
@@ -1626,6 +1682,12 @@ async fn handle_iq_with_conn_state(
                         "auth",
                         "not-authorized",
                     )];
+                }
+                if let Some(enabled) = carbons_toggle {
+                    *carbons_enabled = enabled;
+                    let _ = state
+                        .connection_registry
+                        .set_carbons_enabled(full_jid, enabled);
                 }
                 let ctx = ProtocolStanzaContext { domain, full_jid };
                 let events = state.dispatcher.dispatch_iq(iq, &ctx);
@@ -2765,7 +2827,17 @@ async fn handle_message(
         // server can't reach right now (backpressured or stale) will pick up
         // the message on their next MAM catch-up. Blocking here is what
         // caused join cascades under zombie load.
+        //
+        // Accounting invariant for the broadcast log below:
+        //   `intended = delivered + dropped_full + dropped_closed + not_connected`
+        // The sender is always one of `occupants` in a groupchat send but is
+        // reached via the direct echo response (not `try_send_to`), so the
+        // echo path counts as one `delivered` to keep the invariant true.
         let mut echo_response = None;
+        let mut delivered = 0u32;
+        let mut dropped_full = 0u32;
+        let mut dropped_closed = 0u32;
+        let mut not_connected = 0u32;
         for (occupant_jid, _) in &occupants {
             if occupant_jid == sender_jid {
                 // Echo back to sender — serialize the enriched prototype
@@ -2775,18 +2847,34 @@ async fn handle_message(
                     Stanza::Message(msg)
                 };
                 echo_response = Some(stanza_to_xml(&stanza));
+                delivered += 1;
             } else {
                 let mut msg = prototype.clone();
                 msg.to = Some(jid::Jid::from(occupant_jid.clone()));
                 let stanza = Stanza::Message(msg);
-                let _ = state.connection_registry.try_send_to(occupant_jid, stanza);
+                match state.connection_registry.try_send_to(occupant_jid, stanza) {
+                    BroadcastOutcome::Delivered => delivered += 1,
+                    BroadcastOutcome::DroppedFull => dropped_full += 1,
+                    BroadcastOutcome::DroppedClosed => dropped_closed += 1,
+                    BroadcastOutcome::NotConnected => not_connected += 1,
+                }
             }
         }
+
+        debug_assert_eq!(
+            occupants.len() as u32,
+            delivered + dropped_full + dropped_closed + not_connected,
+            "broadcast accounting must cover every occupant exactly once"
+        );
 
         info!(
             room = %room_jid,
             sender = %sender_nick,
-            recipients = occupants.len(),
+            intended = occupants.len(),
+            delivered,
+            dropped_full,
+            dropped_closed,
+            not_connected,
             "Groupchat message broadcast"
         );
 
@@ -3970,6 +4058,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_iq_carbons_toggle_updates_registry_flag() {
+        let state = create_test_websocket_state().await;
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        state.connection_registry.register(jid.clone(), tx);
+        assert!(!state.connection_registry.is_carbons_enabled(&jid));
+
+        let enable = r#"<iq xmlns="jabber:client" id="carbons-enable" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
+        let enable_responses = handle_iq(
+            enable,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid.clone()),
+        )
+        .await;
+        assert_eq!(enable_responses.len(), 1);
+        assert!(state.connection_registry.is_carbons_enabled(&jid));
+
+        let disable = r#"<iq xmlns="jabber:client" id="carbons-disable" type="set"><disable xmlns="urn:xmpp:carbons:2"/></iq>"#;
+        let disable_responses = handle_iq(
+            disable,
+            "example.com",
+            "muc.example.com",
+            state.as_ref(),
+            &None,
+            &Some(jid.clone()),
+        )
+        .await;
+        assert_eq!(disable_responses.len(), 1);
+        assert!(!state.connection_registry.is_carbons_enabled(&jid));
+    }
+
+    #[tokio::test]
     async fn handle_iq_unknown_includes_routing_addresses_in_error() {
         let state = create_test_websocket_state().await;
         let frame = r#"<iq xmlns="jabber:client" id="unknown-1" type="get" from="alice@example.com/web" to="example.com"><foo xmlns="urn:waddle:test:0"/></iq>"#;
@@ -4885,10 +5008,11 @@ mod tests {
     // ---- B: Non-blocking broadcast ------------------------------------
 
     #[tokio::test]
-    async fn try_send_to_returns_false_when_channel_full() {
+    async fn try_send_to_returns_dropped_full_on_backpressured_channel() {
         // A size-1 channel lets us prove try_send does not block when the
-        // receiver isn't draining: the second send reports failure
-        // immediately instead of awaiting capacity.
+        // receiver isn't draining: the second send must report DroppedFull
+        // immediately instead of awaiting capacity. Callers rely on this
+        // variant to count silent drops for observability.
         let registry = ConnectionRegistry::new();
         let jid: FullJid = "user@example.com/res".parse().expect("jid");
         let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
@@ -4901,12 +5025,18 @@ mod tests {
             xmpp_parsers::presence::Type::None,
         ));
 
-        assert!(registry.try_send_to(&jid, stanza_a));
-        assert!(!registry.try_send_to(&jid, stanza_b));
+        assert_eq!(
+            registry.try_send_to(&jid, stanza_a),
+            BroadcastOutcome::Delivered
+        );
+        assert_eq!(
+            registry.try_send_to(&jid, stanza_b),
+            BroadcastOutcome::DroppedFull
+        );
     }
 
     #[tokio::test]
-    async fn try_send_to_unregisters_closed_channel() {
+    async fn try_send_to_returns_dropped_closed_and_unregisters() {
         let registry = ConnectionRegistry::new();
         let jid: FullJid = "gone@example.com/res".parse().expect("jid");
         let (tx, rx) = mpsc::channel::<OutboundStanza>(4);
@@ -4916,8 +5046,24 @@ mod tests {
         let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
             xmpp_parsers::presence::Type::None,
         ));
-        assert!(!registry.try_send_to(&jid, stanza));
+        assert_eq!(
+            registry.try_send_to(&jid, stanza),
+            BroadcastOutcome::DroppedClosed
+        );
         assert!(!registry.is_connected(&jid));
+    }
+
+    #[tokio::test]
+    async fn try_send_to_returns_not_connected_when_unregistered() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "nobody@example.com/res".parse().expect("jid");
+        let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        assert_eq!(
+            registry.try_send_to(&jid, stanza),
+            BroadcastOutcome::NotConnected
+        );
     }
 
     #[tokio::test]
@@ -4943,16 +5089,52 @@ mod tests {
 
         // A broadcast path now tries to send. From its perspective, it sees
         // whatever sender is currently in the registry — which is B's live
-        // one — so try_send_to returns true. Either way, the entry must
-        // remain in the registry.
+        // one — so try_send_to returns Delivered. Either way, the entry
+        // must remain in the registry.
         let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
             xmpp_parsers::presence::Type::None,
         ));
-        let _ = registry.try_send_to(&jid, stanza);
+        let _outcome = registry.try_send_to(&jid, stanza);
         assert!(
             registry.is_connected(&jid),
             "replacement entry must still be registered after a try_send_to that races with eviction"
         );
+    }
+
+    #[test]
+    fn is_countable_stanza_matches_element_name_not_prefix() {
+        // Real stanzas that must count toward SM handled/sent counters.
+        assert!(is_countable_stanza(
+            "<iq xmlns='jabber:client' type='get' id='1'/>"
+        ));
+        assert!(is_countable_stanza("<message xmlns='jabber:client'/>"));
+        assert!(is_countable_stanza("<presence xmlns='jabber:client'/>"));
+        // Leading whitespace is tolerated (matches the pre-existing
+        // trim behaviour — frames are always serialized with a
+        // namespace by minidom, so callers never produce bare `<iq/>`).
+        assert!(is_countable_stanza("  <iq xmlns='jabber:client' id='1'/>"));
+
+        // SM control nonzas and stream-level frames must NOT count.
+        assert!(!is_countable_stanza("<r xmlns='urn:xmpp:sm:3'/>"));
+        assert!(!is_countable_stanza("<a xmlns='urn:xmpp:sm:3' h='1'/>"));
+        assert!(!is_countable_stanza(
+            "<enable xmlns='urn:xmpp:sm:3' resume='1'/>"
+        ));
+        assert!(!is_countable_stanza(
+            "<resumed xmlns='urn:xmpp:sm:3' previd='x' h='0'/>"
+        ));
+
+        // Substring prefix collisions that the old `starts_with`
+        // implementation would have accepted. These are all non-standard
+        // today but the element-name match is how we stay safe if any
+        // future XEP introduces similarly-named nonzas.
+        assert!(!is_countable_stanza("<messages xmlns='urn:example'/>"));
+        assert!(!is_countable_stanza("<presences xmlns='urn:example'/>"));
+        assert!(!is_countable_stanza("<iqsomething/>"));
+
+        // Malformed XML just doesn't count — no panic, no false positive.
+        assert!(!is_countable_stanza("not-xml-at-all"));
+        assert!(!is_countable_stanza(""));
     }
 
     // ---- C: MUC nick handling -----------------------------------------
@@ -5152,6 +5334,7 @@ mod tests {
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
         };
         state
             .sm_session_registry
@@ -5185,6 +5368,7 @@ mod tests {
         assert!(conn.resource_bound);
         assert_eq!(conn.session_jid, Some(jid));
         assert!(conn.resumed);
+        assert!(conn.carbons_enabled);
     }
 
     #[tokio::test]
@@ -5226,6 +5410,7 @@ mod tests {
             ],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
         };
         state
             .sm_session_registry
@@ -5286,6 +5471,7 @@ mod tests {
                 unacked_stanzas: Vec::new(),
                 max_resume_time: Some(0), // already expired
                 detached_at: std::time::Instant::now(),
+                carbons_enabled: false,
             })
             .await
             .expect("store");

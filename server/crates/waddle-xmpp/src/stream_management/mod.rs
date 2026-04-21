@@ -30,12 +30,15 @@ mod unacked_queue;
 pub use session_registry::{
     DetachedSession, InMemorySmSessionRegistry, SmRegistryError, SmSessionRegistry,
 };
-pub use unacked_queue::{UnackedQueue, UnackedStanza};
+pub use unacked_queue::{UnackedPushResult, UnackedQueue, UnackedStanza};
 
 use std::str::FromStr;
 use std::time::Instant;
 
 use minidom::Element;
+use tracing::warn;
+
+use crate::prometheus;
 
 /// XEP-0198 Stream Management namespace (version 3)
 pub const SM_NS: &str = "urn:xmpp:sm:3";
@@ -427,9 +430,27 @@ impl StreamManagementState {
     ///
     /// This should be called after sending each stanza when SM is enabled.
     /// The stanza is stored for potential resending after stream resumption.
+    ///
+    /// When the unacked queue is at capacity the oldest stanza is evicted
+    /// to make room; that is surfaced via a `warn!` + the
+    /// `waddle_sm_unacked_evicted_total` metric. A non-zero eviction rate
+    /// means a subsequent `<resumed/>` on this stream will silently lose
+    /// the evicted stanzas — the sender half of "reconnects drop
+    /// messages".
     pub fn record_outbound(&mut self, stanza_xml: String) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
-        self.unacked_queue.push(self.outbound_count, stanza_xml);
+        match self.unacked_queue.push(self.outbound_count, stanza_xml) {
+            UnackedPushResult::Accepted => {}
+            UnackedPushResult::Evicted(evicted) => {
+                prometheus::increment_sm_unacked_evicted();
+                warn!(
+                    stream_id = self.stream_id.as_deref().unwrap_or("<unset>"),
+                    evicted_sequence = evicted.sequence,
+                    queue_len = self.unacked_queue.len(),
+                    "SM unacked queue full; evicted oldest stanza — a later resume will replay without it"
+                );
+            }
+        }
     }
 
     /// Update the last acknowledged count from a client ack.
@@ -487,8 +508,14 @@ impl StreamManagementState {
 
     /// Create a detached session for storage in the registry.
     ///
-    /// This captures all the state needed to resume this stream later.
-    pub fn to_detached_session(&self, jid: jid::FullJid) -> Option<DetachedSession> {
+    /// `carbons_enabled` is the actor's current XEP-0280 opt-in value.
+    /// Carbons opt-in is per-stream, so XEP-0198 resumption must preserve
+    /// it — storing it on the detached session is what makes that possible.
+    pub fn to_detached_session(
+        &self,
+        jid: jid::FullJid,
+        carbons_enabled: bool,
+    ) -> Option<DetachedSession> {
         if !self.is_resumable() {
             return None;
         }
@@ -502,6 +529,7 @@ impl StreamManagementState {
             unacked_stanzas: self.unacked_queue.get_all_unacked(),
             max_resume_time: self.max_resume_time,
             detached_at: Instant::now(),
+            carbons_enabled,
         })
     }
 
@@ -736,6 +764,54 @@ mod tests {
     }
 
     #[test]
+    fn test_record_outbound_surfaces_eviction_to_metric() {
+        // With a tiny queue cap, the 4th push must evict the 1st — and
+        // that eviction must bump `waddle_sm_unacked_evicted_total` so
+        // operators can distinguish "everything's fine" from "your
+        // <resumed/> replays have holes".
+        use crate::prometheus;
+
+        // Baseline the counter since other tests run in the same process.
+        let before_render = prometheus::render_metrics();
+        let baseline = before_render
+            .lines()
+            .find(|line| line.starts_with("waddle_sm_unacked_evicted_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let mut state = StreamManagementState::with_config(3, 5);
+        state.enable("tiny-cap".to_string(), true, Some(300));
+
+        state.record_outbound("<message id='1'/>".to_string());
+        state.record_outbound("<message id='2'/>".to_string());
+        state.record_outbound("<message id='3'/>".to_string());
+        assert_eq!(state.queue_len(), 3);
+
+        // 4th push evicts seq=1
+        state.record_outbound("<message id='4'/>".to_string());
+        assert_eq!(state.queue_len(), 3);
+
+        let after_render = prometheus::render_metrics();
+        let after = after_render
+            .lines()
+            .find(|line| line.starts_with("waddle_sm_unacked_evicted_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .expect("metric line must render");
+        assert_eq!(
+            after - baseline,
+            1,
+            "one eviction must have bumped the counter by one"
+        );
+
+        // The replay after resume must be missing the evicted stanza.
+        let resend = state.get_stanzas_to_resend(0);
+        assert_eq!(resend.len(), 3, "evicted seq=1 must be absent from replay");
+        assert!(!resend.iter().any(|xml| xml.contains("id='1'")));
+    }
+
+    #[test]
     fn test_sm_stanza_parse() {
         // Enable
         let enable = SmStanza::parse("<enable xmlns='urn:xmpp:sm:3' resume='true'/>");
@@ -793,5 +869,35 @@ mod tests {
 
         state.enable("test-id".to_string(), true, Some(300));
         assert!(state.is_resumable());
+    }
+
+    /// XEP-0198 §5 stream resumption is meant to continue the exact same
+    /// stream — the client doesn't expect to re-negotiate per-stream add-ons
+    /// like XEP-0280 carbons after a successful `<resumed/>`. So the
+    /// detached session the server stashes at disconnect MUST carry the
+    /// carbons opt-in flag, and a resumed actor must be able to read it
+    /// back. If this regresses, every SM-resume will silently disable
+    /// carbons until the client re-enables them.
+    #[test]
+    fn test_to_detached_session_carries_carbons_flag() {
+        let mut state = StreamManagementState::new();
+        state.enable("stream-carb".to_string(), true, Some(300));
+        let jid: jid::FullJid = "user@example.com/resource".parse().unwrap();
+
+        let detached_off = state
+            .to_detached_session(jid.clone(), false)
+            .expect("resumable state must produce detached session");
+        assert!(
+            !detached_off.carbons_enabled,
+            "carbons_enabled=false must round-trip through DetachedSession"
+        );
+
+        let detached_on = state
+            .to_detached_session(jid, true)
+            .expect("resumable state must produce detached session");
+        assert!(
+            detached_on.carbons_enabled,
+            "carbons_enabled=true must round-trip so resume preserves opt-in"
+        );
     }
 }
