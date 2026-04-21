@@ -1,15 +1,19 @@
 package xmpp_e2e_suite
 
 #Device: {
-	id:       string
 	username: string
 	resource: string
 	...
 }
 
 #User: {
-	id:      string
-	devices: [...#Device]
+	devices: [string]: #Device
+	...
+}
+
+#ActorRef: {
+	user:   string
+	device: string
 	...
 }
 
@@ -25,7 +29,7 @@ package xmpp_e2e_suite
 }
 
 #SendMessage: {
-	actor:   string
+	actor:   #ActorRef
 	message: #Message
 	let actorRef = actor
 	let stanzaRef = message.stanza
@@ -38,7 +42,7 @@ package xmpp_e2e_suite
 }
 
 #ExpectContains: {
-	target:   string
+	target:   #ActorRef
 	contains: [...string] & [string, ...string]
 	let targetRef = target
 	let containsRef = contains

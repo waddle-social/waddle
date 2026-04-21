@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -11,19 +11,17 @@ pub struct ScenarioFile {
 #[derive(Debug, Deserialize)]
 pub struct Scenario {
     pub name: String,
-    pub users: Vec<User>,
+    pub users: BTreeMap<String, User>,
     pub steps: Vec<Step>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct User {
-    pub id: String,
-    pub devices: Vec<Device>,
+    pub devices: BTreeMap<String, Device>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Device {
-    pub id: String,
     pub username: String,
     pub resource: String,
 }
@@ -40,14 +38,20 @@ pub struct Step {
 
 #[derive(Debug, Deserialize)]
 pub struct SendStep {
-    pub actor: String,
+    pub actor: ActorRef,
     pub stanza: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ExpectStanzaStep {
-    pub target: String,
+    pub target: ActorRef,
     pub contains: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActorRef {
+    pub user: String,
+    pub device: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,14 +78,35 @@ fn validate(scenario: &Scenario) -> Result<()> {
         return Err(anyhow!("scenario.steps must not be empty"));
     }
 
-    let mut devices = std::collections::HashSet::new();
-    for user in &scenario.users {
+    let mut actor_paths: HashSet<String> = HashSet::new();
+    for (user_key, user) in &scenario.users {
         if user.devices.is_empty() {
-            return Err(anyhow!("user '{}' must define at least one device", user.id));
+            return Err(anyhow!("user '{}' must define at least one device", user_key));
         }
-        for device in &user.devices {
-            if !devices.insert(device.id.as_str()) {
-                return Err(anyhow!("duplicate device id '{}'", device.id));
+        for device_key in user.devices.keys() {
+            actor_paths.insert(format!("{user_key}.{device_key}"));
+        }
+    }
+
+    let actor_exists = |actor: &ActorRef| {
+        actor_paths.contains(format!("{}.{}", actor.user, actor.device).as_str())
+    };
+
+    for (user_key, user) in &scenario.users {
+        for (device_key, device) in &user.devices {
+            if device.username.is_empty() {
+                return Err(anyhow!(
+                    "user '{}'.devices.'{}' username must not be empty",
+                    user_key,
+                    device_key
+                ));
+            }
+            if device.resource.is_empty() {
+                return Err(anyhow!(
+                    "user '{}'.devices.'{}' resource must not be empty",
+                    user_key,
+                    device_key
+                ));
             }
         }
     }
@@ -97,20 +122,22 @@ fn validate(scenario: &Scenario) -> Result<()> {
             ));
         }
         if let Some(send) = &step.send {
-            if !devices.contains(send.actor.as_str()) {
+            if !actor_exists(&send.actor) {
                 return Err(anyhow!(
-                    "step {} references unknown actor '{}'",
+                    "step {} references unknown actor '{}.{}'",
                     index,
-                    send.actor
+                    send.actor.user,
+                    send.actor.device
                 ));
             }
         }
         if let Some(expect) = &step.expect_stanza {
-            if !devices.contains(expect.target.as_str()) {
+            if !actor_exists(&expect.target) {
                 return Err(anyhow!(
-                    "step {} references unknown target '{}'",
+                    "step {} references unknown target '{}.{}'",
                     index,
-                    expect.target
+                    expect.target.user,
+                    expect.target.device
                 ));
             }
             if expect.contains.is_empty() {

@@ -248,14 +248,14 @@ async fn cue_scenario_runs_end_to_end() -> Result<()> {
     let server = FileBackedMamTestServer::start().await;
     let mut clients: HashMap<String, common::RawXmppClient> = HashMap::new();
 
-    for user in &scenario.users {
-        for device in &user.devices {
+    for (user_key, user) in &scenario.users {
+        for (device_key, device) in &user.devices {
             let mut client = common::RawXmppClient::connect(server.addr).await?;
             let _jid = establish_bound_session(&mut client, &server, &device.username, &device.resource)
                 .await
-                .with_context(|| format!("bind failed for device '{}'", device.id))?;
+                .with_context(|| format!("bind failed for device '{}.{}'", user_key, device_key))?;
             client.clear();
-            clients.insert(device.id.clone(), client);
+            clients.insert(actor_key(user_key, device_key), client);
         }
     }
 
@@ -272,23 +272,28 @@ async fn execute_step(
     mam_db_path: &Path,
 ) -> Result<()> {
     if let Some(send) = &step.send {
+        let actor = actor_key(send.actor.user.as_str(), send.actor.device.as_str());
         let client = clients
-            .get_mut(send.actor.as_str())
-            .ok_or_else(|| anyhow!("unknown actor '{}'", send.actor))?;
+            .get_mut(actor.as_str())
+            .ok_or_else(|| anyhow!("unknown actor '{}'", actor))?;
         client.send(send.stanza.as_str()).await?;
         return Ok(());
     }
 
     if let Some(expect_stanza) = &step.expect_stanza {
+        let target = actor_key(
+            expect_stanza.target.user.as_str(),
+            expect_stanza.target.device.as_str(),
+        );
         let client = clients
-            .get_mut(expect_stanza.target.as_str())
-            .ok_or_else(|| anyhow!("unknown target '{}'", expect_stanza.target))?;
+            .get_mut(target.as_str())
+            .ok_or_else(|| anyhow!("unknown target '{}'", target))?;
         let received = client.read_until("</message>", Duration::from_secs(3)).await?;
         for expected in &expect_stanza.contains {
             if !received.contains(expected) {
                 return Err(anyhow!(
                     "expected target '{}' stanza to contain '{}', got: {}",
-                    expect_stanza.target,
+                    target,
                     expected,
                     received
                 ));
@@ -321,4 +326,8 @@ async fn execute_step(
     }
 
     Err(anyhow!("invalid step"))
+}
+
+fn actor_key(user: &str, device: &str) -> String {
+    format!("{user}.{device}")
 }
