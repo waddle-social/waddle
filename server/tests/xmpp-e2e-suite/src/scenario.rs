@@ -81,7 +81,10 @@ fn validate(scenario: &Scenario) -> Result<()> {
     let mut actor_paths: HashSet<String> = HashSet::new();
     for (user_key, user) in &scenario.users {
         if user.devices.is_empty() {
-            return Err(anyhow!("user '{}' must define at least one device", user_key));
+            return Err(anyhow!(
+                "user '{}' must define at least one device",
+                user_key
+            ));
         }
         for device_key in user.devices.keys() {
             actor_paths.insert(format!("{user_key}.{device_key}"));
@@ -150,6 +153,23 @@ fn validate(scenario: &Scenario) -> Result<()> {
         if let Some(expect_db) = &step.expect_db {
             if expect_db.table.is_empty() {
                 return Err(anyhow!("step {} expectDb.table must not be empty", index));
+            }
+            if expect_db.min_rows == 0 {
+                return Err(anyhow!(
+                    "step {} expectDb.minRows must be at least 1",
+                    index
+                ));
+            }
+            if expect_db.table == "mam_messages" {
+                match expect_db.where_clause.get("body") {
+                    Some(body) if !body.is_empty() => {}
+                    _ => {
+                        return Err(anyhow!(
+                            "step {} expectDb.where.body must not be empty when expectDb.table is 'mam_messages'",
+                            index
+                        ));
+                    }
+                }
             }
         }
     }

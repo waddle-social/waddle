@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,7 +9,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 use waddle_xmpp::{
-    connection::ConnectionActor, commands::CommandRegistry, muc::MucRoomRegistry,
+    commands::CommandRegistry, connection::ConnectionActor, muc::MucRoomRegistry,
     registry::ConnectionRegistry, stream_management::InMemorySmSessionRegistry, AppState,
 };
 use xmpp_e2e_suite::scenario::{load_scenario_from_dir, Step};
@@ -124,13 +126,25 @@ async fn run_test_server<S: AppState>(
                         let cmd_registry = Arc::clone(&command_registry);
                         let registration_enabled = true;
                         let single_tenant = false;
-                        tokio::spawn(async move {
-                            let _ = ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg,
-                                registration_enabled, pubsub, ext, single_tenant, push_store, push_sender,
-                                cmd_registry
-                            ).await;
-                        });
+                        tokio::spawn(handle_test_connection(
+                            stream,
+                            peer_addr,
+                            tls,
+                            dom,
+                            state,
+                            rooms,
+                            conns,
+                            mam,
+                            isr,
+                            sm_reg,
+                            registration_enabled,
+                            pubsub,
+                            ext,
+                            single_tenant,
+                            push_store,
+                            push_sender,
+                            cmd_registry,
+                        ));
                     }
                     Err(_) => break,
                 }
@@ -138,6 +152,47 @@ async fn run_test_server<S: AppState>(
             _ = &mut shutdown_rx => break,
         }
     }
+}
+
+async fn handle_test_connection<S: AppState>(
+    stream: tokio::net::TcpStream,
+    peer_addr: std::net::SocketAddr,
+    tls: TlsAcceptor,
+    dom: String,
+    state: Arc<S>,
+    rooms: Arc<MucRoomRegistry>,
+    conns: Arc<ConnectionRegistry>,
+    mam: Arc<waddle_xmpp::mam::LibSqlMamStorage>,
+    isr: waddle_xmpp::isr::SharedIsrTokenStore,
+    sm_reg: Arc<dyn waddle_xmpp::stream_management::SmSessionRegistry>,
+    registration_enabled: bool,
+    pubsub: Arc<dyn waddle_xmpp::pubsub::PubSubStorage + Send + Sync>,
+    ext: Arc<waddle_extensions::ExtensionManager>,
+    single_tenant: bool,
+    push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore + Send + Sync>,
+    push_sender: Arc<dyn waddle_xmpp::push::WebPushSender + Send + Sync>,
+    cmd_registry: Arc<CommandRegistry>,
+) {
+    let _ = ConnectionActor::handle_connection(
+        stream,
+        peer_addr,
+        tls,
+        dom,
+        state,
+        rooms,
+        conns,
+        mam,
+        isr,
+        sm_reg,
+        registration_enabled,
+        pubsub,
+        ext,
+        single_tenant,
+        push_store,
+        push_sender,
+        cmd_registry,
+    )
+    .await;
 }
 
 async fn establish_bound_session(
@@ -162,7 +217,9 @@ async fn establish_bound_session(
     client
         .send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
         .await?;
-    client.read_until("<proceed", common::DEFAULT_TIMEOUT).await?;
+    client
+        .read_until("<proceed", common::DEFAULT_TIMEOUT)
+        .await?;
     client.clear();
 
     let connector = server.tls_connector();
@@ -190,7 +247,9 @@ async fn establish_bound_session(
             "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{auth_data}</auth>"
         ))
         .await?;
-    client.read_until("<success", common::DEFAULT_TIMEOUT).await?;
+    client
+        .read_until("<success", common::DEFAULT_TIMEOUT)
+        .await?;
     client.clear();
 
     client
@@ -251,9 +310,12 @@ async fn cue_scenario_runs_end_to_end() -> Result<()> {
     for (user_key, user) in &scenario.users {
         for (device_key, device) in &user.devices {
             let mut client = common::RawXmppClient::connect(server.addr).await?;
-            let _jid = establish_bound_session(&mut client, &server, &device.username, &device.resource)
-                .await
-                .with_context(|| format!("bind failed for device '{}.{}'", user_key, device_key))?;
+            let _jid =
+                establish_bound_session(&mut client, &server, &device.username, &device.resource)
+                    .await
+                    .with_context(|| {
+                        format!("bind failed for device '{}.{}'", user_key, device_key)
+                    })?;
             client.clear();
             clients.insert(actor_key(user_key, device_key), client);
         }
@@ -288,7 +350,9 @@ async fn execute_step(
         let client = clients
             .get_mut(target.as_str())
             .ok_or_else(|| anyhow!("unknown target '{}'", target))?;
-        let received = client.read_until("</message>", Duration::from_secs(3)).await?;
+        let received = client
+            .read_until("</message>", common::DEFAULT_TIMEOUT)
+            .await?;
         for expected in &expect_stanza.contains {
             if !received.contains(expected) {
                 return Err(anyhow!(
@@ -313,16 +377,27 @@ async fn execute_step(
             .where_clause
             .get("body")
             .ok_or_else(|| anyhow!("expectDb.where.body is required"))?;
-        let count = count_rows_by_body(mam_db_path, expected_body).await?;
-        if count < expect_db.min_rows {
-            return Err(anyhow!(
-                "expected at least {} rows in mam_messages with body='{}', got {}",
-                expect_db.min_rows,
-                expected_body,
-                count
-            ));
+        let poll_interval = Duration::from_millis(100);
+        let deadline = tokio::time::Instant::now() + common::DEFAULT_TIMEOUT;
+
+        loop {
+            let count = count_rows_by_body(mam_db_path, expected_body).await?;
+
+            if count >= expect_db.min_rows {
+                return Ok(());
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "expected at least {} rows in mam_messages with body='{}', got {}",
+                    expect_db.min_rows,
+                    expected_body,
+                    count
+                ));
+            }
+
+            tokio::time::sleep(poll_interval).await;
         }
-        return Ok(());
     }
 
     Err(anyhow!("invalid step"))
