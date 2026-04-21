@@ -42,7 +42,8 @@ pub struct LatencyRecorder {
 impl Default for LatencyRecorder {
     fn default() -> Self {
         // 1ns .. 60s with 3 sig figs
-        let new = || Mutex::new(Histogram::<u64>::new_with_bounds(1, 60 * 1_000_000_000, 3).unwrap());
+        let new =
+            || Mutex::new(Histogram::<u64>::new_with_bounds(1, 60 * 1_000_000_000, 3).unwrap());
         Self {
             hists: [new(), new(), new(), new()],
             errors: Mutex::new(0),

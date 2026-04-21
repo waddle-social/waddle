@@ -16,6 +16,8 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Backend {
     Sqlite,
+    Postgres,
+    Clickhouse,
 }
 
 #[derive(Parser, Debug)]
@@ -52,6 +54,30 @@ struct Args {
     /// Read pool size (SQLite). 32 is a sensible default on NVMe.
     #[arg(long, default_value_t = 32)]
     reader_pool: u32,
+
+    /// PostgreSQL connection string, e.g. postgres://user:pass@127.0.0.1:5432/db.
+    #[arg(long)]
+    postgres_url: Option<String>,
+
+    /// Max PostgreSQL connections in the benchmark pool.
+    #[arg(long, default_value_t = 64)]
+    postgres_max_connections: u32,
+
+    /// ClickHouse HTTP URL, e.g. http://127.0.0.1:8123.
+    #[arg(long, default_value = "http://127.0.0.1:8123")]
+    clickhouse_url: String,
+
+    /// ClickHouse database name.
+    #[arg(long, default_value = "default")]
+    clickhouse_database: String,
+
+    /// ClickHouse user.
+    #[arg(long, default_value = "default")]
+    clickhouse_user: String,
+
+    /// ClickHouse password.
+    #[arg(long, default_value = "")]
+    clickhouse_password: String,
 
     /// Skip warmup *writes* and just run measured window.
     #[arg(long)]
@@ -98,6 +124,8 @@ async fn main() -> Result<()> {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let backend_tag = match args.backend {
         Backend::Sqlite => "sqlite",
+        Backend::Postgres => "postgres",
+        Backend::Clickhouse => "clickhouse",
     };
     let tag = format!("{backend_tag}-{}-{ts}", scale_tag(scale));
     let db_path = args.out.join(format!("{tag}.db"));
@@ -162,6 +190,56 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Backend::Postgres => {
+            let postgres_url = args.postgres_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("--postgres-url is required for --backend postgres")
+            })?;
+            let store =
+                bench_postgres::PostgresStore::connect(postgres_url, args.postgres_max_connections)
+                    .await?;
+            store
+                .init()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            run(
+                store,
+                cfg,
+                metrics,
+                backend_tag,
+                scale,
+                warmup,
+                duration,
+                args.ops_per_user_per_min,
+                !args.no_warmup,
+                &report_path,
+            )
+            .await?;
+        }
+        Backend::Clickhouse => {
+            let store = bench_clickhouse::ClickHouseStore::connect(
+                &args.clickhouse_url,
+                &args.clickhouse_database,
+                &args.clickhouse_user,
+                &args.clickhouse_password,
+            );
+            store
+                .init()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            run(
+                store,
+                cfg,
+                metrics,
+                backend_tag,
+                scale,
+                warmup,
+                duration,
+                args.ops_per_user_per_min,
+                !args.no_warmup,
+                &report_path,
+            )
+            .await?;
+        }
     }
 
     tracing::info!(?report_path, "done");
@@ -198,9 +276,7 @@ async fn run<S: StanzaStore>(
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let counters = runner.counters();
-    let writes = counters
-        .writes
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let writes = counters.writes.load(std::sync::atomic::Ordering::Relaxed);
     let reads = counters.reads.load(std::sync::atomic::Ordering::Relaxed);
     let db_size = store.db_size_bytes().await.unwrap_or(0);
     let diagnostics = store.diagnostics().await;
@@ -221,7 +297,8 @@ async fn run<S: StanzaStore>(
     };
 
     let json = serde_json::to_string_pretty(&report)?;
-    std::fs::write(report_path, &json).with_context(|| format!("writing {}", report_path.display()))?;
+    std::fs::write(report_path, &json)
+        .with_context(|| format!("writing {}", report_path.display()))?;
 
     tracing::info!(
         total_writes = writes,

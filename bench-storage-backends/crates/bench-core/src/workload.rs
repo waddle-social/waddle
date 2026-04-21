@@ -43,10 +43,10 @@ fn rooms_for_scale(sessions: u64) -> u64 {
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub enum Scale {
-    Small,       // 10
-    Medium,      // 10_000
-    Large,       // 1_000_000
-    Write250k,   // 75_000_000  — targets 250k writes/sec under default mix
+    Small,     // 10
+    Medium,    // 10_000
+    Large,     // 1_000_000
+    Write250k, // 75_000_000  — targets 250k writes/sec under default mix
     Custom(u64),
 }
 

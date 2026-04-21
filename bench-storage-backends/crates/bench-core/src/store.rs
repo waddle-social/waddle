@@ -20,7 +20,7 @@ impl StoreError {
     }
 }
 
-/// Every backend (SQLite, Postgres, DuckDB, ...) implements this trait.
+/// Every backend (SQLite, Postgres, ClickHouse, DuckDB, ...) implements this trait.
 /// The runner talks to it exclusively — swapping backends is a one-line change.
 #[async_trait]
 pub trait StanzaStore: Send + Sync + 'static {

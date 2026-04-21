@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 bench-core = { path = "../bench-core" }
 bench-sqlite = { path = "../bench-sqlite" }
+bench-postgres = { path = "../bench-postgres" }
+bench-clickhouse = { path = "../bench-clickhouse" }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

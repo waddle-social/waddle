@@ -4,6 +4,7 @@ members = [
     "crates/bench-core",
     "crates/bench-sqlite",
     "crates/bench-postgres",
+    "crates/bench-clickhouse",
     "crates/bench-duckdb",
     "crates/bench-runner",
 ]
@@ -41,6 +42,10 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled", "chrono", "uuid", "backup"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros"] }
+clickhouse = { version = "0.13.3", features = ["chrono"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres", "clickhouse"] }
 
 [profile.release]
 opt-level = 3

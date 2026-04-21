@@ -276,7 +276,16 @@ impl SqliteStore {
             let handle = thread::Builder::new()
                 .name("bench-sqlite-flusher".into())
                 .spawn(move || {
-                    flusher_loop(src_uri, src_flags, src_backing, dst_path, interval, shutdown, fl, fc)
+                    flusher_loop(
+                        src_uri,
+                        src_flags,
+                        src_backing,
+                        dst_path,
+                        interval,
+                        shutdown,
+                        fl,
+                        fc,
+                    )
                 })
                 .map_err(StoreError::backend)?;
             Some(handle)
@@ -469,7 +478,8 @@ fn do_flush(
 impl StanzaStore for SqliteStore {
     async fn init(&self) -> Result<(), StoreError> {
         let conn = self.pool.get().map_err(StoreError::backend)?;
-        conn.execute_batch(MAM_SCHEMA).map_err(StoreError::backend)?;
+        conn.execute_batch(MAM_SCHEMA)
+            .map_err(StoreError::backend)?;
         Ok(())
     }
 
@@ -563,10 +573,7 @@ impl StanzaStore for SqliteStore {
     }
 }
 
-fn run_query(
-    pool: &Pool<UriManager>,
-    q: &MamQuery,
-) -> Result<Vec<ArchivedMessage>, StoreError> {
+fn run_query(pool: &Pool<UriManager>, q: &MamQuery) -> Result<Vec<ArchivedMessage>, StoreError> {
     let conn = pool.get().map_err(StoreError::backend)?;
     let mut sql = String::from(
         "SELECT id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, \
@@ -722,7 +729,10 @@ mod tests {
 
     fn uuid_like() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         format!("{n}")
     }
 }
