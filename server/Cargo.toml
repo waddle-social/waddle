@@ -6,6 +6,7 @@ members = [
     "crates/waddle-cli",
     "crates/waddle-xmpp",
     "crates/waddle-extensions",
+    "tests/xmpp-e2e-suite",
 ]
 
 [workspace.package]
