@@ -4,16 +4,15 @@
 //! (connected resources, presence, pending subscriptions, carbons) and
 //! processes messages sequentially, removing the need for external locking.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::connection::Stanza;
-use crate::registry::connection_registry::{OutboundStanza, PresenceState};
+use crate::registry::connection_registry::PresenceState;
 
 /// Actor that manages per-user connection state.
 ///
@@ -21,9 +20,10 @@ use crate::registry::connection_registry::{OutboundStanza, PresenceState};
 /// connected resources, their presence, carbons state, and any pending
 /// subscription stanzas that arrived while the user was offline.
 #[derive(Actor)]
+#[actor(mailbox = bounded(2048))]
 pub struct UserActor {
     bare_jid: BareJid,
-    resources: HashMap<FullJid, mpsc::Sender<OutboundStanza>>,
+    resources: HashSet<FullJid>,
     presence_available: HashMap<FullJid, bool>,
     presence_priority: HashMap<FullJid, i8>,
     presence_states: HashMap<FullJid, PresenceState>,
@@ -36,7 +36,7 @@ impl UserActor {
     pub fn new(bare_jid: BareJid) -> Self {
         Self {
             bare_jid,
-            resources: HashMap::new(),
+            resources: HashSet::new(),
             presence_available: HashMap::new(),
             presence_priority: HashMap::new(),
             presence_states: HashMap::new(),
@@ -67,7 +67,6 @@ impl UserActor {
 /// Register a new connection (resource) for this user.
 pub struct RegisterConnection {
     pub jid: FullJid,
-    pub sender: mpsc::Sender<OutboundStanza>,
 }
 
 impl kameo::message::Message<RegisterConnection> for UserActor {
@@ -79,10 +78,37 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         debug!(jid = %msg.jid, bare = %self.bare_jid, "Registering connection");
-        self.resources.insert(msg.jid.clone(), msg.sender);
+        self.resources.insert(msg.jid.clone());
         self.presence_available.insert(msg.jid.clone(), false);
         self.presence_priority.insert(msg.jid.clone(), 0);
         self.carbons_enabled.insert(msg.jid, false);
+    }
+}
+
+/// Register a new connection with explicit carbons initial state.
+pub struct RegisterConnectionWithCarbons {
+    pub jid: FullJid,
+    pub carbons_enabled: bool,
+}
+
+impl kameo::message::Message<RegisterConnectionWithCarbons> for UserActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RegisterConnectionWithCarbons,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        debug!(
+            jid = %msg.jid,
+            bare = %self.bare_jid,
+            carbons = msg.carbons_enabled,
+            "Registering connection with explicit carbons state"
+        );
+        self.resources.insert(msg.jid.clone());
+        self.presence_available.insert(msg.jid.clone(), false);
+        self.presence_priority.insert(msg.jid.clone(), 0);
+        self.carbons_enabled.insert(msg.jid, msg.carbons_enabled);
     }
 }
 
@@ -104,37 +130,26 @@ impl kameo::message::Message<UnregisterConnection> for UserActor {
     }
 }
 
-/// Route a stanza to a specific resource.
-pub struct RouteStanza {
-    pub target: FullJid,
-    pub stanza: Stanza,
+/// Unregister a connection and return whether the user has no resources left.
+pub struct UnregisterConnectionAndReportEmpty {
+    pub jid: FullJid,
 }
 
-impl kameo::message::Message<RouteStanza> for UserActor {
-    type Reply = Result<(), String>;
+impl kameo::message::Message<UnregisterConnectionAndReportEmpty> for UserActor {
+    type Reply = bool;
 
     async fn handle(
         &mut self,
-        msg: RouteStanza,
+        msg: UnregisterConnectionAndReportEmpty,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let sender = match self.resources.get(&msg.target) {
-            Some(s) => s,
-            None => return Err(format!("Resource {} not connected", msg.target)),
-        };
-        let outbound = OutboundStanza::new(msg.stanza);
-        match sender.try_send(outbound) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(target = %msg.target, "Outbound channel full");
-                Err("channel full".to_string())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                warn!(target = %msg.target, "Outbound channel closed, removing stale resource");
-                self.remove_resource(&msg.target);
-                Err("channel closed".to_string())
-            }
-        }
+        debug!(
+            jid = %msg.jid,
+            bare = %self.bare_jid,
+            "Unregistering connection and checking emptiness"
+        );
+        self.remove_resource(&msg.jid);
+        self.resources.is_empty()
     }
 }
 
@@ -149,7 +164,7 @@ impl kameo::message::Message<GetResources> for UserActor {
         _msg: GetResources,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources.keys().cloned().collect()
+        self.resources.iter().cloned().collect()
     }
 }
 
@@ -165,7 +180,7 @@ impl kameo::message::Message<GetAvailableResources> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.resources
-            .keys()
+            .iter()
             .filter(|jid| self.presence_available.get(*jid).copied().unwrap_or(false))
             .map(|jid| {
                 let priority = self.presence_priority.get(jid).copied().unwrap_or(0);
@@ -189,7 +204,7 @@ impl kameo::message::Message<GetOtherResources> for UserActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.resources
-            .keys()
+            .iter()
             .filter(|jid| **jid != msg.exclude)
             .cloned()
             .collect()
@@ -211,7 +226,7 @@ impl kameo::message::Message<UpdatePresence> for UserActor {
         msg: UpdatePresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.resources.contains_key(&msg.jid) {
+        if self.resources.contains(&msg.jid) {
             self.presence_available
                 .insert(msg.jid.clone(), msg.available);
             self.presence_priority.insert(msg.jid, msg.priority);
@@ -328,7 +343,7 @@ impl kameo::message::Message<IsConnected> for UserActor {
         msg: IsConnected,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.resources.contains_key(&msg.jid)
+        self.resources.contains(&msg.jid)
     }
 }
 
@@ -390,6 +405,25 @@ impl kameo::message::Message<ResourceCount> for UserActor {
 mod tests {
     use super::*;
     use kameo::actor::ActorRef;
+    use kameo::error::SendError;
+    use kameo::request::TryMessageSend;
+    use tokio::sync::oneshot;
+
+    struct HoldMailboxUntilReleased {
+        release_rx: oneshot::Receiver<()>,
+    }
+
+    impl kameo::message::Message<HoldMailboxUntilReleased> for UserActor {
+        type Reply = ();
+
+        async fn handle(
+            &mut self,
+            msg: HoldMailboxUntilReleased,
+            _ctx: &mut Context<Self, Self::Reply>,
+        ) -> Self::Reply {
+            let _ = msg.release_rx.await;
+        }
+    }
 
     fn bare(user: &str) -> BareJid {
         format!("{user}@example.com").parse().expect("bare jid")
@@ -408,12 +442,10 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_resource_count() {
         let actor = spawn_actor("alice").await;
-        let (tx, _rx) = mpsc::channel(16);
 
         actor
             .ask(RegisterConnection {
                 jid: full("alice", "phone"),
-                sender: tx,
             })
             .await
             .expect("register");
@@ -425,14 +457,10 @@ mod tests {
     #[tokio::test]
     async fn test_unregister_cleans_up() {
         let actor = spawn_actor("alice").await;
-        let (tx, _rx) = mpsc::channel(16);
         let jid = full("alice", "phone");
 
         actor
-            .ask(RegisterConnection {
-                jid: jid.clone(),
-                sender: tx,
-            })
+            .ask(RegisterConnection { jid: jid.clone() })
             .await
             .expect("register");
 
@@ -449,15 +477,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unregister_and_report_empty_is_atomic_per_user_actor() {
+        let actor = spawn_actor("alice").await;
+        let jid = full("alice", "phone");
+
+        actor
+            .ask(RegisterConnection { jid: jid.clone() })
+            .await
+            .expect("register");
+
+        let is_empty: bool = actor
+            .ask(UnregisterConnectionAndReportEmpty { jid })
+            .await
+            .expect("unregister+check");
+        assert!(is_empty);
+    }
+
+    #[tokio::test]
     async fn test_get_resources() {
         let actor = spawn_actor("alice").await;
-        let (tx1, _rx1) = mpsc::channel(16);
-        let (tx2, _rx2) = mpsc::channel(16);
 
         actor
             .ask(RegisterConnection {
                 jid: full("alice", "phone"),
-                sender: tx1,
             })
             .await
             .expect("register");
@@ -465,7 +507,6 @@ mod tests {
         actor
             .ask(RegisterConnection {
                 jid: full("alice", "laptop"),
-                sender: tx2,
             })
             .await
             .expect("register");
@@ -480,21 +521,14 @@ mod tests {
         let phone = full("alice", "phone");
         let laptop = full("alice", "laptop");
 
-        let (tx1, _rx1) = mpsc::channel(16);
-        let (tx2, _rx2) = mpsc::channel(16);
-
         actor
-            .ask(RegisterConnection {
-                jid: phone.clone(),
-                sender: tx1,
-            })
+            .ask(RegisterConnection { jid: phone.clone() })
             .await
             .expect("register");
 
         actor
             .ask(RegisterConnection {
                 jid: laptop.clone(),
-                sender: tx2,
             })
             .await
             .expect("register");
@@ -516,21 +550,14 @@ mod tests {
         let phone = full("alice", "phone");
         let laptop = full("alice", "laptop");
 
-        let (tx1, _rx1) = mpsc::channel(16);
-        let (tx2, _rx2) = mpsc::channel(16);
-
         actor
-            .ask(RegisterConnection {
-                jid: phone.clone(),
-                sender: tx1,
-            })
+            .ask(RegisterConnection { jid: phone.clone() })
             .await
             .expect("register");
 
         actor
             .ask(RegisterConnection {
                 jid: laptop.clone(),
-                sender: tx2,
             })
             .await
             .expect("register");
@@ -641,13 +668,9 @@ mod tests {
     async fn test_carbons() {
         let actor = spawn_actor("alice").await;
         let jid = full("alice", "phone");
-        let (tx, _rx) = mpsc::channel(16);
 
         actor
-            .ask(RegisterConnection {
-                jid: jid.clone(),
-                sender: tx,
-            })
+            .ask(RegisterConnection { jid: jid.clone() })
             .await
             .expect("register");
 
@@ -672,75 +695,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_route_stanza() {
+    async fn test_mailbox_backpressure_marks_best_effort_as_dropped() {
         let actor = spawn_actor("alice").await;
-        let jid = full("alice", "phone");
-        let (tx, mut rx) = mpsc::channel(16);
+        assert_eq!(actor.max_capacity(), 2048);
 
+        let (release_tx, release_rx) = oneshot::channel();
         actor
-            .ask(RegisterConnection {
-                jid: jid.clone(),
-                sender: tx,
-            })
+            .tell(HoldMailboxUntilReleased { release_rx })
             .await
-            .expect("register");
+            .expect("hold message should enqueue");
 
-        let msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(bare("alice"))));
-        actor
-            .ask(RouteStanza {
-                target: jid,
-                stanza: Stanza::Message(msg),
-            })
-            .await
-            .expect("route should succeed");
-
-        let received = rx.try_recv();
-        assert!(received.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_route_stanza_not_connected() {
-        let actor = spawn_actor("alice").await;
         let jid = full("alice", "phone");
+        let mut saw_mailbox_full = false;
+        for _ in 0..(actor.max_capacity() * 2) {
+            let send_result = actor
+                .tell(SetCarbonsEnabled {
+                    jid: jid.clone(),
+                    enabled: true,
+                })
+                .try_send()
+                .await;
+            if matches!(send_result, Err(SendError::MailboxFull(_))) {
+                saw_mailbox_full = true;
+                break;
+            }
+            send_result.expect("best-effort tell should either enqueue or return MailboxFull");
+        }
+        assert!(
+            saw_mailbox_full,
+            "bounded mailbox should eventually apply backpressure"
+        );
 
-        let msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(bare("alice"))));
-        let result = actor
-            .ask(RouteStanza {
-                target: jid,
-                stanza: Stanza::Message(msg),
-            })
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_route_stanza_closed_channel_removes_resource() {
-        let actor = spawn_actor("alice").await;
-        let jid = full("alice", "phone");
-        let (tx, rx) = mpsc::channel(16);
-
-        actor
-            .ask(RegisterConnection {
-                jid: jid.clone(),
-                sender: tx,
-            })
-            .await
-            .expect("register");
-
-        // Drop receiver to close channel
-        drop(rx);
-
-        let msg = xmpp_parsers::message::Message::new(Some(jid::Jid::from(bare("alice"))));
-        let result = actor
-            .ask(RouteStanza {
-                target: jid.clone(),
-                stanza: Stanza::Message(msg),
-            })
-            .await;
-        assert!(result.is_err());
-
-        // Resource should have been cleaned up
-        let count: usize = actor.ask(ResourceCount).await.expect("count");
-        assert_eq!(count, 0);
+        let _ = release_tx.send(());
     }
 }

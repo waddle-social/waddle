@@ -513,6 +513,7 @@ impl StreamManagementState {
     /// it — storing it on the detached session is what makes that possible.
     pub fn to_detached_session(
         &self,
+        user_id: String,
         jid: jid::FullJid,
         carbons_enabled: bool,
     ) -> Option<DetachedSession> {
@@ -522,6 +523,7 @@ impl StreamManagementState {
 
         Some(DetachedSession {
             stream_id: self.stream_id.clone()?,
+            user_id,
             jid,
             inbound_count: self.inbound_count,
             outbound_count: self.outbound_count,
@@ -885,7 +887,7 @@ mod tests {
         let jid: jid::FullJid = "user@example.com/resource".parse().unwrap();
 
         let detached_off = state
-            .to_detached_session(jid.clone(), false)
+            .to_detached_session("user@example.com".to_string(), jid.clone(), false)
             .expect("resumable state must produce detached session");
         assert!(
             !detached_off.carbons_enabled,
@@ -893,7 +895,7 @@ mod tests {
         );
 
         let detached_on = state
-            .to_detached_session(jid, true)
+            .to_detached_session("user@example.com".to_string(), jid, true)
             .expect("resumable state must produce detached session");
         assert!(
             detached_on.carbons_enabled,

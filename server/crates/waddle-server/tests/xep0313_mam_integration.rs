@@ -4,10 +4,12 @@
 
 mod ws_common;
 
+use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
 /// Start an isolated server and connect an authenticated client.
 async fn setup() -> (TestServer, WsXmppClient) {
@@ -61,6 +63,7 @@ fn extract_fin_last(frame: &str) -> Option<String> {
 
 #[tokio::test]
 async fn muc_message_archived_and_queryable() {
+    let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("mam-test-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
@@ -128,6 +131,7 @@ async fn muc_message_archived_and_queryable() {
 
 #[tokio::test]
 async fn muc_mam_pagination() {
+    let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let room = format!("mam-page-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
@@ -221,6 +225,7 @@ async fn muc_mam_pagination() {
 
 #[tokio::test]
 async fn dm_archived_in_sender_personal_archive() {
+    let _guard = TEST_SERIAL.lock().await;
     let (_server, mut client) = setup().await;
     let bare_jid = format!("{USERNAME}@{DOMAIN}");
 

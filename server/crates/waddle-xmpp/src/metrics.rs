@@ -98,6 +98,51 @@ pub fn stanza_latency() -> Histogram<f64> {
         .build()
 }
 
+/// Gauge for actor mailbox depth.
+pub fn actor_mailbox_depth() -> Gauge<i64> {
+    meter()
+        .i64_gauge("xmpp.actor.mailbox.depth")
+        .with_description("Current actor mailbox depth")
+        .with_unit("message")
+        .build()
+}
+
+/// Histogram for actor mailbox request latency.
+pub fn actor_mailbox_latency() -> Histogram<f64> {
+    meter()
+        .f64_histogram("xmpp.actor.mailbox.latency")
+        .with_description("Actor mailbox request latency")
+        .with_unit("ms")
+        .build()
+}
+
+/// Counter for actor-path dropped requests.
+pub fn actor_dropped_requests() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.actor.requests.dropped")
+        .with_description("Actor requests dropped due to backpressure or actor shutdown")
+        .with_unit("request")
+        .build()
+}
+
+/// Counter for actor-path mailbox/reply timeouts.
+pub fn actor_request_timeouts() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.actor.requests.timeout")
+        .with_description("Actor requests timed out waiting on mailbox or reply")
+        .with_unit("request")
+        .build()
+}
+
+/// Counter for actor restarts.
+pub fn actor_restarts() -> Counter<u64> {
+    meter()
+        .u64_counter("xmpp.actor.restarts")
+        .with_description("Actor restarts performed by runtime supervision policy")
+        .with_unit("restart")
+        .build()
+}
+
 // ============================================================================
 // Metric Recording Helpers
 // ============================================================================
@@ -134,6 +179,76 @@ pub fn record_stanza_latency(latency_ms: f64, stanza_type: &str) {
     stanza_latency().record(
         latency_ms,
         &[KeyValue::new("type", stanza_type.to_string())],
+    );
+}
+
+/// Record actor mailbox depth.
+pub fn record_actor_mailbox_depth(actor: &str, message_class: &str, depth: i64, max_capacity: i64) {
+    actor_mailbox_depth().record(
+        depth,
+        &[
+            KeyValue::new("actor", actor.to_string()),
+            KeyValue::new("class", message_class.to_string()),
+            KeyValue::new("max_capacity", max_capacity),
+        ],
+    );
+}
+
+/// Record actor request latency in milliseconds.
+pub fn record_actor_mailbox_latency(
+    actor: &str,
+    operation: &str,
+    message_class: &str,
+    latency_ms: f64,
+) {
+    actor_mailbox_latency().record(
+        latency_ms,
+        &[
+            KeyValue::new("actor", actor.to_string()),
+            KeyValue::new("operation", operation.to_string()),
+            KeyValue::new("class", message_class.to_string()),
+        ],
+    );
+}
+
+/// Record a dropped actor request.
+pub fn record_actor_request_dropped(
+    actor: &str,
+    operation: &str,
+    message_class: &str,
+    reason: &str,
+) {
+    actor_dropped_requests().add(
+        1,
+        &[
+            KeyValue::new("actor", actor.to_string()),
+            KeyValue::new("operation", operation.to_string()),
+            KeyValue::new("class", message_class.to_string()),
+            KeyValue::new("reason", reason.to_string()),
+        ],
+    );
+}
+
+/// Record an actor request timeout.
+pub fn record_actor_request_timeout(actor: &str, operation: &str, message_class: &str) {
+    actor_request_timeouts().add(
+        1,
+        &[
+            KeyValue::new("actor", actor.to_string()),
+            KeyValue::new("operation", operation.to_string()),
+            KeyValue::new("class", message_class.to_string()),
+        ],
+    );
+}
+
+/// Record a supervised actor restart.
+pub fn record_actor_restart(actor: &str, reason: &str) {
+    actor_restarts().add(
+        1,
+        &[
+            KeyValue::new("actor", actor.to_string()),
+            KeyValue::new("reason", reason.to_string()),
+        ],
     );
 }
 

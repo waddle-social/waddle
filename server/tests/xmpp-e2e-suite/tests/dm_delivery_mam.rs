@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 use anyhow::{anyhow, Context, Result};
+use kameo::actor::ActorRef;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,8 +14,12 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 use waddle_xmpp::{
-    commands::CommandRegistry, connection::ConnectionActor, muc::MucRoomRegistry,
-    registry::ConnectionRegistry, stream_management::InMemorySmSessionRegistry, AppState,
+    commands::CommandRegistry,
+    connection::ConnectionActor,
+    muc::room_registry_actor::RoomRegistryActor,
+    registry::{ConnectionRegistry, UserRegistryActor},
+    stream_management::InMemorySmSessionRegistry,
+    AppState,
 };
 use xmpp_e2e_suite::scenario::{load_scenario_from_dir, Scenario, Step};
 
@@ -89,8 +94,9 @@ async fn run_test_server<S: AppState>(
     mam_db_path: PathBuf,
 ) {
     let muc_domain = format!("muc.{domain}");
-    let room_registry = Arc::new(MucRoomRegistry::new(muc_domain));
+    let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
     let connection_registry = Arc::new(ConnectionRegistry::new());
+    let user_registry = kameo::spawn(UserRegistryActor::new());
     let db = libsql::Builder::new_local(mam_db_path.to_string_lossy().as_ref())
         .build()
         .await
@@ -118,8 +124,9 @@ async fn run_test_server<S: AppState>(
                         let tls = tls_acceptor.clone();
                         let dom = domain.clone();
                         let state = Arc::clone(&app_state);
-                        let rooms = Arc::clone(&room_registry);
+                        let rooms = room_registry.clone();
                         let conns = Arc::clone(&connection_registry);
+                        let users = user_registry.clone();
                         let mam = Arc::clone(&mam_storage);
                         let isr = Arc::clone(&isr_token_store);
                         let sm_reg = Arc::clone(&sm_session_registry);
@@ -138,6 +145,7 @@ async fn run_test_server<S: AppState>(
                             state,
                             rooms,
                             conns,
+                            users,
                             mam,
                             isr,
                             sm_reg,
@@ -164,8 +172,9 @@ async fn handle_test_connection<S: AppState>(
     tls: TlsAcceptor,
     dom: String,
     state: Arc<S>,
-    rooms: Arc<MucRoomRegistry>,
+    rooms: ActorRef<RoomRegistryActor>,
     conns: Arc<ConnectionRegistry>,
+    users: ActorRef<UserRegistryActor>,
     mam: Arc<waddle_xmpp::mam::LibSqlMamStorage>,
     isr: waddle_xmpp::isr::SharedIsrTokenStore,
     sm_reg: Arc<dyn waddle_xmpp::stream_management::SmSessionRegistry>,
@@ -185,6 +194,7 @@ async fn handle_test_connection<S: AppState>(
         state,
         rooms,
         conns,
+        users,
         mam,
         isr,
         sm_reg,

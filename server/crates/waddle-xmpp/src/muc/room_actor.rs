@@ -7,9 +7,19 @@
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
+use std::convert::Infallible;
+use thiserror::Error;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::presence::Presence;
 
+use super::admin::{is_role_change_query, AdminItem};
+use super::federation::FederatedMessageSet;
+use super::owner::{apply_config_form, build_destroy_notification, ConfigFormData, DestroyRequest};
 use super::room_registry::RoomInfo;
-use super::{MucRoom, RoomConfig};
+use super::{
+    build_affiliation_change_presence, build_ban_presence, build_kick_presence,
+    build_role_change_presence, MucRoom, RoomConfig,
+};
 use crate::types::{Affiliation, Role};
 
 // ---------------------------------------------------------------------------
@@ -23,6 +33,69 @@ pub struct OccupantInfo {
     pub real_jid: FullJid,
     pub role: Role,
     pub affiliation: Affiliation,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoomSnapshot {
+    pub room: MucRoom,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupchatBroadcastResult {
+    pub sender_nick: String,
+    pub federated_messages: FederatedMessageSet,
+    pub occupant_bare_jids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinExistingOccupant {
+    pub jid: FullJid,
+    pub nick: String,
+    pub affiliation: Affiliation,
+    pub role: Role,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinOutcome {
+    pub existing_occupants: Vec<JoinExistingOccupant>,
+    pub new_occupant_affiliation: Affiliation,
+    pub new_occupant_role: Role,
+    pub occupant_count: usize,
+    pub room_jid: BareJid,
+    pub is_same_bare_multi_session_join: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LeaveOutcome {
+    pub nick: String,
+    pub affiliation: Affiliation,
+    pub leaving_room_jid: FullJid,
+    pub remaining_occupants: Vec<FullJid>,
+    pub removed_last_session: bool,
+    pub occupant_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PresenceUpdateOutcome {
+    pub sender_nick: String,
+    pub room_jid: BareJid,
+    pub recipients: Vec<FullJid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminContext {
+    pub affiliation: Affiliation,
+    pub role: Role,
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum AdminApplyError {
+    #[error("occupant '{0}' not found in room")]
+    OccupantNotFound(String),
+    #[error("cannot remove the last owner from a room")]
+    CannotRemoveLastOwner,
+    #[error("{0}")]
+    PermissionDenied(String),
 }
 
 impl OccupantInfo {
@@ -45,8 +118,21 @@ impl OccupantInfo {
 /// Because Kameo processes messages one at a time, the actor holds a
 /// `MucRoom` directly with no external synchronisation required.
 #[derive(Actor)]
+#[actor(mailbox = bounded(2048))]
 pub struct RoomActor {
     room: MucRoom,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum RoomActorError {
+    #[error("room is full")]
+    RoomFull,
+    #[error("nick '{0}' already in use")]
+    NickAlreadyInUse(String),
+    #[error("no occupant with nick '{0}'")]
+    OccupantNotFound(String),
+    #[error("join is forbidden (members_only={members_only})")]
+    JoinForbidden { members_only: bool },
 }
 
 impl RoomActor {
@@ -69,14 +155,14 @@ pub struct Join {
 }
 
 impl kameo::message::Message<Join> for RoomActor {
-    type Reply = Result<(), String>;
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if self.room.is_full() {
-            return Err("Room is full".to_string());
+            return Err(RoomActorError::RoomFull);
         }
         if self.room.get_occupant(&msg.nick).is_some() {
-            return Err(format!("Nick '{}' already in use", msg.nick));
+            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         }
         self.room.add_occupant(super::Occupant {
             real_jid: msg.real_jid,
@@ -96,13 +182,13 @@ pub struct Leave {
 }
 
 impl kameo::message::Message<Leave> for RoomActor {
-    type Reply = Result<(), String>;
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.room
             .remove_occupant(&msg.nick)
             .map(|_| ())
-            .ok_or_else(|| format!("No occupant with nick '{}'", msg.nick))
+            .ok_or(RoomActorError::OccupantNotFound(msg.nick))
     }
 }
 
@@ -148,7 +234,7 @@ impl kameo::message::Message<GetOccupantByNick> for RoomActor {
 pub struct GetInfo;
 
 impl kameo::message::Message<GetInfo> for RoomActor {
-    type Reply = Result<RoomInfo, String>;
+    type Reply = Result<RoomInfo, Infallible>;
 
     async fn handle(
         &mut self,
@@ -167,7 +253,7 @@ impl kameo::message::Message<GetInfo> for RoomActor {
 pub struct GetConfig;
 
 impl kameo::message::Message<GetConfig> for RoomActor {
-    type Reply = Result<RoomConfig, String>;
+    type Reply = Result<RoomConfig, Infallible>;
 
     async fn handle(
         &mut self,
@@ -219,7 +305,7 @@ pub struct GetAffiliation {
 }
 
 impl kameo::message::Message<GetAffiliation> for RoomActor {
-    type Reply = Result<Affiliation, String>;
+    type Reply = Result<Affiliation, Infallible>;
 
     async fn handle(
         &mut self,
@@ -283,7 +369,7 @@ impl kameo::message::Message<Destroy> for RoomActor {
 pub struct GetRoomJid;
 
 impl kameo::message::Message<GetRoomJid> for RoomActor {
-    type Reply = Result<BareJid, String>;
+    type Reply = Result<BareJid, Infallible>;
 
     async fn handle(
         &mut self,
@@ -291,6 +377,551 @@ impl kameo::message::Message<GetRoomJid> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         Ok(self.room.room_jid.clone())
+    }
+}
+
+pub struct GetSnapshot;
+
+impl kameo::message::Message<GetSnapshot> for RoomActor {
+    type Reply = Result<RoomSnapshot, Infallible>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetSnapshot,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(RoomSnapshot {
+            room: self.room.clone(),
+        })
+    }
+}
+
+pub struct BuildGroupchatBroadcast {
+    pub sender_jid: FullJid,
+    pub message: Message,
+}
+
+impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
+    type Reply = Result<GroupchatBroadcastResult, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: BuildGroupchatBroadcast,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let sender_occupant = self
+            .room
+            .find_occupant_by_real_jid(&msg.sender_jid)
+            .ok_or_else(|| RoomActorError::OccupantNotFound(msg.sender_jid.to_string()))?;
+        let sender_nick = sender_occupant.nick.clone();
+
+        if self.room.config.moderated && sender_occupant.role == Role::Visitor {
+            return Err(RoomActorError::OccupantNotFound(
+                "Visitors cannot speak in moderated rooms".to_string(),
+            ));
+        }
+
+        let federated_messages = self
+            .room
+            .broadcast_message_federated(&sender_nick, &msg.message);
+
+        let sender_jid_for_filter = msg.sender_jid;
+        let occupant_bare_jids: Vec<String> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|o| {
+                self.room
+                    .get_occupant_sessions(&o.nick)
+                    .into_iter()
+                    .filter(|jid| *jid != sender_jid_for_filter)
+            })
+            .map(|jid| jid.to_bare().to_string())
+            .collect();
+
+        Ok(GroupchatBroadcastResult {
+            sender_nick,
+            federated_messages,
+            occupant_bare_jids,
+        })
+    }
+}
+
+pub struct ReconcileChannelBackedRoom {
+    pub room_jid: BareJid,
+    pub waddle_id: String,
+    pub channel_id: String,
+    pub desired_config: RoomConfig,
+}
+
+impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: ReconcileChannelBackedRoom,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let instant_name = msg.room_jid.node().map(|node| node.to_string());
+        let mut desired_config = msg.desired_config;
+        desired_config.description = self.room.config.description.clone();
+        desired_config.subject = self.room.config.subject.clone();
+        if !self.room.config.name.is_empty()
+            && instant_name.as_deref() != Some(self.room.config.name.as_str())
+        {
+            desired_config.name = self.room.config.name.clone();
+        }
+        self.room.waddle_id = msg.waddle_id;
+        self.room.channel_id = msg.channel_id;
+        self.room.config = desired_config;
+    }
+}
+
+pub struct JoinWithAffiliation {
+    pub sender_jid: FullJid,
+    pub nick: String,
+    pub effective_affiliation: Affiliation,
+    pub local_domain: String,
+}
+
+impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
+    type Reply = Result<JoinOutcome, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: JoinWithAffiliation,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if msg.effective_affiliation != Affiliation::None {
+            self.room.update_affiliation_from_resolver(
+                msg.sender_jid.to_bare(),
+                msg.effective_affiliation,
+            );
+        }
+
+        if !self.room.can_user_join(&msg.sender_jid.to_bare()) {
+            return Err(RoomActorError::JoinForbidden {
+                members_only: self.room.config.members_only,
+            });
+        }
+        if self.room.is_full() {
+            return Err(RoomActorError::RoomFull);
+        }
+
+        let mut is_same_bare_multi_session_join = false;
+        if let Some(existing) = self.room.get_occupant(&msg.nick) {
+            if existing.real_jid != msg.sender_jid {
+                if existing.real_jid.to_bare() == msg.sender_jid.to_bare() {
+                    is_same_bare_multi_session_join = true;
+                } else {
+                    return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+                }
+            }
+        }
+
+        let existing_occupants: Vec<JoinExistingOccupant> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|o| {
+                self.room
+                    .get_occupant_sessions(&o.nick)
+                    .into_iter()
+                    .map(move |jid| JoinExistingOccupant {
+                        jid,
+                        nick: o.nick.clone(),
+                        affiliation: o.affiliation,
+                        role: o.role,
+                    })
+            })
+            .collect();
+
+        let new_occupant = self.room.add_occupant_with_affiliation(
+            msg.sender_jid,
+            msg.nick.clone(),
+            Some(msg.local_domain.as_str()),
+        );
+        let new_occupant_affiliation = new_occupant.affiliation;
+        let new_occupant_role = new_occupant.role;
+        let occupant_count = self.room.occupant_count();
+        let room_jid = self.room.room_jid.clone();
+
+        Ok(JoinOutcome {
+            existing_occupants,
+            new_occupant_affiliation,
+            new_occupant_role,
+            occupant_count,
+            room_jid,
+            is_same_bare_multi_session_join,
+        })
+    }
+}
+
+pub struct LeaveByRealJid {
+    pub sender_jid: FullJid,
+}
+
+impl kameo::message::Message<LeaveByRealJid> for RoomActor {
+    type Reply = Result<Option<LeaveOutcome>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: LeaveByRealJid,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(nick) = self
+            .room
+            .find_nick_by_real_jid(&msg.sender_jid)
+            .map(ToOwned::to_owned)
+        else {
+            return Ok(None);
+        };
+        let Some(occupant) = self.room.get_occupant(&nick) else {
+            return Ok(None);
+        };
+        let affiliation = occupant.affiliation;
+        let leaving_room_jid = self
+            .room
+            .room_jid
+            .clone()
+            .with_resource_str(&nick)
+            .expect("nick was previously accepted as resource");
+        let remaining_occupants: Vec<FullJid> = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .filter(|jid| *jid != msg.sender_jid)
+            .collect();
+        let removed_last_session = self
+            .room
+            .remove_occupant_session(&nick, &msg.sender_jid)
+            .unwrap_or(false);
+        let occupant_count = self.room.occupant_count();
+        Ok(Some(LeaveOutcome {
+            nick,
+            affiliation,
+            leaving_room_jid,
+            remaining_occupants,
+            removed_last_session,
+            occupant_count,
+        }))
+    }
+}
+
+pub struct PresenceUpdateData {
+    pub sender_jid: FullJid,
+}
+
+impl kameo::message::Message<PresenceUpdateData> for RoomActor {
+    type Reply = Result<Option<PresenceUpdateOutcome>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: PresenceUpdateData,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
+            return Ok(None);
+        };
+        let sender_nick = sender_occupant.nick.clone();
+        let room_jid = self.room.room_jid.clone();
+        let recipients = self
+            .room
+            .occupants
+            .values()
+            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .collect();
+        Ok(Some(PresenceUpdateOutcome {
+            sender_nick,
+            room_jid,
+            recipients,
+        }))
+    }
+}
+
+pub struct PingSelfCheck {
+    pub nick: String,
+    pub sender_jid: FullJid,
+}
+
+impl kameo::message::Message<PingSelfCheck> for RoomActor {
+    type Reply = Result<(), RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: PingSelfCheck,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let occupant = self
+            .room
+            .get_occupant(&msg.nick)
+            .ok_or_else(|| RoomActorError::OccupantNotFound(msg.nick.clone()))?;
+        if occupant.real_jid != msg.sender_jid {
+            return Err(RoomActorError::OccupantNotFound(
+                "Self-ping only allowed for own occupant".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub struct GetAdminContext {
+    pub sender_jid: FullJid,
+}
+
+impl kameo::message::Message<GetAdminContext> for RoomActor {
+    type Reply = Result<AdminContext, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: GetAdminContext,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let sender_affiliation = self.room.get_affiliation(&msg.sender_jid.to_bare());
+        let sender_occupant = self.room.find_occupant_by_real_jid(&msg.sender_jid);
+        let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
+        Ok(AdminContext {
+            affiliation: sender_affiliation,
+            role: sender_role,
+        })
+    }
+}
+
+pub struct ApplyAdminItems {
+    pub sender_jid: FullJid,
+    pub sender_affiliation: Affiliation,
+    pub sender_role: Role,
+    pub items: Vec<AdminItem>,
+}
+
+impl kameo::message::Message<ApplyAdminItems> for RoomActor {
+    type Reply = Result<Vec<(jid::FullJid, Presence)>, AdminApplyError>;
+
+    async fn handle(
+        &mut self,
+        msg: ApplyAdminItems,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut presence_updates: Vec<(jid::FullJid, Presence)> = Vec::new();
+        let mut occupants_to_kick: Vec<String> = Vec::new();
+        if is_role_change_query(&msg.items) {
+            for item in &msg.items {
+                let Some(target_nick) = item.nick.clone() else {
+                    continue;
+                };
+                let Some(new_role) = item.role else {
+                    continue;
+                };
+                let target_occupant = self
+                    .room
+                    .get_occupant(&target_nick)
+                    .cloned()
+                    .ok_or_else(|| AdminApplyError::OccupantNotFound(target_nick.clone()))?;
+                let can_modify = match (
+                    msg.sender_affiliation,
+                    msg.sender_role,
+                    target_occupant.affiliation,
+                    new_role,
+                ) {
+                    (Affiliation::Owner, _, _, _) => true,
+                    (Affiliation::Admin, _, target_aff, _) if target_aff != Affiliation::Owner => {
+                        true
+                    }
+                    (_, Role::Moderator, target_aff, _)
+                        if !matches!(target_aff, Affiliation::Owner | Affiliation::Admin) =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if !can_modify {
+                    return Err(AdminApplyError::PermissionDenied(
+                        "You don't have permission to change this user's role".to_string(),
+                    ));
+                }
+                let from_room_jid = self
+                    .room
+                    .room_jid
+                    .with_resource_str(&target_nick)
+                    .expect("nick was previously accepted as resource");
+                if new_role == Role::None {
+                    for (nick, occupant) in self.room.occupants.iter() {
+                        let is_self = nick == &target_nick;
+                        let presence = build_kick_presence(
+                            &from_room_jid,
+                            &occupant.real_jid,
+                            target_occupant.affiliation,
+                            is_self,
+                            item.reason.as_deref(),
+                            Some(&msg.sender_jid.to_bare()),
+                        );
+                        presence_updates.push((occupant.real_jid.clone(), presence));
+                    }
+                    occupants_to_kick.push(target_nick);
+                } else {
+                    if let Some(occ) = self.room.occupants.get_mut(&target_nick) {
+                        occ.role = new_role;
+                    }
+                    for (nick, occupant) in self.room.occupants.iter() {
+                        let is_self = nick == &target_nick;
+                        let presence = build_role_change_presence(
+                            &from_room_jid,
+                            &occupant.real_jid,
+                            target_occupant.affiliation,
+                            new_role,
+                            is_self,
+                            None,
+                        );
+                        presence_updates.push((occupant.real_jid.clone(), presence));
+                    }
+                }
+            }
+        } else {
+            for item in &msg.items {
+                let Some(target_jid) = item.jid.clone() else {
+                    continue;
+                };
+                let Some(new_affiliation) = item.affiliation else {
+                    continue;
+                };
+                let can_modify = match new_affiliation {
+                    Affiliation::Owner => msg.sender_affiliation == Affiliation::Owner,
+                    Affiliation::Admin
+                    | Affiliation::Member
+                    | Affiliation::None
+                    | Affiliation::Outcast => {
+                        matches!(
+                            msg.sender_affiliation,
+                            Affiliation::Owner | Affiliation::Admin
+                        )
+                    }
+                };
+                if !can_modify {
+                    return Err(AdminApplyError::PermissionDenied(format!(
+                        "You don't have permission to set {} affiliation",
+                        crate::muc::admin::affiliation_to_str(new_affiliation)
+                    )));
+                }
+                if new_affiliation != Affiliation::Owner {
+                    let target_current_affiliation = self.room.get_affiliation(&target_jid);
+                    if target_current_affiliation == Affiliation::Owner {
+                        let owners = self.room.get_jids_by_affiliation(Affiliation::Owner);
+                        if owners.len() == 1 && owners.contains(&target_jid) {
+                            return Err(AdminApplyError::CannotRemoveLastOwner);
+                        }
+                    }
+                }
+                let change = self
+                    .room
+                    .set_affiliation(target_jid.clone(), new_affiliation);
+                if change.is_none() {
+                    continue;
+                }
+                let affected_occupant = self
+                    .room
+                    .occupants
+                    .values()
+                    .find(|o| o.real_jid.to_bare() == target_jid)
+                    .cloned();
+                if let Some(occupant) = affected_occupant {
+                    let from_room_jid = self
+                        .room
+                        .room_jid
+                        .with_resource_str(&occupant.nick)
+                        .expect("nick was previously accepted as resource");
+                    if new_affiliation == Affiliation::Outcast {
+                        for (nick, occ) in self.room.occupants.iter() {
+                            let is_self = nick == &occupant.nick;
+                            let presence = build_ban_presence(
+                                &from_room_jid,
+                                &occ.real_jid,
+                                is_self,
+                                item.reason.as_deref(),
+                                Some(&msg.sender_jid.to_bare()),
+                            );
+                            presence_updates.push((occ.real_jid.clone(), presence));
+                        }
+                        occupants_to_kick.push(occupant.nick.clone());
+                    } else {
+                        for (nick, occ) in self.room.occupants.iter() {
+                            let is_self = nick == &occupant.nick;
+                            let presence = build_affiliation_change_presence(
+                                &from_room_jid,
+                                &occ.real_jid,
+                                new_affiliation,
+                                occupant.role,
+                                is_self,
+                                None,
+                            );
+                            presence_updates.push((occ.real_jid.clone(), presence));
+                        }
+                    }
+                }
+            }
+        }
+        for nick in occupants_to_kick {
+            self.room.remove_occupant(&nick);
+        }
+        Ok(presence_updates)
+    }
+}
+
+pub struct IsOwner {
+    pub jid: BareJid,
+}
+
+impl kameo::message::Message<IsOwner> for RoomActor {
+    type Reply = bool;
+
+    async fn handle(&mut self, msg: IsOwner, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.room.get_affiliation(&msg.jid) == Affiliation::Owner
+    }
+}
+
+pub struct ApplyOwnerConfig {
+    pub form_data: ConfigFormData,
+}
+
+impl kameo::message::Message<ApplyOwnerConfig> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: ApplyOwnerConfig,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        apply_config_form(&mut self.room.config, &msg.form_data);
+    }
+}
+
+pub struct DestroyWithNotifications {
+    pub sender_jid: FullJid,
+    pub request: DestroyRequest,
+}
+
+impl kameo::message::Message<DestroyWithNotifications> for RoomActor {
+    type Reply = Result<Vec<(jid::FullJid, Presence)>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyWithNotifications,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut updates = Vec::new();
+        for (nick, occupant) in self.room.occupants.iter() {
+            let is_self = occupant.real_jid == msg.sender_jid;
+            let presence = build_destroy_notification(
+                &self.room.room_jid,
+                nick,
+                &occupant.real_jid,
+                &msg.request,
+                is_self,
+            );
+            updates.push((occupant.real_jid.clone(), presence));
+        }
+        self.room.occupants.clear();
+        Ok(updates)
     }
 }
 
@@ -302,6 +933,7 @@ impl kameo::message::Message<GetRoomJid> for RoomActor {
 mod tests {
     use super::*;
     use kameo::actor::ActorRef;
+    use kameo::error::SendError;
 
     fn test_room() -> MucRoom {
         let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
@@ -323,6 +955,17 @@ mod tests {
         kameo::spawn(RoomActor::new(test_room()))
     }
 
+    async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomActor> {
+        let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+        config.name = "Test Room".to_string();
+        kameo::spawn(RoomActor::new(MucRoom::new(
+            room_jid,
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            config,
+        )))
+    }
+
     #[tokio::test]
     async fn test_join_and_occupant_count() {
         let actor = spawn_room_actor().await;
@@ -330,7 +973,6 @@ mod tests {
         let count = actor.ask(OccupantCount).await.expect("ask");
         assert_eq!(count, 0);
 
-        // Reply = Result<(), String> -- ask flattens to Result<(), SendError<..., String>>
         actor
             .ask(Join {
                 nick: "alice".to_string(),
@@ -359,8 +1001,6 @@ mod tests {
             .await
             .expect("first join");
 
-        // The handler returns Err(String) which kameo surfaces as
-        // SendError::HandlerError, so .await produces Err(_).
         let result = actor
             .ask(Join {
                 nick: "alice".to_string(),
@@ -369,7 +1009,43 @@ mod tests {
                 affiliation: Affiliation::Member,
             })
             .await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::NickAlreadyInUse(nick)))
+                if nick == "alice"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_join_rejected_when_room_full() {
+        let actor = spawn_room_actor_with_config(RoomConfig {
+            max_occupants: 1,
+            ..RoomConfig::default()
+        })
+        .await;
+
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: test_full_jid("alice"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("first join");
+
+        let result = actor
+            .ask(Join {
+                nick: "bob".to_string(),
+                real_jid: test_full_jid("bob"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::RoomFull))
+        ));
     }
 
     #[tokio::test]
@@ -406,7 +1082,11 @@ mod tests {
                 nick: "ghost".to_string(),
             })
             .await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomActorError::OccupantNotFound(nick)))
+                if nick == "ghost"
+        ));
     }
 
     #[tokio::test]
@@ -553,6 +1233,101 @@ mod tests {
 
         let count = actor.ask(OccupantCount).await.expect("ask");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_apply_admin_items_rejects_moderator_role_change_on_admin() {
+        let actor = spawn_room_actor().await;
+
+        actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: test_full_jid("alice"),
+                role: Role::Moderator,
+                affiliation: Affiliation::Admin,
+            })
+            .await
+            .expect("join");
+
+        let sender_jid = test_full_jid("mod");
+        let result = actor
+            .ask(ApplyAdminItems {
+                sender_jid,
+                sender_affiliation: Affiliation::None,
+                sender_role: Role::Moderator,
+                items: vec![AdminItem {
+                    jid: None,
+                    nick: Some("alice".to_string()),
+                    affiliation: None,
+                    role: Some(Role::Visitor),
+                    reason: None,
+                }],
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(AdminApplyError::PermissionDenied(
+                _
+            )))
+        ));
+
+        let occupant = actor
+            .ask(GetOccupantByNick {
+                nick: "alice".to_string(),
+            })
+            .await
+            .expect("occupant")
+            .expect("occupant exists");
+        assert_eq!(occupant.role, Role::Moderator);
+
+        let count = actor.ask(OccupantCount).await.expect("count");
+        assert_eq!(
+            count, 1,
+            "actor should stay healthy after permission denial"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_admin_items_cannot_remove_last_owner() {
+        let actor = spawn_room_actor().await;
+        let owner_jid: BareJid = "owner@example.com".parse().expect("valid bare jid");
+
+        actor
+            .ask(ChangeAffiliation {
+                jid: owner_jid.clone(),
+                affiliation: Affiliation::Owner,
+            })
+            .await
+            .expect("set owner");
+
+        let result = actor
+            .ask(ApplyAdminItems {
+                sender_jid: test_full_jid("owner"),
+                sender_affiliation: Affiliation::Owner,
+                sender_role: Role::Moderator,
+                items: vec![AdminItem {
+                    jid: Some(owner_jid.clone()),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                }],
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(
+                AdminApplyError::CannotRemoveLastOwner
+            ))
+        ));
+
+        let still_owner = actor
+            .ask(IsOwner { jid: owner_jid })
+            .await
+            .expect("owner check");
+        assert!(still_owner, "last owner must be preserved");
     }
 
     #[tokio::test]

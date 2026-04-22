@@ -721,8 +721,10 @@ async fn run_test_server<S: AppState>(
 ) {
     // Create SHARED registries at server level - these are used by all connections
     let muc_domain = format!("muc.{}", domain);
-    let room_registry = std::sync::Arc::new(waddle_xmpp::muc::MucRoomRegistry::new(muc_domain));
+    let room_registry =
+        kameo::spawn(waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(muc_domain));
     let connection_registry = std::sync::Arc::new(waddle_xmpp::registry::ConnectionRegistry::new());
+    let user_registry = kameo::spawn(waddle_xmpp::registry::UserRegistryActor::new());
     // Create an in-memory MAM storage for the test (shared)
     let db = libsql::Builder::new_local(":memory:")
         .build()
@@ -756,8 +758,9 @@ async fn run_test_server<S: AppState>(
                         let dom = domain.clone();
                         let state = Arc::clone(&app_state);
                         // Clone the shared registries for this connection
-                        let rooms = Arc::clone(&room_registry);
+                        let rooms = room_registry.clone();
                         let conns = Arc::clone(&connection_registry);
+                        let users = user_registry.clone();
                         let mam = Arc::clone(&mam_storage);
                         let isr = Arc::clone(&isr_token_store);
                         let sm_reg = Arc::clone(&sm_session_registry);
@@ -771,7 +774,7 @@ async fn run_test_server<S: AppState>(
                         let st = single_tenant;
                         tokio::spawn(async move {
                             let _ = waddle_xmpp::connection::ConnectionActor::handle_connection(
-                                stream, peer_addr, tls, dom, state, rooms, conns, mam, isr, sm_reg, registration_enabled, pubsub, ext, st, push_store, push_sender, cmd_registry
+                                stream, peer_addr, tls, dom, state, rooms, conns, users, mam, isr, sm_reg, registration_enabled, pubsub, ext, st, push_store, push_sender, cmd_registry
                             ).await;
                         });
                     }

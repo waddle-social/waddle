@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use kameo::actor::ActorRef;
 use rustls::ServerConfig as RustlsServerConfig;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -17,10 +18,10 @@ use crate::commands::CommandRegistry;
 use crate::connection::ConnectionActor;
 use crate::isr::{create_shared_store, SharedIsrTokenStore};
 use crate::mam::LibSqlMamStorage;
-use crate::muc::MucRoomRegistry;
+use crate::muc::room_registry_actor::RoomRegistryActor;
 use crate::pubsub::{InMemoryPubSubStorage, PubSubStorage};
 use crate::push::{HttpWebPushSender, InMemoryPushStore, PushSubscriptionStore, WebPushSender};
-use crate::registry::ConnectionRegistry;
+use crate::registry::{ConnectionRegistry, UserRegistryActor};
 use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
 use crate::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
@@ -127,8 +128,9 @@ pub struct XmppServer<S: AppState> {
     config: XmppServerConfig,
     app_state: Arc<S>,
     tls_acceptor: TlsAcceptor,
-    room_registry: Arc<MucRoomRegistry>,
+    room_registry: ActorRef<RoomRegistryActor>,
     connection_registry: Arc<ConnectionRegistry>,
+    user_registry: ActorRef<UserRegistryActor>,
     mam_storage: Arc<LibSqlMamStorage>,
     /// XEP-0397 ISR token store shared across all connections
     isr_token_store: SharedIsrTokenStore,
@@ -167,12 +169,13 @@ impl<S: AppState> XmppServer<S> {
     ) -> Result<Self, XmppError> {
         let tls_acceptor = Self::load_tls_config(&config)?;
 
-        // Create the MUC room registry with the MUC domain
+        // Create the MUC room registry actor with the MUC domain
         let muc_domain = format!("muc.{}", config.domain);
-        let room_registry = Arc::new(MucRoomRegistry::new(muc_domain));
+        let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
 
         // Create the connection registry for message routing
         let connection_registry = Arc::new(ConnectionRegistry::new());
+        let user_registry = kameo::spawn(UserRegistryActor::new());
 
         // Create the MAM storage
         let mam_storage = Self::create_mam_storage(&config).await?;
@@ -213,6 +216,7 @@ impl<S: AppState> XmppServer<S> {
             tls_acceptor,
             room_registry,
             connection_registry,
+            user_registry,
             mam_storage,
             isr_token_store,
             sm_session_registry,
@@ -345,14 +349,11 @@ impl<S: AppState> XmppServer<S> {
 
             // Create a StanzaRouter for routing inbound S2S stanzas to local users
             let router_config = RouterConfig::new(self.config.domain.clone()).with_federation(true);
-            let stanza_router = Arc::new(
-                StanzaRouter::new(
-                    router_config,
-                    Arc::clone(&self.connection_registry),
-                    None, // S2S pool not needed for inbound routing
-                )
-                .with_muc_room_registry(Arc::clone(&self.room_registry)),
-            );
+            let stanza_router = Arc::new(StanzaRouter::new(
+                router_config,
+                Arc::clone(&self.connection_registry),
+                None, // S2S pool not needed for inbound routing
+            ));
 
             let s2s_listener = S2sListener::new(
                 s2s_config,
@@ -386,6 +387,7 @@ impl<S: AppState> XmppServer<S> {
             let domain = self.config.domain;
             let room_registry = self.room_registry;
             let connection_registry = self.connection_registry;
+            let user_registry = self.user_registry;
             let mam_storage = self.mam_storage;
             let isr_token_store = self.isr_token_store;
             let sm_session_registry = self.sm_session_registry;
@@ -418,8 +420,9 @@ impl<S: AppState> XmppServer<S> {
                     let app_state = Arc::clone(&app_state);
                     let tls_acceptor = tls_acceptor.clone();
                     let domain = domain.clone();
-                    let room_registry = Arc::clone(&room_registry);
+                    let room_registry = room_registry.clone();
                     let connection_registry = Arc::clone(&connection_registry);
+                    let user_registry = user_registry.clone();
                     let mam_storage = Arc::clone(&mam_storage);
                     let isr_token_store = Arc::clone(&isr_token_store);
                     let sm_session_registry = Arc::clone(&sm_session_registry);
@@ -439,6 +442,7 @@ impl<S: AppState> XmppServer<S> {
                                 app_state,
                                 room_registry,
                                 connection_registry,
+                                user_registry,
                                 mam_storage,
                                 isr_token_store,
                                 sm_session_registry,
@@ -498,7 +502,7 @@ impl<S: AppState> XmppServer<S> {
     }
 
     /// Get the room registry.
-    pub fn room_registry(&self) -> &Arc<MucRoomRegistry> {
+    pub fn room_registry(&self) -> &ActorRef<RoomRegistryActor> {
         &self.room_registry
     }
 

@@ -5,6 +5,7 @@ use crate::xep::xep0004::{DataForm, Field, FieldOption, FieldType, FormType};
 use crate::xep::xep0050::Note;
 use crate::ChannelType;
 use std::sync::Arc;
+use thiserror::Error;
 use tracing::debug;
 
 pub const NODE_CREATE_CHANNEL: &str = "waddle:create-channel";
@@ -22,16 +23,42 @@ pub struct CreateChannelResult {
     pub channel_jid: String,
 }
 
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum CreateChannelError {
+    #[error("You do not have permission to create channels in this waddle")]
+    PermissionDenied,
+    #[error("Database pool not available")]
+    DatabasePoolUnavailable,
+    #[error("Failed to access waddle database: {0}")]
+    WaddleDatabaseAccessFailed(String),
+    #[error("Failed to acquire database connection: {0}")]
+    DatabaseConnectionFailed(String),
+    #[error("Failed to insert channel: {0}")]
+    ChannelInsertFailed(String),
+    #[error("Failed to create permission tuple: {0}")]
+    PermissionTupleWriteFailed(String),
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+enum ParseChannelFormError {
+    #[error("Missing required field: {0}")]
+    MissingRequiredField(&'static str),
+    #[error("Channel name cannot be empty")]
+    EmptyChannelName,
+    #[error("Unsupported channel_type '{0}'. Expected one of: text, forum")]
+    UnsupportedChannelType(String),
+}
+
 pub trait CreateChannelDeps: Send + Sync {
     fn create_channel(
         &self,
         user_id: &str,
         waddle_id: &str,
         metadata: ChannelMetadata,
-    ) -> impl std::future::Future<Output = Result<CreateChannelResult, String>> + Send;
+    ) -> impl std::future::Future<Output = Result<CreateChannelResult, CreateChannelError>> + Send;
 }
 
-fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), String> {
+fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), ParseChannelFormError> {
     let mut waddle_id: Option<String> = None;
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;
@@ -54,23 +81,18 @@ fn parse_channel_form(form: &DataForm) -> Result<(String, ChannelMetadata), Stri
         }
     }
 
-    let waddle_id = waddle_id.ok_or_else(|| "Missing required field: waddle_id".to_string())?;
-    let name = name.ok_or_else(|| "Missing required field: name".to_string())?;
+    let waddle_id = waddle_id.ok_or(ParseChannelFormError::MissingRequiredField("waddle_id"))?;
+    let name = name.ok_or(ParseChannelFormError::MissingRequiredField("name"))?;
     let channel_type = channel_type.unwrap_or_else(|| "text".to_string());
     let position = position.unwrap_or(0);
 
     if name.trim().is_empty() {
-        return Err("Channel name cannot be empty".to_string());
+        return Err(ParseChannelFormError::EmptyChannelName);
     }
 
     let channel_type = ChannelType::parse(&channel_type)
         .map(|kind| kind.as_str().to_string())
-        .ok_or_else(|| {
-            format!(
-                "Unsupported channel_type '{}'. Expected one of: text, forum",
-                channel_type
-            )
-        })?;
+        .ok_or_else(|| ParseChannelFormError::UnsupportedChannelType(channel_type.clone()))?;
 
     Ok((
         waddle_id,
@@ -156,7 +178,7 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                 Err(err) => {
                     return CommandResult::Completed {
                         form: None,
-                        notes: vec![Note::new(NoteType::Error, &err)],
+                        notes: vec![Note::new(NoteType::Error, err.to_string())],
                     };
                 }
             };
@@ -183,7 +205,7 @@ pub async fn handle_create_channel<D: CreateChannelDeps>(
                 }
                 Err(err) => CommandResult::Completed {
                     form: None,
-                    notes: vec![Note::new(NoteType::Error, &err)],
+                    notes: vec![Note::new(NoteType::Error, err.to_string())],
                 },
             }
         }
@@ -214,7 +236,7 @@ mod tests {
             user_id: &str,
             _waddle_id: &str,
             _metadata: ChannelMetadata,
-        ) -> Result<CreateChannelResult, String> {
+        ) -> Result<CreateChannelResult, CreateChannelError> {
             *self.captured_user_id.lock().unwrap() = Some(user_id.to_string());
             Ok(CreateChannelResult {
                 channel_id: "channel-123".to_string(),
@@ -287,8 +309,11 @@ mod tests {
             .add_field(Field::new("channel_type", FieldType::ListSingle).with_value("invalid"));
 
         let result = parse_channel_form(&form);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unsupported channel_type"));
+        assert!(matches!(
+            result,
+            Err(ParseChannelFormError::UnsupportedChannelType(channel_type))
+                if channel_type == "invalid"
+        ));
     }
 
     #[test]
@@ -297,8 +322,10 @@ mod tests {
             DataForm::new(FormType::Submit).add_field(Field::hidden("waddle_id", "test-waddle"));
 
         let result = parse_channel_form(&form);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required field: name"));
+        assert!(matches!(
+            result,
+            Err(ParseChannelFormError::MissingRequiredField("name"))
+        ));
     }
 
     #[tokio::test]
@@ -342,5 +369,47 @@ mod tests {
             deps.captured_user_id.lock().unwrap().as_deref(),
             Some("user-123")
         );
+    }
+
+    struct FailingDeps;
+
+    impl CreateChannelDeps for FailingDeps {
+        async fn create_channel(
+            &self,
+            _user_id: &str,
+            _waddle_id: &str,
+            _metadata: ChannelMetadata,
+        ) -> Result<CreateChannelResult, CreateChannelError> {
+            Err(CreateChannelError::PermissionDenied)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_surfaces_typed_dependency_error_message() {
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::hidden("waddle_id", "test-waddle"))
+            .add_field(Field::text_single("name", "General"));
+
+        let result = handle_create_channel(
+            Arc::new(FailingDeps),
+            test_command_context(
+                Action::Complete,
+                Some("session-123"),
+                Some(form),
+                Some("user-123"),
+            ),
+        )
+        .await;
+
+        match result {
+            CommandResult::Completed { notes, .. } => {
+                assert_eq!(notes.len(), 1);
+                assert_eq!(
+                    notes[0].text,
+                    "You do not have permission to create channels in this waddle"
+                );
+            }
+            _ => panic!("expected completed result"),
+        }
     }
 }

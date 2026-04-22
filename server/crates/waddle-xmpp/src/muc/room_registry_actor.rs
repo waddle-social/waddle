@@ -4,25 +4,37 @@
 //! `MucRoomRegistry` with a single-writer actor that owns the room map and
 //! spawns per-room `RoomActor` instances on demand.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use kameo::message::Context;
 use kameo::Actor;
+use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::room_actor::RoomActor;
 use super::{MucRoom, RoomConfig};
+use crate::metrics;
 
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
 /// All room creation, lookup, and destruction flows through this actor,
 /// so no external synchronisation is needed.
 #[derive(Actor)]
+#[actor(mailbox = bounded(1024))]
 pub struct RoomRegistryActor {
     rooms: HashMap<BareJid, ActorRef<RoomActor>>,
+    poisoned_rooms: HashSet<BareJid>,
     muc_domain: String,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum RoomRegistryError {
+    #[error("room {0} already exists")]
+    RoomAlreadyExists(BareJid),
+    #[error("room actor state for {0} was lost; explicit destroy/recreate is required")]
+    RoomActorStateLost(BareJid),
 }
 
 impl RoomRegistryActor {
@@ -31,6 +43,7 @@ impl RoomRegistryActor {
         info!(domain = %muc_domain, "Creating RoomRegistryActor");
         Self {
             rooms: HashMap::new(),
+            poisoned_rooms: HashSet::new(),
             muc_domain,
         }
     }
@@ -50,6 +63,29 @@ impl RoomRegistryActor {
         self.rooms.insert(room_jid, actor_ref.clone());
         actor_ref
     }
+
+    fn live_room(
+        &mut self,
+        room_jid: &BareJid,
+    ) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
+        if self.poisoned_rooms.contains(room_jid) {
+            return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
+        }
+        if let Some(actor_ref) = self.rooms.get(room_jid) {
+            if actor_ref.is_alive() {
+                return Ok(Some(actor_ref.clone()));
+            }
+            self.rooms.remove(room_jid);
+            self.poisoned_rooms.insert(room_jid.clone());
+            warn!(
+                room = %room_jid,
+                "Detected dead RoomActor; failing fast to avoid silent room state loss"
+            );
+            metrics::record_actor_restart("room_actor", "detected_dead_actor_fail_fast");
+            return Err(RoomRegistryError::RoomActorStateLost(room_jid.clone()));
+        }
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -62,10 +98,10 @@ pub struct GetRoom {
 }
 
 impl kameo::message::Message<GetRoom> for RoomRegistryActor {
-    type Reply = Result<Option<ActorRef<RoomActor>>, String>;
+    type Reply = Result<Option<ActorRef<RoomActor>>, RoomRegistryError>;
 
     async fn handle(&mut self, msg: GetRoom, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        Ok(self.rooms.get(&msg.room_jid).cloned())
+        self.live_room(&msg.room_jid)
     }
 }
 
@@ -78,21 +114,57 @@ pub struct GetOrCreateRoom {
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, String>;
+    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
 
     async fn handle(
         &mut self,
         msg: GetOrCreateRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if let Some(actor_ref) = self.rooms.get(&msg.room_jid) {
+        if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
             debug!(room = %msg.room_jid, "Room already exists");
-            return Ok(actor_ref.clone());
+            return Ok(actor_ref);
         }
 
         info!(room = %msg.room_jid, "Creating new room via GetOrCreateRoom");
-        let actor_ref = self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config);
-        Ok(actor_ref)
+        self.poisoned_rooms.remove(&msg.room_jid);
+        Ok(self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config))
+    }
+}
+
+/// Create an instant room per XEP-0045.
+pub struct CreateInstantRoom {
+    pub room_jid: BareJid,
+}
+
+impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
+    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
+
+    async fn handle(
+        &mut self,
+        msg: CreateInstantRoom,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if let Some(actor_ref) = self.live_room(&msg.room_jid)? {
+            return Ok(actor_ref);
+        }
+
+        let room_local = msg
+            .room_jid
+            .node()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "instant".to_string());
+        let waddle_id = format!("instant:{}", room_local);
+        let channel_id = room_local.clone();
+        let config = RoomConfig {
+            name: room_local,
+            members_only: false,
+            persistent: false,
+            ..RoomConfig::default()
+        };
+
+        self.poisoned_rooms.remove(&msg.room_jid);
+        Ok(self.spawn_room(msg.room_jid, waddle_id, channel_id, config))
     }
 }
 
@@ -105,18 +177,19 @@ pub struct CreateRoom {
 }
 
 impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
-    type Reply = Result<ActorRef<RoomActor>, String>;
+    type Reply = Result<ActorRef<RoomActor>, RoomRegistryError>;
 
     async fn handle(
         &mut self,
         msg: CreateRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.rooms.contains_key(&msg.room_jid) {
-            return Err(format!("Room {} already exists", msg.room_jid));
+        if self.live_room(&msg.room_jid)?.is_some() {
+            return Err(RoomRegistryError::RoomAlreadyExists(msg.room_jid));
         }
 
         info!(room = %msg.room_jid, "Creating new room");
+        self.poisoned_rooms.remove(&msg.room_jid);
         let actor_ref = self.spawn_room(msg.room_jid, msg.waddle_id, msg.channel_id, msg.config);
         Ok(actor_ref)
     }
@@ -137,15 +210,14 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         msg: DestroyRoom,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match self.rooms.remove(&msg.room_jid) {
-            Some(_actor_ref) => {
-                info!(room = %msg.room_jid, "Destroyed room");
-                true
-            }
-            None => {
-                warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
-                false
-            }
+        let removed_room = self.rooms.remove(&msg.room_jid).is_some();
+        let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
+        if removed_room || removed_poison {
+            info!(room = %msg.room_jid, "Destroyed room");
+            true
+        } else {
+            warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
+            false
         }
     }
 }
@@ -156,14 +228,14 @@ pub struct RoomExists {
 }
 
 impl kameo::message::Message<RoomExists> for RoomRegistryActor {
-    type Reply = bool;
+    type Reply = Result<bool, RoomRegistryError>;
 
     async fn handle(
         &mut self,
         msg: RoomExists,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.rooms.contains_key(&msg.room_jid)
+        Ok(self.live_room(&msg.room_jid)?.is_some())
     }
 }
 
@@ -188,14 +260,26 @@ impl kameo::message::Message<IsMucJid> for RoomRegistryActor {
 pub struct ListRooms;
 
 impl kameo::message::Message<ListRooms> for RoomRegistryActor {
-    type Reply = Result<Vec<BareJid>, String>;
+    type Reply = Result<Vec<BareJid>, RoomRegistryError>;
 
     async fn handle(
         &mut self,
         _msg: ListRooms,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        Ok(self.rooms.keys().cloned().collect())
+        let room_ids: Vec<BareJid> = self.rooms.keys().cloned().collect();
+        let mut live_rooms = Vec::with_capacity(room_ids.len());
+        for room_jid in room_ids {
+            match self.live_room(&room_jid) {
+                Ok(Some(_)) => live_rooms.push(room_jid),
+                Ok(None) | Err(RoomRegistryError::RoomActorStateLost(_)) => {
+                    // Ignore stale/dead rooms in discovery listing; per-room
+                    // operations still fail fast with RoomActorStateLost.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(live_rooms)
     }
 }
 
@@ -221,6 +305,7 @@ impl kameo::message::Message<RoomCount> for RoomRegistryActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kameo::error::SendError;
 
     fn test_room_jid(name: &str) -> BareJid {
         format!("{}@muc.example.com", name)
@@ -282,15 +367,18 @@ mod tests {
 
         let result = registry
             .ask(CreateRoom {
-                room_jid: jid,
+                room_jid: jid.clone(),
                 waddle_id: "w-1".to_string(),
                 channel_id: "c-1".to_string(),
                 config: RoomConfig::default(),
             })
             .await;
 
-        // Should fail with HandlerError (duplicate)
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomRegistryError::RoomAlreadyExists(room_jid)))
+                if room_jid == jid
+        ));
     }
 
     #[tokio::test]
@@ -449,5 +537,56 @@ mod tests {
         assert_eq!(rooms.len(), 2);
         assert_eq!(rooms[0].to_string(), "alpha@muc.example.com");
         assert_eq!(rooms[1].to_string(), "beta@muc.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_fails_fast_for_dead_room_until_explicit_destroy() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("restart");
+
+        let first: ActorRef<RoomActor> = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("first get_or_create");
+        first.kill();
+        tokio::task::yield_now().await;
+
+        let result = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(jid)))
+                if jid == room_jid
+        ));
+
+        let destroyed = registry
+            .ask(DestroyRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("destroy poisoned room");
+        assert!(destroyed);
+
+        let recreated: ActorRef<RoomActor> = registry
+            .ask(GetOrCreateRoom {
+                room_jid,
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("recreate room after explicit destroy");
+        assert!(recreated.is_alive());
     }
 }

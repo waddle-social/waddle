@@ -3,11 +3,15 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::Utc;
 use jid::{BareJid, FullJid};
+use kameo::actor::ActorRef;
+use kameo::error::SendError;
+use kameo::mailbox::bounded::BoundedMailbox;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
@@ -39,22 +43,32 @@ use crate::mam::{
     add_stanza_id, build_fin_iq, build_result_messages, is_mam_query, parse_mam_query,
     ArchivedMessage, MamStorage,
 };
-use crate::metrics::{record_muc_occupant_count, record_muc_presence};
+use crate::metrics::{
+    record_actor_mailbox_depth, record_actor_mailbox_latency, record_actor_request_dropped,
+    record_actor_request_timeout, record_muc_occupant_count, record_muc_presence,
+};
+use crate::muc::room_actor::{
+    AdminApplyError, ApplyAdminItems, ApplyOwnerConfig, BuildGroupchatBroadcast,
+    DestroyWithNotifications, GetAdminContext, GetSnapshot, IsOwner, JoinWithAffiliation,
+    LeaveByRealJid, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom, RoomActor,
+};
+use crate::muc::room_registry_actor::{
+    CreateInstantRoom, DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms,
+    RoomRegistryActor, RoomRegistryError,
+};
 use crate::muc::{
     admin::{
         build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
         is_role_change_query, parse_admin_query,
     },
     affiliation::{AffiliationResolver, AppStateAffiliationResolver},
-    build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_leave_presence, build_occupant_presence, build_role_change_presence, is_muc_owner_get,
-    is_muc_owner_set,
+    build_leave_presence, build_occupant_presence, is_muc_owner_get, is_muc_owner_set,
     owner::{
-        apply_config_form, build_config_form, build_config_result, build_destroy_notification,
-        build_owner_set_result, parse_owner_query, OwnerAction,
+        build_config_form, build_config_result, build_owner_set_result, parse_owner_query,
+        OwnerAction,
     },
     parse_muc_presence, MucJoinRequest, MucLeaveRequest, MucMessage, MucPresenceAction,
-    MucPresenceUpdateRequest, MucRoomRegistry,
+    MucPresenceUpdateRequest,
 };
 use crate::parser::ParsedStanza;
 use crate::presence::{
@@ -67,7 +81,15 @@ use crate::pubsub::{
     build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubItem, PubSubRequest,
     PubSubStorage,
 };
-use crate::registry::{ConnectionRegistry, OutboundStanza, SendResult};
+use crate::registry::user_actor::{
+    ClearPresenceState, DrainPendingSubscriptions, GetAvailableResources, GetOtherResources,
+    GetPresenceState, GetResources, IsCarbonsEnabled, QueuePendingSubscription, SetCarbonsEnabled,
+    UpdatePresence, UpdatePresenceState, UserActor,
+};
+use crate::registry::{
+    ConnectionRegistry, GetOrCreateUser, GetUser, OutboundStanza, RegisterUserResource, RemoveUser,
+    SendResult, UnregisterUserResource, UserRegistryActor, UserRegistryError,
+};
 use crate::roster::{
     build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
     is_roster_set, parse_roster_get, parse_roster_set, RosterItem, Subscription,
@@ -114,6 +136,7 @@ use waddle_extensions::{message_has_embed_for_namespaces, ExtensionManager};
 
 /// Size of the outbound message channel buffer.
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
+const ACTOR_MUST_DELIVER_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BareMessageDelivery {
@@ -155,6 +178,7 @@ fn room_config_for_channel(
     }
 }
 
+#[cfg(test)]
 fn reconcile_channel_backed_room(
     room: &mut crate::muc::MucRoom,
     room_jid: &jid::BareJid,
@@ -175,8 +199,43 @@ fn reconcile_channel_backed_room(
     room.channel_id = room_info.channel.id.clone();
     room.config = desired_config;
 }
+
 /// Receiver for outbound stanzas to be sent to this connection.
 type OutboundReceiver = mpsc::Receiver<OutboundStanza>;
+
+/// Typed runtime events emitted by the socket reader adapter.
+#[derive(Debug)]
+enum ReaderAdapterEvent {
+    Parsed(ParsedStanza),
+    StreamClosed,
+    ReadError(XmppError),
+}
+
+impl ReaderAdapterEvent {
+    fn from_read_result(result: Result<Option<ParsedStanza>, XmppError>) -> Self {
+        match result {
+            Ok(Some(parsed)) => Self::Parsed(parsed),
+            Ok(None) => Self::StreamClosed,
+            Err(error) => Self::ReadError(error),
+        }
+    }
+}
+
+/// Typed runtime events consumed by the session actor loop.
+#[derive(Debug)]
+enum SessionRuntimeEvent {
+    Reader(ReaderAdapterEvent),
+    RoutedOutbound(OutboundStanza),
+    RoutedOutboundClosed,
+}
+
+/// Typed runtime effects produced by the session actor loop.
+#[derive(Debug)]
+enum RuntimeEffect {
+    WriteStanza(Stanza),
+    TrackOutboundForSm,
+    StopSession,
+}
 
 /// Actor managing a single XMPP client connection.
 pub struct ConnectionActor<S: AppState, M: MamStorage> {
@@ -194,14 +253,21 @@ pub struct ConnectionActor<S: AppState, M: MamStorage> {
     domain: String,
     /// Shared application state
     app_state: Arc<S>,
-    /// MUC room registry for groupchat message routing
-    room_registry: Arc<MucRoomRegistry>,
+    /// MUC room registry actor for groupchat message routing
+    room_registry: ActorRef<RoomRegistryActor>,
+    /// MUC domain
+    muc_domain: String,
     /// Connection registry for message routing between connections
     connection_registry: Arc<ConnectionRegistry>,
+    /// Registry actor for per-user runtime state.
+    user_registry: ActorRef<UserRegistryActor>,
     /// MAM storage for message archival
     mam_storage: Arc<M>,
     /// Receiver for outbound stanzas (messages routed to this connection)
     outbound_rx: Option<OutboundReceiver>,
+    /// True when this connection has been superseded by a newer registration
+    /// for the same FullJid and should skip shared-state cleanup on shutdown.
+    superseded_by_replacement: bool,
     /// XEP-0198 Stream Management state
     sm_state: StreamManagementState,
     /// XEP-0198 Stream Management session registry (for resumption)
@@ -252,7 +318,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Handle a new incoming connection.
     #[instrument(
         name = "xmpp.connection.handle",
-        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, extension_manager, push_store, push_sender, command_registry),
+        skip(tcp_stream, tls_acceptor, app_state, room_registry, connection_registry, user_registry, mam_storage, isr_token_store, sm_session_registry, pubsub_storage, extension_manager, push_store, push_sender, command_registry),
         fields(peer = %peer_addr)
     )]
     #[allow(clippy::too_many_arguments)]
@@ -262,8 +328,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         tls_acceptor: TlsAcceptor,
         domain: String,
         app_state: Arc<S>,
-        room_registry: Arc<MucRoomRegistry>,
+        room_registry: ActorRef<RoomRegistryActor>,
         connection_registry: Arc<ConnectionRegistry>,
+        user_registry: ActorRef<UserRegistryActor>,
         mam_storage: Arc<M>,
         isr_token_store: SharedIsrTokenStore,
         sm_session_registry: Arc<dyn SmSessionRegistry>,
@@ -283,12 +350,15 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             state: ConnectionState::Initial,
             session: None,
             jid: None,
-            domain,
+            domain: domain.clone(),
             app_state,
             room_registry,
+            muc_domain: format!("muc.{}", domain),
             connection_registry,
+            user_registry,
             mam_storage,
             outbound_rx: None,
+            superseded_by_replacement: false,
             sm_state: StreamManagementState::new(),
             sm_session_registry,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
@@ -367,13 +437,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.jid = Some(full_jid.clone());
         self.state = ConnectionState::Established;
 
-        // Register this connection with the connection registry for message routing.
-        // The returned handle shares the registry entry's carbons flag so we can
-        // toggle per-resource XEP-0280 opt-in from this actor.
-        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
-        self.carbons_enabled = self
-            .connection_registry
-            .register(full_jid.clone(), outbound_tx);
+        let outbound_rx = self
+            .register_connection_transactional(&full_jid, false)
+            .await?;
         self.outbound_rx = Some(outbound_rx);
 
         info!(jid = %full_jid, "Session established and registered");
@@ -415,41 +481,66 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let result = self.process_stanzas().await;
 
         // Store SM session for potential resumption (if enabled and resumable)
-        if let Some(ref jid) = self.jid {
-            // Capture XEP-0280 carbons opt-in so resume restores it instead of
-            // creating a fresh entry with carbons disabled.
-            let carbons_enabled = self.carbons_enabled.load(Ordering::Relaxed);
-            if let Some(detached) = self
-                .sm_state
-                .to_detached_session(jid.clone(), carbons_enabled)
-            {
-                debug!(
-                    stream_id = %detached.stream_id,
-                    jid = %jid,
-                    unacked_count = detached.unacked_stanzas.len(),
-                    "Storing detached SM session for potential resumption"
-                );
-                if let Err(e) = self.sm_session_registry.store_session(detached).await {
-                    warn!(error = %e, "Failed to store SM session for resumption");
+        if !self.superseded_by_replacement {
+            if let (Some(jid), Some(session)) = (self.jid.as_ref(), self.session.as_ref()) {
+                // Capture XEP-0280 carbons opt-in so resume restores it instead of
+                // creating a fresh entry with carbons disabled.
+                let carbons_enabled = self.carbons_enabled.load(Ordering::Relaxed);
+                if let Some(detached) = self.sm_state.to_detached_session(
+                    session.user_id.clone(),
+                    jid.clone(),
+                    carbons_enabled,
+                ) {
+                    debug!(
+                        stream_id = %detached.stream_id,
+                        jid = %jid,
+                        unacked_count = detached.unacked_stanzas.len(),
+                        "Storing detached SM session for potential resumption"
+                    );
+                    if let Err(e) = self.sm_session_registry.store_session(detached).await {
+                        warn!(error = %e, "Failed to store SM session for resumption");
+                    }
                 }
             }
         }
 
         // Unregister this connection on disconnect
-        if let Some(ref jid) = self.jid {
-            self.connection_registry.unregister(jid);
-            if self
-                .connection_registry
-                .get_available_resources_for_user(&jid.to_bare())
-                .is_empty()
-            {
-                if let Some(presence) = self.last_available_presence.as_ref() {
-                    let status = default_presence_status(&presence.statuses);
-                    self.connection_registry
-                        .record_last_activity(&jid.to_bare(), status);
+        if !self.superseded_by_replacement {
+            if let Some(ref jid) = self.jid {
+                let removed = self
+                    .connection_registry
+                    .unregister_if_owner(jid, &self.carbons_enabled)
+                    .is_some();
+                if removed {
+                    self.unregister_user_resource(jid).await;
+                    if self
+                        .available_resources_for_user(&jid.to_bare())
+                        .await
+                        .is_empty()
+                    {
+                        if let Some(presence) = self.last_available_presence.as_ref() {
+                            let status = default_presence_status(&presence.statuses);
+                            self.connection_registry
+                                .record_last_activity(&jid.to_bare(), status);
+                        }
+                    }
+                    debug!(jid = %jid, "Unregistered connection");
+                } else {
+                    if self.connection_registry.is_connected(jid) {
+                        self.superseded_by_replacement = true;
+                        debug!(
+                            jid = %jid,
+                            "Skipped unregister because connection was superseded by a replacement"
+                        );
+                    } else {
+                        self.unregister_user_resource(jid).await;
+                        debug!(
+                            jid = %jid,
+                            "Connection registry slot already removed; cleaned user resource state"
+                        );
+                    }
                 }
             }
-            debug!(jid = %jid, "Unregistered connection");
         }
 
         self.state = ConnectionState::Closed;
@@ -992,28 +1083,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let mut outbound_rx = self.outbound_rx.take();
 
         loop {
-            tokio::select! {
-                // Handle inbound stanzas from the client (using raw parser for SM support)
+            let event = tokio::select! {
                 inbound_result = self.stream.read_parsed_stanza() => {
-                    match inbound_result {
-                        Ok(Some(parsed)) => {
-                            if let Err(e) = self.handle_parsed_stanza(parsed).await {
-                                warn!(error = %e, "Error handling stanza");
-                            }
-                        }
-                        Ok(None) => {
-                            // Stream closed gracefully
-                            debug!("Client closed stream");
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Error reading stanza");
-                            break;
-                        }
-                    }
+                    SessionRuntimeEvent::Reader(ReaderAdapterEvent::from_read_result(inbound_result))
                 }
-
-                // Handle outbound stanzas routed from other connections
                 outbound = async {
                     match outbound_rx.as_mut() {
                         Some(rx) => rx.recv().await,
@@ -1021,29 +1094,78 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     }
                 } => {
                     match outbound {
-                        Some(outbound_stanza) => {
-                            debug!("Received outbound stanza from registry");
-                            // Use CSI-aware sending to buffer non-critical stanzas when client is inactive
-                            if let Err(e) = self.send_stanza_with_csi(outbound_stanza.stanza).await {
-                                warn!(error = %e, "Error writing outbound stanza");
-                                // Don't break - the client might still be readable
-                            }
-                            // Track outbound stanzas for SM acknowledgment
-                            // Note: buffered stanzas are also counted since they'll be sent eventually
-                            if self.sm_state.enabled {
-                                self.sm_state.increment_outbound();
-                            }
-                        }
-                        None => {
-                            // Outbound channel closed - this shouldn't happen during normal operation
-                            debug!("Outbound channel closed");
-                        }
+                        Some(outbound_stanza) => SessionRuntimeEvent::RoutedOutbound(outbound_stanza),
+                        None => SessionRuntimeEvent::RoutedOutboundClosed,
                     }
                 }
+            };
+
+            let effects = self.handle_session_runtime_event(event).await;
+            if !self.apply_runtime_effects(effects).await {
+                break;
             }
         }
 
         Ok(())
+    }
+
+    /// Session actor: consume runtime events and produce typed runtime effects.
+    async fn handle_session_runtime_event(
+        &mut self,
+        event: SessionRuntimeEvent,
+    ) -> Vec<RuntimeEffect> {
+        match event {
+            SessionRuntimeEvent::Reader(reader_event) => match reader_event {
+                ReaderAdapterEvent::Parsed(parsed) => {
+                    if let Err(error) = self.handle_parsed_stanza(parsed).await {
+                        warn!(error = %error, "Error handling stanza");
+                    }
+                    Vec::new()
+                }
+                ReaderAdapterEvent::StreamClosed => {
+                    debug!("Client closed stream");
+                    vec![RuntimeEffect::StopSession]
+                }
+                ReaderAdapterEvent::ReadError(error) => {
+                    warn!(error = %error, "Error reading stanza");
+                    vec![RuntimeEffect::StopSession]
+                }
+            },
+            SessionRuntimeEvent::RoutedOutbound(outbound_stanza) => {
+                debug!("Received outbound stanza from registry");
+                vec![
+                    RuntimeEffect::WriteStanza(outbound_stanza.stanza),
+                    RuntimeEffect::TrackOutboundForSm,
+                ]
+            }
+            SessionRuntimeEvent::RoutedOutboundClosed => {
+                info!("Outbound channel closed; session superseded by replacement");
+                self.superseded_by_replacement = true;
+                vec![RuntimeEffect::StopSession]
+            }
+        }
+    }
+
+    /// Writer actor: apply typed runtime effects in deterministic order.
+    async fn apply_runtime_effects(&mut self, effects: Vec<RuntimeEffect>) -> bool {
+        for effect in effects {
+            match effect {
+                RuntimeEffect::WriteStanza(stanza) => {
+                    if let Err(error) = self.send_stanza_with_csi(stanza).await {
+                        // Don't break - the client might still be readable.
+                        warn!(error = %error, "Error writing outbound stanza");
+                    }
+                }
+                RuntimeEffect::TrackOutboundForSm => {
+                    // Note: buffered stanzas are also counted since they'll be sent eventually.
+                    if self.sm_state.enabled {
+                        self.sm_state.increment_outbound();
+                    }
+                }
+                RuntimeEffect::StopSession => return false,
+            }
+        }
+        true
     }
 
     /// Handle a raw parsed stanza, including SM stanzas.
@@ -1262,60 +1384,117 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 "ISR token validated for instant resumption"
             );
 
-            // Consume the token to prevent reuse
-            self.isr_token_store.consume_token(previd);
+            let Some(sm_stream_id) = isr_token.sm_stream_id.clone() else {
+                warn!(previd = %previd, "ISR token has no SM stream state; cannot resume");
+                self.stream
+                    .send_sm_failed(Some("item-not-found"), None)
+                    .await?;
+                return Ok(());
+            };
 
-            // Restore session state from the ISR token
+            let detached = match self.sm_session_registry.take_session(&sm_stream_id).await {
+                Ok(Some(session)) => session,
+                Ok(None) => {
+                    warn!(stream_id = %sm_stream_id, "ISR token SM session not found in registry");
+                    self.stream
+                        .send_sm_failed(Some("item-not-found"), None)
+                        .await?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(stream_id = %sm_stream_id, error = %error, "ISR token resume lookup failed");
+                    self.stream
+                        .send_sm_failed(Some("internal-server-error"), None)
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+            if let Some(current_session) = self.session.as_ref() {
+                if current_session.user_id != detached.user_id {
+                    let _ = self
+                        .sm_session_registry
+                        .store_session(detached.clone())
+                        .await;
+                    warn!(
+                        current_user = %current_session.user_id,
+                        resumed_user = %detached.user_id,
+                        "Rejecting ISR resume due to authenticated identity mismatch"
+                    );
+                    self.stream
+                        .send_sm_failed(Some("not-authorized"), None)
+                        .await?;
+                    return Ok(());
+                }
+            }
+
+            let stanzas_to_resend = detached.stanzas_to_resend(h);
+            let resent_count = stanzas_to_resend.len();
+
+            let rx = match self
+                .register_connection_transactional(&detached.jid, detached.carbons_enabled)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(error) => {
+                    let _ = self
+                        .sm_session_registry
+                        .store_session(detached.clone())
+                        .await;
+                    self.stream
+                        .send_sm_failed(Some("resource-constraint"), None)
+                        .await?;
+                    warn!(jid = %detached.jid, error = %error, "Failed to register resumed ISR session");
+                    return Ok(());
+                }
+            };
+            self.jid = Some(detached.jid.clone());
             self.session = Some(Session {
-                user_id: isr_token.user_id.clone(),
-                jid: isr_token.jid.clone(),
-                // Use session expiry from somewhere - for now use a long-lived session
-                // In production, this should be looked up from the session store
+                user_id: detached.user_id.clone(),
+                jid: detached.jid.to_bare(),
                 created_at: Utc::now(),
                 expires_at: Utc::now() + chrono::Duration::hours(24),
             });
+            self.sm_state.restore_from_session(&detached);
+            self.sm_state.acknowledge(h);
+            self.outbound_rx = Some(rx);
 
-            // Restore SM state
-            if let Some(sm_stream_id) = &isr_token.sm_stream_id {
-                self.sm_state.enable(sm_stream_id.clone(), true, Some(300));
-                // Restore counters - client's h tells us what they've received
-                // Token's outbound count tells us what we sent before disconnect
-                debug!(
-                    client_h = h,
-                    server_outbound = isr_token.sm_outbound_count,
-                    server_inbound = isr_token.sm_inbound_count,
-                    "Restoring SM counters"
-                );
-            }
+            // Consume the old token after successful state restoration.
+            self.isr_token_store.consume_token(previd);
 
             // Create a new ISR token for the resumed session
-            let new_isr_token = if let Some(ref sm_id) = isr_token.sm_stream_id {
-                self.isr_token_store.create_token_with_sm(
-                    isr_token.user_id.clone(),
-                    isr_token.jid.clone(),
-                    sm_id.clone(),
-                    isr_token.sm_inbound_count,
-                    isr_token.sm_outbound_count,
-                )
-            } else {
-                self.isr_token_store
-                    .create_token(isr_token.user_id.clone(), isr_token.jid.clone())
-            };
+            let new_isr_token = self.isr_token_store.create_token_with_sm(
+                detached.user_id.clone(),
+                detached.jid.to_bare(),
+                detached.stream_id.clone(),
+                detached.inbound_count,
+                detached.outbound_count,
+            );
 
             self.current_isr_token = Some(new_isr_token.token.clone());
 
             // Send resumed response with new ISR token
             self.stream
                 .send_sm_resumed_with_isr(
-                    isr_token.sm_stream_id.as_deref().unwrap_or(previd),
-                    isr_token.sm_inbound_count,
+                    &detached.stream_id,
+                    detached.inbound_count,
                     &new_isr_token.to_xml(),
                 )
                 .await?;
 
+            // Resend unacked stanzas
+            for stanza_xml in stanzas_to_resend {
+                debug!(
+                    stanza_len = stanza_xml.len(),
+                    "Resending unacked stanza after ISR resume"
+                );
+                self.stream.write_raw(&stanza_xml).await?;
+            }
+
             info!(
-                jid = %isr_token.jid,
-                sm_stream_id = ?isr_token.sm_stream_id,
+                jid = %detached.jid,
+                sm_stream_id = %detached.stream_id,
+                resent_count = resent_count,
                 "Stream resumed via ISR token"
             );
 
@@ -1325,39 +1504,60 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Standard SM resumption via session registry (XEP-0198)
         match self.sm_session_registry.take_session(previd).await {
             Ok(Some(session)) => {
+                if let Some(current_session) = self.session.as_ref() {
+                    if current_session.user_id != session.user_id {
+                        let _ = self
+                            .sm_session_registry
+                            .store_session(session.clone())
+                            .await;
+                        warn!(
+                            current_user = %current_session.user_id,
+                            resumed_user = %session.user_id,
+                            "Rejecting SM resume due to authenticated identity mismatch"
+                        );
+                        self.stream
+                            .send_sm_failed(Some("not-authorized"), None)
+                            .await?;
+                        return Ok(());
+                    }
+                }
+
                 info!(
                     stream_id = %previd,
                     jid = %session.jid,
                     "SM session found in registry, resuming"
                 );
 
-                // Restore session from detached state
+                let stanzas_to_resend = session.stanzas_to_resend(h);
+                let resent_count = stanzas_to_resend.len();
+
+                let rx = match self
+                    .register_connection_transactional(&session.jid, session.carbons_enabled)
+                    .await
+                {
+                    Ok(rx) => rx,
+                    Err(error) => {
+                        let _ = self
+                            .sm_session_registry
+                            .store_session(session.clone())
+                            .await;
+                        self.stream
+                            .send_sm_failed(Some("resource-constraint"), None)
+                            .await?;
+                        warn!(jid = %session.jid, error = %error, "Failed to register resumed SM session");
+                        return Ok(());
+                    }
+                };
                 self.jid = Some(session.jid.clone());
                 self.session = Some(Session {
-                    user_id: format!(
-                        "user_id:sm:{}",
-                        session
-                            .jid
-                            .node()
-                            .map(|n| n.to_string())
-                            .unwrap_or_default()
-                    ),
+                    user_id: session.user_id.clone(),
                     jid: session.jid.to_bare(),
                     created_at: Utc::now(),
                     expires_at: Utc::now() + chrono::Duration::hours(24),
                 });
-
-                // Restore SM state
                 self.sm_state.restore_from_session(&session);
-
-                // Get stanzas that need to be resent (client's h tells us what they received)
-                let stanzas_to_resend: Vec<_> = session
-                    .unacked_stanzas
-                    .iter()
-                    .filter(|(seq, _)| *seq > h)
-                    .map(|(_, xml)| xml.clone())
-                    .collect();
-                let resent_count = stanzas_to_resend.len();
+                self.sm_state.acknowledge(h);
+                self.outbound_rx = Some(rx);
 
                 // Send resumed response
                 self.stream
@@ -1378,19 +1578,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     );
                     self.stream.write_raw(&stanza_xml).await?;
                 }
-
-                // Re-register in connection registry with the restored JID.
-                // XEP-0198 §5: `<resumed/>` continues the same stream, so the
-                // pre-detach XEP-0280 carbons opt-in must be preserved —
-                // seed the fresh `ConnectionEntry` with the flag that was
-                // captured when the session detached.
-                let (tx, rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
-                self.carbons_enabled = self.connection_registry.register_with_carbons(
-                    session.jid.clone(),
-                    tx,
-                    session.carbons_enabled,
-                );
-                self.outbound_rx = Some(rx);
 
                 info!(
                     jid = %session.jid,
@@ -1479,7 +1666,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             MessageType::Groupchat => {
                 if let Some(to_jid) = &msg.to {
                     let to_bare = to_jid.to_bare();
-                    if self.room_registry.is_muc_jid(&to_bare) {
+                    if to_bare.domain().as_str() == self.muc_domain {
                         return self.handle_groupchat_message(msg, sender_jid).await;
                     }
 
@@ -1532,14 +1719,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
     }
 
-    fn select_bare_message_targets(
+    async fn select_bare_message_targets(
         &self,
         recipient_bare: &jid::BareJid,
         delivery: BareMessageDelivery,
     ) -> Vec<FullJid> {
         let mut available = self
-            .connection_registry
-            .get_available_resources_for_user(recipient_bare)
+            .available_resources_for_user(recipient_bare)
+            .await
             .into_iter()
             .filter(|(_, priority)| *priority >= 0)
             .collect::<Vec<_>>();
@@ -1582,6 +1769,516 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
     }
 
+    fn record_actor_depth<A>(&self, actor_name: &str, message_class: &str, actor_ref: &ActorRef<A>)
+    where
+        A: kameo::Actor<Mailbox = BoundedMailbox<A>>,
+    {
+        let max_capacity = actor_ref.max_capacity();
+        let remaining_capacity = actor_ref.capacity();
+        let depth = max_capacity.saturating_sub(remaining_capacity);
+        record_actor_mailbox_depth(actor_name, message_class, depth as i64, max_capacity as i64);
+    }
+
+    fn record_actor_send_error_metrics<Msg, ErrT>(
+        &self,
+        actor_name: &str,
+        operation: &str,
+        message_class: &str,
+        error: &SendError<Msg, ErrT>,
+    ) {
+        match error {
+            SendError::MailboxFull(_) => {
+                record_actor_request_dropped(actor_name, operation, message_class, "mailbox_full");
+            }
+            SendError::Timeout(_) => {
+                record_actor_request_timeout(actor_name, operation, message_class);
+            }
+            SendError::ActorNotRunning(_) | SendError::ActorStopped => {
+                record_actor_request_dropped(
+                    actor_name,
+                    operation,
+                    message_class,
+                    "actor_not_running",
+                );
+            }
+            SendError::HandlerError(_) => {}
+        }
+    }
+
+    async fn user_actor(&self, bare_jid: &BareJid) -> Option<ActorRef<UserActor>> {
+        let started = Instant::now();
+        self.record_actor_depth("user_registry", "must_deliver", &self.user_registry);
+        match self
+            .user_registry
+            .ask(GetUser {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+        {
+            Ok(actor) => {
+                record_actor_mailbox_latency(
+                    "user_registry",
+                    "get_user",
+                    "must_deliver",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+                actor
+            }
+            Err(error) => {
+                self.record_actor_send_error_metrics(
+                    "user_registry",
+                    "get_user",
+                    "must_deliver",
+                    &error,
+                );
+                match &error {
+                    SendError::HandlerError(UserRegistryError::UserActorStateLost(_)) => {
+                        warn!(
+                            jid = %bare_jid,
+                            "User actor state lost; explicit cleanup is required before reuse"
+                        );
+                    }
+                    _ => {
+                        warn!(jid = %bare_jid, error = %error, "Failed to query user actor");
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    async fn get_or_create_user_actor(&self, bare_jid: &BareJid) -> Option<ActorRef<UserActor>> {
+        let started = Instant::now();
+        self.record_actor_depth("user_registry", "must_deliver", &self.user_registry);
+        match self
+            .user_registry
+            .ask(GetOrCreateUser {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+        {
+            Ok(actor) => {
+                record_actor_mailbox_latency(
+                    "user_registry",
+                    "get_or_create_user",
+                    "must_deliver",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+                Some(actor)
+            }
+            Err(error) => {
+                self.record_actor_send_error_metrics(
+                    "user_registry",
+                    "get_or_create_user",
+                    "must_deliver",
+                    &error,
+                );
+                match &error {
+                    SendError::HandlerError(UserRegistryError::UserActorStateLost(_)) => {
+                        warn!(
+                            jid = %bare_jid,
+                            "User actor state lost; refusing implicit recreation"
+                        );
+                    }
+                    _ => {
+                        warn!(jid = %bare_jid, error = %error, "Failed to create user actor");
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    async fn register_connection_transactional(
+        &mut self,
+        jid: &FullJid,
+        carbons_enabled: bool,
+    ) -> Result<mpsc::Receiver<OutboundStanza>, XmppError> {
+        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
+        self.register_user_resource(jid, carbons_enabled).await?;
+        let carbons_handle = self.connection_registry.register_with_carbons(
+            jid.clone(),
+            outbound_tx,
+            carbons_enabled,
+        );
+        self.carbons_enabled = carbons_handle;
+        Ok(outbound_rx)
+    }
+
+    async fn register_user_resource(
+        &self,
+        jid: &FullJid,
+        carbons_enabled: bool,
+    ) -> Result<(), XmppError> {
+        for attempt in 1..=2 {
+            let started = Instant::now();
+            self.record_actor_depth("user_registry", "must_deliver", &self.user_registry);
+            let result = self
+                .user_registry
+                .ask(RegisterUserResource {
+                    jid: jid.clone(),
+                    carbons_enabled,
+                })
+                .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+                .await;
+            match result {
+                Ok(()) => {
+                    record_actor_mailbox_latency(
+                        "user_registry",
+                        "register_user_resource",
+                        "must_deliver",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.record_actor_send_error_metrics(
+                        "user_registry",
+                        "register_user_resource",
+                        "must_deliver",
+                        &error,
+                    );
+                    if attempt == 1 {
+                        if let SendError::HandlerError(UserRegistryError::UserActorStateLost(
+                            bare_jid,
+                        )) = &error
+                        {
+                            warn!(
+                                jid = %jid,
+                                bare_jid = %bare_jid,
+                                "Recovering from lost user actor state by removing poisoned entry and retrying"
+                            );
+                            let _ = self
+                                .user_registry
+                                .ask(RemoveUser {
+                                    bare_jid: bare_jid.clone(),
+                                })
+                                .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+                                .await;
+                            continue;
+                        }
+                    }
+                    let detail = match &error {
+                        SendError::HandlerError(UserRegistryError::UserActorStateLost(
+                            bare_jid,
+                        )) => {
+                            format!("user actor state lost for {bare_jid}")
+                        }
+                        SendError::HandlerError(UserRegistryError::UserActorBusy(bare_jid)) => {
+                            format!("user actor busy for {bare_jid}")
+                        }
+                        _ => format!("{error}"),
+                    };
+                    warn!(jid = %jid, error = %error, "Failed to register user resource");
+                    return Err(XmppError::internal(format!(
+                        "failed to register user resource {jid}: {detail}"
+                    )));
+                }
+            }
+        }
+        Err(XmppError::internal(format!(
+            "failed to register user resource {jid}: retry exhausted"
+        )))
+    }
+
+    async fn unregister_user_resource(&self, jid: &FullJid) {
+        const RETRY_LIMIT: usize = 3;
+        for attempt in 1..=RETRY_LIMIT {
+            let started = Instant::now();
+            self.record_actor_depth("user_registry", "must_deliver", &self.user_registry);
+            match self
+                .user_registry
+                .ask(UnregisterUserResource { jid: jid.clone() })
+                .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+                .await
+            {
+                Ok(()) => {
+                    record_actor_mailbox_latency(
+                        "user_registry",
+                        "unregister_user_resource",
+                        "must_deliver",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.record_actor_send_error_metrics(
+                        "user_registry",
+                        "unregister_user_resource",
+                        "must_deliver",
+                        &error,
+                    );
+                    if matches!(
+                        error,
+                        SendError::HandlerError(UserRegistryError::UserActorBusy(_))
+                    ) && attempt < RETRY_LIMIT
+                    {
+                        warn!(
+                            jid = %jid,
+                            attempt = attempt,
+                            "Retrying unregister after transient user actor backpressure"
+                        );
+                        tokio::time::sleep(Duration::from_millis((attempt as u64) * 100)).await;
+                        continue;
+                    }
+
+                    if matches!(
+                        error,
+                        SendError::HandlerError(UserRegistryError::UserActorStateLost(_))
+                    ) {
+                        warn!(
+                            jid = %jid,
+                            "Failed to unregister user resource because user actor state was lost"
+                        );
+                    } else if matches!(
+                        error,
+                        SendError::HandlerError(UserRegistryError::UserActorBusy(_))
+                    ) {
+                        warn!(
+                            jid = %jid,
+                            "Failed to unregister user resource after retries due to transient user actor backpressure"
+                        );
+                        match self
+                            .user_registry
+                            .ask(UnregisterUserResource { jid: jid.clone() })
+                            .await
+                        {
+                            Ok(()) => {
+                                warn!(
+                                    jid = %jid,
+                                    "Unregister eventually succeeded after blocking retry"
+                                );
+                            }
+                            Err(final_error) => {
+                                warn!(
+                                    jid = %jid,
+                                    error = %final_error,
+                                    "Blocking unregister retry failed"
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(jid = %jid, error = %error, "Failed to unregister user resource");
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+        let Some(user_actor) = self.user_actor(bare_jid).await else {
+            return Vec::new();
+        };
+        match user_actor.ask(GetResources).await {
+            Ok(resources) => resources,
+            Err(error) => {
+                warn!(jid = %bare_jid, error = %error, "Failed to get user resources");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn available_resources_for_user(&self, bare_jid: &BareJid) -> Vec<(FullJid, i8)> {
+        let Some(user_actor) = self.user_actor(bare_jid).await else {
+            return Vec::new();
+        };
+        match user_actor.ask(GetAvailableResources).await {
+            Ok(resources) => resources,
+            Err(error) => {
+                warn!(jid = %bare_jid, error = %error, "Failed to get available user resources");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn presence_state_for_resource(
+        &self,
+        jid: &FullJid,
+    ) -> Option<(Option<String>, Option<String>, i8)> {
+        let Some(user_actor) = self.user_actor(&jid.to_bare()).await else {
+            return None;
+        };
+        match user_actor.ask(GetPresenceState { jid: jid.clone() }).await {
+            Ok(state) => state.map(|s| (s.show, s.status, s.priority)),
+            Err(error) => {
+                warn!(jid = %jid, error = %error, "Failed to get presence state");
+                None
+            }
+        }
+    }
+
+    async fn update_presence_for_resource(&self, jid: &FullJid, available: bool, priority: i8) {
+        let Some(user_actor) = self.user_actor(&jid.to_bare()).await else {
+            return;
+        };
+        self.record_actor_depth("user_actor", "must_deliver", &user_actor);
+        match user_actor
+            .ask(UpdatePresence {
+                jid: jid.clone(),
+                available,
+                priority,
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+        {
+            Ok(false) => {
+                warn!(jid = %jid, "Skipping presence update for unknown resource");
+            }
+            Ok(true) => {}
+            Err(error) => {
+                self.record_actor_send_error_metrics(
+                    "user_actor",
+                    "update_presence",
+                    "must_deliver",
+                    &error,
+                );
+                warn!(jid = %jid, error = %error, "Failed to update presence state");
+            }
+        }
+    }
+
+    async fn update_presence_payload_for_resource(
+        &self,
+        jid: &FullJid,
+        show: Option<String>,
+        status: Option<String>,
+        priority: i8,
+    ) {
+        let Some(user_actor) = self.user_actor(&jid.to_bare()).await else {
+            return;
+        };
+        self.record_actor_depth("user_actor", "must_deliver", &user_actor);
+        if let Err(error) = user_actor
+            .ask(UpdatePresenceState {
+                jid: jid.clone(),
+                show,
+                status,
+                priority,
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+        {
+            self.record_actor_send_error_metrics(
+                "user_actor",
+                "update_presence_state",
+                "must_deliver",
+                &error,
+            );
+            warn!(jid = %jid, error = %error, "Failed to update full presence state");
+        }
+    }
+
+    async fn clear_presence_state_for_resource(&self, jid: &FullJid) {
+        let Some(user_actor) = self.user_actor(&jid.to_bare()).await else {
+            return;
+        };
+        self.record_actor_depth("user_actor", "must_deliver", &user_actor);
+        if let Err(error) = user_actor
+            .ask(ClearPresenceState { jid: jid.clone() })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+        {
+            self.record_actor_send_error_metrics(
+                "user_actor",
+                "clear_presence_state",
+                "must_deliver",
+                &error,
+            );
+            warn!(jid = %jid, error = %error, "Failed to clear presence state");
+        }
+    }
+
+    async fn queue_pending_subscription(&self, bare_jid: &BareJid, stanza: Stanza) {
+        let Some(user_actor) = self.get_or_create_user_actor(bare_jid).await else {
+            return;
+        };
+        if let Err(error) = user_actor.ask(QueuePendingSubscription { stanza }).await {
+            warn!(jid = %bare_jid, error = %error, "Failed to queue pending subscription");
+        }
+    }
+
+    async fn drain_pending_subscriptions(&self, bare_jid: &BareJid) -> Vec<Stanza> {
+        let Some(user_actor) = self.user_actor(bare_jid).await else {
+            return Vec::new();
+        };
+        match user_actor.ask(DrainPendingSubscriptions).await {
+            Ok(stanzas) => stanzas,
+            Err(error) => {
+                warn!(jid = %bare_jid, error = %error, "Failed to drain pending subscriptions");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn is_carbons_enabled_for_resource(&self, jid: &FullJid) -> bool {
+        let Some(user_actor) = self.user_actor(&jid.to_bare()).await else {
+            return false;
+        };
+        match user_actor.ask(IsCarbonsEnabled { jid: jid.clone() }).await {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                warn!(jid = %jid, error = %error, "Failed to read carbons state");
+                false
+            }
+        }
+    }
+
+    async fn set_carbons_enabled_for_resource(&self, jid: &FullJid, enabled: bool) {
+        let Some(user_actor) = self.get_or_create_user_actor(&jid.to_bare()).await else {
+            return;
+        };
+        self.record_actor_depth("user_actor", "must_deliver", &user_actor);
+        if let Err(error) = user_actor
+            .ask(SetCarbonsEnabled {
+                jid: jid.clone(),
+                enabled,
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+        {
+            self.record_actor_send_error_metrics(
+                "user_actor",
+                "set_carbons_enabled",
+                "must_deliver",
+                &error,
+            );
+            warn!(jid = %jid, error = %error, "Failed to set carbons state");
+        }
+    }
+
+    async fn other_carbon_resources_for_user(
+        &self,
+        bare_jid: &BareJid,
+        exclude: &FullJid,
+    ) -> Vec<FullJid> {
+        let Some(user_actor) = self.user_actor(bare_jid).await else {
+            return Vec::new();
+        };
+        let resources = match user_actor
+            .ask(GetOtherResources {
+                exclude: exclude.clone(),
+            })
+            .await
+        {
+            Ok(resources) => resources,
+            Err(error) => {
+                warn!(jid = %bare_jid, error = %error, "Failed to read other resources");
+                return Vec::new();
+            }
+        };
+
+        let mut carbon_resources = Vec::new();
+        for resource in resources {
+            if self.is_carbons_enabled_for_resource(&resource).await {
+                carbon_resources.push(resource);
+            }
+        }
+        carbon_resources
+    }
+
     async fn send_message_error(
         &mut self,
         original: &xmpp_parsers::message::Message,
@@ -1619,6 +2316,160 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         self.stream.write_raw(&xml).await
     }
 
+    fn map_room_registry_error<T>(error: SendError<T, RoomRegistryError>) -> XmppError {
+        match error {
+            SendError::HandlerError(RoomRegistryError::RoomAlreadyExists(room_jid)) => {
+                XmppError::conflict(Some(format!("Room {room_jid} already exists")))
+            }
+            SendError::HandlerError(RoomRegistryError::RoomActorStateLost(room_jid)) => {
+                XmppError::service_unavailable(Some(format!(
+                    "Room actor state lost for {room_jid}; destroy/recreate required"
+                )))
+            }
+            SendError::ActorNotRunning(_) => {
+                XmppError::internal("Room registry actor is not running".to_string())
+            }
+            SendError::MailboxFull(_) => {
+                XmppError::internal("Room registry mailbox is full".to_string())
+            }
+            SendError::Timeout(_) => {
+                XmppError::internal("Room registry request timed out".to_string())
+            }
+            _ => XmppError::internal("Room registry actor error".to_string()),
+        }
+    }
+
+    fn map_room_registry_send_error<T, E>(_error: SendError<T, E>) -> XmppError {
+        XmppError::internal("Room registry actor error".to_string())
+    }
+
+    fn map_room_actor_error<T, E>(_error: SendError<T, E>) -> XmppError {
+        XmppError::internal("Room actor error".to_string())
+    }
+
+    async fn is_muc_jid(&self, jid: &BareJid) -> Result<bool, XmppError> {
+        let started = Instant::now();
+        self.record_actor_depth("room_registry", "must_deliver", &self.room_registry);
+        self.room_registry
+            .ask(IsMucJid { jid: jid.clone() })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+            .inspect(|_| {
+                record_actor_mailbox_latency(
+                    "room_registry",
+                    "is_muc_jid",
+                    "must_deliver",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            })
+            .inspect_err(|error| {
+                self.record_actor_send_error_metrics(
+                    "room_registry",
+                    "is_muc_jid",
+                    "must_deliver",
+                    error,
+                );
+            })
+            .map_err(Self::map_room_registry_send_error)
+    }
+
+    async fn get_room_actor(
+        &self,
+        room_jid: &BareJid,
+    ) -> Result<Option<ActorRef<RoomActor>>, XmppError> {
+        let started = Instant::now();
+        self.record_actor_depth("room_registry", "must_deliver", &self.room_registry);
+        self.room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+            .inspect(|_| {
+                record_actor_mailbox_latency(
+                    "room_registry",
+                    "get_room",
+                    "must_deliver",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            })
+            .inspect_err(|error| {
+                self.record_actor_send_error_metrics(
+                    "room_registry",
+                    "get_room",
+                    "must_deliver",
+                    error,
+                );
+            })
+            .map_err(Self::map_room_registry_error)
+    }
+
+    async fn get_or_create_room_actor(
+        &self,
+        room_jid: BareJid,
+        waddle_id: String,
+        channel_id: String,
+        config: crate::muc::RoomConfig,
+    ) -> Result<ActorRef<RoomActor>, XmppError> {
+        let started = Instant::now();
+        self.record_actor_depth("room_registry", "must_deliver", &self.room_registry);
+        self.room_registry
+            .ask(GetOrCreateRoom {
+                room_jid,
+                waddle_id,
+                channel_id,
+                config,
+            })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+            .inspect(|_| {
+                record_actor_mailbox_latency(
+                    "room_registry",
+                    "get_or_create_room",
+                    "must_deliver",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            })
+            .inspect_err(|error| {
+                self.record_actor_send_error_metrics(
+                    "room_registry",
+                    "get_or_create_room",
+                    "must_deliver",
+                    error,
+                );
+            })
+            .map_err(Self::map_room_registry_error)
+    }
+
+    async fn create_instant_room_actor(
+        &self,
+        room_jid: BareJid,
+    ) -> Result<ActorRef<RoomActor>, XmppError> {
+        let started = Instant::now();
+        self.record_actor_depth("room_registry", "must_deliver", &self.room_registry);
+        self.room_registry
+            .ask(CreateInstantRoom { room_jid })
+            .mailbox_timeout(ACTOR_MUST_DELIVER_TIMEOUT)
+            .await
+            .inspect(|_| {
+                record_actor_mailbox_latency(
+                    "room_registry",
+                    "create_instant_room",
+                    "must_deliver",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            })
+            .inspect_err(|error| {
+                self.record_actor_send_error_metrics(
+                    "room_registry",
+                    "create_instant_room",
+                    "must_deliver",
+                    error,
+                );
+            })
+            .map_err(Self::map_room_registry_error)
+    }
+
     /// Handle a groupchat (MUC) message.
     ///
     /// Routes the message to the appropriate MUC room, which broadcasts
@@ -1649,10 +2500,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         // Check if this is a MUC room we manage
-        if !self.room_registry.is_muc_jid(&room_jid) {
+        if !self.is_muc_jid(&room_jid).await? {
             debug!(
                 room = %room_jid,
-                muc_domain = %self.room_registry.muc_domain(),
+                muc_domain = %self.muc_domain,
                 "Message to non-MUC JID"
             );
             return Err(XmppError::item_not_found(Some(format!(
@@ -1661,56 +2512,32 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             ))));
         }
 
-        // Get the room data
-        let room_data = self.room_registry.get_room_data(&room_jid).ok_or_else(|| {
+        let room_actor = self.get_room_actor(&room_jid).await?.ok_or_else(|| {
             debug!(room = %room_jid, "Room not found in registry");
             XmppError::item_not_found(Some(format!("Room {} not found", room_jid)))
         })?;
-
-        // Read the room and broadcast the message using federated routing
-        let room = room_data.read().await;
-
-        // Find the sender's nick in the room and verify permissions
-        let sender_occupant = room.find_occupant_by_real_jid(&sender_jid).ok_or_else(|| {
-            debug!(
-                sender = %sender_jid,
-                room = %room_jid,
-                "Sender is not an occupant of the room"
-            );
-            XmppError::forbidden(Some(format!("You are not an occupant of {}", room_jid)))
-        })?;
-
-        let sender_nick = sender_occupant.nick.clone();
-
-        // Check if sender has permission to speak (XEP-0045: visitors cannot speak in moderated rooms)
-        if room.config.moderated && sender_occupant.role == Role::Visitor {
-            return Err(XmppError::forbidden(Some(
-                "Visitors cannot speak in moderated rooms".to_string(),
-            )));
-        }
-
-        // Use federated broadcast to get messages grouped by delivery target
-        let federated_messages = room.broadcast_message_federated(&sender_nick, &muc_msg.message);
+        let broadcast = room_actor
+            .ask(BuildGroupchatBroadcast {
+                sender_jid: sender_jid.clone(),
+                message: muc_msg.message.clone(),
+            })
+            .await
+            .map_err(|error| match error {
+                SendError::HandlerError(_) => {
+                    XmppError::forbidden(Some(format!("You are not an occupant of {}", room_jid)))
+                }
+                other => Self::map_room_actor_error(other),
+            })?;
+        let sender_nick = broadcast.sender_nick;
+        let federated_messages = broadcast.federated_messages;
 
         // Capture counts before consuming the FederatedMessageSet
         let local_count = federated_messages.local_count();
         let remote_domain_count = federated_messages.remote_domain_count();
         let remote_count = federated_messages.remote_count();
 
-        // XEP-0357: Collect occupant bare JIDs for broadcast mention push (before dropping room lock)
-        let sender_jid_for_filter = sender_jid.clone();
-        let occupant_bare_jids: Vec<String> = room
-            .occupants
-            .values()
-            .flat_map(|o| {
-                room.get_occupant_sessions(&o.nick)
-                    .into_iter()
-                    .filter(|jid| *jid != sender_jid_for_filter)
-            })
-            .map(|jid| jid.to_bare().to_string())
-            .collect();
-
-        drop(room); // Release the read lock before archival and sending
+        // XEP-0357: Collect occupant bare JIDs for broadcast mention push
+        let occupant_bare_jids = broadcast.occupant_bare_jids;
 
         // Archive user-visible room timeline events so refresh and MAM replay stay faithful.
         let archive_id = if should_archive_timeline_message(&muc_msg.message) {
@@ -1767,8 +2594,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             for occupant_bare in occupant_bare_jids
                 .iter()
-                .filter_map(|jid| jid.parse::<jid::BareJid>().ok())
-                .filter(|jid| jid.domain().as_str() == self.domain)
+                .filter_map(|jid: &String| jid.parse::<jid::BareJid>().ok())
+                .filter(|jid: &jid::BareJid| jid.domain().as_str() == self.domain)
             {
                 if let Err(error) = self
                     .app_state
@@ -2090,8 +2917,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // RFC 6121: if a full-JID target is unavailable, only `type='chat'`
             // is rerouted as bare-JID delivery.
             if should_fallback_to_bare && matches!(msg.type_, MessageType::Chat) {
-                let fallback_resources =
-                    self.select_bare_message_targets(&recipient_bare, bare_delivery);
+                let fallback_resources = self
+                    .select_bare_message_targets(&recipient_bare, bare_delivery)
+                    .await;
                 for resource_jid in fallback_resources {
                     let stanza = Stanza::Message(msg_with_from.clone());
                     match self
@@ -2111,8 +2939,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
         } else {
-            let recipient_resources =
-                self.select_bare_message_targets(&recipient_bare, bare_delivery);
+            let recipient_resources = self
+                .select_bare_message_targets(&recipient_bare, bare_delivery)
+                .await;
 
             if recipient_resources.is_empty() {
                 debug!(
@@ -2246,9 +3075,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Route to all connected resources for the recipient
-        let recipient_resources = self
-            .connection_registry
-            .get_resources_for_user(&recipient_bare);
+        let recipient_resources = self.resources_for_user(&recipient_bare).await;
 
         let mut delivered = false;
 
@@ -2326,8 +3153,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             PresenceAction::PresenceUpdate(pres) => {
                 // Continue with MUC/regular presence handling below
                 // Parse the presence to see if it's a MUC action
-                let muc_domain = self.room_registry.muc_domain();
-                match parse_muc_presence(&pres, &sender_jid, muc_domain)? {
+                match parse_muc_presence(&pres, &sender_jid, &self.muc_domain)? {
                     MucPresenceAction::Join(join_req) => {
                         return self.handle_muc_join(join_req).await;
                     }
@@ -2350,7 +3176,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         &self,
         room_jid: &jid::BareJid,
         room_info: &crate::ChannelRoomInfo,
-    ) -> Result<Arc<tokio::sync::RwLock<crate::muc::MucRoom>>, XmppError> {
+    ) -> Result<ActorRef<RoomActor>, XmppError> {
         let channel_type =
             ChannelType::parse(&room_info.channel.channel_type).ok_or_else(|| {
                 XmppError::service_unavailable(Some(format!(
@@ -2358,29 +3184,30 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     room_info.channel.channel_type
                 )))
             })?;
-        self.room_registry.get_or_create_room(
-            room_jid.clone(),
-            room_info.waddle_id.clone(),
-            room_info.channel.id.clone(),
-            room_config_for_channel(&room_info.channel, channel_type),
-        )?;
-
-        let room_data = self.room_registry.get_room_data(room_jid).ok_or_else(|| {
-            XmppError::internal("Failed to get room data after channel materialization".to_string())
-        })?;
-
-        {
-            let mut room = room_data.write().await;
-            reconcile_channel_backed_room(&mut room, room_jid, room_info, channel_type);
-        }
-
-        Ok(room_data)
+        let room_actor = self
+            .get_or_create_room_actor(
+                room_jid.clone(),
+                room_info.waddle_id.clone(),
+                room_info.channel.id.clone(),
+                room_config_for_channel(&room_info.channel, channel_type),
+            )
+            .await?;
+        room_actor
+            .ask(ReconcileChannelBackedRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: room_info.waddle_id.clone(),
+                channel_id: room_info.channel.id.clone(),
+                desired_config: room_config_for_channel(&room_info.channel, channel_type),
+            })
+            .await
+            .map_err(Self::map_room_actor_error)?;
+        Ok(room_actor)
     }
 
     async fn materialize_room_from_channel_metadata(
         &self,
         room_jid: &jid::BareJid,
-    ) -> Result<Option<Arc<tokio::sync::RwLock<crate::muc::MucRoom>>>, XmppError> {
+    ) -> Result<Option<ActorRef<RoomActor>>, XmppError> {
         let Some((waddle_id, channel_id)) = parse_managed_room_jid(room_jid) else {
             return Ok(None);
         };
@@ -2430,7 +3257,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         );
 
         // Check if this is a MUC room we manage
-        if !self.room_registry.is_muc_jid(&join_req.room_jid) {
+        if !self.is_muc_jid(&join_req.room_jid).await? {
             return Err(XmppError::item_not_found(Some(format!(
                 "Room {} not found",
                 join_req.room_jid
@@ -2449,14 +3276,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Get the room data, materialize it from stored channel metadata, or create an instant
         // room if nothing backs this JID.
-        let (room_data, room_created) = match self.room_registry.get_room_data(&join_req.room_jid) {
-            Some(data) => (data, false),
+        let (room_actor, room_created) = match self.get_room_actor(&join_req.room_jid).await? {
+            Some(actor) => (actor, false),
             None => {
-                if let Some(data) = self
+                if let Some(actor) = self
                     .materialize_room_from_channel_metadata(&join_req.room_jid)
                     .await?
                 {
-                    (data, false)
+                    (actor, false)
                 } else {
                     // Block instant room creation for managed channel JIDs
                     // Managed channels must be created via XEP-0050 ad-hoc commands
@@ -2472,29 +3299,21 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         creator = %join_req.sender_jid,
                         "Creating instant room on first join"
                     );
-                    self.room_registry
-                        .create_instant_room(join_req.room_jid.clone())?;
-                    (
-                        self.room_registry
-                            .get_room_data(&join_req.room_jid)
-                            .ok_or_else(|| {
-                                XmppError::internal(
-                                    "Failed to get room data after creation".to_string(),
-                                )
-                            })?,
-                        true,
-                    )
+                    let actor = self
+                        .create_instant_room_actor(join_req.room_jid.clone())
+                        .await?;
+                    (actor, true)
                 }
             }
         };
 
-        // Lock the room for modification
-        let mut room = room_data.write().await;
-
-        // Get room metadata needed for permission resolution
-        let waddle_id = room.waddle_id.clone();
-        let channel_id = room.channel_id.clone();
-        let is_members_only = room.config.members_only;
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .map_err(Self::map_room_actor_error)?
+            .room;
+        let waddle_id = snapshot.waddle_id.clone();
+        let channel_id = snapshot.channel_id.clone();
 
         // Resolve affiliation from Zanzibar permissions before checking join permissions
         let resolver =
@@ -2532,89 +3351,54 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             resolved_affiliation
         };
 
-        // Update the room's affiliation list with the effective affiliation
-        // This ensures the affiliation is persisted for subsequent queries
-        let bare_jid = join_req.sender_jid.to_bare();
-        if effective_affiliation != Affiliation::None {
-            room.update_affiliation_from_resolver(bare_jid.clone(), effective_affiliation);
-            debug!(
-                jid = %bare_jid,
-                affiliation = %effective_affiliation,
-                "Updated room affiliation"
-            );
-        }
-
-        // Check if user is allowed to join (now uses the updated affiliation list)
-        if !room.can_user_join(&bare_jid) {
-            // For members-only rooms, users without membership are denied
-            if is_members_only {
-                return Err(XmppError::registration_required(Some(format!(
+        let join_outcome = room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: join_req.sender_jid.clone(),
+                nick: join_req.nick.clone(),
+                effective_affiliation,
+                local_domain: self.domain.clone(),
+            })
+            .await
+            .map_err(|error| match error {
+                SendError::HandlerError(crate::muc::room_actor::RoomActorError::RoomFull) => {
+                    XmppError::service_unavailable(Some("Room is full".to_string()))
+                }
+                SendError::HandlerError(
+                    crate::muc::room_actor::RoomActorError::NickAlreadyInUse(nick),
+                ) => XmppError::conflict(Some(format!("Nickname {} is already in use", nick))),
+                SendError::HandlerError(
+                    crate::muc::room_actor::RoomActorError::JoinForbidden { members_only: true },
+                ) => XmppError::registration_required(Some(format!(
                     "Room {} is members-only and you do not have membership",
                     join_req.room_jid
-                ))));
-            }
-            return Err(XmppError::forbidden(Some(format!(
-                "You are not allowed to join {}",
-                join_req.room_jid
-            ))));
-        }
-
-        // Check if room is full
-        if room.is_full() {
-            return Err(XmppError::service_unavailable(Some(
-                "Room is full".to_string(),
-            )));
-        }
-
-        let mut is_same_bare_multi_session_join = false;
-
-        // XEP-0045 §7.2.8: same-nick same-bare joins SHOULD be allowed.
-        if let Some(existing) = room.get_occupant(&join_req.nick) {
-            if existing.real_jid != join_req.sender_jid {
-                if existing.real_jid.to_bare() == join_req.sender_jid.to_bare() {
-                    is_same_bare_multi_session_join = true;
-                } else {
-                    return Err(XmppError::conflict(Some(format!(
-                        "Nickname {} is already in use",
-                        join_req.nick
-                    ))));
-                }
-            } else {
-                // User is already in the room with this nick - treat as presence refresh.
-                debug!("User already in room, refreshing presence");
-            }
-        }
-
-        // Get existing occupants before adding the new one (for presence broadcast)
-        let existing_occupants: Vec<(FullJid, String, Affiliation, Role)> = room
-            .occupants
-            .values()
-            .flat_map(|o| {
-                room.get_occupant_sessions(&o.nick)
-                    .into_iter()
-                    .map(move |jid| (jid, o.nick.clone(), o.affiliation, o.role))
-            })
+                ))),
+                SendError::HandlerError(
+                    crate::muc::room_actor::RoomActorError::JoinForbidden {
+                        members_only: false,
+                    },
+                ) => XmppError::forbidden(Some(format!(
+                    "You are not allowed to join {}",
+                    join_req.room_jid
+                ))),
+                SendError::HandlerError(_) => XmppError::forbidden(Some(format!(
+                    "You are not allowed to join {}",
+                    join_req.room_jid
+                ))),
+                other => Self::map_room_actor_error(other),
+            })?;
+        let existing_occupants: Vec<(FullJid, String, Affiliation, Role)> = join_outcome
+            .existing_occupants
+            .into_iter()
+            .map(|o| (o.jid, o.nick, o.affiliation, o.role))
             .collect();
-
-        // Add the occupant to the room (uses affiliation from the updated list)
-        let new_occupant = room.add_occupant_with_affiliation(
-            join_req.sender_jid.clone(),
-            join_req.nick.clone(),
-            Some(self.domain.as_str()),
-        );
-        let new_occupant_affiliation = new_occupant.affiliation;
-        let new_occupant_role = new_occupant.role;
-
-        let occupant_count = room.occupant_count();
-
-        // Build the new occupant's room JID
-        let new_occupant_room_jid = room
+        let new_occupant_affiliation = join_outcome.new_occupant_affiliation;
+        let new_occupant_role = join_outcome.new_occupant_role;
+        let occupant_count = join_outcome.occupant_count;
+        let is_same_bare_multi_session_join = join_outcome.is_same_bare_multi_session_join;
+        let new_occupant_room_jid = join_outcome
             .room_jid
-            .clone()
             .with_resource_str(&join_req.nick)
             .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
-
-        drop(room); // Release the write lock
 
         // Record metrics
         record_muc_presence("join", &join_req.room_jid.to_string());
@@ -2917,7 +3701,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             return Ok(());
         }
 
-        let muc_domain = self.room_registry.muc_domain().to_string();
+        let muc_domain = self.muc_domain.clone();
 
         // Derive nick from JID localpart (e.g., "alice" from "alice@waddle.social/res")
         let nick = full_jid
@@ -3123,59 +3907,39 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing MUC leave request"
         );
 
-        // Get the room data
-        let room_data = self
-            .room_registry
-            .get_room_data(&leave_req.room_jid)
+        let room_actor = self
+            .get_room_actor(&leave_req.room_jid)
+            .await?
             .ok_or_else(|| {
                 XmppError::item_not_found(Some(format!("Room {} not found", leave_req.room_jid)))
             })?;
-
-        // Lock the room for modification
-        let mut room = room_data.write().await;
-
-        // Find the occupant by their real JID (not by nick from the presence, as that could be manipulated)
-        let occupant_nick = room
-            .find_nick_by_real_jid(&leave_req.sender_jid)
-            .map(|s| s.to_owned());
-
-        let nick = match occupant_nick {
-            Some(n) => n,
+        let outcome = room_actor
+            .ask(LeaveByRealJid {
+                sender_jid: leave_req.sender_jid.clone(),
+            })
+            .await
+            .map_err(Self::map_room_actor_error)?;
+        let (
+            nick,
+            affiliation,
+            leaving_room_jid,
+            remaining_occupants,
+            removed_last_session,
+            occupant_count,
+        ) = match outcome {
+            Some(outcome) => (
+                outcome.nick,
+                outcome.affiliation,
+                outcome.leaving_room_jid,
+                outcome.remaining_occupants,
+                outcome.removed_last_session,
+                outcome.occupant_count,
+            ),
             None => {
                 debug!("User not in room, ignoring leave");
                 return Ok(());
             }
         };
-
-        // Get the occupant's info before removal
-        let occupant = room
-            .get_occupant(&nick)
-            .ok_or_else(|| XmppError::internal("Occupant disappeared during leave".to_string()))?;
-        let affiliation = occupant.affiliation;
-
-        // Build the leaving user's room JID
-        let leaving_room_jid = room
-            .room_jid
-            .clone()
-            .with_resource_str(&nick)
-            .map_err(|e| XmppError::internal(format!("Invalid nick as resource: {}", e)))?;
-
-        // Get remaining active sessions (excluding the one leaving).
-        let remaining_occupants: Vec<FullJid> = room
-            .occupants
-            .values()
-            .flat_map(|o| room.get_occupant_sessions(&o.nick))
-            .filter(|jid| *jid != leave_req.sender_jid)
-            .collect();
-
-        // Remove only the leaving resource session. If this was the last
-        // session for the nick, the occupant is removed from the room.
-        let removed_last_session = room
-            .remove_occupant_session(&nick, &leave_req.sender_jid)
-            .unwrap_or(false);
-        let occupant_count = room.occupant_count();
-
-        drop(room); // Release the write lock
 
         // Record metrics
         record_muc_presence("leave", &leave_req.room_jid.to_string());
@@ -3230,7 +3994,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         update_req: MucPresenceUpdateRequest,
         incoming_presence: &xmpp_parsers::presence::Presence,
     ) -> Result<(), XmppError> {
-        let Some(room_data) = self.room_registry.get_room_data(&update_req.room_jid) else {
+        let Some(room_actor) = self.get_room_actor(&update_req.room_jid).await? else {
             debug!(
                 room = %update_req.room_jid,
                 sender = %update_req.sender_jid,
@@ -3247,16 +4011,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 .await;
         };
 
-        let room = room_data.read().await;
-        let sender_occupant = room.find_occupant_by_real_jid(&update_req.sender_jid);
-
-        let Some(sender_occupant) = sender_occupant else {
+        let Some(outcome) = room_actor
+            .ask(PresenceUpdateData {
+                sender_jid: update_req.sender_jid.clone(),
+            })
+            .await
+            .map_err(Self::map_room_actor_error)?
+        else {
             debug!(
                 room = %update_req.room_jid,
                 sender = %update_req.sender_jid,
                 "Sender is not an occupant for MUC presence update, treating as join"
             );
-            drop(room);
             return self
                 .handle_muc_join(MucJoinRequest {
                     room_jid: update_req.room_jid,
@@ -3268,14 +4034,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 .await;
         };
 
-        let sender_nick = sender_occupant.nick.clone();
-        let room_jid = room.room_jid.clone();
-        let recipients: Vec<FullJid> = room
-            .occupants
-            .values()
-            .flat_map(|o| room.get_occupant_sessions(&o.nick))
-            .collect();
-        drop(room);
+        let sender_nick = outcome.sender_nick;
+        let room_jid = outcome.room_jid;
+        let recipients = outcome.recipients;
 
         let from_room_jid = room_jid
             .with_resource_str(&sender_nick)
@@ -3644,7 +4405,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Get all connected resources for the target user
-        let resources = self.connection_registry.get_resources_for_user(&to);
+        let resources = self.resources_for_user(&to).await;
 
         if resources.is_empty() {
             // User exists but is offline: return unavailable presence.
@@ -3660,13 +4421,18 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         } else {
             // User is online - send available presence from each resource
             for resource_jid in resources {
-                let ps = self.connection_registry.get_presence_state(&resource_jid);
+                let ps = self.presence_state_for_resource(&resource_jid).await;
                 let (show, status, priority) = match ps {
-                    Some(ref s) => (s.show.as_deref(), s.status.as_deref(), s.priority),
+                    Some((show, status, priority)) => (show, status, priority),
                     None => (None, None, 0),
                 };
-                let available =
-                    build_available_presence(&resource_jid, &from, show, status, priority);
+                let available = build_available_presence(
+                    &resource_jid,
+                    &from,
+                    show.as_deref(),
+                    status.as_deref(),
+                    priority,
+                );
                 let stanza = Stanza::Presence(available);
                 self.route_stanza_to_bare_jid(&from, stanza).await?;
             }
@@ -3738,9 +4504,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
 
-            let available_targets = self
-                .connection_registry
-                .get_available_resources_for_user(&target_bare);
+            let available_targets = self.available_resources_for_user(&target_bare).await;
             for (target_full, _) in available_targets {
                 // Preserve the original bare-JID 'to' value per RFC 6121.
                 let stanza = Stanza::Presence(pres_clone.clone());
@@ -3752,9 +4516,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // Undirected presence updates the sender availability state.
         let is_available = matches!(pres.type_, xmpp_parsers::presence::Type::None);
         let priority = pres.priority;
-        let _ = self
-            .connection_registry
-            .update_presence(&sender_jid, is_available, priority);
+        self.update_presence_for_resource(&sender_jid, is_available, priority)
+            .await;
 
         // Store full presence state (show/status/priority) for probe responses.
         if is_available {
@@ -3769,12 +4532,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 .to_string()
             });
             let status_str = default_presence_status(&pres.statuses);
-            self.connection_registry.update_presence_state(
-                &sender_jid,
-                show_str,
-                status_str,
-                priority,
-            );
+            self.update_presence_payload_for_resource(&sender_jid, show_str, status_str, priority)
+                .await;
         }
 
         if is_available {
@@ -3790,11 +4549,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         } else if matches!(pres.type_, xmpp_parsers::presence::Type::Unavailable) {
             self.last_available_presence = None;
             // Clear stored presence state so probes don't return stale data.
-            self.connection_registry.clear_presence_state(&sender_jid);
+            self.clear_presence_state_for_resource(&sender_jid).await;
             let status_str = default_presence_status(&pres.statuses);
             if self
-                .connection_registry
-                .get_available_resources_for_user(&sender_bare)
+                .available_resources_for_user(&sender_bare)
+                .await
                 .is_empty()
             {
                 self.connection_registry
@@ -3809,9 +4568,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             .get_presence_subscribers(&sender_bare)
             .await?;
         for subscriber in subscribers {
-            let resources = self
-                .connection_registry
-                .get_available_resources_for_user(&subscriber);
+            let resources = self.available_resources_for_user(&subscriber).await;
             for (resource_jid, _) in resources {
                 let mut routed = pres_clone.clone();
                 routed.to = Some(resource_jid.clone().into());
@@ -3828,21 +4585,16 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
     /// Deliver queued subscription stanzas for a user that just became available.
     async fn deliver_pending_subscription_stanzas(&self, user_bare: &jid::BareJid) {
-        let pending = self
-            .connection_registry
-            .drain_pending_subscription_stanzas(user_bare);
+        let pending = self.drain_pending_subscriptions(user_bare).await;
         if pending.is_empty() {
             return;
         }
 
-        let resources = self
-            .connection_registry
-            .get_available_resources_for_user(user_bare);
+        let resources = self.available_resources_for_user(user_bare).await;
         if resources.is_empty() {
             // User became unavailable again before we could deliver; re-queue stanzas.
             for stanza in pending {
-                self.connection_registry
-                    .queue_pending_subscription_stanza(user_bare, stanza);
+                self.queue_pending_subscription(user_bare, stanza).await;
             }
             return;
         }
@@ -3955,12 +4707,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Get all connected resources for the target.
-        let resources = self.connection_registry.get_resources_for_user(target);
+        let resources = self.resources_for_user(target).await;
 
         if resources.is_empty() {
             if Self::is_queueable_subscription_stanza(&stanza) {
-                self.connection_registry
-                    .queue_pending_subscription_stanza(target, stanza);
+                self.queue_pending_subscription(target, stanza).await;
                 debug!(
                     target = %target,
                     "Queued subscription stanza for offline user"
@@ -4203,7 +4954,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Check if this is a MUC owner IQ (XEP-0045 §10.1-10.2, room config/destroy)
-        let muc_domain = self.room_registry.muc_domain();
+        let muc_domain = self.muc_domain.as_str();
         if (is_muc_owner_get(&iq) || is_muc_owner_set(&iq))
             && iq
                 .to
@@ -4280,11 +5031,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         }
 
         // Online users are known to exist.
-        if !self
-            .connection_registry
-            .get_resources_for_user(bare_jid)
-            .is_empty()
-        {
+        if !self.resources_for_user(bare_jid).await.is_empty() {
             return Ok(true);
         }
 
@@ -4304,7 +5051,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     async fn handle_disco_info_query(&mut self, iq: xmpp_parsers::iq::Iq) -> Result<(), XmppError> {
         let query = parse_disco_info_query(&iq)?;
 
-        let muc_domain = self.room_registry.muc_domain();
+        let muc_domain = self.muc_domain.as_str();
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
@@ -4415,13 +5162,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     .parse()
                     .map_err(|e| XmppError::bad_request(Some(format!("Invalid JID: {}", e))))?;
 
-                let room_data = match self.room_registry.get_room_data(&room_jid) {
-                    Some(data) => data,
+                let room_actor = match self.get_room_actor(&room_jid).await? {
+                    Some(actor) => actor,
                     None => match self
                         .materialize_room_from_channel_metadata(&room_jid)
                         .await?
                     {
-                        Some(data) => data,
+                        Some(actor) => actor,
                         None => {
                             return Err(XmppError::item_not_found(Some(format!(
                                 "Room {} not found",
@@ -4430,7 +5177,11 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                         }
                     },
                 };
-                let room = room_data.read().await;
+                let room = room_actor
+                    .ask(GetSnapshot)
+                    .await
+                    .map_err(Self::map_room_actor_error)?
+                    .room;
                 debug!(room = %room_jid, "disco#info query to MUC room");
                 (
                     vec![Identity::muc_room(Some(&room.config.name))],
@@ -4587,7 +5338,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     ) -> Result<(), XmppError> {
         let query = parse_disco_items_query(&iq)?;
 
-        let muc_domain = self.room_registry.muc_domain();
+        let muc_domain = self.muc_domain.as_str();
         let upload_domain = format!("upload.{}", self.domain);
         let pubsub_domain = format!("pubsub.{}", self.domain);
         let spaces_domain = format!("spaces.{}", self.domain);
@@ -4618,11 +5369,25 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             // Query to MUC domain - return room list
             Some(target) if target == muc_domain => {
                 debug!(domain = %muc_domain, "disco#items query to MUC domain");
-                let room_infos = self.room_registry.list_room_info().await;
-                room_infos
-                    .iter()
-                    .map(|info| DiscoItem::muc_room(&info.room_jid.to_string(), &info.name))
-                    .collect()
+                let room_jids = self
+                    .room_registry
+                    .ask(ListRooms)
+                    .await
+                    .map_err(Self::map_room_registry_error)?;
+                let mut items = Vec::new();
+                for room_jid in room_jids {
+                    if let Some(room_actor) = self.get_room_actor(&room_jid).await? {
+                        let snapshot = room_actor
+                            .ask(GetSnapshot)
+                            .await
+                            .map_err(Self::map_room_actor_error)?;
+                        items.push(DiscoItem::muc_room(
+                            &room_jid.to_string(),
+                            &snapshot.room.config.name,
+                        ));
+                    }
+                }
+                items
             }
             // Query to upload domain - no sub-items
             Some(target) if target == upload_domain => {
@@ -4784,6 +5549,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // only needs eventual visibility; there's no happens-before ordering we
         // depend on with any other memory.
         self.carbons_enabled.store(true, Ordering::Relaxed);
+        if let Some(jid) = self.jid.as_ref() {
+            self.set_carbons_enabled_for_resource(jid, true).await;
+        }
 
         // Send success response
         let response = build_carbons_result(&iq);
@@ -4801,6 +5569,9 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         debug!("Disabling message carbons for connection");
 
         self.carbons_enabled.store(false, Ordering::Relaxed);
+        if let Some(jid) = self.jid.as_ref() {
+            self.set_carbons_enabled_for_resource(jid, false).await;
+        }
 
         // Send success response
         let response = build_carbons_result(&iq);
@@ -4825,7 +5596,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Handle MUC self-ping (XEP-0410): ping to room@muc.domain/nick
         if let Some(to) = &iq.to {
-            let muc_domain = self.room_registry.muc_domain();
+            let muc_domain = self.muc_domain.as_str();
             let target_bare = to.to_bare();
 
             if target_bare.domain().as_str() == muc_domain {
@@ -4833,8 +5604,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     let to_str = iq.from.as_ref().map(|j| j.to_string());
                     let from_str = iq.to.as_ref().map(|j| j.to_string());
 
-                    let room_data = match self.room_registry.get_room_data(&target_bare) {
-                        Some(data) => data,
+                    let room_actor = match self.get_room_actor(&target_bare).await? {
+                        Some(actor) => actor,
                         None => {
                             let error = crate::generate_iq_error(
                                 &iq.id,
@@ -4848,35 +5619,43 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             return Ok(());
                         }
                     };
-
-                    let room = room_data.read().await;
-                    let occupant = match room.get_occupant(nick) {
-                        Some(occupant) => occupant,
-                        None => {
+                    match room_actor
+                        .ask(PingSelfCheck {
+                            nick: nick.to_string(),
+                            sender_jid: sender_jid.clone(),
+                        })
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(SendError::HandlerError(
+                            crate::muc::room_actor::RoomActorError::OccupantNotFound(message),
+                        )) => {
+                            let (condition, error_type, text) =
+                                if message == "Self-ping only allowed for own occupant" {
+                                    (
+                                        crate::StanzaErrorCondition::Forbidden,
+                                        crate::StanzaErrorType::Auth,
+                                        "Self-ping only allowed for own occupant",
+                                    )
+                                } else {
+                                    (
+                                        crate::StanzaErrorCondition::ItemNotFound,
+                                        crate::StanzaErrorType::Cancel,
+                                        "Occupant not found",
+                                    )
+                                };
                             let error = crate::generate_iq_error(
                                 &iq.id,
                                 to_str.as_deref(),
                                 from_str.as_deref(),
-                                crate::StanzaErrorCondition::ItemNotFound,
-                                crate::StanzaErrorType::Cancel,
-                                Some("Occupant not found"),
+                                condition,
+                                error_type,
+                                Some(text),
                             );
                             self.stream.write_raw(&error).await?;
                             return Ok(());
                         }
-                    };
-
-                    if occupant.real_jid != sender_jid {
-                        let error = crate::generate_iq_error(
-                            &iq.id,
-                            to_str.as_deref(),
-                            from_str.as_deref(),
-                            crate::StanzaErrorCondition::Forbidden,
-                            crate::StanzaErrorType::Auth,
-                            Some("Self-ping only allowed for own occupant"),
-                        );
-                        self.stream.write_raw(&error).await?;
-                        return Ok(());
+                        Err(other) => return Err(Self::map_room_actor_error(other)),
                     }
 
                     let response = build_ping_result(&iq);
@@ -4995,8 +5774,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
 
             if !self
-                .connection_registry
-                .get_available_resources_for_user(&target_bare)
+                .available_resources_for_user(&target_bare)
+                .await
                 .is_empty()
             {
                 // User is online → seconds=0
@@ -5401,7 +6180,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         query: &crate::disco::DiscoItemsQuery,
     ) -> Result<Vec<DiscoItem>, XmppError> {
         let spaces_domain = format!("spaces.{}", self.domain);
-        let muc_domain = self.room_registry.muc_domain();
+        let muc_domain = self.muc_domain.as_str();
 
         match query.node.as_deref() {
             // No node: list space nodes (waddles)
@@ -5497,7 +6276,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 item_ids,
             } => {
                 debug!(node = %node, "Spaces pubsub items request");
-                let muc_domain = self.room_registry.muc_domain();
+                let muc_domain = self.muc_domain.as_str();
 
                 // Verify space exists
                 match self.app_state.get_waddle_details(&node).await {
@@ -5833,8 +6612,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         // XEP-0280 §5: only resources that opted in (via `<enable/>`) receive
         // carbon-wrapped copies.
         let other_resources = self
-            .connection_registry
-            .get_other_carbon_resources_for_user(&bare_jid, sender_jid);
+            .other_carbon_resources_for_user(&bare_jid, sender_jid)
+            .await;
 
         if other_resources.is_empty() {
             return;
@@ -5879,8 +6658,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Get all other carbons-opted-in resources for this user (XEP-0280 §5).
         let other_resources = self
-            .connection_registry
-            .get_other_carbon_resources_for_user(&bare_jid, recipient_jid);
+            .other_carbon_resources_for_user(&bare_jid, recipient_jid)
+            .await;
 
         if other_resources.is_empty() {
             return;
@@ -5926,9 +6705,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         delivered_resources: &[FullJid],
     ) {
         // Get all resources for the recipient user
-        let all_resources = self
-            .connection_registry
-            .get_resources_for_user(recipient_bare);
+        let all_resources = self.resources_for_user(recipient_bare).await;
 
         // Filter to resources that didn't receive the original (other devices)
         // In practice, if the message was routed to all resources, we might not need carbons
@@ -5948,12 +6725,14 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
         // Find resources that didn't get the original message and have
         // opted into carbons (XEP-0280 §5: carbons are per-resource opt-in).
-        let other_resources: Vec<&FullJid> = all_resources
-            .iter()
-            .filter(|r| {
-                !delivered_resources.contains(r) && self.connection_registry.is_carbons_enabled(r)
-            })
-            .collect();
+        let mut other_resources: Vec<FullJid> = Vec::new();
+        for resource in all_resources {
+            if !delivered_resources.contains(&resource)
+                && self.is_carbons_enabled_for_resource(&resource).await
+            {
+                other_resources.push(resource);
+            }
+        }
 
         if other_resources.is_empty() {
             return;
@@ -5965,7 +6744,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Sending received carbons to recipient's other resources"
         );
 
-        for resource_jid in other_resources {
+        for resource_jid in &other_resources {
             let carbon = match build_received_carbon(
                 msg,
                 &recipient_bare.to_string(),
@@ -6291,7 +7070,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
     /// Send roster push to all connected resources for an arbitrary bare JID.
     async fn send_roster_push_for_user(&self, bare_jid: &jid::BareJid, item: &RosterItem) {
         // Get all connected resources for this user (including self)
-        let resources = self.connection_registry.get_resources_for_user(bare_jid);
+        let resources = self.resources_for_user(bare_jid).await;
 
         if resources.is_empty() {
             return;
@@ -6648,7 +7427,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        let muc_domain = self.room_registry.muc_domain();
+        let muc_domain = self.muc_domain.as_str();
         let query = match parse_admin_query(&iq, muc_domain) {
             Ok(q) => q,
             Err(e) => {
@@ -6673,14 +7452,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing MUC admin IQ"
         );
 
-        // Get the room
-        let room_data = match self.room_registry.get_room_data(&query.room_jid) {
-            Some(data) => data,
+        let room_actor = match self.get_room_actor(&query.room_jid).await? {
+            Some(actor) => actor,
             None => match self
                 .materialize_room_from_channel_metadata(&query.room_jid)
                 .await?
             {
-                Some(data) => data,
+                Some(actor) => actor,
                 None => {
                     let error = crate::generate_iq_error(
                         &iq.id,
@@ -6695,25 +7473,29 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             },
         };
+        let admin_context = room_actor
+            .ask(GetAdminContext {
+                sender_jid: sender_jid.clone(),
+            })
+            .await
+            .map_err(Self::map_room_actor_error)?;
+        let room = room_actor
+            .ask(GetSnapshot)
+            .await
+            .map_err(Self::map_room_actor_error)?
+            .room;
 
         if query.is_get {
-            // Handle GET - query affiliation or role list
-            let room = room_data.read().await;
-
-            // Check if sender has permission to view affiliations/roles
-            // Per XEP-0045, admins and owners can query affiliation lists
-            // Moderators can query role lists
-            let sender_affiliation = room.get_affiliation(&sender_jid.to_bare());
-            let sender_occupant = room.find_occupant_by_real_jid(&sender_jid);
-            let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
-
             // Check if this is a role query (has role attribute) or affiliation query
             let requested_role = query.items.first().and_then(|item| item.role);
 
             if let Some(role) = requested_role {
                 // Role query - moderators and above can query
-                if sender_role < Role::Moderator
-                    && !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
+                if admin_context.role < Role::Moderator
+                    && !matches!(
+                        admin_context.affiliation,
+                        Affiliation::Owner | Affiliation::Admin
+                    )
                 {
                     let error = crate::generate_iq_error(
                         &iq.id,
@@ -6747,7 +7529,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 );
             } else {
                 // Affiliation query - admins and owners can query
-                if !matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin) {
+                if !matches!(
+                    admin_context.affiliation,
+                    Affiliation::Owner | Affiliation::Admin
+                ) {
                     let error = crate::generate_iq_error(
                         &iq.id,
                         iq.to.as_ref().map(|j| j.to_string()).as_deref(),
@@ -6787,183 +7572,22 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 );
             }
         } else {
-            // Handle SET - modify affiliations or roles
-            let mut room = room_data.write().await;
-
-            // Determine if this is a role change or affiliation change
             let is_role_change = is_role_change_query(&query.items);
-
-            // Check permissions based on operation type
-            let sender_affiliation = room.get_affiliation(&sender_jid.to_bare());
-            let sender_occupant = room.find_occupant_by_real_jid(&sender_jid);
-            let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
-
-            // Collect presence updates to broadcast after processing
-            let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> =
-                Vec::new();
-            // Collect occupants to remove (for kicks and bans)
-            let mut occupants_to_kick: Vec<String> = Vec::new();
-
-            if is_role_change {
-                // Handle role changes (kicks, granting/revoking voice)
-                for item in &query.items {
-                    let target_nick = match &item.nick {
-                        Some(nick) => nick.clone(),
-                        None => continue, // Skip items without nick
-                    };
-
-                    let new_role = match item.role {
-                        Some(role) => role,
-                        None => continue, // Skip items without role
-                    };
-
-                    // Find the target occupant
-                    let target_occupant = match room.get_occupant(&target_nick) {
-                        Some(occ) => occ.clone(),
-                        None => {
-                            let error = crate::generate_iq_error(
-                                &iq.id,
-                                iq.to.as_ref().map(|j| j.to_string()).as_deref(),
-                                iq.from.as_ref().map(|j| j.to_string()).as_deref(),
-                                crate::StanzaErrorCondition::ItemNotFound,
-                                crate::StanzaErrorType::Cancel,
-                                Some(&format!("Occupant '{}' not found in room", target_nick)),
-                            );
-                            self.stream.write_raw(&error).await?;
-                            return Ok(());
-                        }
-                    };
-
-                    // Permission check for role changes
-                    // Per XEP-0045 §8.2-8.5:
-                    // - Moderators can change roles of participants and visitors
-                    // - Admins can change roles of any non-owner
-                    // - Owners can change roles of anyone
-                    let can_modify = match (
-                        sender_affiliation,
-                        sender_role,
-                        target_occupant.affiliation,
-                        new_role,
-                    ) {
-                        // Owners can do anything
-                        (Affiliation::Owner, _, _, _) => true,
-                        // Admins can modify non-owners
-                        (Affiliation::Admin, _, target_aff, _)
-                            if target_aff != Affiliation::Owner =>
-                        {
-                            true
-                        }
-                        // Moderators can modify participants and visitors
-                        (_, Role::Moderator, target_aff, _)
-                            if !matches!(target_aff, Affiliation::Owner | Affiliation::Admin) =>
-                        {
-                            true
-                        }
-                        _ => false,
-                    };
-
-                    if !can_modify {
-                        let error = crate::generate_iq_error(
-                            &iq.id,
-                            iq.to.as_ref().map(|j| j.to_string()).as_deref(),
-                            iq.from.as_ref().map(|j| j.to_string()).as_deref(),
-                            crate::StanzaErrorCondition::NotAllowed,
-                            crate::StanzaErrorType::Cancel,
-                            Some("You don't have permission to change this user's role"),
-                        );
-                        self.stream.write_raw(&error).await?;
-                        return Ok(());
-                    }
-
-                    // Build the room JID with the target's nick
-                    let from_room_jid = match query.room_jid.with_resource_str(&target_nick) {
-                        Ok(jid) => jid,
-                        Err(_) => continue,
-                    };
-
-                    if new_role == Role::None {
-                        // This is a kick operation
-                        debug!(
-                            room = %query.room_jid,
-                            target = %target_nick,
-                            actor = %sender_jid.to_bare(),
-                            reason = ?item.reason,
-                            "Kicking occupant"
-                        );
-
-                        // Build kick presence for all occupants
-                        for (nick, occupant) in room.occupants.iter() {
-                            let is_self = nick == &target_nick;
-                            let presence = build_kick_presence(
-                                &from_room_jid,
-                                &occupant.real_jid,
-                                target_occupant.affiliation,
-                                is_self,
-                                item.reason.as_deref(),
-                                Some(&sender_jid.to_bare()),
-                            );
-                            presence_updates.push((occupant.real_jid.clone(), presence));
-                        }
-
-                        occupants_to_kick.push(target_nick);
-                    } else {
-                        // Role change (voice grant/revoke, moderator grant/revoke)
-                        debug!(
-                            room = %query.room_jid,
-                            target = %target_nick,
-                            old_role = ?target_occupant.role,
-                            new_role = ?new_role,
-                            "Changing occupant role"
-                        );
-
-                        // Update occupant's role
-                        if let Some(occ) = room.occupants.get_mut(&target_nick) {
-                            occ.role = new_role;
-                        }
-
-                        // Build role change presence for all occupants
-                        for (nick, occupant) in room.occupants.iter() {
-                            let is_self = nick == &target_nick;
-                            let presence = build_role_change_presence(
-                                &from_room_jid,
-                                &occupant.real_jid,
-                                target_occupant.affiliation,
-                                new_role,
-                                is_self,
-                                None,
-                            );
-                            presence_updates.push((occupant.real_jid.clone(), presence));
-                        }
-                    }
-                }
-            } else {
-                // Handle affiliation changes
-                for item in &query.items {
-                    let target_jid = match &item.jid {
-                        Some(jid) => jid.clone(),
-                        None => continue, // Skip items without JID
-                    };
-
-                    let new_affiliation = match item.affiliation {
-                        Some(aff) => aff,
-                        None => continue, // Skip items without affiliation
-                    };
-
-                    // Permission check: who can set what affiliation
-                    // Per XEP-0045 §10.6:
-                    // - Only owners can grant/revoke owner status
-                    // - Owners and admins can grant/revoke admin/member status
-                    // - Owners and admins can ban (outcast) users
+            for item in &query.items {
+                let Some(new_affiliation) = item.affiliation else {
+                    continue;
+                };
+                if !is_role_change {
                     let can_modify = match new_affiliation {
-                        Affiliation::Owner => sender_affiliation == Affiliation::Owner,
+                        Affiliation::Owner => admin_context.affiliation == Affiliation::Owner,
                         Affiliation::Admin
                         | Affiliation::Member
                         | Affiliation::None
-                        | Affiliation::Outcast => {
-                            matches!(sender_affiliation, Affiliation::Owner | Affiliation::Admin)
-                        }
+                        | Affiliation::Outcast => matches!(
+                            admin_context.affiliation,
+                            Affiliation::Owner | Affiliation::Admin
+                        ),
                     };
-
                     if !can_modify {
                         let error = crate::generate_iq_error(
                             &iq.id,
@@ -6971,114 +7595,36 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                             iq.from.as_ref().map(|j| j.to_string()).as_deref(),
                             crate::StanzaErrorCondition::Forbidden,
                             crate::StanzaErrorType::Auth,
-                            Some(&format!(
-                                "You don't have permission to set {} affiliation",
-                                crate::muc::admin::affiliation_to_str(new_affiliation)
-                            )),
+                            Some("You don't have permission to set affiliation"),
                         );
                         self.stream.write_raw(&error).await?;
                         return Ok(());
                     }
-
-                    // Cannot demote the last owner
-                    if new_affiliation != Affiliation::Owner {
-                        let target_current_affiliation = room.get_affiliation(&target_jid);
-                        if target_current_affiliation == Affiliation::Owner {
-                            let owners = room.get_jids_by_affiliation(Affiliation::Owner);
-                            if owners.len() == 1 && owners.contains(&target_jid) {
-                                let error = crate::generate_iq_error(
-                                    &iq.id,
-                                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
-                                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
-                                    crate::StanzaErrorCondition::Conflict,
-                                    crate::StanzaErrorType::Cancel,
-                                    Some("Cannot remove the last owner from a room"),
-                                );
-                                self.stream.write_raw(&error).await?;
-                                return Ok(());
-                            }
-                        }
-                    }
-
-                    // Set the affiliation
-                    let change = room.set_affiliation(target_jid.clone(), new_affiliation);
-
-                    if let Some(change) = change {
-                        debug!(
-                            room = %query.room_jid,
-                            target = %target_jid,
-                            old_affiliation = ?change.old_affiliation,
-                            new_affiliation = ?change.new_affiliation,
-                            "Affiliation changed"
-                        );
-
-                        // Find occupant with this JID if they are in the room
-                        let affected_occupant = room
-                            .occupants
-                            .values()
-                            .find(|o| o.real_jid.to_bare() == target_jid)
-                            .cloned();
-
-                        if let Some(occupant) = affected_occupant {
-                            let from_room_jid =
-                                match query.room_jid.with_resource_str(&occupant.nick) {
-                                    Ok(jid) => jid,
-                                    Err(_) => continue,
-                                };
-
-                            if new_affiliation == Affiliation::Outcast {
-                                // Ban - kick the user and send ban presence
-                                debug!(
-                                    room = %query.room_jid,
-                                    target = %occupant.nick,
-                                    actor = %sender_jid.to_bare(),
-                                    reason = ?item.reason,
-                                    "Banning occupant"
-                                );
-
-                                // Build ban presence for all occupants
-                                for (nick, occ) in room.occupants.iter() {
-                                    let is_self = nick == &occupant.nick;
-                                    let presence = build_ban_presence(
-                                        &from_room_jid,
-                                        &occ.real_jid,
-                                        is_self,
-                                        item.reason.as_deref(),
-                                        Some(&sender_jid.to_bare()),
-                                    );
-                                    presence_updates.push((occ.real_jid.clone(), presence));
-                                }
-
-                                occupants_to_kick.push(occupant.nick.clone());
-                            } else {
-                                // Regular affiliation change - send presence update
-                                for (nick, occ) in room.occupants.iter() {
-                                    let is_self = nick == &occupant.nick;
-                                    let presence = build_affiliation_change_presence(
-                                        &from_room_jid,
-                                        &occ.real_jid,
-                                        new_affiliation,
-                                        occupant.role,
-                                        is_self,
-                                        None,
-                                    );
-                                    presence_updates.push((occ.real_jid.clone(), presence));
-                                }
-                            }
-                        }
-                    }
                 }
             }
-
-            // Remove kicked/banned occupants from the room
-            for nick in occupants_to_kick {
-                room.remove_occupant(&nick);
-            }
-
-            // Drop the lock before sending presence updates
-            drop(room);
-
-            // Send all presence updates
+            let presence_updates = room_actor
+                .ask(ApplyAdminItems {
+                    sender_jid: sender_jid.clone(),
+                    sender_affiliation: admin_context.affiliation,
+                    sender_role: admin_context.role,
+                    items: query.items.clone(),
+                })
+                .await
+                .map_err(|error| match error {
+                    SendError::HandlerError(AdminApplyError::OccupantNotFound(nick)) => {
+                        XmppError::item_not_found(Some(format!(
+                            "Occupant '{}' not found in room",
+                            nick
+                        )))
+                    }
+                    SendError::HandlerError(AdminApplyError::CannotRemoveLastOwner) => {
+                        XmppError::conflict(Some("Cannot remove the last owner from a room".into()))
+                    }
+                    SendError::HandlerError(AdminApplyError::PermissionDenied(reason)) => {
+                        XmppError::not_allowed(Some(reason))
+                    }
+                    other => Self::map_room_actor_error(other),
+                })?;
             for (to_jid, presence) in presence_updates {
                 match self
                     .connection_registry
@@ -7094,7 +7640,6 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                 }
             }
 
-            // Send success response
             let response = build_admin_set_result(&query.iq_id, &query.room_jid, &query.from);
             self.stream.write_stanza(&Stanza::Iq(response)).await?;
 
@@ -7130,7 +7675,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             iq.from = Some(sender_jid.clone().into());
         }
 
-        let muc_domain = self.room_registry.muc_domain();
+        let muc_domain = self.muc_domain.as_str();
         let query = match parse_owner_query(&iq, muc_domain) {
             Ok(q) => q,
             Err(e) => {
@@ -7154,9 +7699,8 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             "Processing MUC owner IQ"
         );
 
-        // Get the room
-        let room_data = match self.room_registry.get_room_data(&query.room_jid) {
-            Some(data) => data,
+        let room_actor = match self.get_room_actor(&query.room_jid).await? {
+            Some(actor) => actor,
             None => {
                 let error = crate::generate_iq_error(
                     &iq.id,
@@ -7171,28 +7715,33 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         };
 
-        // Check if sender is a room owner
+        if !room_actor
+            .ask(IsOwner {
+                jid: sender_jid.to_bare(),
+            })
+            .await
+            .map_err(Self::map_room_actor_error)?
         {
-            let room = room_data.read().await;
-            let sender_affiliation = room.get_affiliation(&sender_jid.to_bare());
-            if sender_affiliation != Affiliation::Owner {
-                let error = crate::generate_iq_error(
-                    &iq.id,
-                    iq.to.as_ref().map(|j| j.to_string()).as_deref(),
-                    iq.from.as_ref().map(|j| j.to_string()).as_deref(),
-                    crate::StanzaErrorCondition::Forbidden,
-                    crate::StanzaErrorType::Auth,
-                    Some("Only room owners can perform owner operations"),
-                );
-                self.stream.write_raw(&error).await?;
-                return Ok(());
-            }
+            let error = crate::generate_iq_error(
+                &iq.id,
+                iq.to.as_ref().map(|j| j.to_string()).as_deref(),
+                iq.from.as_ref().map(|j| j.to_string()).as_deref(),
+                crate::StanzaErrorCondition::Forbidden,
+                crate::StanzaErrorType::Auth,
+                Some("Only room owners can perform owner operations"),
+            );
+            self.stream.write_raw(&error).await?;
+            return Ok(());
         }
 
         match query.action {
             OwnerAction::GetConfig => {
                 // Return room configuration form
-                let room = room_data.read().await;
+                let room = room_actor
+                    .ask(GetSnapshot)
+                    .await
+                    .map_err(Self::map_room_actor_error)?
+                    .room;
                 let config_form = build_config_form(&room);
                 let response =
                     build_config_result(&query.iq_id, &query.room_jid, &query.from, config_form);
@@ -7206,18 +7755,20 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
 
             OwnerAction::SetConfig(form_data) => {
                 // Update room configuration
-                {
-                    let mut room = room_data.write().await;
-                    apply_config_form(&mut room.config, &form_data);
+                room_actor
+                    .ask(ApplyOwnerConfig {
+                        form_data: form_data.clone(),
+                    })
+                    .await
+                    .map_err(Self::map_room_actor_error)?;
 
-                    debug!(
-                        room = %query.room_jid,
-                        name = ?form_data.name,
-                        persistent = ?form_data.persistent,
-                        members_only = ?form_data.members_only,
-                        "Room configuration updated"
-                    );
-                }
+                debug!(
+                    room = %query.room_jid,
+                    name = ?form_data.name,
+                    persistent = ?form_data.persistent,
+                    members_only = ?form_data.members_only,
+                    "Room configuration updated"
+                );
 
                 // Send success response
                 let response = build_owner_set_result(&query.iq_id, &query.room_jid, &query.from);
@@ -7230,34 +7781,13 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
 
             OwnerAction::Destroy(destroy_request) => {
-                // Destroy the room
-                let mut presence_updates: Vec<(jid::FullJid, xmpp_parsers::presence::Presence)> =
-                    Vec::new();
-
-                {
-                    let room = room_data.read().await;
-
-                    debug!(
-                        room = %query.room_jid,
-                        occupant_count = room.occupants.len(),
-                        reason = ?destroy_request.reason,
-                        alternate = ?destroy_request.alternate_venue,
-                        "Destroying room"
-                    );
-
-                    // Build destroy notifications for all occupants
-                    for (nick, occupant) in room.occupants.iter() {
-                        let is_self = occupant.real_jid == sender_jid;
-                        let presence = build_destroy_notification(
-                            &query.room_jid,
-                            nick,
-                            &occupant.real_jid,
-                            &destroy_request,
-                            is_self,
-                        );
-                        presence_updates.push((occupant.real_jid.clone(), presence));
-                    }
-                }
+                let presence_updates = room_actor
+                    .ask(DestroyWithNotifications {
+                        sender_jid: sender_jid.clone(),
+                        request: destroy_request.clone(),
+                    })
+                    .await
+                    .map_err(Self::map_room_actor_error)?;
 
                 // Send destroy notifications to all occupants
                 for (to_jid, presence) in presence_updates {
@@ -7275,8 +7805,12 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
                     }
                 }
 
-                // Remove the room from the registry
-                self.room_registry.destroy_room(&query.room_jid);
+                self.room_registry
+                    .ask(DestroyRoom {
+                        room_jid: query.room_jid.clone(),
+                    })
+                    .await
+                    .map_err(Self::map_room_registry_send_error)?;
 
                 // Send success response
                 let response = build_owner_set_result(&query.iq_id, &query.room_jid, &query.from);
@@ -7580,7 +8114,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let bare_jid = sender_jid.to_bare();
 
         // Get all connected resources for this user
-        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
+        let resources = self.resources_for_user(&bare_jid).await;
 
         if resources.is_empty() {
             return;
@@ -7628,7 +8162,7 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
         let bare_jid = sender_jid.to_bare();
 
         // Get all connected resources for this user
-        let resources = self.connection_registry.get_resources_for_user(&bare_jid);
+        let resources = self.resources_for_user(&bare_jid).await;
 
         if resources.is_empty() {
             return;
@@ -8169,7 +8703,10 @@ mod tests {
     use super::reconcile_channel_backed_room;
     use super::resolves_to_disallowed_ip;
     use super::validate_push_endpoint;
+    use super::ReaderAdapterEvent;
     use crate::muc::{MucRoom, RoomConfig};
+    use crate::parser::ParsedStanza;
+    use crate::XmppError;
     use crate::{ChannelInfo, ChannelRoomInfo, ChannelType};
 
     #[test]
@@ -8281,5 +8818,26 @@ mod tests {
     #[test]
     fn rejects_unresolvable_push_host() {
         assert!(resolves_to_disallowed_ip("nonexistent.invalid"));
+    }
+
+    #[test]
+    fn reader_adapter_maps_some_parsed_to_parsed_event() {
+        let event = ReaderAdapterEvent::from_read_result(Ok(Some(ParsedStanza::StreamEnd)));
+        assert!(matches!(
+            event,
+            ReaderAdapterEvent::Parsed(ParsedStanza::StreamEnd)
+        ));
+    }
+
+    #[test]
+    fn reader_adapter_maps_none_to_stream_closed_event() {
+        let event = ReaderAdapterEvent::from_read_result(Ok(None));
+        assert!(matches!(event, ReaderAdapterEvent::StreamClosed));
+    }
+
+    #[test]
+    fn reader_adapter_maps_error_to_read_error_event() {
+        let event = ReaderAdapterEvent::from_read_result(Err(XmppError::internal("read-failed")));
+        assert!(matches!(event, ReaderAdapterEvent::ReadError(_)));
     }
 }

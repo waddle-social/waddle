@@ -12,16 +12,45 @@ use waddle_xmpp::{Session as XmppSession, XmppError};
 use crate::auth::{
     jid_to_localpart, localpart_to_jid, NativeUserStore, RegisterRequest, SessionManager,
 };
-use crate::db::actor::DbActor;
-use crate::db::{Database, DatabasePool, MigrationRunner};
+use crate::db::actor::{DbActor, DbExecute, DbQuery, DbQueryOne, GetDatabase};
+use crate::db::{row_value, Database, DatabaseError, DatabasePool, MigrationRunner, ValueExt};
 use crate::permissions::{
     Object, ObjectType, PermissionService, Relation, Subject, SubjectType, Tuple,
 };
-use crate::server::routes::channels::get_channel_from_db;
-use crate::server::routes::channels::list_channels_from_db as list_channels_for_waddle_from_db;
-use crate::server::routes::waddles::list_user_waddles as list_user_waddles_from_db;
 use crate::vcard::VCardStore;
 use kameo::actor::ActorRef;
+
+#[derive(Clone)]
+struct WaddleDbService {
+    db_pool: Arc<DatabasePool>,
+}
+
+impl WaddleDbService {
+    fn new(db_pool: Arc<DatabasePool>) -> Self {
+        Self { db_pool }
+    }
+
+    async fn actor_for_waddle(&self, waddle_id: &str) -> Result<ActorRef<DbActor>, XmppError> {
+        self.db_pool.get_waddle_actor(waddle_id).await.map_err(|e| {
+            warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle database actor");
+            XmppError::internal(format!("Failed to access waddle database: {}", e))
+        })
+    }
+
+    async fn actor_for_waddle_with_migrations(
+        &self,
+        waddle_id: &str,
+    ) -> Result<ActorRef<DbActor>, XmppError> {
+        let actor = self.actor_for_waddle(waddle_id).await?;
+        let runner = MigrationRunner::waddle();
+        if let Ok(db) = actor.ask(GetDatabase).await {
+            if let Err(e) = runner.run(&db).await {
+                warn!(waddle_id = %waddle_id, error = %e, "Failed to run waddle DB migrations");
+            }
+        }
+        Ok(actor)
+    }
+}
 
 /// XMPP application state that bridges to waddle-server services.
 ///
@@ -42,10 +71,10 @@ pub struct XmppAppState {
     native_user_store: NativeUserStore,
     /// vCard store for XEP-0054 vcard-temp
     vcard_store: VCardStore,
-    /// Database for upload slots and other direct DB operations
-    db: Arc<Database>,
-    /// Database pool for per-waddle database access (auto-join enumeration)
-    db_pool: Option<Arc<DatabasePool>>,
+    /// Global database actor for runtime repository access.
+    global_db_actor: ActorRef<DbActor>,
+    /// Waddle database service for per-waddle actor access.
+    waddle_db_service: Option<WaddleDbService>,
     /// Shared XEP-0430 inbox projection storage.
     inbox_storage: Option<Arc<dyn InboxStorage>>,
 }
@@ -64,7 +93,7 @@ impl XmppAppState {
         db_actor: ActorRef<DbActor>,
         encryption_key: Option<&[u8]>,
     ) -> Self {
-        let session_manager = SessionManager::new(db_actor, encryption_key);
+        let session_manager = SessionManager::new(db_actor.clone(), encryption_key);
         let permission_service = PermissionService::new(Arc::clone(&db));
         let native_user_store = NativeUserStore::new(Arc::clone(&db));
         let vcard_store = VCardStore::new(Arc::clone(&db));
@@ -75,8 +104,8 @@ impl XmppAppState {
             permission_service,
             native_user_store,
             vcard_store,
-            db,
-            db_pool: None,
+            global_db_actor: db_actor,
+            waddle_db_service: None,
             inbox_storage: None,
         }
     }
@@ -86,7 +115,7 @@ impl XmppAppState {
     /// This enables auto-join channel enumeration by providing access
     /// to per-waddle SQLite databases.
     pub fn with_db_pool(mut self, db_pool: Arc<DatabasePool>) -> Self {
-        self.db_pool = Some(db_pool);
+        self.waddle_db_service = Some(WaddleDbService::new(db_pool));
         self
     }
 
@@ -112,6 +141,13 @@ impl XmppAppState {
         Subject::parse(subject).map_err(|e| {
             XmppError::internal(format!("Invalid subject format '{}': {}", subject, e))
         })
+    }
+
+    async fn global_database(&self) -> Result<Database, XmppError> {
+        self.global_db_actor
+            .ask(GetDatabase)
+            .await
+            .map_err(|e| XmppError::internal(format!("Failed to access global database: {}", e)))
     }
 }
 
@@ -510,35 +546,28 @@ impl waddle_xmpp::AppState for XmppAppState {
             return Ok(None);
         };
 
-        let conn = self.db.guard().await.map_err(|e| {
-            warn!(jid = %jid, error = %e, "Failed to acquire DB connection for avatar lookup");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
-
-        let mut rows = conn
-            .query(
-                "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1",
-                libsql::params![localpart.clone()],
-            )
+        let row = self
+            .global_db_actor
+            .ask(DbQueryOne {
+                sql: "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
+                params: vec![libsql::Value::from(localpart.clone())],
+            })
             .await
             .map_err(|e| {
                 warn!(jid = %jid, error = %e, "avatar_url query failed");
-                XmppError::internal(format!("Database error: {}", e))
+                XmppError::internal(format!("Database actor error: {}", e))
             })?;
-
-        let row = rows.next().await.map_err(|e| {
-            warn!(jid = %jid, error = %e, "avatar_url row read failed");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
 
         let Some(row) = row else {
             return Ok(None);
         };
 
-        let url: Option<String> = row.get::<Option<String>>(0).map_err(|e| {
-            warn!(jid = %jid, error = %e, "avatar_url column decode failed");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+        let url = row_value(&row, 0)
+            .and_then(|value| value.as_optional_string())
+            .map_err(|e| {
+                warn!(jid = %jid, error = %e, "avatar_url column decode failed");
+                XmppError::internal(format!("Database error: {}", e))
+            })?;
 
         Ok(url.filter(|s| !s.is_empty()))
     }
@@ -596,24 +625,23 @@ impl waddle_xmpp::AppState for XmppAppState {
         let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
 
         // Store the slot in the database
-        let conn = self.db.guard().await.map_err(|e| {
-            warn!(error = %e, "Failed to connect to database for upload slot");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
-        conn.execute(
-            "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-            libsql::params![
-                slot_id.clone(),
-                requester_jid.to_string(),
-                safe_filename.clone(),
-                size as i64,
-                effective_type.clone(),
-                expires_at.to_rfc3339(),
-            ],
-        ).await.map_err(|e| {
-            warn!(error = %e, "Failed to create upload slot in database");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+        self.global_db_actor
+            .ask(DbExecute {
+                sql: "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)".to_string(),
+                params: vec![
+                    libsql::Value::from(slot_id.clone()),
+                    libsql::Value::from(requester_jid.to_string()),
+                    libsql::Value::from(safe_filename.clone()),
+                    libsql::Value::from(size as i64),
+                    libsql::Value::from(effective_type.clone()),
+                    libsql::Value::from(expires_at.to_rfc3339()),
+                ],
+            })
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "Failed to create upload slot in database");
+                XmppError::internal(format!("Database actor error: {}", e))
+            })?;
 
         debug!(
             slot_id = %slot_id,
@@ -651,8 +679,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, "Getting roster");
 
-        // Clone the Database to create a DatabaseRosterStorage
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         let rows = storage.get_roster(user_jid).await.map_err(|e| {
             warn!(jid = %user_jid, error = %e, "Failed to get roster");
@@ -681,7 +709,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(user = %user_jid, contact = %contact_jid, "Getting roster item");
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         let row = storage.get_roster_item(user_jid, contact_jid).await.map_err(|e| {
             warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to get roster item");
@@ -707,7 +736,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(user = %user_jid, contact = %item.jid, "Setting roster item");
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         let row = roster_item_to_row(item);
         let is_new = storage.set_roster_item(user_jid, &row).await.map_err(|e| {
@@ -732,7 +762,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(user = %user_jid, contact = %contact_jid, "Removing roster item");
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         storage.remove_roster_item(user_jid, contact_jid).await.map_err(|e| {
             warn!(user = %user_jid, contact = %contact_jid, error = %e, "Failed to remove roster item");
@@ -749,7 +780,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, "Getting roster version");
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         storage.get_roster_version(user_jid).await.map_err(|e| {
             warn!(jid = %user_jid, error = %e, "Failed to get roster version");
@@ -775,7 +807,8 @@ impl waddle_xmpp::AppState for XmppAppState {
             "Updating roster subscription"
         );
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         let subscription_str = subscription.as_str();
         let ask_str = ask.map(|a| a.as_str());
@@ -808,7 +841,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, "Getting presence subscribers");
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         let jid_strings = storage
             .get_presence_subscribers(user_jid)
@@ -839,7 +873,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, "Getting presence subscriptions");
 
-        let storage = DatabaseRosterStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseRosterStorage::new(db);
 
         let jid_strings = storage
             .get_presence_subscriptions(user_jid)
@@ -871,7 +906,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, "Getting blocklist");
 
-        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseBlockingStorage::new(db);
 
         storage.get_blocklist(user_jid).await.map_err(|e| {
             warn!(jid = %user_jid, error = %e, "Failed to get blocklist");
@@ -889,7 +925,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(user = %user_jid, blocked = %blocked_jid, "Checking if JID is blocked");
 
-        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseBlockingStorage::new(db);
 
         storage.is_blocked(user_jid, blocked_jid).await.map_err(|e| {
             warn!(user = %user_jid, blocked = %blocked_jid, error = %e, "Failed to check if blocked");
@@ -907,7 +944,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, count = blocked_jids.len(), "Adding blocks");
 
-        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseBlockingStorage::new(db);
 
         storage
             .add_blocks(user_jid, blocked_jids)
@@ -928,7 +966,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, count = blocked_jids.len(), "Removing blocks");
 
-        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseBlockingStorage::new(db);
 
         storage
             .remove_blocks(user_jid, blocked_jids)
@@ -945,7 +984,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
         debug!(jid = %user_jid, "Removing all blocks");
 
-        let storage = DatabaseBlockingStorage::new((*self.db).clone());
+        let db = self.global_database().await?;
+        let storage = DatabaseBlockingStorage::new(db);
 
         storage.remove_all_blocks(user_jid).await.map_err(|e| {
             warn!(jid = %user_jid, error = %e, "Failed to remove all blocks");
@@ -965,33 +1005,29 @@ impl waddle_xmpp::AppState for XmppAppState {
     ) -> Result<Option<String>, XmppError> {
         debug!(jid = %jid, namespace = %namespace, "Getting private XML");
 
-        let query = "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?";
-        let params = libsql::params![jid.to_string(), namespace.to_string()];
-
-        let conn = self
-            .db
-            .guard()
+        let row = self
+            .global_db_actor
+            .ask(DbQueryOne {
+                sql: "SELECT xml_content FROM private_xml_storage WHERE jid = ? AND namespace = ?"
+                    .to_string(),
+                params: vec![
+                    libsql::Value::from(jid.to_string()),
+                    libsql::Value::from(namespace.to_string()),
+                ],
+            })
             .await
-            .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-        let mut rows = conn.query(query, params).await.map_err(|e| {
-            warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
-        let result = match rows
-            .next()
-            .await
-            .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?
-        {
-            Some(row) => {
-                let xml: String = row
-                    .get(0)
-                    .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-                Some(xml)
-            }
-            None => None,
-        };
+            .map_err(|e| {
+                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to get private XML");
+                XmppError::internal(format!("Database actor error: {}", e))
+            })?;
 
-        Ok(result)
+        match row {
+            Some(values) => row_value(&values, 0)
+                .and_then(|value| value.as_string())
+                .map(Some)
+                .map_err(|e| XmppError::internal(format!("Database error: {}", e))),
+            None => Ok(None),
+        }
     }
 
     /// Store/update private XML data for a user by namespace.
@@ -1003,22 +1039,20 @@ impl waddle_xmpp::AppState for XmppAppState {
     ) -> Result<(), XmppError> {
         debug!(jid = %jid, namespace = %namespace, "Setting private XML");
 
-        let query = "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))";
-        let params = libsql::params![
-            jid.to_string(),
-            namespace.to_string(),
-            xml_content.to_string()
-        ];
-
-        let conn = self
-            .db
-            .guard()
+        self.global_db_actor
+            .ask(DbExecute {
+                sql: "INSERT OR REPLACE INTO private_xml_storage (jid, namespace, xml_content, updated_at) VALUES (?, ?, ?, datetime('now'))".to_string(),
+                params: vec![
+                    libsql::Value::from(jid.to_string()),
+                    libsql::Value::from(namespace.to_string()),
+                    libsql::Value::from(xml_content.to_string()),
+                ],
+            })
             .await
-            .map_err(|e| XmppError::internal(format!("Database error: {}", e)))?;
-        conn.execute(query, params).await.map_err(|e| {
-            warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
-            XmppError::internal(format!("Database error: {}", e))
-        })?;
+            .map_err(|e| {
+                warn!(jid = %jid, namespace = %namespace, error = %e, "Failed to set private XML");
+                XmppError::internal(format!("Database actor error: {}", e))
+            })?;
 
         Ok(())
     }
@@ -1103,24 +1137,49 @@ impl waddle_xmpp::AppState for XmppAppState {
     ) -> Result<Vec<waddle_xmpp::WaddleInfo>, XmppError> {
         debug!(user_id = %user_id, "Listing user waddles for auto-join");
 
-        // Reuse shared query helper from waddles routes to avoid SQL duplication.
         const PAGE_SIZE: usize = 200;
         let mut offset = 0usize;
         let mut result = Vec::new();
 
         loop {
-            let page = list_user_waddles_from_db(self.db.as_ref(), user_id, PAGE_SIZE, offset)
+            let rows = self
+                .global_db_actor
+                .ask(DbQuery {
+                    sql: r#"
+                        SELECT w.id, w.name
+                        FROM waddles w
+                        JOIN waddle_members wm ON w.id = wm.waddle_id
+                        WHERE wm.user_id = ?
+                        ORDER BY w.created_at DESC
+                        LIMIT ? OFFSET ?
+                    "#
+                    .to_string(),
+                    params: vec![
+                        libsql::Value::from(user_id.to_string()),
+                        libsql::Value::from(PAGE_SIZE as i64),
+                        libsql::Value::from(offset as i64),
+                    ],
+                })
                 .await
                 .map_err(|e| {
                     warn!(user_id = %user_id, error = %e, "Failed to list user waddles");
                     XmppError::internal(format!("Failed to list user waddles: {}", e))
                 })?;
 
-            let page_len = page.len();
-            result.extend(page.into_iter().map(|w| waddle_xmpp::WaddleInfo {
-                id: w.id,
-                name: w.name,
-            }));
+            let page_len = rows.len();
+            for row in rows {
+                let id = row_value(&row, 0)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse waddle id: {}", e))
+                    })?;
+                let name = row_value(&row, 1)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse waddle name: {}", e))
+                    })?;
+                result.push(waddle_xmpp::WaddleInfo { id, name });
+            }
 
             if page_len < PAGE_SIZE {
                 break;
@@ -1139,42 +1198,63 @@ impl waddle_xmpp::AppState for XmppAppState {
     ) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
         debug!(waddle_id = %waddle_id, "Listing waddle channels for auto-join");
 
-        let db_pool = self.db_pool.as_ref().ok_or_else(|| {
+        let waddle_db_service = self.waddle_db_service.as_ref().ok_or_else(|| {
             warn!("Database pool not configured for auto-join channel enumeration");
             XmppError::internal("Database pool not configured".to_string())
         })?;
 
-        let waddle_db = db_pool.get_waddle_db(waddle_id).await.map_err(|e| {
-            warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle database");
-            XmppError::internal(format!("Failed to access waddle database: {}", e))
-        })?;
+        let actor = waddle_db_service
+            .actor_for_waddle_with_migrations(waddle_id)
+            .await?;
 
-        // Ensure migrations are run on the waddle DB
-        let runner = MigrationRunner::waddle();
-        if let Err(e) = runner.run(&waddle_db).await {
-            warn!(waddle_id = %waddle_id, error = %e, "Failed to run waddle DB migrations");
-            // Continue anyway - table may already exist
-        }
-
-        // Reuse shared query helper from channels routes to avoid SQL duplication.
         const PAGE_SIZE: usize = 200;
         let mut offset = 0usize;
         let mut result = Vec::new();
 
         loop {
-            let page = list_channels_for_waddle_from_db(&waddle_db, waddle_id, PAGE_SIZE, offset)
+            let rows = actor
+                .ask(DbQuery {
+                    sql: r#"
+                        SELECT id, name, channel_type
+                        FROM channels
+                        ORDER BY position ASC, created_at ASC
+                        LIMIT ? OFFSET ?
+                    "#
+                    .to_string(),
+                    params: vec![
+                        libsql::Value::from(PAGE_SIZE as i64),
+                        libsql::Value::from(offset as i64),
+                    ],
+                })
                 .await
                 .map_err(|e| {
                     warn!(waddle_id = %waddle_id, error = %e, "Failed to list channels");
                     XmppError::internal(format!("Failed to list channels: {}", e))
                 })?;
 
-            let page_len = page.len();
-            result.extend(page.into_iter().map(|c| waddle_xmpp::ChannelInfo {
-                id: c.id,
-                name: c.name,
-                channel_type: c.channel_type,
-            }));
+            let page_len = rows.len();
+            for row in rows {
+                let id = row_value(&row, 0)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse channel id: {}", e))
+                    })?;
+                let name = row_value(&row, 1)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse channel name: {}", e))
+                    })?;
+                let channel_type = row_value(&row, 2)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse channel type: {}", e))
+                    })?;
+                result.push(waddle_xmpp::ChannelInfo {
+                    id,
+                    name,
+                    channel_type,
+                });
+            }
 
             if page_len < PAGE_SIZE {
                 break;
@@ -1198,40 +1278,66 @@ impl waddle_xmpp::AppState for XmppAppState {
             "Looking up channel-backed room metadata"
         );
 
-        let Some(db_pool) = self.db_pool.as_ref() else {
+        let Some(waddle_db_service) = self.waddle_db_service.as_ref() else {
             debug!("Database pool not configured for channel room lookup");
             return Ok(None);
         };
 
-        let waddle_db = match db_pool.get_waddle_db(waddle_id).await {
-            Ok(db) => db,
+        let actor = match waddle_db_service
+            .actor_for_waddle_with_migrations(waddle_id)
+            .await
+        {
+            Ok(actor) => actor,
             Err(e) => {
-                warn!(waddle_id = %waddle_id, error = %e, "Failed to open waddle database");
+                warn!(waddle_id = %waddle_id, error = %e, "Failed to open waddle database actor");
                 return Ok(None);
             }
         };
 
-        let runner = MigrationRunner::waddle();
-        if let Err(e) = runner.run(&waddle_db).await {
-            warn!(waddle_id = %waddle_id, error = %e, "Failed to run waddle DB migrations");
-        }
-
-        match get_channel_from_db(&waddle_db, waddle_id, channel_id).await {
-            Ok(Some(channel)) => Ok(Some(waddle_xmpp::ChannelRoomInfo {
-                waddle_id: waddle_id.to_string(),
-                channel: waddle_xmpp::ChannelInfo {
-                    id: channel.id,
-                    name: channel.name,
-                    channel_type: channel.channel_type,
-                },
-            })),
+        match actor
+            .ask(DbQueryOne {
+                sql: r#"
+                    SELECT id, name, channel_type
+                    FROM channels
+                    WHERE id = ?
+                "#
+                .to_string(),
+                params: vec![libsql::Value::from(channel_id.to_string())],
+            })
+            .await
+        {
+            Ok(Some(row)) => {
+                let id = row_value(&row, 0)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse channel id: {}", e))
+                    })?;
+                let name = row_value(&row, 1)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse channel name: {}", e))
+                    })?;
+                let channel_type = row_value(&row, 2)
+                    .and_then(|value| value.as_string())
+                    .map_err(|e| {
+                        XmppError::internal(format!("Failed to parse channel type: {}", e))
+                    })?;
+                Ok(Some(waddle_xmpp::ChannelRoomInfo {
+                    waddle_id: waddle_id.to_string(),
+                    channel: waddle_xmpp::ChannelInfo {
+                        id,
+                        name,
+                        channel_type,
+                    },
+                }))
+            }
             Ok(None) => Ok(None),
             Err(e) => {
                 warn!(
                     waddle_id = %waddle_id,
                     channel_id = %channel_id,
                     error = %e,
-                    "Failed to read channel from waddle database"
+                    "Failed to query channel from waddle database actor"
                 );
                 Ok(None)
             }
@@ -1249,23 +1355,66 @@ impl waddle_xmpp::AppState for XmppAppState {
     ) -> Result<Option<waddle_xmpp::WaddleDetails>, XmppError> {
         debug!(waddle_id = %waddle_id, "Getting waddle details for spaces service");
 
-        use crate::server::routes::waddles::get_waddle_by_id as get_waddle_by_id_from_db;
-        let row = get_waddle_by_id_from_db(self.db.as_ref(), waddle_id)
+        let row = self
+            .global_db_actor
+            .ask(DbQueryOne {
+                sql: r#"
+                    SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+                    FROM waddles w
+                    JOIN users u ON w.owner_id = u.id
+                    WHERE w.id = ?
+                "#
+                .to_string(),
+                params: vec![libsql::Value::from(waddle_id.to_string())],
+            })
             .await
             .map_err(|e| {
                 warn!(waddle_id = %waddle_id, error = %e, "Failed to get waddle details");
                 XmppError::internal(format!("Failed to get waddle details: {}", e))
             })?;
 
-        Ok(row.map(|w| waddle_xmpp::WaddleDetails {
-            id: w.id,
-            name: w.name,
-            description: w.description,
-            owner_id: w.owner_user_id,
-            icon_url: w.icon_url,
-            is_public: w.is_public,
-            created_at: w.created_at,
-        }))
+        Ok(row
+            .map(|row| -> Result<_, XmppError> {
+                Ok(waddle_xmpp::WaddleDetails {
+                    id: row_value(&row, 0)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle id: {}", e))
+                        })?,
+                    name: row_value(&row, 1)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle name: {}", e))
+                        })?,
+                    description: row_value(&row, 2)
+                        .and_then(|value| value.as_optional_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!(
+                                "Failed to parse waddle description: {}",
+                                e
+                            ))
+                        })?,
+                    owner_id: row_value(&row, 3)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle owner: {}", e))
+                        })?,
+                    icon_url: row_value(&row, 4)
+                        .and_then(|value| value.as_optional_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle icon: {}", e))
+                        })?,
+                    is_public: row_value(&row, 5).and_then(value_as_bool).map_err(|e| {
+                        XmppError::internal(format!("Failed to parse waddle visibility: {}", e))
+                    })?,
+                    created_at: row_value(&row, 6)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle created_at: {}", e))
+                        })?,
+                })
+            })
+            .transpose()?)
     }
 
     /// Get detailed information about all waddles a user belongs to.
@@ -1280,23 +1429,72 @@ impl waddle_xmpp::AppState for XmppAppState {
         let mut result = Vec::new();
 
         loop {
-            let page = list_user_waddles_from_db(self.db.as_ref(), user_id, PAGE_SIZE, offset)
+            let rows = self
+                .global_db_actor
+                .ask(DbQuery {
+                    sql: r#"
+                        SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+                        FROM waddles w
+                        JOIN users u ON w.owner_id = u.id
+                        JOIN waddle_members wm ON w.id = wm.waddle_id
+                        WHERE wm.user_id = ?
+                        ORDER BY w.created_at DESC
+                        LIMIT ? OFFSET ?
+                    "#
+                    .to_string(),
+                    params: vec![
+                        libsql::Value::from(user_id.to_string()),
+                        libsql::Value::from(PAGE_SIZE as i64),
+                        libsql::Value::from(offset as i64),
+                    ],
+                })
                 .await
                 .map_err(|e| {
                     warn!(user_id = %user_id, error = %e, "Failed to list user waddles with details");
                     XmppError::internal(format!("Failed to list user waddles: {}", e))
                 })?;
 
-            let page_len = page.len();
-            result.extend(page.into_iter().map(|w| waddle_xmpp::WaddleDetails {
-                id: w.id,
-                name: w.name,
-                description: w.description,
-                owner_id: w.owner_user_id,
-                icon_url: w.icon_url,
-                is_public: w.is_public,
-                created_at: w.created_at,
-            }));
+            let page_len = rows.len();
+            for row in rows {
+                result.push(waddle_xmpp::WaddleDetails {
+                    id: row_value(&row, 0)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle id: {}", e))
+                        })?,
+                    name: row_value(&row, 1)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle name: {}", e))
+                        })?,
+                    description: row_value(&row, 2)
+                        .and_then(|value| value.as_optional_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!(
+                                "Failed to parse waddle description: {}",
+                                e
+                            ))
+                        })?,
+                    owner_id: row_value(&row, 3)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle owner: {}", e))
+                        })?,
+                    icon_url: row_value(&row, 4)
+                        .and_then(|value| value.as_optional_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle icon: {}", e))
+                        })?,
+                    is_public: row_value(&row, 5).and_then(value_as_bool).map_err(|e| {
+                        XmppError::internal(format!("Failed to parse waddle visibility: {}", e))
+                    })?,
+                    created_at: row_value(&row, 6)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle created_at: {}", e))
+                        })?,
+                });
+            }
 
             if page_len < PAGE_SIZE {
                 break;
@@ -1320,32 +1518,86 @@ impl waddle_xmpp::AppState for XmppAppState {
             "Listing all waddles for spaces service"
         );
 
-        use crate::server::routes::waddles::list_all_waddles_from_db;
-        let rows = list_all_waddles_from_db(self.db.as_ref(), limit, offset)
+        let rows = self
+            .global_db_actor
+            .ask(DbQuery {
+                sql: r#"
+                    SELECT w.id, w.name, w.description, u.id as owner_user_id, w.icon_url, w.is_public, w.created_at
+                    FROM waddles w
+                    JOIN users u ON w.owner_id = u.id
+                    ORDER BY w.created_at DESC
+                    LIMIT ? OFFSET ?
+                "#
+                .to_string(),
+                params: vec![
+                    libsql::Value::from(limit as i64),
+                    libsql::Value::from(offset as i64),
+                ],
+            })
             .await
             .map_err(|e| {
                 warn!(error = %e, "Failed to list all waddles");
                 XmppError::internal(format!("Failed to list all waddles: {}", e))
             })?;
 
-        Ok(rows
-            .into_iter()
-            .map(|w| waddle_xmpp::WaddleDetails {
-                id: w.id,
-                name: w.name,
-                description: w.description,
-                owner_id: w.owner_user_id,
-                icon_url: w.icon_url,
-                is_public: w.is_public,
-                created_at: w.created_at,
+        rows.into_iter()
+            .map(|row| {
+                Ok(waddle_xmpp::WaddleDetails {
+                    id: row_value(&row, 0)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle id: {}", e))
+                        })?,
+                    name: row_value(&row, 1)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle name: {}", e))
+                        })?,
+                    description: row_value(&row, 2)
+                        .and_then(|value| value.as_optional_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!(
+                                "Failed to parse waddle description: {}",
+                                e
+                            ))
+                        })?,
+                    owner_id: row_value(&row, 3)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle owner: {}", e))
+                        })?,
+                    icon_url: row_value(&row, 4)
+                        .and_then(|value| value.as_optional_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle icon: {}", e))
+                        })?,
+                    is_public: row_value(&row, 5).and_then(value_as_bool).map_err(|e| {
+                        XmppError::internal(format!("Failed to parse waddle visibility: {}", e))
+                    })?,
+                    created_at: row_value(&row, 6)
+                        .and_then(|value| value.as_string())
+                        .map_err(|e| {
+                            XmppError::internal(format!("Failed to parse waddle created_at: {}", e))
+                        })?,
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
 // =========================================================================
 // Roster Conversion Helpers
 // =========================================================================
+
+fn value_as_bool(value: &libsql::Value) -> Result<bool, DatabaseError> {
+    match value {
+        libsql::Value::Integer(v) => Ok(*v != 0),
+        other => Err(DatabaseError::QueryFailed(format!(
+            "expected integer boolean, got {:?}",
+            other
+        ))),
+    }
+}
 
 /// Convert a database roster item row to a waddle_xmpp RosterItem.
 fn row_to_roster_item(
@@ -1399,7 +1651,8 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
         user_id: &str,
         waddle_id: &str,
         metadata: waddle_xmpp::commands::ChannelMetadata,
-    ) -> Result<waddle_xmpp::commands::CreateChannelResult, String> {
+    ) -> Result<waddle_xmpp::commands::CreateChannelResult, waddle_xmpp::commands::CreateChannelError>
+    {
         use tracing::error;
 
         // Check permission
@@ -1414,45 +1667,52 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
             .unwrap_or(false);
 
         if !can_create {
-            return Err("You do not have permission to create channels in this waddle".to_string());
+            return Err(waddle_xmpp::commands::CreateChannelError::PermissionDenied);
         }
 
         // Get waddle database
-        let db_pool = match &self.db_pool {
-            Some(pool) => pool,
-            None => return Err("Database pool not available".to_string()),
+        let waddle_db_service = match &self.waddle_db_service {
+            Some(service) => service,
+            None => return Err(waddle_xmpp::commands::CreateChannelError::DatabasePoolUnavailable),
         };
 
-        let waddle_db = db_pool
-            .get_waddle_db(waddle_id)
+        let waddle_db_actor = waddle_db_service
+            .actor_for_waddle_with_migrations(waddle_id)
             .await
-            .map_err(|e| format!("Failed to access waddle database: {}", e))?;
+            .map_err(|e| {
+                waddle_xmpp::commands::CreateChannelError::WaddleDatabaseAccessFailed(e.to_string())
+            })?;
 
         // Generate channel ID
         let channel_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
-        // Insert channel into database
-        let conn = waddle_db.guard().await.map_err(|e| e.to_string())?;
-        conn.execute(
-            r#"
-                INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-            libsql::params![
-                channel_id.as_str(),
-                metadata.name.as_str(),
-                metadata.description.as_deref(),
-                metadata.channel_type.as_str(),
-                metadata.position,
-                0_i32, // not default
-                now.as_str(),
-                now.as_str()
-            ],
-        )
-        .await
-        .map_err(|e| format!("Failed to insert channel: {}", e))?;
-        drop(conn);
+        waddle_db_actor
+            .ask(DbExecute {
+                sql: r#"
+                    INSERT INTO channels (id, name, description, channel_type, position, is_default, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                "#
+                .to_string(),
+                params: vec![
+                    libsql::Value::from(channel_id.as_str()),
+                    libsql::Value::from(metadata.name.as_str()),
+                    metadata
+                        .description
+                        .as_deref()
+                        .map(libsql::Value::from)
+                        .unwrap_or(libsql::Value::Null),
+                    libsql::Value::from(metadata.channel_type.as_str()),
+                    libsql::Value::from(metadata.position as i64),
+                    libsql::Value::from(0_i64),
+                    libsql::Value::from(now.as_str()),
+                    libsql::Value::from(now.as_str()),
+                ],
+            })
+            .await
+            .map_err(|e| {
+                waddle_xmpp::commands::CreateChannelError::DatabaseConnectionFailed(e.to_string())
+            })?;
 
         // Create permission tuple: channel#parent@waddle
         let parent_tuple = Tuple::new(
@@ -1468,15 +1728,17 @@ impl waddle_xmpp::commands::CreateChannelDeps for XmppAppState {
         if let Err(err) = self.permission_service.write_tuple(parent_tuple).await {
             error!("Failed to write parent permission tuple: {}", err);
             // Clean up: delete the channel
-            if let Ok(conn) = waddle_db.guard().await {
-                let _ = conn
-                    .execute(
-                        "DELETE FROM channels WHERE id = ?",
-                        libsql::params![channel_id.as_str()],
-                    )
-                    .await;
-            }
-            return Err(format!("Failed to create permission tuple: {}", err));
+            let _ = waddle_db_actor
+                .ask(DbExecute {
+                    sql: "DELETE FROM channels WHERE id = ?".to_string(),
+                    params: vec![libsql::Value::from(channel_id.as_str())],
+                })
+                .await;
+            return Err(
+                waddle_xmpp::commands::CreateChannelError::PermissionTupleWriteFailed(
+                    err.to_string(),
+                ),
+            );
         }
 
         // Build channel JID: {waddleId}_{channelId}@muc.{domain}
@@ -1547,5 +1809,30 @@ mod tests {
     async fn test_parse_invalid_subject() {
         let result = XmppAppState::parse_subject("invalid");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_private_xml_roundtrip_uses_actor_boundary() {
+        let (db, actor) = create_test_db().await;
+        let state = XmppAppState::new("waddle.social".to_string(), db, actor, None);
+        let jid: jid::BareJid = "alice@waddle.social".parse().expect("valid bare jid");
+
+        state
+            .set_private_xml(
+                &jid,
+                "urn:xmpp:test",
+                "<prefs><theme>aether</theme></prefs>",
+            )
+            .await
+            .expect("set private xml");
+
+        let stored = state
+            .get_private_xml(&jid, "urn:xmpp:test")
+            .await
+            .expect("get private xml");
+        assert_eq!(
+            stored.as_deref(),
+            Some("<prefs><theme>aether</theme></prefs>")
+        );
     }
 }

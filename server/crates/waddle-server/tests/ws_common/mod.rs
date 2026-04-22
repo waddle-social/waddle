@@ -20,9 +20,9 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(10);
 // Each test spawns a fresh waddle-server binary; startup includes
 // ephemeral cert generation (CPU-bound ring keygen) before listeners
 // bind. Under `cargo test --test-threads=N` several servers race for
-// CPU and one can miss a tight budget on slower CI runners. 60s is
-// generous enough to absorb that without masking a real hang.
-const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+// CPU and one can miss a tight budget on slower CI runners. Use a longer
+// budget to reduce CI flake during full-workspace test runs.
+const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
 // Test server harness

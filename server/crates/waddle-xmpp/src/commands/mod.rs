@@ -7,8 +7,8 @@ pub mod create_channel;
 pub mod registry;
 
 pub use create_channel::{
-    handle_create_channel, ChannelMetadata, CreateChannelDeps, CreateChannelResult,
-    NODE_CREATE_CHANNEL,
+    handle_create_channel, ChannelMetadata, CreateChannelDeps, CreateChannelError,
+    CreateChannelResult, NODE_CREATE_CHANNEL,
 };
 pub use registry::{
     CommandContext, CommandHandler, CommandMetadata, CommandRegistry, CommandResult, CommandSession,
