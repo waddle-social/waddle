@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
-    carbons::CARBONS_NS,
+    carbons::{build_received_carbon, build_sent_carbon, should_copy_message, CARBONS_NS},
     commands::{CommandContext, CommandRegistry, CommandResult},
     connection::Stanza,
     disco::{
@@ -45,7 +45,7 @@ use waddle_xmpp::{
         frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
-    registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza},
+    registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza, SendResult},
     stream_management::{
         InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
         StreamManagementState, SM_NS,
@@ -2901,6 +2901,8 @@ async fn handle_message(
             }
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
             prototype.type_ = XmppMessageType::Chat;
+            let should_carbon =
+                prototype.type_ == XmppMessageType::Chat && should_copy_message(&prototype);
 
             // Enrich: detect GitHub links and append embed XML elements
             let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
@@ -2948,14 +2950,18 @@ async fn handle_message(
             }
 
             // Route the enriched message
-            if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
+            let delivered_full_jid = if let Ok(to_full_jid) = to_jid.clone().try_into_full() {
                 let mut msg = prototype.clone();
                 msg.to = Some(jid::Jid::from(to_full_jid.clone()));
                 let stanza = Stanza::Message(msg);
-                let _ = state
+                match state
                     .connection_registry
                     .send_to(&to_full_jid, stanza)
-                    .await;
+                    .await
+                {
+                    SendResult::Sent => Some(to_full_jid),
+                    SendResult::NotConnected | SendResult::ChannelClosed => None,
+                }
             } else {
                 let to_bare_jid = to_jid.to_bare();
                 let resources = state
@@ -2970,6 +2976,19 @@ async fn handle_message(
                         .send_to(&resource_jid, stanza)
                         .await;
                 }
+                None
+            };
+
+            if should_carbon {
+                if let Some(ref recipient_full_jid) = delivered_full_jid {
+                    send_received_carbons_to_websocket_resources(
+                        state,
+                        recipient_full_jid,
+                        &prototype,
+                    )
+                    .await;
+                }
+                send_sent_carbons_to_websocket_resources(state, sender_jid, &prototype).await;
             }
 
             if has_github_embed {
@@ -2984,6 +3003,61 @@ async fn handle_message(
 
     debug!(msg_type = ?incoming.type_, "Message stanza received");
     vec![]
+}
+
+async fn send_sent_carbons_to_websocket_resources(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    message: &xmpp_parsers::message::Message,
+) {
+    let sender_bare = sender_jid.to_bare();
+    let resources = state
+        .connection_registry
+        .get_other_carbon_resources_for_user(&sender_bare, sender_jid);
+
+    for resource_jid in resources {
+        let carbon =
+            match build_sent_carbon(message, &sender_bare.to_string(), &resource_jid.to_string()) {
+                Ok(carbon) => carbon,
+                Err(error) => {
+                    warn!(error = %error, to = %resource_jid, "Failed to build sent carbon");
+                    continue;
+                }
+            };
+        let _ = state
+            .connection_registry
+            .send_to(&resource_jid, Stanza::Message(carbon))
+            .await;
+    }
+}
+
+async fn send_received_carbons_to_websocket_resources(
+    state: &WebSocketState,
+    recipient_jid: &FullJid,
+    message: &xmpp_parsers::message::Message,
+) {
+    let recipient_bare = recipient_jid.to_bare();
+    let resources = state
+        .connection_registry
+        .get_other_carbon_resources_for_user(&recipient_bare, recipient_jid);
+
+    for resource_jid in resources {
+        let carbon = match build_received_carbon(
+            message,
+            &recipient_bare.to_string(),
+            &resource_jid.to_string(),
+        ) {
+            Ok(carbon) => carbon,
+            Err(error) => {
+                warn!(error = %error, to = %resource_jid, "Failed to build received carbon");
+                continue;
+            }
+        };
+        let _ = state
+            .connection_registry
+            .send_to(&resource_jid, Stanza::Message(carbon))
+            .await;
+    }
 }
 
 /// Push an inbox update headline to all connected sessions of a user.
@@ -4572,6 +4646,113 @@ mod tests {
             }
         }
         assert!(found_chat, "recipient should receive the chat message");
+    }
+
+    #[tokio::test]
+    async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resource() {
+        let state = create_test_websocket_state().await;
+        let sender_jid: FullJid = "alice@example.com/phone".parse().expect("sender jid");
+        let sibling_jid: FullJid = "alice@example.com/desktop".parse().expect("sibling jid");
+
+        let (sender_tx, _sender_rx) = mpsc::channel(8);
+        let (sibling_tx, mut sibling_rx) = mpsc::channel(8);
+        state
+            .connection_registry
+            .register(sender_jid.clone(), sender_tx);
+        state
+            .connection_registry
+            .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
+
+        let responses = handle_message(
+            "<message xmlns='jabber:client' to='ghost@example.com' type='chat' id='sent-carbon-1'>\
+                <body>sent carbon over websocket</body>\
+             </message>",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(sender_jid),
+            &None,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "plain DM should not echo to sender");
+
+        let mut sent_carbon = None;
+        while let Ok(outbound) = sibling_rx.try_recv() {
+            let xml = stanza_to_xml(&outbound.stanza);
+            if xml.contains("urn:xmpp:carbons:2") && xml.contains("<sent") {
+                sent_carbon = Some(xml);
+                break;
+            }
+        }
+
+        let carbon_xml = sent_carbon.expect("opted-in sibling should receive sent carbon");
+        assert!(
+            carbon_xml.contains("sent carbon over websocket"),
+            "sent carbon should preserve message body: {carbon_xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_message_direct_chat_sends_received_carbon_to_opted_in_sibling_resource() {
+        let state = create_test_websocket_state().await;
+        let sender_jid: FullJid = "bob@example.com/phone".parse().expect("sender jid");
+        let recipient_jid: FullJid = "alice@example.com/phone".parse().expect("recipient jid");
+        let sibling_jid: FullJid = "alice@example.com/desktop".parse().expect("sibling jid");
+
+        let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
+        let (sibling_tx, mut sibling_rx) = mpsc::channel(8);
+        state
+            .connection_registry
+            .register(recipient_jid.clone(), recipient_tx);
+        state
+            .connection_registry
+            .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
+
+        let frame = format!(
+            "<message xmlns='jabber:client' to='{recipient_jid}' type='chat' id='recv-carbon-1'>\
+                <body>received carbon over websocket</body>\
+             </message>"
+        );
+
+        let responses = handle_message(
+            frame.as_str(),
+            "muc.example.com",
+            state.as_ref(),
+            &Some(sender_jid),
+            &None,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "plain DM should not echo to sender");
+
+        let mut delivered_original = None;
+        while let Ok(outbound) = recipient_rx.try_recv() {
+            let xml = stanza_to_xml(&outbound.stanza);
+            if xml.contains("received carbon over websocket") && !xml.contains("urn:xmpp:carbons:2")
+            {
+                delivered_original = Some(xml);
+                break;
+            }
+        }
+        assert!(
+            delivered_original.is_some(),
+            "targeted recipient should receive original message"
+        );
+
+        let mut received_carbon = None;
+        while let Ok(outbound) = sibling_rx.try_recv() {
+            let xml = stanza_to_xml(&outbound.stanza);
+            if xml.contains("urn:xmpp:carbons:2") && xml.contains("<received") {
+                received_carbon = Some(xml);
+                break;
+            }
+        }
+
+        let carbon_xml = received_carbon.expect("opted-in sibling should receive received carbon");
+        assert!(
+            carbon_xml.contains("received carbon over websocket"),
+            "received carbon should preserve message body: {carbon_xml}"
+        );
     }
 
     #[tokio::test]
