@@ -114,7 +114,9 @@ pub fn generate_ephemeral_tls_config(domain: &str) -> Result<Arc<RustlsServerCon
 /// XMPP server instance.
 pub struct XmppServer<S: AppState> {
     config: XmppServerConfig,
-    _app_state: std::marker::PhantomData<S>,
+    // Tie the server handle to the embedding app-state type even though the
+    // standalone listener only uses S2S-only state today.
+    _app_state_marker: std::marker::PhantomData<S>,
     tls_acceptor: TlsAcceptor,
     connection_registry: Arc<ConnectionRegistry>,
     /// S2S listener — passed in if S2S federation is enabled.
@@ -141,7 +143,7 @@ impl<S: AppState> XmppServer<S> {
 
         Ok(Self {
             config,
-            _app_state: std::marker::PhantomData,
+            _app_state_marker: std::marker::PhantomData,
             tls_acceptor,
             connection_registry,
             s2s_listener,
