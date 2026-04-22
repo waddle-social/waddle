@@ -132,7 +132,6 @@ impl<S: AppState> XmppServer<S> {
     pub async fn new(
         config: XmppServerConfig,
         _app_state: Arc<S>,
-        _c2s_listener: Option<TcpListener>,
         s2s_listener: Option<TcpListener>,
         shutdown_token: tokio_util::sync::CancellationToken,
     ) -> Result<Self, XmppError> {

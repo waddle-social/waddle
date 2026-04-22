@@ -657,15 +657,9 @@ async fn start_xmpp_server(
         "Starting XMPP server"
     );
 
-    let server = waddle_xmpp::start(
-        config,
-        Arc::clone(&app_state),
-        None,
-        s2s_listener,
-        stop_token,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
+    let server = waddle_xmpp::start(config, Arc::clone(&app_state), s2s_listener, stop_token)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
 
     server
         .run()
