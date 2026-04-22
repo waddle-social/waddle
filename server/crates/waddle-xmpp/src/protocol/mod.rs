@@ -3,7 +3,7 @@
 //! This module implements the XMPP protocol as a pure synchronous state
 //! machine. It consumes [`InboundEvent`]s and emits [`OutboundEvent`]s. All
 //! I/O, async work, and interaction with external resources (connection
-//! registry, MUC rooms, MAM storage, actors) happens in a transport-specific
+//! registry, MUC rooms, MAM storage, actors) happens in a caller-owned
 //! *interpreter* layer that lives outside this module.
 //!
 //! The architecture is modelled on the sans-I/O pattern used by `hyper`,
@@ -13,15 +13,15 @@
 //! # Layering
 //!
 //! ```text
-//! Transport adapter (WebSocket / TCP)
+//! Transport adapter (WebSocket C2S in `waddle-server`)
 //!     ↓ InboundEvent
 //! XmppStateMachine (pure, sync)  ← this module
 //!     ↓ OutboundEvent
-//! Effect interpreter (async, in transport adapter)
+//! Effect interpreter (async, in the caller)
 //! ```
 //!
-//! Only the middle layer — the state machine — lives here. The transport
-//! adapter and interpreter are the caller's responsibility.
+//! Only the middle layer — the state machine — lives here. The WebSocket C2S
+//! adapter and its async interpreter remain the caller's responsibility.
 
 pub mod dispatch;
 pub mod event;

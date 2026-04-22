@@ -18,7 +18,7 @@ use routes::channels::ChannelState;
 use routes::permissions::PermissionState;
 use routes::uploads::UploadState;
 use routes::waddles::WaddleState;
-use routes::websocket::WebSocketState;
+use routes::websocket::{ProtocolServices, WebSocketDeps, WebSocketState};
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls_acme::caches::DirCache;
 use rustls_acme::tower::TowerHttp01ChallengeService;
@@ -929,18 +929,22 @@ async fn create_router(
 
     // XMPP over WebSocket (RFC 7395) with registries for message routing
     let websocket_state = Arc::new(WebSocketState {
-        app_state: state.clone(),
-        auth_state: auth_state.clone(),
-        connection_registry,
-        room_registry,
-        mam_storage,
-        inbox_storage: Arc::clone(&state.inbox_storage),
-        command_registry: websocket_command_registry,
-        extension_manager,
-        dispatcher: stanza_dispatcher,
-        pubsub_storage,
-        sm_session_registry,
-        resumable_sessions,
+        deps: WebSocketDeps {
+            app_state: state.clone(),
+            auth_state: auth_state.clone(),
+            protocol: ProtocolServices {
+                connection_registry,
+                room_registry,
+                mam_storage,
+                inbox_storage: Arc::clone(&state.inbox_storage),
+                command_registry: websocket_command_registry,
+                extension_manager,
+                dispatcher: stanza_dispatcher,
+                pubsub_storage,
+                sm_session_registry,
+                resumable_sessions,
+            },
+        },
     });
     // XEP-0198 expired-session janitor. Without this, detached SM sessions
     // whose resume window elapses leave MUC occupants in their rooms forever
@@ -959,7 +963,13 @@ async fn create_router(
                 let Some(state) = weak_state.upgrade() else {
                     break;
                 };
-                let drained = match state.sm_session_registry.drain_expired().await {
+                let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .drain_expired()
+                    .await
+                {
                     Ok(sessions) => sessions,
                     Err(err) => {
                         warn!(error = %err, "SM janitor: drain_expired failed");
@@ -974,8 +984,16 @@ async fn create_router(
                     "SM janitor: cleaning up expired detached sessions"
                 );
                 for session in drained {
-                    state.resumable_sessions.remove(&session.stream_id);
-                    state.connection_registry.unregister(&session.jid);
+                    state
+                        .deps
+                        .protocol
+                        .resumable_sessions
+                        .remove(&session.stream_id);
+                    state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .unregister(&session.jid);
                     routes::websocket::cleanup_muc_presence_for_jid(&state, &session.jid).await;
                 }
             }

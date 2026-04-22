@@ -7,7 +7,7 @@
 //!
 //! ## Architecture
 //!
-//! - **Transport**: WebSocket C2S in `waddle-server`, optional TCP 5269 listener for S2S
+//! - **Transport**: WebSocket-only C2S in `waddle-server`, optional TCP 5269 listener for S2S
 //! - **Connection Actors**: S2S connections managed by a Kameo actor
 //! - **MUC Room Actors**: Multi-user chat rooms as separate actors
 //! - **Stream Processing**: XML stream parsing via xmpp-parsers

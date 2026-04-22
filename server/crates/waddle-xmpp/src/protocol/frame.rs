@@ -1,4 +1,4 @@
-//! Parsed XMPP frames at the transport boundary.
+//! Parsed XMPP frames at the WebSocket C2S boundary.
 //!
 //! Replaces the string-based `starts_with`/`contains` routing in the
 //! existing WebSocket handler with a single typed classifier. Frames are
@@ -6,9 +6,8 @@
 //!
 //! [`parse_frame`] is the entry point. It accepts the raw text of one RFC
 //! 7395 WebSocket payload and returns a typed [`InboundFrame`], or a
-//! [`ParseError`] if the frame is malformed. The same function is intended
-//! for the TCP transport: once the XML stream chunker has assembled a
-//! complete top-level element, `parse_frame` classifies it.
+//! [`ParseError`] if the frame is malformed. Internal callers that already
+//! have one complete top-level element can also reuse the same classifier.
 
 use crate::connection::Stanza;
 use std::str::FromStr;
@@ -41,10 +40,11 @@ pub enum InboundFrame {
     SaslResponse(String),
     /// A typed XMPP stanza (IQ, message, or presence).
     ///
-    /// Uses [`crate::connection::Stanza`] for uniformity with the TCP
-    /// handler. Boxed because `Stanza` is ~300 bytes and the other
-    /// variants are unit — without the box every `InboundFrame` pays
-    /// that cost on every move (clippy `large_enum_variant`).
+    /// Uses [`crate::connection::Stanza`] for uniformity with the rest of
+    /// the crate's typed stanza pipeline. Boxed because `Stanza` is ~300
+    /// bytes and the other variants are unit — without the box every
+    /// `InboundFrame` pays that cost on every move (clippy
+    /// `large_enum_variant`).
     Stanza(Box<Stanza>),
 }
 
@@ -54,8 +54,9 @@ pub enum InboundFrame {
 /// `parse_frame` is expected to be fallible: clients sometimes send
 /// malformed XML, unknown root elements (e.g. a client experimenting with a
 /// non-standard XEP), or SASL frames missing required attributes. The
-/// transport adapter decides how to react (typically: log and drop for
-/// WebSocket; send a stream error for TCP).
+/// current WebSocket C2S adapter decides how to react (today that usually
+/// means logging and dropping the frame, while other callers may translate
+/// the error into a stream-level failure).
 #[derive(Debug, Error)]
 pub enum ParseError {
     /// The payload was empty or contained only whitespace.
@@ -84,7 +85,8 @@ pub enum ParseError {
 
 /// Classify a raw inbound frame into a typed [`InboundFrame`].
 ///
-/// Called once per WebSocket text payload (or per TCP top-level element).
+/// Called once per WebSocket text payload. Internal callers with an
+/// already-delimited top-level element can also reuse it as a classifier.
 /// Fast-paths trivial frames (`<open>`/`<close>`) by peeking at the root
 /// element name without invoking the XML parser; all non-trivial frames
 /// then go through `xmpp_parsers::minidom::Element::from_str` for strict

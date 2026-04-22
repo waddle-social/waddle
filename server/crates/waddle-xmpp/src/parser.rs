@@ -252,7 +252,7 @@ impl XmlParser {
             ("<presence", parse_presence_stanza),
             // XEP-0198 Stream Management stanzas. All routes funnel through
             // `parse_sm_nonza` (which delegates to stream_management::SmStanza)
-            // so we maintain one parsing path across transports.
+            // so stream-oriented callers share one parsing path.
             ("<enable", parse_sm_nonza),
             ("<resume", parse_sm_nonza), // Must come before <r
             ("<r", parse_sm_nonza),

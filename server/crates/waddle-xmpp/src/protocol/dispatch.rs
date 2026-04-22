@@ -23,7 +23,8 @@ use xmpp_parsers::presence::Presence;
 /// Routes stanzas to the handlers registered for them.
 ///
 /// Instances are cheap to clone (the handlers sit behind `Arc`) so the
-/// same dispatcher can be shared between the TCP and WebSocket transports.
+/// same dispatcher can be shared between WebSocket C2S sessions, tests,
+/// and other callers that feed typed stanzas into the machine.
 #[derive(Clone, Default)]
 pub struct StanzaDispatcher {
     iq_handlers: HashMap<&'static str, Arc<dyn IqHandler>>,

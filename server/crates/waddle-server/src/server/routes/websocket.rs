@@ -51,7 +51,7 @@ use waddle_xmpp::{
         RoomConfig,
     },
     protocol::{
-        frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
+        frame::{parse_frame, InboundFrame, ParseError},
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
     registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza, SendResult},
@@ -93,13 +93,22 @@ use waddle_xmpp::xep::xep0430::{
     parse_inbox_query, parse_mark_read,
 };
 
-/// WebSocket state containing all necessary registries for message routing
+/// WebSocket route dependencies kept narrower than the full server graph.
 pub struct WebSocketState {
+    pub deps: WebSocketDeps,
+}
+
+pub struct WebSocketDeps {
     /// Core app state for accessing the global and per-waddle databases.
     pub app_state: Arc<AppState>,
-    /// Authentication state for session validation
+    /// Authentication state for session validation.
     pub auth_state: Arc<AuthState>,
-    /// Registry for tracking active connections by JID
+    /// Protocol/runtime services used by the WebSocket C2S path.
+    pub protocol: ProtocolServices,
+}
+
+pub struct ProtocolServices {
+    /// Registry for tracking active connections by JID.
     pub connection_registry: Arc<ConnectionRegistry>,
     /// Actor-backed registry for MUC rooms.
     pub room_registry: ActorRef<RoomRegistryActor>,
@@ -109,7 +118,7 @@ pub struct WebSocketState {
     pub inbox_storage: Arc<dyn InboxStorage>,
     /// Registry for ad-hoc commands exposed over the WebSocket transport.
     pub command_registry: Arc<CommandRegistry>,
-    /// Runtime extension manager for message embeds + feature advertisements
+    /// Runtime extension manager for message embeds + feature advertisements.
     pub extension_manager: Arc<ExtensionManager>,
     /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
     /// roster, carbons) are routed through this before falling back to the
@@ -214,7 +223,7 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// Handle an XMPP WebSocket connection
 async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
-    let domain = state.auth_state.xmpp_domain.clone();
+    let domain = state.deps.auth_state.xmpp_domain.clone();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -256,7 +265,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
                         if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() {
                             if let (Some(jid), Some(tx)) = (conn.session_jid.as_ref(), pending_tx.take()) {
-                                state.connection_registry.register_with_carbons(
+                                state.deps.protocol.connection_registry.register_with_carbons(
                                     jid.clone(),
                                     tx,
                                     conn.carbons_enabled,
@@ -400,14 +409,24 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                 {
                     let stream_id = detached.stream_id.clone();
                     if let Some(session) = conn.authenticated_session.clone() {
-                        state.resumable_sessions.insert(stream_id.clone(), session);
+                        state
+                            .deps
+                            .protocol
+                            .resumable_sessions
+                            .insert(stream_id.clone(), session);
                     }
-                    match state.sm_session_registry.store_session(detached).await {
+                    match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .store_session(detached)
+                        .await
+                    {
                         Ok(()) => {
                             // Remove the routing entry only — the MUC occupant
                             // slot stays. On a successful resume we'll re-register
                             // the same FullJid and presence is preserved.
-                            state.connection_registry.unregister(&jid);
+                            state.deps.protocol.connection_registry.unregister(&jid);
                             info!(
                                 jid = %jid,
                                 stream_id = %stream_id,
@@ -416,17 +435,17 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         }
                         Err(err) => {
                             warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                            state.resumable_sessions.remove(&stream_id);
-                            state.connection_registry.unregister(&jid);
+                            state.deps.protocol.resumable_sessions.remove(&stream_id);
+                            state.deps.protocol.connection_registry.unregister(&jid);
                             cleanup_muc_presence(&state, &jid).await;
                         }
                     }
                 } else {
-                    state.connection_registry.unregister(&jid);
+                    state.deps.protocol.connection_registry.unregister(&jid);
                     cleanup_muc_presence(&state, &jid).await;
                 }
             } else {
-                state.connection_registry.unregister(&jid);
+                state.deps.protocol.connection_registry.unregister(&jid);
                 info!(jid = %jid, "WebSocket connection unregistered");
                 cleanup_muc_presence(&state, &jid).await;
             }
@@ -516,6 +535,8 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
 
 async fn get_room_actor(state: &WebSocketState, room_jid: &BareJid) -> Option<ActorRef<RoomActor>> {
     match state
+        .deps
+        .protocol
         .room_registry
         .ask(GetRoom {
             room_jid: room_jid.clone(),
@@ -538,6 +559,8 @@ async fn get_or_create_room_actor(
     channel_id: String,
 ) -> Option<ActorRef<RoomActor>> {
     match state
+        .deps
+        .protocol
         .room_registry
         .ask(GetOrCreateRoom {
             room_jid: room_jid.clone(),
@@ -556,7 +579,7 @@ async fn get_or_create_room_actor(
 }
 
 async fn list_room_jids(state: &WebSocketState) -> Vec<BareJid> {
-    match state.room_registry.ask(ListRooms).await {
+    match state.deps.protocol.room_registry.ask(ListRooms).await {
         Ok(rooms) => rooms,
         Err(error) => {
             warn!(error = ?error, "Failed to list room actors");
@@ -567,6 +590,8 @@ async fn list_room_jids(state: &WebSocketState) -> Vec<BareJid> {
 
 async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) -> bool {
     match state
+        .deps
+        .protocol
         .room_registry
         .ask(IsMucJid {
             jid: room_jid.clone(),
@@ -583,6 +608,8 @@ async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) -> bool {
 
 async fn destroy_room_actor(state: &WebSocketState, room_jid: &BareJid) -> bool {
     match state
+        .deps
+        .protocol
         .room_registry
         .ask(DestroyRoom {
             room_jid: room_jid.clone(),
@@ -636,16 +663,6 @@ fn archived_stanza_xml(message: &xmpp_parsers::message::Message) -> String {
 
 fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
     stanza_to_xml(&Stanza::Iq(iq))
-}
-
-fn parse_iq_frame(frame: &str) -> Option<xmpp_parsers::iq::Iq> {
-    // WebSocket clients may omit xmlns="jabber:client" on stanzas (they
-    // rely on stream-level namespace inheritance from <open>). Inject it
-    // when missing using the shared frame normalizer so xmpp_parsers can
-    // parse the IQ without duplicating brittle string surgery here.
-    let patched = inject_client_ns_if_missing(frame);
-    let element = xmpp_parsers::minidom::Element::from_str(&patched).ok()?;
-    xmpp_parsers::iq::Iq::try_from(element).ok()
 }
 
 fn build_iq_result_xml(
@@ -749,21 +766,6 @@ fn sasl_failure_xml(condition: &str) -> String {
             .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
             .build(),
     )
-}
-
-fn parse_sasl_auth_frame(frame: &str) -> Result<(String, String), String> {
-    let element =
-        Element::from_str(frame).map_err(|err| format!("Invalid SASL auth XML: {err}"))?;
-    if element.name() != "auth" {
-        return Err("SASL frame is not an auth element".to_string());
-    }
-
-    let mechanism = element
-        .attr("mechanism")
-        .ok_or_else(|| "SASL auth missing mechanism".to_string())?
-        .to_string();
-
-    Ok((mechanism, element.text().trim().to_string()))
 }
 
 /// Returns true if the frame is an XMPP stanza that counts toward XEP-0198
@@ -878,7 +880,13 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         return vec![SmFailed::with_condition("unexpected-request").to_xml()];
     }
 
-    let detached = match state.sm_session_registry.take_session(&resume.previd).await {
+    let detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .take_session(&resume.previd)
+        .await
+    {
         Ok(Some(session)) => session,
         Ok(None) => {
             info!(stream_id = %resume.previd, "SM resume rejected: session not found or expired");
@@ -901,6 +909,8 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // user retains basic messaging but any IQ that re-checks
     // authenticated_session will re-deny until the next bind.
     let restored_session = state
+        .deps
+        .protocol
         .resumable_sessions
         .remove(&resume.previd)
         .map(|(_, s)| s);
@@ -947,15 +957,6 @@ async fn handle_xmpp_frame(
     state: &WebSocketState,
     conn: &mut LegacyConnState,
 ) -> Vec<String> {
-    if frame.len() > MAX_FRAME_SIZE {
-        warn!(len = frame.len(), "Dropping oversized XMPP frame");
-        return vec![];
-    }
-
-    // Split the bundle into the individual `&mut` borrows the legacy body
-    // expects. Once the sans-I/O migration lands (see the protocol module
-    // tracking PR), the whole body becomes a single
-    // `machine.handle(InboundEvent)` call and this shim goes away.
     let LegacyConnState {
         authenticated,
         session_jid,
@@ -967,80 +968,10 @@ async fn handle_xmpp_frame(
         carbons_enabled,
         suppress_sm_record_next_batch,
     } = conn;
-    let frame = frame.trim();
     let muc_domain = format!("muc.{}", domain);
 
-    // RFC 7395: <open> element starts the stream
-    if frame.starts_with("<open") {
-        info!("XMPP stream open requested");
-
-        // RFC 7395: Send <open> and <stream:features> as SEPARATE WebSocket messages
-        let open_element = format!(
-            r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="{}" id="{}" version="1.0" xml:lang="en"/>"#,
-            domain,
-            uuid::Uuid::new_v4()
-        );
-        let features_element = build_stream_features_xml(*authenticated);
-        return vec![open_element, features_element];
-    }
-
-    // RFC 7395: <close> element ends the stream
-    if frame.starts_with("<close") {
-        info!("XMPP stream close requested");
-        return vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()];
-    }
-
-    if frame.starts_with("<auth") {
-        let (mechanism, data) = match parse_sasl_auth_frame(frame) {
-            Ok(auth) => auth,
-            Err(err) => {
-                warn!(error = %err, "Invalid SASL auth frame");
-                return vec![sasl_failure_xml("not-authorized")];
-            }
-        };
-
-        return match mechanism.as_str() {
-            "SCRAM-SHA-256" => {
-                handle_sasl_scram_client_first(&data, domain, state, pending_scram).await
-            }
-            "OAUTHBEARER" => {
-                handle_sasl_oauthbearer(
-                    &data,
-                    state,
-                    authenticated,
-                    session_jid,
-                    authenticated_session,
-                )
-                .await
-            }
-            mechanism => {
-                warn!(mechanism = %mechanism, "Unsupported SASL mechanism");
-                vec![sasl_failure_xml("invalid-mechanism")]
-            }
-        };
-    }
-
-    // Handle SASL <response> (SCRAM client-final-message)
-    if frame.starts_with("<response") {
-        if let Some(scram) = pending_scram.take() {
-            return handle_sasl_scram_response(
-                frame,
-                domain,
-                scram,
-                authenticated,
-                session_jid,
-                authenticated_session,
-            );
-        }
-        warn!("SASL response received without pending SCRAM state");
-        return vec![sasl_failure_xml("not-authorized")];
-    }
-
-    // XEP-0198 Stream Management control frames can arrive anywhere from
-    // post-auth onward. `<resume/>` arrives instead of bind (to restore a
-    // detached session); `<enable/>`, `<r/>`, `<a/>` arrive after bind.
-    // Keep this branch BEFORE the resource-binding handler so a resuming
-    // client skips bind entirely.
+    // SM nonzas (enable/resume/r/a) are not part of the parse_frame typed
+    // vocabulary — keep the direct SmStanza check before parse_frame.
     if SmStanza::is_client_nonza_candidate(frame) {
         if let Some(sm) = SmStanza::parse(frame) {
             let ctx = SmCtx {
@@ -1057,65 +988,133 @@ async fn handle_xmpp_frame(
         }
     }
 
-    // Handle resource binding
-    if frame.contains("urn:ietf:params:xml:ns:xmpp-bind") && frame.starts_with("<iq") {
-        let (responses, success) = handle_resource_binding(frame, domain, session_jid);
-        if success {
-            *resource_bound = true;
+    let inbound = match parse_frame(frame) {
+        Ok(f) => f,
+        Err(ParseError::TooLarge) => {
+            warn!(len = frame.len(), "Dropping oversized XMPP frame");
+            return vec![];
         }
-        return responses;
-    }
+        Err(ParseError::Empty) => return vec![],
+        Err(err) => {
+            warn!(error = %err, len = frame.len(), "Unhandled XMPP frame");
+            return vec![];
+        }
+    };
 
-    // Count inbound stanzas for XEP-0198. SM "counts only stanzas
-    // (iq/message/presence)"; control frames (open/close/auth/sm-control)
-    // are excluded by this check.
-    if sm_state.enabled && is_countable_stanza(frame) {
-        sm_state.increment_inbound();
-    }
+    match inbound {
+        InboundFrame::Open => {
+            info!("XMPP stream open requested");
+            let open_element = format!(
+                r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="{}" id="{}" version="1.0" xml:lang="en"/>"#,
+                domain,
+                uuid::Uuid::new_v4()
+            );
+            let features_element = build_stream_features_xml(*authenticated);
+            vec![open_element, features_element]
+        }
 
-    // Handle presence
-    if frame.starts_with("<presence") {
-        return handle_presence(
-            frame,
-            domain,
-            &muc_domain,
-            state,
-            session_jid,
-            authenticated_session,
-        )
-        .await;
-    }
+        InboundFrame::Close => {
+            info!("XMPP stream close requested");
+            vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
+        }
 
-    // Handle IQ stanzas
-    if frame.starts_with("<iq") {
-        return handle_iq_with_conn_state(
-            frame,
-            domain,
-            &muc_domain,
-            state,
-            authenticated_session,
-            session_jid,
-            *authenticated,
-            *resource_bound,
-            carbons_enabled,
-        )
-        .await;
-    }
+        InboundFrame::Auth { mechanism, data } => match mechanism.as_str() {
+            "SCRAM-SHA-256" => {
+                handle_sasl_scram_client_first(&data, domain, state, pending_scram).await
+            }
+            "OAUTHBEARER" => {
+                handle_sasl_oauthbearer(
+                    &data,
+                    state,
+                    authenticated,
+                    session_jid,
+                    authenticated_session,
+                )
+                .await
+            }
+            other => {
+                warn!(mechanism = %other, "Unsupported SASL mechanism");
+                vec![sasl_failure_xml("invalid-mechanism")]
+            }
+        },
 
-    // Handle message stanzas
-    if frame.starts_with("<message") {
-        return handle_message(
-            frame,
-            &muc_domain,
-            state,
-            session_jid,
-            authenticated_session,
-        )
-        .await;
-    }
+        InboundFrame::SaslResponse(data) => {
+            if let Some(scram) = pending_scram.take() {
+                return handle_sasl_scram_response(
+                    &data,
+                    domain,
+                    scram,
+                    authenticated,
+                    session_jid,
+                    authenticated_session,
+                );
+            }
+            warn!("SASL response received without pending SCRAM state");
+            vec![sasl_failure_xml("not-authorized")]
+        }
 
-    warn!(len = frame.len(), "Unhandled XMPP frame");
-    vec![]
+        InboundFrame::Stanza(stanza) => {
+            // Count inbound stanzas for XEP-0198: iq/message/presence always
+            // count; SM control nonzas and framing elements are excluded above.
+            if sm_state.enabled {
+                sm_state.increment_inbound();
+            }
+
+            match *stanza {
+                Stanza::Iq(iq) => {
+                    let is_bind = match &iq.payload {
+                        xmpp_parsers::iq::IqType::Set(e) | xmpp_parsers::iq::IqType::Get(e) => {
+                            e.ns() == waddle_xmpp::ns::BIND
+                        }
+                        _ => false,
+                    };
+                    if is_bind {
+                        let (responses, success) =
+                            handle_resource_binding(&iq, domain, session_jid);
+                        if success {
+                            *resource_bound = true;
+                        }
+                        return responses;
+                    }
+                    handle_iq_with_conn_state(
+                        iq,
+                        domain,
+                        &muc_domain,
+                        state,
+                        authenticated_session,
+                        session_jid,
+                        *authenticated,
+                        *resource_bound,
+                        carbons_enabled,
+                    )
+                    .await
+                }
+
+                Stanza::Presence(presence) => {
+                    handle_presence(
+                        presence,
+                        domain,
+                        &muc_domain,
+                        state,
+                        session_jid,
+                        authenticated_session,
+                    )
+                    .await
+                }
+
+                Stanza::Message(message) => {
+                    handle_message(
+                        message,
+                        &muc_domain,
+                        state,
+                        session_jid,
+                        authenticated_session,
+                    )
+                    .await
+                }
+            }
+        }
+    }
 }
 
 /// Handle SASL OAUTHBEARER authentication.
@@ -1149,6 +1148,7 @@ async fn handle_sasl_oauthbearer(
     };
 
     match state
+        .deps
         .auth_state
         .session_manager
         .validate_session(&token)
@@ -1156,7 +1156,8 @@ async fn handle_sasl_oauthbearer(
     {
         Ok(session) => {
             let bare_jid_str =
-                match localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain) {
+                match localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
+                {
                     Ok(jid) => jid,
                     Err(e) => {
                         warn!(
@@ -1239,7 +1240,7 @@ async fn handle_sasl_scram_client_first(
 
     // Look up SCRAM credentials for the user
     let native_user_store =
-        NativeUserStore::new(Arc::new(state.app_state.db_pool.global().clone()));
+        NativeUserStore::new(Arc::new(state.deps.app_state.db_pool.global().clone()));
 
     let creds = match native_user_store
         .get_scram_credentials(&username, domain)
@@ -1289,24 +1290,13 @@ async fn handle_sasl_scram_client_first(
 /// Verifies the client proof against stored keys and returns `<success>` or
 /// `<failure>`.
 fn handle_sasl_scram_response(
-    frame: &str,
+    b64_data: &str,
     domain: &str,
     mut scram: PendingScramAuth,
     authenticated: &mut bool,
     session_jid: &mut Option<FullJid>,
     authenticated_session: &mut Option<Session>,
 ) -> Vec<String> {
-    // Parse <response> element to extract base64 data
-    let element = match Element::from_str(frame) {
-        Ok(el) => el,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: invalid response XML");
-            return vec![sasl_failure_xml("not-authorized")];
-        }
-    };
-
-    let b64_data = element.text();
-
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
         Err(e) => {
@@ -1393,7 +1383,7 @@ fn build_bind_result_xml(id: &str, full_jid: &FullJid) -> String {
 /// Handle resource binding IQ
 /// Returns (responses, success) where success indicates if binding completed successfully
 fn handle_resource_binding(
-    frame: &str,
+    iq: &xmpp_parsers::iq::Iq,
     _domain: &str,
     session_jid: &mut Option<FullJid>,
 ) -> (Vec<String>, bool) {
@@ -1402,23 +1392,23 @@ fn handle_resource_binding(
         return (vec![], false);
     };
 
-    let id = extract_attr(frame, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let resource = extract_element_text(frame, "resource")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        // RFC 6120 allows servers to assign a resource when the client omits
-        // one. Use a unique value so separate devices never collide on the
-        // same FullJid slot in ConnectionRegistry.
-        .unwrap_or_else(|| format!("ws-{}", uuid::Uuid::new_v4()));
+    let id = iq.id.clone();
 
-    // Create the full JID with the requested resource
+    let resource = match &iq.payload {
+        xmpp_parsers::iq::IqType::Set(e) | xmpp_parsers::iq::IqType::Get(e) => e
+            .get_child("resource", waddle_xmpp::ns::BIND)
+            .map(|r| r.text().trim().to_string())
+            .filter(|v| !v.is_empty()),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("ws-{}", uuid::Uuid::new_v4()));
+
     let bare_jid = jid.to_bare();
     let full_jid_str = format!("{}/{}", bare_jid, resource);
 
     if let Ok(full_jid) = full_jid_str.parse::<FullJid>() {
         info!(jid = %full_jid, id = %id, "Resource bound");
         *session_jid = Some(full_jid.clone());
-
         (vec![build_bind_result_xml(&id, &full_jid)], true)
     } else {
         warn!(jid = %full_jid_str, "Invalid JID during resource binding");
@@ -1428,20 +1418,19 @@ fn handle_resource_binding(
 
 /// Handle presence stanzas including MUC join/leave
 async fn handle_presence(
-    frame: &str,
+    presence: xmpp_parsers::presence::Presence,
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
     session_jid: &Option<FullJid>,
     _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
-    let to = extract_attr(frame, "to");
-    let presence_type = extract_attr(frame, "type");
+    let to = presence.to.as_ref().map(|jid| jid.to_string());
+    let is_unavailable = presence.type_ == xmpp_parsers::presence::Type::Unavailable;
 
     // Check if this is a MUC presence (to room@muc.domain/nick)
     if let Some(ref to_jid) = to {
         if to_jid.contains(muc_domain) {
-            // MUC presence handling
             let parts: Vec<&str> = to_jid.split('/').collect();
             let room_jid_str = parts.first().copied().unwrap_or(to_jid);
             let nick = parts.get(1).copied().unwrap_or("anonymous");
@@ -1456,12 +1445,10 @@ async fn handle_presence(
                 return vec![];
             };
 
-            // Check if this is a leave presence
-            if presence_type.as_deref() == Some("unavailable") {
+            if is_unavailable {
                 return handle_muc_leave(state, &room_jid, sender_jid, nick).await;
             }
 
-            // This is a join presence
             return handle_muc_join(
                 state,
                 domain,
@@ -1475,7 +1462,6 @@ async fn handle_presence(
     }
 
     debug!("Presence stanza received");
-    // Regular presence - just acknowledge
     vec![]
 }
 
@@ -1601,7 +1587,11 @@ async fn handle_muc_join(
             let presence_stanza =
                 create_presence_stanza(room_jid, nick, sender_jid, &existing.jid, false);
             let stanza = Stanza::Presence(presence_stanza);
-            let _outcome = state.connection_registry.try_send_to(&existing.jid, stanza);
+            let _outcome = state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&existing.jid, stanza);
         }
     }
 
@@ -1672,7 +1662,11 @@ async fn handle_muc_leave(
             presence.from = Some(jid::Jid::from(from_jid));
             presence.to = Some(jid::Jid::from(occupant_jid.clone()));
             let stanza = Stanza::Presence(presence);
-            let _outcome = state.connection_registry.try_send_to(occupant_jid, stanza);
+            let _outcome = state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(occupant_jid, stanza);
         }
     }
 
@@ -1696,11 +1690,24 @@ async fn handle_iq(
     let resource_bound = session_jid
         .as_ref()
         .is_some_and(|jid| jid.resource().as_str() != "pending");
-    let mut carbons_enabled = session_jid
-        .as_ref()
-        .is_some_and(|jid| state.connection_registry.is_carbons_enabled(jid));
+    let mut carbons_enabled = session_jid.as_ref().is_some_and(|jid| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .is_carbons_enabled(jid)
+    });
+
+    let iq = match parse_frame(frame) {
+        Ok(InboundFrame::Stanza(stanza)) => match *stanza {
+            Stanza::Iq(iq) => iq,
+            _ => return vec![],
+        },
+        _ => return vec![],
+    };
+
     handle_iq_with_conn_state(
-        frame,
+        iq,
         domain,
         muc_domain,
         state,
@@ -1714,7 +1721,7 @@ async fn handle_iq(
 }
 
 async fn handle_iq_with_conn_state(
-    frame: &str,
+    iq: xmpp_parsers::iq::Iq,
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
@@ -1729,41 +1736,30 @@ async fn handle_iq_with_conn_state(
         .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
 
-    let parsed_iq = parse_iq_frame(frame);
-    let id = parsed_iq
-        .as_ref()
-        .map(|iq| iq.id.clone())
-        .or_else(|| extract_attr(frame, "id"))
-        .unwrap_or_default();
-    let to = parsed_iq
-        .as_ref()
-        .and_then(|iq| iq.to.as_ref().map(|jid| jid.to_string()))
-        .or_else(|| extract_attr(frame, "to"));
-    let from = parsed_iq
-        .as_ref()
-        .and_then(|iq| iq.from.as_ref().map(|jid| jid.to_string()))
-        .or_else(|| extract_attr(frame, "from"));
+    let id = iq.id.clone();
+    let to = iq.to.as_ref().map(|jid| jid.to_string());
+    let from = iq.from.as_ref().map(|jid| jid.to_string());
     let response_from = to.as_deref();
     let response_to = from.as_deref();
 
-    // IQ result/error stanzas require no server response — silently accept them.
-    // This handles client acks for server-initiated IQ sets (e.g. Jingle session-accept).
-    // Check parsed IQ first, then fall back to raw XML for malformed stanzas that
-    // xmpp_parsers can't parse (e.g. error IQs missing a defined-condition element).
-    if let Some(ref iq) = parsed_iq {
-        if matches!(
-            &iq.payload,
-            xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_)
-        ) {
-            debug!(id = %id, "Ignoring IQ result/error stanza");
-            return vec![];
-        }
-    } else if extract_attr(frame, "type").as_deref() == Some("error")
-        || extract_attr(frame, "type").as_deref() == Some("result")
-    {
-        debug!(id = %id, "Ignoring unparseable IQ result/error stanza");
+    if matches!(
+        &iq.payload,
+        xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_)
+    ) {
+        debug!(id = %id, "Ignoring IQ result/error stanza");
         return vec![];
     }
+
+    let payload_ns = match &iq.payload {
+        xmpp_parsers::iq::IqType::Get(e) | xmpp_parsers::iq::IqType::Set(e) => e.ns(),
+        _ => String::new(),
+    };
+    let has_destroy = match &iq.payload {
+        xmpp_parsers::iq::IqType::Set(e) => e
+            .get_child("destroy", "http://jabber.org/protocol/muc#owner")
+            .is_some(),
+        _ => false,
+    };
 
     // Sans-I/O dispatch: if the IQ namespace has a registered handler in
     // the protocol dispatcher, route through it and translate the emitted
@@ -1773,13 +1769,7 @@ async fn handle_iq_with_conn_state(
     // and any other namespaces not yet registered with the dispatcher)
     // continue to fall through to the legacy string-matching branches
     // below until the two-phase async callback machinery lands.
-    if let (Some(iq), Some(full_jid)) = (parsed_iq.as_ref(), session_jid.as_ref()) {
-        let payload_ns = match &iq.payload {
-            xmpp_parsers::iq::IqType::Get(e) | xmpp_parsers::iq::IqType::Set(e) => {
-                Some(e.ns().to_string())
-            }
-            _ => None,
-        };
+    if let Some(full_jid) = session_jid.as_ref() {
         let carbons_toggle = match &iq.payload {
             xmpp_parsers::iq::IqType::Set(e)
                 if e.ns() == CARBONS_NS && (e.name() == "enable" || e.name() == "disable") =>
@@ -1788,35 +1778,40 @@ async fn handle_iq_with_conn_state(
             }
             _ => None,
         };
-        if let Some(ns) = payload_ns {
-            if state.dispatcher.has_iq_handler(&ns) {
-                if !authenticated || !resource_bound {
-                    return vec![build_iq_error_xml_with_addresses(
-                        &id,
-                        response_from,
-                        response_to,
-                        "auth",
-                        "not-authorized",
-                    )];
-                }
-                if let Some(enabled) = carbons_toggle {
-                    *carbons_enabled = enabled;
-                    let _ = state
-                        .connection_registry
-                        .set_carbons_enabled(full_jid, enabled);
-                }
-                let ctx = ProtocolStanzaContext { domain, full_jid };
-                let events = state.dispatcher.dispatch_iq(iq, &ctx);
-                let outcome = super::interpret::interpret(events).await;
-                if outcome.close {
-                    warn!(
-                        ns = %ns,
-                        "Sans-I/O handler requested transport close; \
-                         WebSocket adapter cannot honour CloseTransport yet"
-                    );
-                }
-                return outcome.frames;
+        if state
+            .deps
+            .protocol
+            .dispatcher
+            .has_iq_handler(payload_ns.as_str())
+        {
+            if !authenticated || !resource_bound {
+                return vec![build_iq_error_xml_with_addresses(
+                    &id,
+                    response_from,
+                    response_to,
+                    "auth",
+                    "not-authorized",
+                )];
             }
+            if let Some(enabled) = carbons_toggle {
+                *carbons_enabled = enabled;
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .set_carbons_enabled(full_jid, enabled);
+            }
+            let ctx = ProtocolStanzaContext { domain, full_jid };
+            let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
+            let outcome = super::interpret::interpret(events).await;
+            if outcome.close {
+                warn!(
+                    ns = %payload_ns,
+                    "Sans-I/O handler requested transport close; \
+                     WebSocket adapter cannot honour CloseTransport yet"
+                );
+            }
+            return outcome.frames;
         }
     }
 
@@ -1824,98 +1819,81 @@ async fn handle_iq_with_conn_state(
     // through the sans-I/O dispatcher short-circuit above.
 
     // Disco info on MUC service
-    if frame.contains("http://jabber.org/protocol/disco#info") {
-        if let Some(request_iq) = parsed_iq.as_ref() {
-            let query = match parse_disco_info_query(request_iq) {
-                Ok(query) => query,
-                Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
-            };
+    if payload_ns == "http://jabber.org/protocol/disco#info" {
+        let request_iq = &iq;
+        let query = match parse_disco_info_query(request_iq) {
+            Ok(query) => query,
+            Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+        };
 
-            if to.as_deref() == Some(muc_domain) {
-                let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
-                let mut features = vec![Feature::muc(), Feature::replies()];
-                features.extend(
-                    state
-                        .extension_manager
-                        .extension_features()
-                        .into_iter()
-                        .map(|ns| Feature::new(&ns)),
-                );
-                let response = build_disco_info_response(request_iq, &identities, &features, None);
-                return vec![iq_to_xml(response)];
-            }
+        if to.as_deref() == Some(muc_domain) {
+            let identities = vec![Identity::muc_service(Some("Waddle Chatrooms"))];
+            let mut features = vec![Feature::muc(), Feature::replies()];
+            features.extend(
+                state
+                    .deps
+                    .protocol
+                    .extension_manager
+                    .extension_features()
+                    .into_iter()
+                    .map(|ns| Feature::new(&ns)),
+            );
+            let response = build_disco_info_response(request_iq, &identities, &features, None);
+            return vec![iq_to_xml(response)];
+        }
 
-            // Disco info on a specific room
-            if let Some(target) = to.as_deref() {
-                let room_target = target.split('/').next().unwrap_or(target);
-                if let Ok(room_jid) = room_target.parse::<BareJid>() {
-                    if let Some(room_actor) = get_room_actor(state, &room_jid).await {
-                        let snapshot = match room_actor.ask(GetSnapshot).await {
-                            Ok(snapshot) => snapshot.room,
-                            Err(error) => {
-                                warn!(
-                                    room = %room_jid,
-                                    error = ?error,
-                                    "Failed to load room snapshot for disco#info"
-                                );
-                                return vec![build_iq_error_xml_with_addresses(
-                                    &id,
-                                    response_from,
-                                    response_to,
-                                    "wait",
-                                    "internal-server-error",
-                                )];
-                            }
-                        };
-                        let identities = vec![Identity::muc_room(Some(&snapshot.config.name))];
-                        let mut features = muc_room_features(
-                            snapshot.config.persistent,
-                            snapshot.config.members_only,
-                            snapshot.config.moderated,
-                            snapshot.config.forum,
-                        );
-                        features.extend(
-                            state
-                                .extension_manager
-                                .extension_features()
-                                .into_iter()
-                                .map(|ns| Feature::new(&ns)),
-                        );
-                        let response =
-                            build_disco_info_response(request_iq, &identities, &features, None);
-                        return vec![iq_to_xml(response)];
-                    }
-
-                    if is_muc_room_jid(state, &room_jid).await {
-                        if let Some(channel) = get_managed_channel_for_room(state, &room_jid).await
-                        {
-                            let identities = vec![Identity::muc_room(Some(&channel.name))];
-                            let mut features = muc_room_features(
-                                true,
-                                false,
-                                false,
-                                channel.channel_type == "forum",
+        // Disco info on a specific room
+        if let Some(target) = to.as_deref() {
+            let room_target = target.split('/').next().unwrap_or(target);
+            if let Ok(room_jid) = room_target.parse::<BareJid>() {
+                if let Some(room_actor) = get_room_actor(state, &room_jid).await {
+                    let snapshot = match room_actor.ask(GetSnapshot).await {
+                        Ok(snapshot) => snapshot.room,
+                        Err(error) => {
+                            warn!(
+                                room = %room_jid,
+                                error = ?error,
+                                "Failed to load room snapshot for disco#info"
                             );
-                            features.extend(
-                                state
-                                    .extension_manager
-                                    .extension_features()
-                                    .into_iter()
-                                    .map(|ns| Feature::new(&ns)),
-                            );
-                            let response =
-                                build_disco_info_response(request_iq, &identities, &features, None);
-                            return vec![iq_to_xml(response)];
+                            return vec![build_iq_error_xml_with_addresses(
+                                &id,
+                                response_from,
+                                response_to,
+                                "wait",
+                                "internal-server-error",
+                            )];
                         }
+                    };
+                    let identities = vec![Identity::muc_room(Some(&snapshot.config.name))];
+                    let mut features = muc_room_features(
+                        snapshot.config.persistent,
+                        snapshot.config.members_only,
+                        snapshot.config.moderated,
+                        snapshot.config.forum,
+                    );
+                    features.extend(
+                        state
+                            .deps
+                            .protocol
+                            .extension_manager
+                            .extension_features()
+                            .into_iter()
+                            .map(|ns| Feature::new(&ns)),
+                    );
+                    let response =
+                        build_disco_info_response(request_iq, &identities, &features, None);
+                    return vec![iq_to_xml(response)];
+                }
 
-                        let room_name = room_jid
-                            .node()
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "Room".to_string());
-                        let identities = vec![Identity::muc_room(Some(&room_name))];
-                        let mut features = muc_room_features(false, false, false, false);
+                if is_muc_room_jid(state, &room_jid).await {
+                    if let Some(channel) = get_managed_channel_for_room(state, &room_jid).await {
+                        let identities = vec![Identity::muc_room(Some(&channel.name))];
+                        let mut features =
+                            muc_room_features(true, false, false, channel.channel_type == "forum");
                         features.extend(
                             state
+                                .deps
+                                .protocol
                                 .extension_manager
                                 .extension_features()
                                 .into_iter()
@@ -1925,31 +1903,46 @@ async fn handle_iq_with_conn_state(
                             build_disco_info_response(request_iq, &identities, &features, None);
                         return vec![iq_to_xml(response)];
                     }
+
+                    let room_name = room_jid
+                        .node()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "Room".to_string());
+                    let identities = vec![Identity::muc_room(Some(&room_name))];
+                    let mut features = muc_room_features(false, false, false, false);
+                    features.extend(
+                        state
+                            .deps
+                            .protocol
+                            .extension_manager
+                            .extension_features()
+                            .into_iter()
+                            .map(|ns| Feature::new(&ns)),
+                    );
+                    let response =
+                        build_disco_info_response(request_iq, &identities, &features, None);
+                    return vec![iq_to_xml(response)];
                 }
             }
+        }
 
-            if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
-                let identities = vec![Identity::automation(Some("Ad-Hoc Commands"))];
-                let features = vec![
-                    Feature::disco_info(),
-                    Feature::disco_items(),
-                    Feature::commands(),
-                ];
-                let response = build_disco_info_response(
-                    request_iq,
-                    &identities,
-                    &features,
-                    Some(NODE_COMMANDS),
-                );
-                return vec![iq_to_xml(response)];
-            }
+        if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
+            let identities = vec![Identity::automation(Some("Ad-Hoc Commands"))];
+            let features = vec![
+                Feature::disco_info(),
+                Feature::disco_items(),
+                Feature::commands(),
+            ];
+            let response =
+                build_disco_info_response(request_iq, &identities, &features, Some(NODE_COMMANDS));
+            return vec![iq_to_xml(response)];
+        }
 
-            // Disco info on spaces service
-            if to.as_deref() == Some(spaces_domain.as_str()) {
-                if let Some(node) = query.node.as_deref() {
-                    let waddle = match get_waddle_by_id(state.app_state.db_pool.global(), node)
-                        .await
-                    {
+        // Disco info on spaces service
+        if to.as_deref() == Some(spaces_domain.as_str()) {
+            if let Some(node) = query.node.as_deref() {
+                let waddle =
+                    match get_waddle_by_id(state.deps.app_state.db_pool.global(), node).await {
                         Ok(Some(waddle)) => waddle,
                         Ok(None) => {
                             return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
@@ -1964,24 +1957,159 @@ async fn handle_iq_with_conn_state(
                         }
                     };
 
-                    let is_member = if single_tenant {
+                let is_member = if single_tenant {
+                    true
+                } else if let Some(session) = authenticated_session {
+                    match list_user_waddles(
+                        state.deps.app_state.db_pool.global(),
+                        &session.user_id,
+                        200,
+                        0,
+                    )
+                    .await
+                    {
+                        Ok(waddles) => waddles.iter().any(|candidate| candidate.id == node),
+                        Err(err) => {
+                            warn!(
+                                user_id = %session.user_id,
+                                node = %node,
+                                error = %err,
+                                "Failed membership check for space node disco#info"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if !single_tenant && !is_member && !waddle.is_public {
+                    return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
+                }
+
+                let identities = vec![Identity::pubsub_leaf(Some(&waddle.name))];
+                let features = vec![
+                    Feature::disco_info(),
+                    Feature::pubsub(),
+                    Feature::pubsub_retrieve_items(),
+                    Feature::spaces(),
+                ];
+                let metadata = build_spaces_metadata_form(&WaddleDetails {
+                    id: waddle.id.clone(),
+                    name: waddle.name.clone(),
+                    description: waddle.description.clone(),
+                    owner_id: waddle.owner_user_id.clone(),
+                    icon_url: waddle.icon_url.clone(),
+                    is_public: waddle.is_public,
+                    created_at: waddle.created_at.clone(),
+                });
+                let response = build_disco_info_response_with_extensions(
+                    request_iq,
+                    &identities,
+                    &features,
+                    Some(node),
+                    &[metadata],
+                );
+                return vec![iq_to_xml(response)];
+            }
+
+            let identities = vec![Identity::spaces_service(Some("Spaces"))];
+            let features = spaces_service_features();
+            let response = build_disco_info_response(request_iq, &identities, &features, None);
+            return vec![iq_to_xml(response)];
+        }
+
+        // Disco info on upload service (XEP-0363)
+        let upload_domain = format!("upload.{domain}");
+        if to.as_deref() == Some(upload_domain.as_str()) {
+            let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
+            let features = upload_service_features();
+            let response = build_disco_info_response(request_iq, &identities, &features, None);
+            return vec![iq_to_xml(response)];
+        }
+
+        // Disco info on server
+        let identities = vec![Identity::server(Some("Waddle"))];
+        let mut features = vec![
+            Feature::ping(),
+            Feature::replies(),
+            Feature::disco_info(),
+            Feature::disco_items(),
+            Feature::commands(),
+            Feature::spaces(),
+        ];
+        features.extend(
+            state
+                .deps
+                .protocol
+                .extension_manager
+                .extension_features()
+                .into_iter()
+                .map(|ns| Feature::new(&ns)),
+        );
+        let response = build_disco_info_response(request_iq, &identities, &features, None);
+        return vec![iq_to_xml(response)];
+    }
+
+    // Disco items - list services/rooms
+    if payload_ns == "http://jabber.org/protocol/disco#items" {
+        let request_iq = &iq;
+        let query = match parse_disco_items_query(request_iq) {
+            Ok(query) => query,
+            Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+        };
+
+        if to.as_deref() == Some(muc_domain) {
+            debug!("Disco items query on MUC service");
+            let mut rooms = list_room_jids(state).await;
+            rooms.sort_by_key(|room| room.to_string());
+
+            let items: Vec<DiscoItem> = if rooms.is_empty() {
+                let lobby_jid = format!("lobby@{muc_domain}");
+                vec![DiscoItem::muc_room(&lobby_jid, "Lobby")]
+            } else {
+                rooms
+                    .into_iter()
+                    .map(|room_jid| {
+                        let room_jid_string = room_jid.to_string();
+                        let name = room_jid
+                            .node()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| room_jid_string.clone());
+                        DiscoItem::muc_room(&room_jid_string, &name)
+                    })
+                    .collect()
+            };
+
+            let response = build_disco_items_response(request_iq, &items, None);
+            return vec![iq_to_xml(response)];
+        }
+
+        if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
+            let commands = state.deps.protocol.command_registry.list_commands().await;
+            let command_refs: Vec<(&str, &str)> = commands
+                .iter()
+                .map(|(node, name)| (node.as_str(), name.as_str()))
+                .collect();
+            let response = build_command_items(request_iq, &command_refs, domain);
+            return vec![iq_to_xml(response)];
+        }
+
+        if to.as_deref() == Some(spaces_domain.as_str()) {
+            let global_db = state.deps.app_state.db_pool.global();
+            let items: Vec<DiscoItem> = match query.node.as_deref() {
+                Some(node) => {
+                    let can_list_channels = if single_tenant {
                         true
                     } else if let Some(session) = authenticated_session {
-                        match list_user_waddles(
-                            state.app_state.db_pool.global(),
-                            &session.user_id,
-                            200,
-                            0,
-                        )
-                        .await
-                        {
-                            Ok(waddles) => waddles.iter().any(|candidate| candidate.id == node),
+                        match list_user_waddles(global_db, &session.user_id, 200, 0).await {
+                            Ok(waddles) => waddles.iter().any(|w| w.id == node),
                             Err(err) => {
                                 warn!(
                                     user_id = %session.user_id,
                                     node = %node,
                                     error = %err,
-                                    "Failed membership check for space node disco#info"
+                                    "Failed membership check for spaces node discovery"
                                 );
                                 false
                             }
@@ -1990,149 +2118,14 @@ async fn handle_iq_with_conn_state(
                         false
                     };
 
-                    if !single_tenant && !is_member && !waddle.is_public {
-                        return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
-                    }
-
-                    let identities = vec![Identity::pubsub_leaf(Some(&waddle.name))];
-                    let features = vec![
-                        Feature::disco_info(),
-                        Feature::pubsub(),
-                        Feature::pubsub_retrieve_items(),
-                        Feature::spaces(),
-                    ];
-                    let metadata = build_spaces_metadata_form(&WaddleDetails {
-                        id: waddle.id.clone(),
-                        name: waddle.name.clone(),
-                        description: waddle.description.clone(),
-                        owner_id: waddle.owner_user_id.clone(),
-                        icon_url: waddle.icon_url.clone(),
-                        is_public: waddle.is_public,
-                        created_at: waddle.created_at.clone(),
-                    });
-                    let response = build_disco_info_response_with_extensions(
-                        request_iq,
-                        &identities,
-                        &features,
-                        Some(node),
-                        &[metadata],
-                    );
-                    return vec![iq_to_xml(response)];
-                }
-
-                let identities = vec![Identity::spaces_service(Some("Spaces"))];
-                let features = spaces_service_features();
-                let response = build_disco_info_response(request_iq, &identities, &features, None);
-                return vec![iq_to_xml(response)];
-            }
-
-            // Disco info on upload service (XEP-0363)
-            let upload_domain = format!("upload.{domain}");
-            if to.as_deref() == Some(upload_domain.as_str()) {
-                let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
-                let features = upload_service_features();
-                let response = build_disco_info_response(request_iq, &identities, &features, None);
-                return vec![iq_to_xml(response)];
-            }
-
-            // Disco info on server
-            let identities = vec![Identity::server(Some("Waddle"))];
-            let mut features = vec![
-                Feature::ping(),
-                Feature::replies(),
-                Feature::disco_info(),
-                Feature::disco_items(),
-                Feature::commands(),
-                Feature::spaces(),
-            ];
-            features.extend(
-                state
-                    .extension_manager
-                    .extension_features()
-                    .into_iter()
-                    .map(|ns| Feature::new(&ns)),
-            );
-            let response = build_disco_info_response(request_iq, &identities, &features, None);
-            return vec![iq_to_xml(response)];
-        }
-
-        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-    }
-
-    // Disco items - list services/rooms
-    if frame.contains("http://jabber.org/protocol/disco#items") {
-        if let Some(request_iq) = parsed_iq.as_ref() {
-            let query = match parse_disco_items_query(request_iq) {
-                Ok(query) => query,
-                Err(_) => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
-            };
-
-            if to.as_deref() == Some(muc_domain) {
-                debug!("Disco items query on MUC service");
-                let mut rooms = list_room_jids(state).await;
-                rooms.sort_by_key(|room| room.to_string());
-
-                let items: Vec<DiscoItem> = if rooms.is_empty() {
-                    let lobby_jid = format!("lobby@{muc_domain}");
-                    vec![DiscoItem::muc_room(&lobby_jid, "Lobby")]
-                } else {
-                    rooms
-                        .into_iter()
-                        .map(|room_jid| {
-                            let room_jid_string = room_jid.to_string();
-                            let name = room_jid
-                                .node()
-                                .map(|n| n.to_string())
-                                .unwrap_or_else(|| room_jid_string.clone());
-                            DiscoItem::muc_room(&room_jid_string, &name)
-                        })
-                        .collect()
-                };
-
-                let response = build_disco_items_response(request_iq, &items, None);
-                return vec![iq_to_xml(response)];
-            }
-
-            if to.as_deref() == Some(domain) && query.node.as_deref() == Some(NODE_COMMANDS) {
-                let commands = state.command_registry.list_commands().await;
-                let command_refs: Vec<(&str, &str)> = commands
-                    .iter()
-                    .map(|(node, name)| (node.as_str(), name.as_str()))
-                    .collect();
-                let response = build_command_items(request_iq, &command_refs, domain);
-                return vec![iq_to_xml(response)];
-            }
-
-            if to.as_deref() == Some(spaces_domain.as_str()) {
-                let global_db = state.app_state.db_pool.global();
-                let items: Vec<DiscoItem> = match query.node.as_deref() {
-                    Some(node) => {
-                        let can_list_channels = if single_tenant {
-                            true
-                        } else if let Some(session) = authenticated_session {
-                            match list_user_waddles(global_db, &session.user_id, 200, 0).await {
-                                Ok(waddles) => waddles.iter().any(|w| w.id == node),
-                                Err(err) => {
-                                    warn!(
-                                        user_id = %session.user_id,
-                                        node = %node,
-                                        error = %err,
-                                        "Failed membership check for spaces node discovery"
-                                    );
-                                    false
-                                }
-                            }
-                        } else {
-                            false
-                        };
-
-                        if !can_list_channels {
-                            vec![]
-                        } else {
-                            match state.app_state.db_pool.get_waddle_db(node).await {
-                                Ok(waddle_db) => {
-                                    match list_channels_from_db(&waddle_db, node, 200, 0).await {
-                                        Ok(channels) => channels
+                    if !can_list_channels {
+                        vec![]
+                    } else {
+                        match state.deps.app_state.db_pool.get_waddle_db(node).await {
+                            Ok(waddle_db) => {
+                                match list_channels_from_db(&waddle_db, node, 200, 0).await {
+                                    Ok(channels) => {
+                                        channels
                                             .into_iter()
                                             .filter_map(|channel| {
                                                 waddle_xmpp::managed_room_jid(
@@ -2148,112 +2141,102 @@ async fn handle_iq_with_conn_state(
                                                     )
                                                 })
                                             })
-                                            .collect(),
-                                        Err(err) => {
-                                            warn!(
-                                                node = %node,
-                                                error = %err,
-                                                "Failed to list channels for spaces node discovery"
-                                            );
-                                            vec![]
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        node = %node,
-                                        error = %err,
-                                        "Failed to open waddle database for spaces node discovery"
-                                    );
-                                    vec![]
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        let waddles = if single_tenant {
-                            match list_all_waddles_from_db(global_db, 1, 0).await {
-                                Ok(rows) => rows,
-                                Err(err) => {
-                                    warn!(error = %err, "Failed to list canonical single-tenant space");
-                                    vec![]
-                                }
-                            }
-                        } else if let Some(session) = authenticated_session {
-                            const PAGE_SIZE: usize = 200;
-                            let mut offset = 0usize;
-                            let mut all = Vec::new();
-
-                            loop {
-                                match list_user_waddles(
-                                    global_db,
-                                    &session.user_id,
-                                    PAGE_SIZE,
-                                    offset,
-                                )
-                                .await
-                                {
-                                    Ok(page) => {
-                                        let count = page.len();
-                                        all.extend(page);
-                                        if count < PAGE_SIZE {
-                                            break;
-                                        }
-                                        offset += PAGE_SIZE;
+                                            .collect()
                                     }
                                     Err(err) => {
                                         warn!(
-                                            user_id = %session.user_id,
+                                            node = %node,
                                             error = %err,
-                                            "Failed to list user spaces for discovery"
+                                            "Failed to list channels for spaces node discovery"
                                         );
-                                        break;
+                                        vec![]
                                     }
                                 }
                             }
-
-                            all
-                        } else {
-                            vec![]
-                        };
-
-                        waddles
-                            .into_iter()
-                            .map(|w| DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name)))
-                            .collect()
+                            Err(err) => {
+                                warn!(
+                                    node = %node,
+                                    error = %err,
+                                    "Failed to open waddle database for spaces node discovery"
+                                );
+                                vec![]
+                            }
+                        }
                     }
-                };
+                }
+                None => {
+                    let waddles = if single_tenant {
+                        match list_all_waddles_from_db(global_db, 1, 0).await {
+                            Ok(rows) => rows,
+                            Err(err) => {
+                                warn!(error = %err, "Failed to list canonical single-tenant space");
+                                vec![]
+                            }
+                        }
+                    } else if let Some(session) = authenticated_session {
+                        const PAGE_SIZE: usize = 200;
+                        let mut offset = 0usize;
+                        let mut all = Vec::new();
 
-                let response =
-                    build_disco_items_response(request_iq, &items, query.node.as_deref());
-                return vec![iq_to_xml(response)];
-            }
+                        loop {
+                            match list_user_waddles(global_db, &session.user_id, PAGE_SIZE, offset)
+                                .await
+                            {
+                                Ok(page) => {
+                                    let count = page.len();
+                                    all.extend(page);
+                                    if count < PAGE_SIZE {
+                                        break;
+                                    }
+                                    offset += PAGE_SIZE;
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        user_id = %session.user_id,
+                                        error = %err,
+                                        "Failed to list user spaces for discovery"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
 
-            debug!("Disco items query on server");
-            let upload_domain = format!("upload.{domain}");
-            let items = vec![
-                DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
-                DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
-                DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
-            ];
-            let response = build_disco_items_response(request_iq, &items, None);
+                        all
+                    } else {
+                        vec![]
+                    };
+
+                    waddles
+                        .into_iter()
+                        .map(|w| DiscoItem::spaces_node(&spaces_domain, &w.id, Some(&w.name)))
+                        .collect()
+                }
+            };
+
+            let response = build_disco_items_response(request_iq, &items, query.node.as_deref());
             return vec![iq_to_xml(response)];
         }
 
-        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+        debug!("Disco items query on server");
+        let upload_domain = format!("upload.{domain}");
+        let items = vec![
+            DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
+            DiscoItem::upload_service(&upload_domain, Some("HTTP File Upload")),
+            DiscoItem::spaces_service(&spaces_domain, Some("Spaces")),
+        ];
+        let response = build_disco_items_response(request_iq, &items, None);
+        return vec![iq_to_xml(response)];
     }
 
-    if let Some(request_iq) = parsed_iq.as_ref() {
-        if frame.contains("http://jabber.org/protocol/commands") {
-            return handle_command_iq(request_iq, state, authenticated_session, session_jid).await;
-        }
+    if payload_ns == "http://jabber.org/protocol/commands" {
+        return handle_command_iq(&iq, state, authenticated_session, session_jid).await;
     }
 
     // MUC owner IQ (XEP-0045): instant room config submit and room destroy.
     // This is needed for clients that create a room by:
     // 1) joining via presence
     // 2) submitting an empty owner form (`jabber:x:data` type='submit')
-    if frame.contains("http://jabber.org/protocol/muc#owner") {
+    if payload_ns == "http://jabber.org/protocol/muc#owner" {
         let Some(target) = to.as_deref() else {
             return vec![build_iq_error_xml_with_addresses(
                 &id,
@@ -2285,7 +2268,7 @@ async fn handle_iq_with_conn_state(
             )];
         }
 
-        if frame.contains("<destroy") {
+        if has_destroy {
             if destroy_room_actor(state, &room_jid).await {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
                 let room_jid_string = room_jid.to_string();
@@ -2317,119 +2300,112 @@ async fn handle_iq_with_conn_state(
     }
 
     // MAM (Message Archive Management) query
-    if let Some(request_iq) = parsed_iq.as_ref() {
-        if is_mam_query(request_iq) {
-            let Some(target) = request_iq.to.as_ref().map(|jid| jid.to_string()) else {
-                return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-            };
+    if is_mam_query(&iq) {
+        let request_iq = &iq;
+        let Some(target) = request_iq.to.as_ref().map(|jid| jid.to_string()) else {
+            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+        };
 
-            let room_target = target.split('/').next().unwrap_or(target.as_str());
-            let Ok(target_bare) = room_target.parse::<BareJid>() else {
-                return vec![build_iq_error_xml(&id, "modify", "jid-malformed")];
-            };
+        let room_target = target.split('/').next().unwrap_or(target.as_str());
+        let Ok(target_bare) = room_target.parse::<BareJid>() else {
+            return vec![build_iq_error_xml(&id, "modify", "jid-malformed")];
+        };
 
-            // Determine whether this is a personal archive query (to=self) or a
-            // MUC room archive query.  Personal queries are allowed when the
-            // target JID matches the authenticated user's bare JID.
-            let sender_bare: Option<BareJid> = authenticated_session.as_ref().and_then(|session| {
-                format!("{}@{}", session.xmpp_localpart, domain)
-                    .parse()
-                    .ok()
-            });
+        // Determine whether this is a personal archive query (to=self) or a
+        // MUC room archive query.  Personal queries are allowed when the
+        // target JID matches the authenticated user's bare JID.
+        let sender_bare: Option<BareJid> = authenticated_session.as_ref().and_then(|session| {
+            format!("{}@{}", session.xmpp_localpart, domain)
+                .parse()
+                .ok()
+        });
 
-            let is_personal = sender_bare
-                .as_ref()
-                .is_some_and(|bare| *bare == target_bare);
+        let is_personal = sender_bare
+            .as_ref()
+            .is_some_and(|bare| *bare == target_bare);
 
-            if !is_personal && !is_muc_room_jid(state, &target_bare).await {
-                return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
-            }
-
-            let (query_id, query) = match parse_mam_query(request_iq) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    warn!(error = %err, target = %target_bare, "Invalid MAM query");
-                    return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-                }
-            };
-
-            let archive_jid = target_bare.to_string();
-            let mut result = match state
-                .mam_storage
-                .query_messages(archive_jid.as_str(), &query)
-                .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    warn!(error = %err, target = %target_bare, "MAM query failed");
-                    return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
-                }
-            };
-
-            result.count = state
-                .mam_storage
-                .count_messages(archive_jid.as_str())
-                .await
-                .ok();
-
-            let recipient_jid = request_iq
-                .from
-                .as_ref()
-                .map(|jid| jid.to_string())
-                .or_else(|| extract_attr(frame, "from"))
-                .or_else(|| {
-                    authenticated_session
-                        .as_ref()
-                        .map(|session| format!("{}@{}", session.xmpp_localpart, domain))
-                })
-                .unwrap_or_else(|| "unknown@localhost".to_string());
-
-            let mut responses: Vec<String> =
-                build_result_messages(&query_id, recipient_jid.as_str(), &result.messages)
-                    .into_iter()
-                    .map(|message| stanza_to_xml(&Stanza::Message(message)))
-                    .collect();
-            responses.push(iq_to_xml(build_fin_iq(request_iq, &result)));
-            return responses;
+        if !is_personal && !is_muc_room_jid(state, &target_bare).await {
+            return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
         }
+
+        let (query_id, query) = match parse_mam_query(request_iq) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!(error = %err, target = %target_bare, "Invalid MAM query");
+                return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+            }
+        };
+
+        let archive_jid = target_bare.to_string();
+        let mut result = match state
+            .deps
+            .protocol
+            .mam_storage
+            .query_messages(archive_jid.as_str(), &query)
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                warn!(error = %err, target = %target_bare, "MAM query failed");
+                return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+            }
+        };
+
+        result.count = state
+            .deps
+            .protocol
+            .mam_storage
+            .count_messages(archive_jid.as_str())
+            .await
+            .ok();
+
+        let recipient_jid = request_iq
+            .from
+            .as_ref()
+            .map(|jid| jid.to_string())
+            .or_else(|| {
+                authenticated_session
+                    .as_ref()
+                    .map(|session| format!("{}@{}", session.xmpp_localpart, domain))
+            })
+            .unwrap_or_else(|| "unknown@localhost".to_string());
+
+        let mut responses: Vec<String> =
+            build_result_messages(&query_id, recipient_jid.as_str(), &result.messages)
+                .into_iter()
+                .map(|message| stanza_to_xml(&Stanza::Message(message)))
+                .collect();
+        responses.push(iq_to_xml(build_fin_iq(request_iq, &result)));
+        return responses;
     }
 
-    if let Some(request_iq) = parsed_iq.as_ref() {
-        if is_inbox_iq(request_iq) {
-            let Some(user_jid) = session_jid.as_ref().map(|jid| jid.to_bare()) else {
-                return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
-            };
+    if is_inbox_iq(&iq) {
+        let request_iq = &iq;
+        let Some(user_jid) = session_jid.as_ref().map(|jid| jid.to_bare()) else {
+            return vec![build_iq_error_xml(&id, "auth", "not-authorized")];
+        };
 
-            match &request_iq.payload {
-                xmpp_parsers::iq::IqType::Get(_) => {
-                    let query = match parse_inbox_query(request_iq) {
-                        Ok(query) => query,
-                        Err(error) => {
-                            warn!(error = %error, "Invalid inbox query");
-                            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-                        }
-                    };
-                    let entries = if query.threads {
-                        if let Some(room) = &query.room {
-                            match state.inbox_storage.list_threads(&user_jid, room).await {
-                                Ok(entries) => entries,
-                                Err(error) => {
-                                    warn!(error = %error, jid = %user_jid, "Failed to list thread inbox");
-                                    return vec![build_iq_error_xml(
-                                        &id,
-                                        "wait",
-                                        "internal-server-error",
-                                    )];
-                                }
-                            }
-                        } else {
-                            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-                        }
-                    } else {
-                        match state.inbox_storage.list(&user_jid).await {
+        match &request_iq.payload {
+            xmpp_parsers::iq::IqType::Get(_) => {
+                let query = match parse_inbox_query(request_iq) {
+                    Ok(query) => query,
+                    Err(error) => {
+                        warn!(error = %error, "Invalid inbox query");
+                        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                    }
+                };
+                let entries = if query.threads {
+                    if let Some(room) = &query.room {
+                        match state
+                            .deps
+                            .protocol
+                            .inbox_storage
+                            .list_threads(&user_jid, room)
+                            .await
+                        {
                             Ok(entries) => entries,
                             Err(error) => {
-                                warn!(error = %error, jid = %user_jid, "Failed to list inbox");
+                                warn!(error = %error, jid = %user_jid, "Failed to list thread inbox");
                                 return vec![build_iq_error_xml(
                                     &id,
                                     "wait",
@@ -2437,45 +2413,63 @@ async fn handle_iq_with_conn_state(
                                 )];
                             }
                         }
-                    };
-                    let total_unread = match state.inbox_storage.total_unread(&user_jid).await {
-                        Ok(total_unread) => total_unread,
+                    } else {
+                        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                    }
+                } else {
+                    match state.deps.protocol.inbox_storage.list(&user_jid).await {
+                        Ok(entries) => entries,
                         Err(error) => {
-                            warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
+                            warn!(error = %error, jid = %user_jid, "Failed to list inbox");
                             return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
                         }
-                    };
-                    let response = build_inbox_query_result(
-                        request_iq,
-                        &filter_query(entries, &query),
-                        total_unread,
-                    );
-                    return vec![iq_to_xml(response)];
-                }
-                xmpp_parsers::iq::IqType::Set(_) => {
-                    let mark_read = match parse_mark_read(request_iq) {
-                        Ok(mark_read) => mark_read,
-                        Err(error) => {
-                            warn!(error = %error, "Invalid inbox mark-read");
-                            return vec![build_iq_error_xml(&id, "modify", "bad-request")];
-                        }
-                    };
-                    if let Err(error) = state
-                        .inbox_storage
-                        .mark_read(
-                            &user_jid,
-                            &mark_read.partner,
-                            mark_read.thread_id.as_deref(),
-                        )
-                        .await
-                    {
-                        warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
+                    }
+                };
+                let total_unread = match state
+                    .deps
+                    .protocol
+                    .inbox_storage
+                    .total_unread(&user_jid)
+                    .await
+                {
+                    Ok(total_unread) => total_unread,
+                    Err(error) => {
+                        warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
                         return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
                     }
-                    return vec![iq_to_xml(build_mark_read_result(request_iq))];
-                }
-                _ => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
+                };
+                let response = build_inbox_query_result(
+                    request_iq,
+                    &filter_query(entries, &query),
+                    total_unread,
+                );
+                return vec![iq_to_xml(response)];
             }
+            xmpp_parsers::iq::IqType::Set(_) => {
+                let mark_read = match parse_mark_read(request_iq) {
+                    Ok(mark_read) => mark_read,
+                    Err(error) => {
+                        warn!(error = %error, "Invalid inbox mark-read");
+                        return vec![build_iq_error_xml(&id, "modify", "bad-request")];
+                    }
+                };
+                if let Err(error) = state
+                    .deps
+                    .protocol
+                    .inbox_storage
+                    .mark_read(
+                        &user_jid,
+                        &mark_read.partner,
+                        mark_read.thread_id.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(error = %error, jid = %user_jid, partner = %mark_read.partner, "Failed to mark inbox read");
+                    return vec![build_iq_error_xml(&id, "wait", "internal-server-error")];
+                }
+                return vec![iq_to_xml(build_mark_read_result(request_iq))];
+            }
+            _ => return vec![build_iq_error_xml(&id, "modify", "bad-request")],
         }
     }
 
@@ -2483,99 +2477,108 @@ async fn handle_iq_with_conn_state(
     // protocol::handlers::carbons::CarbonsHandler via the short-circuit above.
 
     // XEP-0363: HTTP File Upload slot request
-    if frame.contains("urn:xmpp:http:upload:0") {
-        if let Some(request_iq) = parsed_iq.as_ref() {
-            if is_upload_request(request_iq) {
-                let request = match parse_upload_request(request_iq) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        return vec![build_upload_error(&id, &e)];
-                    }
-                };
-
-                // Check file size limits (default 10 MB)
-                let max_size: u64 = std::env::var("WADDLE_MAX_UPLOAD_SIZE")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10 * 1024 * 1024);
-
-                if request.size > max_size {
-                    return vec![build_upload_error(
-                        &id,
-                        &UploadError::FileTooLarge { max_size },
-                    )];
+    if payload_ns == "urn:xmpp:http:upload:0" {
+        let request_iq = &iq;
+        if is_upload_request(request_iq) {
+            let request = match parse_upload_request(request_iq) {
+                Ok(req) => req,
+                Err(e) => {
+                    return vec![build_upload_error(&id, &e)];
                 }
+            };
 
-                let safe_filename = sanitize_filename(&request.filename);
-                let content_type =
-                    effective_content_type(request.content_type.as_deref()).to_string();
-                let slot_id = uuid::Uuid::new_v4().to_string();
-                let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
+            // Check file size limits (default 10 MB)
+            let max_size: u64 = std::env::var("WADDLE_MAX_UPLOAD_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10 * 1024 * 1024);
 
-                let base_url = std::env::var("WADDLE_BASE_URL")
-                    .unwrap_or_else(|_| format!("https://{}", domain));
-                let base_url = base_url.trim_end_matches('/');
-                let put_url = format!("{}/api/upload/{}", base_url, slot_id);
-                let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
+            if request.size > max_size {
+                return vec![build_upload_error(
+                    &id,
+                    &UploadError::FileTooLarge { max_size },
+                )];
+            }
 
-                let db = state.app_state.db_pool.global();
-                let conn = match db.guard().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to connect to database for upload slot");
-                        return vec![build_upload_error(
-                            &id,
-                            &UploadError::InternalError(format!("Database error: {}", e)),
-                        )];
-                    }
-                };
+            let safe_filename = sanitize_filename(&request.filename);
+            let content_type = effective_content_type(request.content_type.as_deref()).to_string();
+            let slot_id = uuid::Uuid::new_v4().to_string();
+            let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
 
-                if let Err(e) = conn
-                    .execute(
-                        "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                        libsql::params![
-                            slot_id.clone(),
-                            authenticated_session
-                                .as_ref()
-                                .map(|s| format!("{}@{}", s.xmpp_localpart, domain))
-                                .unwrap_or_else(|| "unknown@localhost".to_string()),
-                            safe_filename.clone(),
-                            request.size as i64,
-                            content_type.clone(),
-                            expires_at,
-                        ],
-                    )
-                    .await
-                {
-                    warn!(error = %e, "Failed to create upload slot in database");
+            let base_url =
+                std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", domain));
+            let base_url = base_url.trim_end_matches('/');
+            let put_url = format!("{}/api/upload/{}", base_url, slot_id);
+            let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
+
+            let db = state.deps.app_state.db_pool.global();
+            let conn = match db.guard().await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "Failed to connect to database for upload slot");
                     return vec![build_upload_error(
                         &id,
                         &UploadError::InternalError(format!("Database error: {}", e)),
                     )];
                 }
+            };
 
-                debug!(
-                    slot_id = %slot_id,
-                    put_url = %put_url,
-                    get_url = %get_url,
-                    "Created upload slot via WebSocket"
-                );
-
-                let slot = UploadSlot {
-                    put_url,
-                    put_headers: vec![("Content-Type".to_string(), content_type)],
-                    get_url,
-                };
-                let response = build_upload_slot_response(request_iq, &slot);
-                return vec![iq_to_xml(response)];
+            if let Err(e) = conn
+                .execute(
+                    "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, status, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                    libsql::params![
+                        slot_id.clone(),
+                        authenticated_session
+                            .as_ref()
+                            .map(|s| format!("{}@{}", s.xmpp_localpart, domain))
+                            .unwrap_or_else(|| "unknown@localhost".to_string()),
+                        safe_filename.clone(),
+                        request.size as i64,
+                        content_type.clone(),
+                        expires_at,
+                    ],
+                )
+                .await
+            {
+                warn!(error = %e, "Failed to create upload slot in database");
+                return vec![build_upload_error(
+                    &id,
+                    &UploadError::InternalError(format!("Database error: {}", e)),
+                )];
             }
+
+            debug!(
+                slot_id = %slot_id,
+                put_url = %put_url,
+                get_url = %get_url,
+                "Created upload slot via WebSocket"
+            );
+
+            let slot = UploadSlot {
+                put_url,
+                put_headers: vec![("Content-Type".to_string(), content_type)],
+                get_url,
+            };
+            let response = build_upload_slot_response(request_iq, &slot);
+            return vec![iq_to_xml(response)];
         }
     }
 
     // PubSub / PEP (XEP-0060, XEP-0163)
-    if let Some(ref iq) = parsed_iq {
-        if is_pubsub_iq(iq) {
-            if !authenticated || !resource_bound {
+    if is_pubsub_iq(&iq) {
+        if !authenticated || !resource_bound {
+            return vec![build_iq_error_xml_with_addresses(
+                &id,
+                response_from,
+                response_to,
+                "auth",
+                "not-authorized",
+            )];
+        }
+
+        let user_jid = match session_jid {
+            Some(jid) => jid.to_bare(),
+            None => {
                 return vec![build_iq_error_xml_with_addresses(
                     &id,
                     response_from,
@@ -2584,198 +2587,193 @@ async fn handle_iq_with_conn_state(
                     "not-authorized",
                 )];
             }
+        };
 
-            let user_jid = match session_jid {
-                Some(jid) => jid.to_bare(),
-                None => {
-                    return vec![build_iq_error_xml_with_addresses(
-                        &id,
-                        response_from,
-                        response_to,
-                        "auth",
-                        "not-authorized",
-                    )];
+        let target_jid = match &iq.to {
+            Some(to_jid) => to_jid.to_bare(),
+            None => user_jid.clone(),
+        };
+
+        let request = match parse_pubsub_iq(&iq) {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("Failed to parse PubSub request: {}", e);
+                let error = build_pubsub_error(&iq, PubSubError::InvalidJid);
+                return vec![iq_to_xml(error)];
+            }
+        };
+
+        debug!(?request, "Handling PubSub request via WebSocket");
+
+        match request {
+            PubSubRequest::Publish { node, item } => {
+                let result = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .publish_item(&target_jid, &node, &item, Some(&user_jid), true)
+                    .await;
+
+                match result {
+                    Ok(publish_result) => {
+                        debug!(
+                            node = %node,
+                            item_id = %publish_result.item_id,
+                            created = publish_result.node_created,
+                            "PubSub item published via WebSocket"
+                        );
+                        let response =
+                            build_pubsub_publish_result(&iq, &node, &publish_result.item_id);
+                        return vec![iq_to_xml(response)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub publish failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                        return vec![iq_to_xml(error)];
+                    }
                 }
-            };
+            }
 
-            let target_jid = match &iq.to {
-                Some(to_jid) => to_jid.to_bare(),
-                None => user_jid.clone(),
-            };
+            PubSubRequest::Items {
+                node,
+                max_items,
+                item_ids,
+            } => {
+                let result = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .get_items(&target_jid, &node, max_items, &item_ids)
+                    .await;
 
-            let request = match parse_pubsub_iq(iq) {
-                Ok(req) => req,
-                Err(e) => {
-                    warn!("Failed to parse PubSub request: {}", e);
-                    let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                match result {
+                    Ok(stored_items) => {
+                        let items: Vec<_> =
+                            stored_items.iter().map(|si| si.to_pubsub_item()).collect();
+                        debug!(
+                            node = %node,
+                            count = items.len(),
+                            "PubSub items retrieved via WebSocket"
+                        );
+                        let response = build_pubsub_items_result(&iq, &node, &items);
+                        return vec![iq_to_xml(response)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub items retrieval failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
+                        return vec![iq_to_xml(error)];
+                    }
+                }
+            }
+
+            PubSubRequest::Retract {
+                node,
+                item_id,
+                notify: _,
+            } => {
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
                 }
-            };
 
-            debug!(?request, "Handling PubSub request via WebSocket");
+                let result = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .retract_item(&target_jid, &node, &item_id)
+                    .await;
 
-            match request {
-                PubSubRequest::Publish { node, item } => {
-                    let result = state
-                        .pubsub_storage
-                        .publish_item(&target_jid, &node, &item, Some(&user_jid), true)
-                        .await;
-
-                    match result {
-                        Ok(publish_result) => {
-                            debug!(
-                                node = %node,
-                                item_id = %publish_result.item_id,
-                                created = publish_result.node_created,
-                                "PubSub item published via WebSocket"
-                            );
-                            let response =
-                                build_pubsub_publish_result(iq, &node, &publish_result.item_id);
+                match result {
+                    Ok(retracted) => {
+                        if retracted {
+                            debug!(node = %node, item_id = %item_id, "PubSub item retracted via WebSocket");
+                            let response = build_pubsub_success(&iq);
                             return vec![iq_to_xml(response)];
-                        }
-                        Err(e) => {
-                            warn!("PubSub publish failed: {}", e);
-                            let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        } else {
+                            let error = build_pubsub_error(&iq, PubSubError::ItemNotFound);
                             return vec![iq_to_xml(error)];
                         }
                     }
-                }
-
-                PubSubRequest::Items {
-                    node,
-                    max_items,
-                    item_ids,
-                } => {
-                    let result = state
-                        .pubsub_storage
-                        .get_items(&target_jid, &node, max_items, &item_ids)
-                        .await;
-
-                    match result {
-                        Ok(stored_items) => {
-                            let items: Vec<_> =
-                                stored_items.iter().map(|si| si.to_pubsub_item()).collect();
-                            debug!(
-                                node = %node,
-                                count = items.len(),
-                                "PubSub items retrieved via WebSocket"
-                            );
-                            let response = build_pubsub_items_result(iq, &node, &items);
-                            return vec![iq_to_xml(response)];
-                        }
-                        Err(e) => {
-                            warn!("PubSub items retrieval failed: {}", e);
-                            let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
-                            return vec![iq_to_xml(error)];
-                        }
-                    }
-                }
-
-                PubSubRequest::Retract {
-                    node,
-                    item_id,
-                    notify: _,
-                } => {
-                    if target_jid != user_jid {
-                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                    Err(e) => {
+                        warn!("PubSub retract failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
                         return vec![iq_to_xml(error)];
                     }
+                }
+            }
 
-                    let result = state
-                        .pubsub_storage
-                        .retract_item(&target_jid, &node, &item_id)
-                        .await;
-
-                    match result {
-                        Ok(retracted) => {
-                            if retracted {
-                                debug!(node = %node, item_id = %item_id, "PubSub item retracted via WebSocket");
-                                let response = build_pubsub_success(iq);
-                                return vec![iq_to_xml(response)];
-                            } else {
-                                let error = build_pubsub_error(iq, PubSubError::ItemNotFound);
-                                return vec![iq_to_xml(error)];
-                            }
-                        }
-                        Err(e) => {
-                            warn!("PubSub retract failed: {}", e);
-                            let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
-                            return vec![iq_to_xml(error)];
-                        }
-                    }
+            PubSubRequest::CreateNode { node } => {
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
                 }
 
-                PubSubRequest::CreateNode { node } => {
-                    if target_jid != user_jid {
-                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                let result = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .get_or_create_node(&target_jid, &node)
+                    .await;
+
+                match result {
+                    Ok((_, created)) => {
+                        if created {
+                            debug!(node = %node, "PubSub node created via WebSocket");
+                        } else {
+                            debug!(node = %node, "PubSub node already exists");
+                        }
+                        let response = build_pubsub_success(&iq);
+                        return vec![iq_to_xml(response)];
+                    }
+                    Err(e) => {
+                        warn!("PubSub node creation failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                         return vec![iq_to_xml(error)];
                     }
+                }
+            }
 
-                    let result = state
-                        .pubsub_storage
-                        .get_or_create_node(&target_jid, &node)
-                        .await;
+            PubSubRequest::DeleteNode { node } => {
+                if target_jid != user_jid {
+                    let error = build_pubsub_error(&iq, PubSubError::Forbidden);
+                    return vec![iq_to_xml(error)];
+                }
 
-                    match result {
-                        Ok((_, created)) => {
-                            if created {
-                                debug!(node = %node, "PubSub node created via WebSocket");
-                            } else {
-                                debug!(node = %node, "PubSub node already exists");
-                            }
-                            let response = build_pubsub_success(iq);
+                let result = state
+                    .deps
+                    .protocol
+                    .pubsub_storage
+                    .delete_node(&target_jid, &node)
+                    .await;
+
+                match result {
+                    Ok(deleted) => {
+                        if deleted {
+                            debug!(node = %node, "PubSub node deleted via WebSocket");
+                            let response = build_pubsub_success(&iq);
                             return vec![iq_to_xml(response)];
-                        }
-                        Err(e) => {
-                            warn!("PubSub node creation failed: {}", e);
-                            let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                        } else {
+                            let error = build_pubsub_error(&iq, PubSubError::NodeNotFound);
                             return vec![iq_to_xml(error)];
                         }
                     }
-                }
-
-                PubSubRequest::DeleteNode { node } => {
-                    if target_jid != user_jid {
-                        let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                    Err(e) => {
+                        warn!("PubSub node deletion failed: {}", e);
+                        let error = build_pubsub_error(&iq, PubSubError::Forbidden);
                         return vec![iq_to_xml(error)];
                     }
-
-                    let result = state.pubsub_storage.delete_node(&target_jid, &node).await;
-
-                    match result {
-                        Ok(deleted) => {
-                            if deleted {
-                                debug!(node = %node, "PubSub node deleted via WebSocket");
-                                let response = build_pubsub_success(iq);
-                                return vec![iq_to_xml(response)];
-                            } else {
-                                let error = build_pubsub_error(iq, PubSubError::NodeNotFound);
-                                return vec![iq_to_xml(error)];
-                            }
-                        }
-                        Err(e) => {
-                            warn!("PubSub node deletion failed: {}", e);
-                            let error = build_pubsub_error(iq, PubSubError::Forbidden);
-                            return vec![iq_to_xml(error)];
-                        }
-                    }
                 }
+            }
 
-                PubSubRequest::Subscribe { .. } | PubSubRequest::Unsubscribe { .. } => {
-                    let response = build_pubsub_success(iq);
-                    return vec![iq_to_xml(response)];
-                }
+            PubSubRequest::Subscribe { .. } | PubSubRequest::Unsubscribe { .. } => {
+                let response = build_pubsub_success(&iq);
+                return vec![iq_to_xml(response)];
             }
         }
     }
 
     // Unknown IQ - log a compact summary and return an error.
-    let payload_ns = parsed_iq.as_ref().and_then(|iq| match &iq.payload {
-        xmpp_parsers::iq::IqType::Get(payload) | xmpp_parsers::iq::IqType::Set(payload) => {
-            Some(payload.ns().to_string())
-        }
-        xmpp_parsers::iq::IqType::Result(_) | xmpp_parsers::iq::IqType::Error(_) => None,
-    });
+    let payload_ns = (!payload_ns.is_empty()).then_some(payload_ns.as_str());
     warn!(id = %id, payload_ns, "Unhandled IQ stanza");
     vec![build_iq_error_xml_with_addresses(
         &id,
@@ -2788,7 +2786,7 @@ async fn handle_iq_with_conn_state(
 
 /// Handle message stanzas including groupchat routing
 async fn handle_message(
-    frame: &str,
+    mut incoming: xmpp_parsers::message::Message,
     muc_domain: &str,
     state: &WebSocketState,
     session_jid: &Option<FullJid>,
@@ -2797,14 +2795,6 @@ async fn handle_message(
     let Some(ref sender_jid) = session_jid else {
         warn!("Message received without authenticated session");
         return vec![];
-    };
-
-    let mut incoming = match parse_message_stanza(frame) {
-        Ok(msg) => msg,
-        Err(err) => {
-            warn!(error = %err, "Failed to parse message stanza");
-            return vec![];
-        }
     };
 
     // Always stamp the authenticated sender.
@@ -2841,7 +2831,12 @@ async fn handle_message(
         prototype.type_ = XmppMessageType::Groupchat;
 
         // Enrich: detect GitHub links and append embed XML elements (fail-open)
-        let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
+        let _embeds_added = state
+            .deps
+            .protocol
+            .extension_manager
+            .enrich_message(&mut prototype)
+            .await;
 
         let broadcast = match room_actor
             .ask(BuildGroupchatBroadcast {
@@ -2885,6 +2880,8 @@ async fn handle_message(
             let entry = groupchat_entry(room_jid.clone(), &prototype, timestamp);
 
             if let Err(error) = state
+                .deps
+                .protocol
                 .inbox_storage
                 .upsert(&sender_bare, entry.clone(), false)
                 .await
@@ -2923,6 +2920,8 @@ async fn handle_message(
                 .filter(|jid| projected_bares.insert(jid.clone()))
             {
                 match state
+                    .deps
+                    .protocol
                     .inbox_storage
                     .upsert(&occupant_bare, entry.clone(), true)
                     .await
@@ -2936,6 +2935,8 @@ async fn handle_message(
                 // Push thread-level entry too
                 if let Some(ref thread_entry) = thread_entry {
                     match state
+                        .deps
+                        .protocol
                         .inbox_storage
                         .upsert(&occupant_bare, thread_entry.clone(), true)
                         .await
@@ -2951,6 +2952,8 @@ async fn handle_message(
             // Upsert thread entry for sender too (without incrementing unread)
             if let Some(ref thread_entry) = thread_entry {
                 if let Err(error) = state
+                    .deps
+                    .protocol
                     .inbox_storage
                     .upsert(&sender_bare, thread_entry.clone(), false)
                     .await
@@ -2988,7 +2991,12 @@ async fn handle_message(
                 delivered += 1;
             } else {
                 let stanza = Stanza::Message(outbound.message);
-                match state.connection_registry.try_send_to(&outbound.to, stanza) {
+                match state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(&outbound.to, stanza)
+                {
                     BroadcastOutcome::Delivered => delivered += 1,
                     BroadcastOutcome::DroppedFull => dropped_full += 1,
                     BroadcastOutcome::DroppedClosed => dropped_closed += 1,
@@ -3036,10 +3044,15 @@ async fn handle_message(
                 prototype.type_ == XmppMessageType::Chat && should_copy_message(&prototype);
 
             // Enrich: detect GitHub links and append embed XML elements
-            let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
+            let _embeds_added = state
+                .deps
+                .protocol
+                .extension_manager
+                .enrich_message(&mut prototype)
+                .await;
             let has_github_embed = message_has_embed_for_namespaces(
                 &prototype,
-                state.extension_manager.feature_namespaces(),
+                state.deps.protocol.extension_manager.feature_namespaces(),
             );
 
             // Archive body-bearing DMs to both sender's and recipient's personal MAM.
@@ -3051,6 +3064,8 @@ async fn handle_message(
                 let recipient_bare = to_jid.to_bare();
 
                 if let Err(error) = state
+                    .deps
+                    .protocol
                     .inbox_storage
                     .upsert(
                         &sender_bare,
@@ -3064,6 +3079,8 @@ async fn handle_message(
 
                 if recipient_bare.domain() == sender_bare.domain() {
                     match state
+                        .deps
+                        .protocol
                         .inbox_storage
                         .upsert(
                             &recipient_bare,
@@ -3086,6 +3103,8 @@ async fn handle_message(
                 msg.to = Some(jid::Jid::from(to_full_jid.clone()));
                 let stanza = Stanza::Message(msg);
                 match state
+                    .deps
+                    .protocol
                     .connection_registry
                     .send_to(&to_full_jid, stanza)
                     .await
@@ -3096,6 +3115,8 @@ async fn handle_message(
             } else {
                 let to_bare_jid = to_jid.to_bare();
                 let resources = state
+                    .deps
+                    .protocol
                     .connection_registry
                     .get_resources_for_user(&to_bare_jid);
                 for resource_jid in resources {
@@ -3103,6 +3124,8 @@ async fn handle_message(
                     msg.to = Some(jid::Jid::from(resource_jid.clone()));
                     let stanza = Stanza::Message(msg);
                     let _ = state
+                        .deps
+                        .protocol
                         .connection_registry
                         .send_to(&resource_jid, stanza)
                         .await;
@@ -3143,6 +3166,8 @@ async fn send_sent_carbons_to_websocket_resources(
 ) {
     let sender_bare = sender_jid.to_bare();
     let resources = state
+        .deps
+        .protocol
         .connection_registry
         .get_other_carbon_resources_for_user(&sender_bare, sender_jid);
 
@@ -3156,6 +3181,8 @@ async fn send_sent_carbons_to_websocket_resources(
                 }
             };
         let _ = state
+            .deps
+            .protocol
             .connection_registry
             .send_to(&resource_jid, Stanza::Message(carbon))
             .await;
@@ -3169,6 +3196,8 @@ async fn send_received_carbons_to_websocket_resources(
 ) {
     let recipient_bare = recipient_jid.to_bare();
     let resources = state
+        .deps
+        .protocol
         .connection_registry
         .get_other_carbon_resources_for_user(&recipient_bare, recipient_jid);
 
@@ -3185,6 +3214,8 @@ async fn send_received_carbons_to_websocket_resources(
             }
         };
         let _ = state
+            .deps
+            .protocol
             .connection_registry
             .send_to(&resource_jid, Stanza::Message(carbon))
             .await;
@@ -3197,10 +3228,16 @@ async fn push_inbox_update(
     user: &BareJid,
     entry: &waddle_xmpp::inbox::InboxEntry,
 ) {
-    let resources = state.connection_registry.get_resources_for_user(user);
+    let resources = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_resources_for_user(user);
     for resource_jid in resources {
         let msg = build_inbox_push(jid::Jid::from(resource_jid.clone()), entry);
         let _ = state
+            .deps
+            .protocol
             .connection_registry
             .send_to(&resource_jid, Stanza::Message(msg))
             .await;
@@ -3268,6 +3305,8 @@ async fn archive_groupchat_message(
 
     let archive_jid = room_jid.to_string();
     match state
+        .deps
+        .protocol
         .mam_storage
         .store_message(archive_jid.as_str(), &archived)
         .await
@@ -3320,6 +3359,8 @@ async fn archive_direct_message(
     // Store in sender's personal archive
     let sender_bare = sender_jid.to_bare().to_string();
     if let Err(err) = state
+        .deps
+        .protocol
         .mam_storage
         .store_message(sender_bare.as_str(), &archived)
         .await
@@ -3335,6 +3376,8 @@ async fn archive_direct_message(
     // Store in recipient's personal archive
     let recipient_bare = to_jid.to_bare().to_string();
     if let Err(err) = state
+        .deps
+        .protocol
         .mam_storage
         .store_message(recipient_bare.as_str(), &archived)
         .await
@@ -3543,82 +3586,8 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-/// Extract an XML attribute value
-fn extract_attr(xml: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr);
-    if let Some(start) = xml.find(&pattern) {
-        let rest = &xml[start + pattern.len()..];
-        if let Some(end) = rest.find('"') {
-            return Some(rest[..end].to_string());
-        }
-    }
-    // Also try single quotes
-    let pattern = format!("{}='", attr);
-    if let Some(start) = xml.find(&pattern) {
-        let rest = &xml[start + pattern.len()..];
-        if let Some(end) = rest.find('\'') {
-            return Some(rest[..end].to_string());
-        }
-    }
-    None
-}
-
-/// Extract text content of an XML element
-fn extract_element_text(xml: &str, element: &str) -> Option<String> {
-    let open_tag = format!("<{}", element);
-    if let Some(start) = xml.find(&open_tag) {
-        let rest = &xml[start..];
-        if let Some(tag_end) = rest.find('>') {
-            let after_tag = &rest[tag_end + 1..];
-            let close_tag = format!("</{}", element);
-            if let Some(end) = after_tag.find(&close_tag) {
-                return Some(after_tag[..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Parse a raw XMPP `<message/>` frame into an xmpp-parsers message stanza.
-fn parse_message_stanza(frame: &str) -> Result<xmpp_parsers::message::Message, String> {
-    let patched = add_default_namespace_if_missing(frame, "jabber:client");
-    let element: Element = patched
-        .parse()
-        .map_err(|err| format!("Failed to parse message XML: {}", err))?;
-    xmpp_parsers::message::Message::try_from(element)
-        .map_err(|err| format!("Invalid message stanza: {:?}", err))
-}
-
-fn add_default_namespace_if_missing(xml: &str, default_ns: &str) -> String {
-    let trimmed = xml.trim();
-    if !trimmed.starts_with("<message") {
-        return trimmed.to_string();
-    }
-
-    let open_end = match trimmed.find('>') {
-        Some(idx) => idx,
-        None => return trimmed.to_string(),
-    };
-    let open_tag = &trimmed[..open_end];
-
-    if open_tag.contains("xmlns=") {
-        return trimmed.to_string();
-    }
-
-    let tag_end = trimmed[1..]
-        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
-        .map(|idx| idx + 1)
-        .unwrap_or(open_end);
-
-    format!(
-        "{} xmlns='{}'{}",
-        &trimmed[..tag_end],
-        default_ns,
-        &trimmed[tag_end..]
-    )
-}
-
 /// Derive waddle_id and channel_id from a room's bare JID node.
+
 ///
 /// Convention: node is "waddleId_channelId" (first underscore separates).
 /// Falls back to ("default", "default") if the node can't be parsed.
@@ -3635,6 +3604,7 @@ async fn get_managed_channel_for_room(
 ) -> Option<crate::server::routes::channels::ChannelResponse> {
     let (waddle_id, channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid)?;
     let waddle_db = state
+        .deps
         .app_state
         .db_pool
         .get_waddle_db(&waddle_id)
@@ -3720,7 +3690,7 @@ async fn handle_command_iq(
         command,
     };
 
-    let result = state.command_registry.dispatch(ctx).await;
+    let result = state.deps.protocol.command_registry.dispatch(ctx).await;
     let response_command = match result {
         CommandResult::Executing {
             form,
@@ -3852,24 +3822,35 @@ mod tests {
         waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
 
         Arc::new(WebSocketState {
-            app_state,
-            auth_state,
-            connection_registry: Arc::new(ConnectionRegistry::new()),
-            room_registry: kameo::spawn(RoomRegistryActor::new("muc.example.com".to_string())),
-            mam_storage,
-            inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
-            command_registry: Arc::new(CommandRegistry::new()),
-            extension_manager: Arc::new(ExtensionManager::from_env().expect("extension manager")),
-            dispatcher: Arc::new(dispatcher),
-            pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
-            sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
-            resumable_sessions: Arc::new(dashmap::DashMap::new()),
+            deps: WebSocketDeps {
+                app_state,
+                auth_state,
+                protocol: ProtocolServices {
+                    connection_registry: Arc::new(ConnectionRegistry::new()),
+                    room_registry: kameo::spawn(RoomRegistryActor::new(
+                        "muc.example.com".to_string(),
+                    )),
+                    mam_storage,
+                    inbox_storage: Arc::new(
+                        waddle_xmpp::inbox::storage::InMemoryInboxStorage::new(),
+                    ),
+                    command_registry: Arc::new(CommandRegistry::new()),
+                    extension_manager: Arc::new(
+                        ExtensionManager::from_env().expect("extension manager"),
+                    ),
+                    dispatcher: Arc::new(dispatcher),
+                    pubsub_storage: Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+                    sm_session_registry: Arc::new(InMemorySmSessionRegistry::new()),
+                    resumable_sessions: Arc::new(dashmap::DashMap::new()),
+                },
+            },
         })
     }
 
     async fn create_test_session(state: &WebSocketState, username: &str) -> Session {
         let session = Session::new(&uuid::Uuid::new_v4().to_string(), username, username);
         state
+            .deps
             .auth_state
             .session_manager
             .create_session(&session)
@@ -3884,6 +3865,16 @@ mod tests {
     ) -> waddle_xmpp::muc::room_actor::RoomSnapshot {
         let room_actor = get_room_actor(state, room_jid).await.expect("room actor");
         room_actor.ask(GetSnapshot).await.expect("room snapshot")
+    }
+
+    fn parse_message_for_test(xml: &str) -> xmpp_parsers::message::Message {
+        match parse_frame(xml).expect("message parses") {
+            InboundFrame::Stanza(stanza) => match *stanza {
+                Stanza::Message(msg) => msg,
+                _ => panic!("expected message stanza"),
+            },
+            _ => panic!("expected message stanza"),
+        }
     }
 
     #[tokio::test]
@@ -3914,6 +3905,44 @@ mod tests {
 
         assert!(sent);
         assert_eq!(sink.sent.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_open_dispatches_via_typed_ingress() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].contains("urn:ietf:params:xml:ns:xmpp-framing"));
+        assert!(responses[1].contains("<features"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_auth_dispatches_via_typed_ingress() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(responses, vec![sasl_success_xml()]);
+        assert!(conn.authenticated);
+        assert!(conn.authenticated_session.is_some());
     }
 
     #[tokio::test]
@@ -3990,7 +4019,7 @@ mod tests {
             Some(session.user_id.as_str())
         );
         let expected_bare =
-            localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
+            localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
         assert_eq!(
             conn.session_jid
@@ -4051,7 +4080,7 @@ mod tests {
             .get_child("jid", waddle_xmpp::ns::BIND)
             .expect("jid child");
         let expected_bare =
-            localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
+            localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
         let expected_full = format!("{expected_bare}/web");
         assert!(
@@ -4105,7 +4134,7 @@ mod tests {
             .text();
 
         let expected_bare =
-            localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
+            localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
                 .expect("session localpart should produce JID");
         let prefix = format!("{expected_bare}/ws-");
         assert!(
@@ -4267,7 +4296,10 @@ mod tests {
     async fn handle_xmpp_frame_drops_oversized_input() {
         let state = create_test_websocket_state().await;
         let mut conn = LegacyConnState::new();
-        let huge = format!("<iq id=\"big\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+        let huge = format!(
+            "<iq id=\"big\">{}</iq>",
+            "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
+        );
         let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
         assert!(responses.is_empty());
     }
@@ -4327,8 +4359,16 @@ mod tests {
         let state = create_test_websocket_state().await;
         let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        state.connection_registry.register(jid.clone(), tx);
-        assert!(!state.connection_registry.is_carbons_enabled(&jid));
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx);
+        assert!(!state
+            .deps
+            .protocol
+            .connection_registry
+            .is_carbons_enabled(&jid));
 
         let enable = r#"<iq xmlns="jabber:client" id="carbons-enable" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
         let enable_responses = handle_iq(
@@ -4341,7 +4381,11 @@ mod tests {
         )
         .await;
         assert_eq!(enable_responses.len(), 1);
-        assert!(state.connection_registry.is_carbons_enabled(&jid));
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .is_carbons_enabled(&jid));
 
         let disable = r#"<iq xmlns="jabber:client" id="carbons-disable" type="set"><disable xmlns="urn:xmpp:carbons:2"/></iq>"#;
         let disable_responses = handle_iq(
@@ -4354,7 +4398,11 @@ mod tests {
         )
         .await;
         assert_eq!(disable_responses.len(), 1);
-        assert!(!state.connection_registry.is_carbons_enabled(&jid));
+        assert!(!state
+            .deps
+            .protocol
+            .connection_registry
+            .is_carbons_enabled(&jid));
     }
 
     #[tokio::test]
@@ -4435,6 +4483,8 @@ mod tests {
     async fn handle_iq_command_request_routes_to_registry() {
         let state = create_test_websocket_state().await;
         state
+            .deps
+            .protocol
             .command_registry
             .register(
                 "waddle:create-channel",
@@ -4489,6 +4539,7 @@ mod tests {
     ) {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = state
+            .deps
             .app_state
             .db_pool
             .global()
@@ -4520,6 +4571,7 @@ mod tests {
     ) {
         seed_waddle(state, user_id, waddle_id, waddle_name, true).await;
         let conn = state
+            .deps
             .app_state
             .db_pool
             .global()
@@ -4655,6 +4707,7 @@ mod tests {
             .await;
 
         let waddle_db = state
+            .deps
             .app_state
             .db_pool
             .create_waddle_db(waddle_id)
@@ -4779,6 +4832,8 @@ mod tests {
 
         let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
         state
+            .deps
+            .protocol
             .connection_registry
             .register(recipient_jid.clone(), recipient_tx);
 
@@ -4792,7 +4847,7 @@ mod tests {
         );
 
         let responses = handle_message(
-            &frame,
+            parse_message_for_test(&frame),
             "muc.example.com",
             state.as_ref(),
             &Some(sender_jid),
@@ -4846,16 +4901,22 @@ mod tests {
         let (web_tx, mut web_rx) = mpsc::channel(8);
         let (mobile_tx, mut mobile_rx) = mpsc::channel(8);
         state
+            .deps
+            .protocol
             .connection_registry
             .register(recipient_web.clone(), web_tx);
         state
+            .deps
+            .protocol
             .connection_registry
             .register(recipient_mobile.clone(), mobile_tx);
 
         let responses = handle_message(
-            "<message xmlns='jabber:client' to='alice@example.com' type='chat' id='dm-bare-1'>\
+            parse_message_for_test(
+                "<message xmlns='jabber:client' to='alice@example.com' type='chat' id='dm-bare-1'>\
                 <body>hello all resources</body>\
              </message>",
+            ),
             "muc.example.com",
             state.as_ref(),
             &Some(sender_jid),
@@ -4907,16 +4968,22 @@ mod tests {
         let (sender_tx, _sender_rx) = mpsc::channel(8);
         let (sibling_tx, mut sibling_rx) = mpsc::channel(8);
         state
+            .deps
+            .protocol
             .connection_registry
             .register(sender_jid.clone(), sender_tx);
         state
+            .deps
+            .protocol
             .connection_registry
             .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
 
         let responses = handle_message(
-            "<message xmlns='jabber:client' to='ghost@example.com' type='chat' id='sent-carbon-1'>\
+            parse_message_for_test(
+                "<message xmlns='jabber:client' to='ghost@example.com' type='chat' id='sent-carbon-1'>\
                 <body>sent carbon over websocket</body>\
              </message>",
+            ),
             "muc.example.com",
             state.as_ref(),
             &Some(sender_jid),
@@ -4952,9 +5019,13 @@ mod tests {
         let (recipient_tx, mut recipient_rx) = mpsc::channel(8);
         let (sibling_tx, mut sibling_rx) = mpsc::channel(8);
         state
+            .deps
+            .protocol
             .connection_registry
             .register(recipient_jid.clone(), recipient_tx);
         state
+            .deps
+            .protocol
             .connection_registry
             .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
 
@@ -4965,7 +5036,7 @@ mod tests {
         );
 
         let responses = handle_message(
-            frame.as_str(),
+            parse_message_for_test(frame.as_str()),
             "muc.example.com",
             state.as_ref(),
             &Some(sender_jid),
@@ -5024,7 +5095,7 @@ mod tests {
             bob_jid.to_bare()
         );
         let responses = handle_message(
-            message_xml.as_str(),
+            parse_message_for_test(message_xml.as_str()),
             "muc.example.com",
             state.as_ref(),
             &Some(alice_jid),
@@ -5135,7 +5206,7 @@ mod tests {
             bob_jid.to_bare()
         );
         let responses = handle_message(
-            message_xml.as_str(),
+            parse_message_for_test(message_xml.as_str()),
             "muc.example.com",
             state.as_ref(),
             &Some(alice_jid),
@@ -5214,7 +5285,7 @@ mod tests {
              </message>"
         );
         let message_responses = handle_message(
-            message_xml.as_str(),
+            parse_message_for_test(message_xml.as_str()),
             "muc.example.com",
             state.as_ref(),
             &Some(sender_jid.clone()),
@@ -5345,7 +5416,7 @@ mod tests {
             <reply xmlns="urn:xmpp:reply:0" id="parent-msg" to="alice@localhost"/>
         </message>"#;
 
-        let parsed = parse_message_stanza(xml).expect("message parses");
+        let parsed = parse_message_for_test(xml);
         assert_eq!(parsed.id.as_deref(), Some("msg-1"));
         assert_eq!(
             parsed.thread.as_ref().map(|t| t.0.as_str()),
@@ -5365,9 +5436,9 @@ mod tests {
             <reply xmlns="urn:xmpp:reply:0" id="msg-1" to="alice@localhost"/>
         </message>"#;
 
-        let parsed = parse_message_stanza(xml).expect("message parses");
+        let parsed = parse_message_for_test(xml);
         let rendered = stanza_to_xml(&Stanza::Message(parsed));
-        let reparsed = parse_message_stanza(&rendered).expect("serialized message parses");
+        let reparsed = parse_message_for_test(&rendered);
         assert_eq!(
             reparsed.thread.as_ref().map(|thread| thread.0.as_str()),
             Some("thread-root"),
@@ -5379,13 +5450,6 @@ mod tests {
                 && payload.attr("id") == Some("msg-1")
                 && payload.attr("to") == Some("alice@localhost")
         }));
-    }
-
-    #[test]
-    fn add_default_namespace_if_missing_for_message() {
-        let xml = "<message type='chat'><body>Hi</body></message>";
-        let patched = add_default_namespace_if_missing(xml, "jabber:client");
-        assert!(patched.contains("xmlns='jabber:client'"));
     }
 
     #[tokio::test]
@@ -5795,6 +5859,8 @@ mod tests {
             carbons_enabled: true,
         };
         state
+            .deps
+            .protocol
             .sm_session_registry
             .store_session(detached)
             .await
@@ -5872,6 +5938,8 @@ mod tests {
             carbons_enabled: false,
         };
         state
+            .deps
+            .protocol
             .sm_session_registry
             .store_session(detached)
             .await
@@ -5925,6 +5993,8 @@ mod tests {
         // Seed an immediately-expired detached session for that JID.
         let stream_id = "already-expired".to_string();
         state
+            .deps
+            .protocol
             .sm_session_registry
             .store_session(DetachedSession {
                 stream_id: stream_id.clone(),
@@ -5941,6 +6011,8 @@ mod tests {
             .await
             .expect("store");
         state
+            .deps
+            .protocol
             .resumable_sessions
             .insert(stream_id.clone(), Session::new("uid", "alice", "alice"));
 
@@ -5948,6 +6020,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let drained = state
+            .deps
+            .protocol
             .sm_session_registry
             .drain_expired()
             .await
@@ -5956,11 +6030,19 @@ mod tests {
         assert_eq!(drained[0].stream_id, stream_id);
 
         // The janitor body: remove sidecar + MUC occupant + any routing slot.
-        state.resumable_sessions.remove(&stream_id);
-        state.connection_registry.unregister(&drained[0].jid);
+        state.deps.protocol.resumable_sessions.remove(&stream_id);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .unregister(&drained[0].jid);
         cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
 
-        assert!(!state.resumable_sessions.contains_key(&stream_id));
+        assert!(!state
+            .deps
+            .protocol
+            .resumable_sessions
+            .contains_key(&stream_id));
         assert!(
             snapshot_room(state.as_ref(), &room_jid)
                 .await

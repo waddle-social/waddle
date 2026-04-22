@@ -1,9 +1,7 @@
-//! Client-to-Server (C2S) connection handling.
+//! Client-to-server (C2S) connection metadata for the WebSocket server path.
 //!
-//! This module handles the C2S portion of XMPP, including:
-//! - Initial stream negotiation
-//! - Feature advertisement
-//! - Stanza routing to/from clients
+//! The HTTP/WebSocket stack owns RFC 7395 session handling; this module just
+//! carries small typed records shared with the rest of the XMPP crate.
 
 use std::net::SocketAddr;
 
