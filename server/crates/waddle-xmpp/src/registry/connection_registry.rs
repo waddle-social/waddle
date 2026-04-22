@@ -251,6 +251,27 @@ impl ConnectionRegistry {
         removed.map(|(_, entry)| entry)
     }
 
+    /// Unregister a connection only if the current registry entry belongs to
+    /// the provided carbons handle (i.e. this actor still owns the slot).
+    #[instrument(skip(self, carbons_handle), fields(jid = %jid))]
+    pub fn unregister_if_owner(
+        &self,
+        jid: &FullJid,
+        carbons_handle: &Arc<AtomicBool>,
+    ) -> Option<ConnectionEntry> {
+        let removed = self.connections.remove_if(jid, |_, entry| {
+            Arc::ptr_eq(&entry.carbons_enabled, carbons_handle)
+        });
+        if removed.is_some() {
+            prometheus::decrement_connected_users();
+            self.presence_states.remove(jid);
+            debug!("Unregistered owned connection");
+        } else {
+            debug!("Skipped unregister: ownership moved to replacement connection");
+        }
+        removed.map(|(_, entry)| entry)
+    }
+
     /// Check if a JID is currently connected.
     pub fn is_connected(&self, jid: &FullJid) -> bool {
         self.connections.contains_key(jid)
@@ -1010,5 +1031,87 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let jid = test_jid("missing");
         assert!(!registry.set_carbons_enabled(&jid, true));
+    }
+
+    #[test]
+    fn test_try_send_to_dropped_full_keeps_connection_registered() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("full");
+        let (tx, _rx) = mpsc::channel(1);
+        registry.register(jid.clone(), tx);
+
+        let first =
+            registry.try_send_to(&jid, Stanza::Message(make_test_message("full@example.com")));
+        let second =
+            registry.try_send_to(&jid, Stanza::Message(make_test_message("full@example.com")));
+
+        assert_eq!(first, BroadcastOutcome::Delivered);
+        assert_eq!(second, BroadcastOutcome::DroppedFull);
+        assert!(
+            registry.is_connected(&jid),
+            "full channel should not be evicted"
+        );
+    }
+
+    #[test]
+    fn test_try_send_to_closed_evicts_connection() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("closed");
+        let (tx, rx) = mpsc::channel(1);
+        registry.register(jid.clone(), tx);
+        drop(rx);
+
+        let outcome = registry.try_send_to(
+            &jid,
+            Stanza::Message(make_test_message("closed@example.com")),
+        );
+
+        assert_eq!(outcome, BroadcastOutcome::DroppedClosed);
+        assert!(
+            !registry.is_connected(&jid),
+            "closed channel should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn test_remove_if_sender_closed_keeps_new_live_registration() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("racy");
+
+        let (tx_closed, rx_closed) = mpsc::channel(1);
+        registry.register(jid.clone(), tx_closed);
+        drop(rx_closed);
+
+        let (tx_live, _rx_live) = mpsc::channel(1);
+        registry.register(jid.clone(), tx_live);
+
+        registry.remove_if_sender_closed(&jid);
+
+        assert!(
+            registry.is_connected(&jid),
+            "race-safe stale cleanup must not remove a newly registered live sender"
+        );
+    }
+
+    #[test]
+    fn test_try_send_to_load_reports_single_delivery_then_drops() {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("load");
+        let (tx, _rx) = mpsc::channel(1);
+        registry.register(jid.clone(), tx);
+
+        let mut delivered = 0;
+        let mut dropped_full = 0;
+        for _ in 0..32 {
+            match registry.try_send_to(&jid, Stanza::Message(make_test_message("load@example.com")))
+            {
+                BroadcastOutcome::Delivered => delivered += 1,
+                BroadcastOutcome::DroppedFull => dropped_full += 1,
+                other => panic!("unexpected outcome during load test: {other:?}"),
+            }
+        }
+
+        assert_eq!(delivered, 1);
+        assert_eq!(dropped_full, 31);
     }
 }

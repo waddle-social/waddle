@@ -72,7 +72,7 @@ pub struct ConfigFormData {
 }
 
 /// Room destruction request.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DestroyRequest {
     /// Optional reason for destruction
     pub reason: Option<String>,

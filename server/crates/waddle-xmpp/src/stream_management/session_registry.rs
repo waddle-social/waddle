@@ -45,6 +45,8 @@ pub enum SmRegistryError {
 pub struct DetachedSession {
     /// The unique stream ID
     pub stream_id: String,
+    /// Authenticated user identifier.
+    pub user_id: String,
     /// The full JID of the session owner
     pub jid: FullJid,
     /// Server's inbound stanza count at detach time
@@ -93,6 +95,15 @@ impl DetachedSession {
             .iter()
             .filter(|(seq, _)| sequence_gt(*seq, client_h))
             .count()
+    }
+
+    /// Get the XML payloads that must be resent to a client reporting `h`.
+    pub fn stanzas_to_resend(&self, client_h: u32) -> Vec<String> {
+        self.unacked_stanzas
+            .iter()
+            .filter(|(seq, _)| sequence_gt(*seq, client_h))
+            .map(|(_, xml)| xml.clone())
+            .collect()
     }
 }
 
@@ -330,6 +341,7 @@ mod tests {
     fn make_test_session(stream_id: &str) -> DetachedSession {
         DetachedSession {
             stream_id: stream_id.to_string(),
+            user_id: "user@example.com".to_string(),
             jid: make_test_jid(),
             inbound_count: 10,
             outbound_count: 15,

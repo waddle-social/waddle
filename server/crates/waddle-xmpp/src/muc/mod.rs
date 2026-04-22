@@ -159,7 +159,7 @@ pub struct Occupant {
 }
 
 /// MUC room actor state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MucRoom {
     /// Room JID (bare)
     pub room_jid: BareJid,

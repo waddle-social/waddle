@@ -380,9 +380,14 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
         if let Some(jid) = conn.session_jid.clone() {
             if conn.sm_state.is_resumable() {
                 let carbons_enabled = conn.carbons_enabled;
-                if let Some(detached) = conn
-                    .sm_state
-                    .to_detached_session(jid.clone(), carbons_enabled)
+                let user_id = conn
+                    .authenticated_session
+                    .as_ref()
+                    .map(|session| session.user_id.to_string())
+                    .unwrap_or_else(|| jid.to_bare().to_string());
+                if let Some(detached) =
+                    conn.sm_state
+                        .to_detached_session(user_id, jid.clone(), carbons_enabled)
                 {
                     let stream_id = detached.stream_id.clone();
                     if let Some(session) = conn.authenticated_session.clone() {
@@ -5324,6 +5329,7 @@ mod tests {
         let stream_id = "stream-xyz".to_string();
         let detached = DetachedSession {
             stream_id: stream_id.clone(),
+            user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 7,
             outbound_count: 10,
@@ -5400,6 +5406,7 @@ mod tests {
         let stream_id = "stream-dup-check".to_string();
         let detached = DetachedSession {
             stream_id: stream_id.clone(),
+            user_id: "alice@example.com".to_string(),
             jid,
             inbound_count: 0,
             outbound_count: 2,
@@ -5464,6 +5471,7 @@ mod tests {
             .sm_session_registry
             .store_session(DetachedSession {
                 stream_id: stream_id.clone(),
+                user_id: "alice@example.com".to_string(),
                 jid: jid.clone(),
                 inbound_count: 0,
                 outbound_count: 0,

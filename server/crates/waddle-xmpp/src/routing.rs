@@ -35,7 +35,6 @@ use xmpp_parsers::message::Message;
 use xmpp_parsers::presence::Presence;
 
 use crate::connection::Stanza;
-use crate::muc::MucRoomRegistry;
 use crate::registry::{ConnectionRegistry, SendResult};
 use crate::s2s::pool::{S2sConnectionPool, S2sPoolError};
 use crate::XmppError;
@@ -130,8 +129,6 @@ pub struct StanzaRouter {
     config: RouterConfig,
     /// Connection registry for local users
     connection_registry: Arc<ConnectionRegistry>,
-    /// MUC room registry for participant lookups.
-    muc_room_registry: Option<Arc<MucRoomRegistry>>,
     /// S2S connection pool for remote servers (None if federation disabled)
     s2s_pool: Option<Arc<S2sConnectionPool>>,
 }
@@ -161,15 +158,8 @@ impl StanzaRouter {
         Self {
             config,
             connection_registry,
-            muc_room_registry: None,
             s2s_pool,
         }
-    }
-
-    /// Attach a MUC room registry for routing validation.
-    pub fn with_muc_room_registry(mut self, registry: Arc<MucRoomRegistry>) -> Self {
-        self.muc_room_registry = Some(registry);
-        self
     }
 
     /// Get the router configuration.
