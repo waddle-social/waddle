@@ -1,10 +1,13 @@
 import { betterAuth } from "better-auth";
-import { jwt, oidcProvider } from "better-auth/plugins";
+import { oauthProvider } from "@better-auth/oauth-provider";
+import { jwt } from "better-auth/plugins";
 
 import { database } from "./auth-database";
+import { getServerIdTokenClaims, oauthClaimsSupported } from "./oauth-claims";
 
 export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL,
+  disabledPaths: ["/token"],
   secret: process.env.BETTER_AUTH_SECRET,
   database,
   trustedOrigins: [
@@ -34,33 +37,23 @@ export const auth = betterAuth({
   plugins: [
     jwt({
       disableSettingJwtHeader: true,
+      jwt: {
+        issuer: process.env.BETTER_AUTH_URL ?? "http://localhost:4321",
+      },
     }),
-    oidcProvider({
+    oauthProvider({
       loginPage: "/sign-in",
       consentPage: "/oauth/consent",
       allowDynamicClientRegistration: true,
-      getAdditionalUserInfoClaim: (user, _scopes, client) => {
-        if (client.metadata?.product !== "server") {
-          return {};
-        }
-
-        const picture = typeof user.image === "string" ? user.image.trim() : "";
-        const githubUsername =
-          typeof user.githubUsername === "string"
-            ? user.githubUsername.trim()
-            : "";
-        const claims: Record<string, string> = {};
-
-        if (githubUsername) {
-          claims.preferred_username = githubUsername;
-        }
-        if (picture) {
-          claims.picture = picture;
-        }
-
-        return claims;
+      allowUnauthenticatedClientRegistration: true,
+      customIdTokenClaims: getServerIdTokenClaims,
+      advertisedMetadata: {
+        claims_supported: [...oauthClaimsSupported],
       },
-      useJWTPlugin: true,
+      silenceWarnings: {
+        oauthAuthServerConfig: true,
+        openidConfig: true,
+      },
     }),
   ],
 });

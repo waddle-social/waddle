@@ -1,0 +1,143 @@
+---
+import { Font } from "astro:assets";
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  heading: string;
+  description?: string;
+  panelClass?: string;
+  showHeader?: boolean;
+  showLogo?: boolean;
+}
+
+const {
+  title,
+  heading,
+  description,
+  panelClass = "",
+  showHeader = true,
+  showLogo = true,
+} = Astro.props;
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f7" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d12" />
+    <script is:inline>
+      const savedTheme = localStorage.getItem("waddle-theme");
+      const theme = savedTheme === "light" || savedTheme === "dark"
+        ? savedTheme
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+
+      document.documentElement.dataset.theme = theme;
+      requestAnimationFrame(() => {
+        document.documentElement.classList.add("theme-ready");
+      });
+    </script>
+    <title>{title}</title>
+    <Font cssVariable="--font-inter" preload />
+    <Font cssVariable="--font-fredoka" preload />
+  </head>
+  <body>
+    <main class="auth-shell">
+      <div class="sky" aria-hidden="true">
+        <button
+          type="button"
+          class="celestial-slot celestial-slot--sun"
+          data-theme-toggle
+          aria-label="Switch to dark theme"
+        >
+          <svg class="celestial celestial--sun" viewBox="0 0 100 100" aria-hidden="true">
+            <circle cx="50" cy="50" r="18" fill="#ffd26e" />
+            <g stroke="#ffd26e" stroke-width="3" stroke-linecap="round">
+              <line x1="50" y1="8" x2="50" y2="22" />
+              <line x1="50" y1="78" x2="50" y2="92" />
+              <line x1="8" y1="50" x2="22" y2="50" />
+              <line x1="78" y1="50" x2="92" y2="50" />
+              <line x1="20" y1="20" x2="30" y2="30" />
+              <line x1="70" y1="70" x2="80" y2="80" />
+              <line x1="80" y1="20" x2="70" y2="30" />
+              <line x1="30" y1="70" x2="20" y2="80" />
+            </g>
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="celestial-slot celestial-slot--moon"
+          data-theme-toggle
+          aria-label="Switch to light theme"
+        >
+          <svg class="celestial celestial--moon" viewBox="0 0 100 100" aria-hidden="true">
+            <path
+              d="M60 8 A42 42 0 1 0 92 56 A32 32 0 0 1 60 8 Z"
+              fill="#e8eef7"
+            />
+            <circle cx="62" cy="38" r="3" fill="#c9d3e4" opacity="0.7" />
+            <circle cx="74" cy="58" r="4" fill="#c9d3e4" opacity="0.6" />
+            <circle cx="52" cy="62" r="2.5" fill="#c9d3e4" opacity="0.5" />
+          </svg>
+        </button>
+        <div class="stars" aria-hidden="true">
+          <span style="--x: 8%; --y: 18%; --s: 2px; --d: 0s;"></span>
+          <span style="--x: 22%; --y: 32%; --s: 3px; --d: 0.8s;"></span>
+          <span style="--x: 14%; --y: 62%; --s: 2px; --d: 1.6s;"></span>
+          <span style="--x: 30%; --y: 78%; --s: 2.5px; --d: 2.4s;"></span>
+          <span style="--x: 72%; --y: 24%; --s: 2px; --d: 0.4s;"></span>
+          <span style="--x: 84%; --y: 58%; --s: 3px; --d: 1.2s;"></span>
+          <span style="--x: 90%; --y: 78%; --s: 2px; --d: 2s;"></span>
+          <span style="--x: 62%; --y: 82%; --s: 2.5px; --d: 2.8s;"></span>
+        </div>
+        <div class="snow" aria-hidden="true">
+          <span style="--x: 12%; --y: 22%; --d: 0s; --r: -18deg;">❄</span>
+          <span style="--x: 28%; --y: 70%; --d: 1.4s; --r: 12deg;">❄</span>
+          <span style="--x: 18%; --y: 48%; --d: 2.8s; --r: -6deg;">❄</span>
+          <span style="--x: 78%; --y: 36%; --d: 0.7s; --r: 20deg;">❄</span>
+          <span style="--x: 86%; --y: 68%; --d: 2.1s; --r: -14deg;">❄</span>
+          <span style="--x: 62%; --y: 82%; --d: 3.5s; --r: 8deg;">❄</span>
+        </div>
+      </div>
+
+      <section class="brand-stage">
+        {showLogo && (
+          <a href="/" class="logo-link" aria-label="Colony home">
+            <img class="logo" src="/logo.svg" alt="Waddle" width="220" height="220" />
+          </a>
+        )}
+
+        <div class:list={["auth-panel", panelClass]}>
+          {showHeader && (
+            <header class="auth-header">
+              <h2>{heading}</h2>
+              {description && <p class="lede">{description}</p>}
+            </header>
+          )}
+
+          <slot />
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const root = document.documentElement;
+
+      document
+        .querySelectorAll<HTMLElement>("[data-theme-toggle]")
+        .forEach((el) => {
+          el.addEventListener("click", () => {
+            const next = root.dataset.theme === "dark" ? "light" : "dark";
+            root.dataset.theme = next;
+            localStorage.setItem("waddle-theme", next);
+          });
+        });
+    </script>
+  </body>
+</html>

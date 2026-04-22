@@ -1,4 +1,6 @@
 ---
+import ColonyLayout from "../../layouts/ColonyLayout.astro";
+
 const user = Astro.locals.user;
 
 if (!user) {
@@ -9,62 +11,73 @@ const clientId = Astro.url.searchParams.get("client_id");
 const scopes = Astro.url.searchParams.get("scope")?.split(" ") ?? [];
 ---
 
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Authorize - Colony</title>
-  </head>
-  <body>
-    <main>
-      <h1>Authorization Request</h1>
-      <p>An application is requesting access to your account.</p>
+<ColonyLayout
+  title="Authorize - Colony"
+  heading="Authorize access"
+  description="Review the OAuth request before continuing."
+  panelClass="auth-panel--wide"
+>
+  <div class="stack">
+    {clientId && (
+      <dl class="detail-list">
+        <div class="detail-row">
+          <dt>Client</dt>
+          <dd class="client-id">{clientId}</dd>
+        </div>
+      </dl>
+    )}
 
-      {clientId && (
-        <>
-          <p><strong>Client ID:</strong> {clientId}</p>
-          {scopes.length > 0 && (
-            <>
-              <p><strong>Requested scopes:</strong></p>
-              <ul>
-                {scopes.map((scope) => <li>{scope}</li>)}
-              </ul>
-            </>
-          )}
-        </>
-      )}
+    {scopes.length > 0 && (
+      <ul class="scope-list" aria-label="Requested scopes">
+        {scopes.map((scope) => <li>{scope}</li>)}
+      </ul>
+    )}
 
-      <div>
-        <button id="approve" type="button">Approve</button>
-        <button id="deny" type="button">Deny</button>
-      </div>
-    </main>
+    <div class="button-row button-row--split">
+      <button class="button button--primary" id="approve" type="button">Approve</button>
+      <button class="button button--secondary" id="deny" type="button">Deny</button>
+    </div>
+  </div>
 
-    <script>
-      async function submitConsent(accept: boolean) {
-        const params = new URLSearchParams(window.location.search);
-        const res = await fetch("/api/auth/oauth2/consent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            accept,
-            consent_code: params.get("consent_code") ?? undefined,
-          }),
-        });
-
-        if (!res.ok) {
-          return;
-        }
-
-        const data: { redirectURI?: string; url?: string } = await res.json();
-        const redirectTo = data.redirectURI ?? data.url;
-        if (redirectTo) {
-          window.location.href = redirectTo;
-        }
+  <script>
+    function getOAuthQuery(params: URLSearchParams) {
+      if (!params.has("sig")) {
+        return undefined;
       }
 
-      document.getElementById("approve")?.addEventListener("click", () => submitConsent(true));
-      document.getElementById("deny")?.addEventListener("click", () => submitConsent(false));
-    </script>
-  </body>
-</html>
+      const signedParams = new URLSearchParams();
+      for (const [key, value] of params.entries()) {
+        signedParams.append(key, value);
+        if (key === "sig") {
+          break;
+        }
+      }
+      return signedParams.toString();
+    }
+
+    async function submitConsent(accept: boolean) {
+      const params = new URLSearchParams(window.location.search);
+      const res = await fetch("/api/auth/oauth2/consent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accept,
+          oauth_query: getOAuthQuery(params),
+        }),
+      });
+
+      if (!res.ok) {
+        return;
+      }
+
+      const data: { redirect_uri?: string; redirectURI?: string; url?: string } = await res.json();
+      const redirectTo = data.redirect_uri ?? data.redirectURI ?? data.url;
+      if (redirectTo) {
+        window.location.href = redirectTo;
+      }
+    }
+
+    document.getElementById("approve")?.addEventListener("click", () => submitConsent(true));
+    document.getElementById("deny")?.addEventListener("click", () => submitConsent(false));
+  </script>
+</ColonyLayout>

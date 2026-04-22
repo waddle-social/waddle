@@ -1,11 +1,16 @@
+import {
+  oauthProviderAuthServerMetadata,
+  oauthProviderOpenIdConfigMetadata,
+} from "@better-auth/oauth-provider";
+
 import { getAuth } from "./auth";
 
-export async function proxyOpenIdConfiguration(
-  request: Request,
-  pathname = "/api/auth/.well-known/openid-configuration",
-) {
+export async function getOpenIdConfiguration(request: Request) {
   const auth = await getAuth();
-  const url = new URL(request.url);
-  url.pathname = pathname;
-  return auth.handler(new Request(url, request));
+  return oauthProviderOpenIdConfigMetadata(auth)(request);
+}
+
+export async function getOAuthAuthorizationServerMetadata(request: Request) {
+  const auth = await getAuth();
+  return oauthProviderAuthServerMetadata(auth)(request);
 }

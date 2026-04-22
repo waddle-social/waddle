@@ -1,53 +1,61 @@
 ---
+import ColonyLayout from "../layouts/ColonyLayout.astro";
+
 const user = Astro.locals.user;
 const session = Astro.locals.session;
 ---
 
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Colony</title>
-  </head>
-  <body>
-    <main>
-      <h1>Colony</h1>
-      <p>Astro 6. Cloudflare. D1. Better Auth.</p>
+<ColonyLayout
+  title="Colony"
+  heading={user && session ? "Signed in" : "Identity for Waddle"}
+  description={user && session ? "Your Waddle identity session is active." : "OAuth for Waddle services."}
+  showHeader={false}
+  showLogo={Boolean(!user || !session)}
+>
+  {user && session ? (
+    <div class="stack">
+      <dl class="detail-list">
+        <div class="detail-row">
+          <dt>Name</dt>
+          <dd>{user.name ?? user.email}</dd>
+        </div>
+        <div class="detail-row">
+          <dt>Email</dt>
+          <dd>{user.email}</dd>
+        </div>
+        <div class="detail-row">
+          <dt>Session</dt>
+          <dd class="session-id">{session.id}</dd>
+        </div>
+      </dl>
+      <div class="button-row">
+        <button class="button button--secondary" id="sign-out" type="button">Sign out</button>
+      </div>
+    </div>
+  ) : (
+    <div class="stack">
+      <div class="button-row">
+        <button class="button button--primary" id="sign-in" type="button">Continue with GitHub</button>
+      </div>
+    </div>
+  )}
 
-      {user && session ? (
-        <>
-          <p>Status: signed in.</p>
-          <p>Name: {user.name ?? user.email}</p>
-          <p>Email: {user.email}</p>
-          <p>Session ID: {session.id}</p>
-          <p><button id="sign-out" type="button">Sign out</button></p>
-        </>
-      ) : (
-        <>
-          <p>Status: signed out.</p>
-          <p>Use GitHub OAuth to sign in.</p>
-          <p><button id="sign-in" type="button">Sign in with GitHub</button></p>
-        </>
-      )}
-    </main>
+  <script>
+    import { authClient } from "../lib/auth-client.ts";
 
-    <script>
-      import { authClient } from "../lib/auth-client.ts";
+    const signInButton = document.getElementById("sign-in");
+    const signOutButton = document.getElementById("sign-out");
 
-      const signInButton = document.getElementById("sign-in");
-      const signOutButton = document.getElementById("sign-out");
-
-      signInButton?.addEventListener("click", async () => {
-        await authClient.signIn.social({
-          provider: "github",
-          callbackURL: `${window.location.pathname}${window.location.search}`,
-        });
+    signInButton?.addEventListener("click", async () => {
+      await authClient.signIn.social({
+        provider: "github",
+        callbackURL: `${window.location.pathname}${window.location.search}`,
       });
+    });
 
-      signOutButton?.addEventListener("click", async () => {
-        await authClient.signOut();
-        window.location.reload();
-      });
-    </script>
-  </body>
-</html>
+    signOutButton?.addEventListener("click", async () => {
+      await authClient.signOut();
+      window.location.reload();
+    });
+  </script>
+</ColonyLayout>

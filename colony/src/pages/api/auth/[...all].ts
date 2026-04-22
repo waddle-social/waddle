@@ -1,7 +1,6 @@
 import type { APIRoute } from "astro";
 
 import { getAuth } from "../../../lib/auth";
-import { proxyOpenIdConfiguration } from "../../../lib/openid-config";
 
 type DpopJwk = {
   kty: "EC";
@@ -120,9 +119,6 @@ async function validateDpopHeader(request: Request): Promise<boolean> {
 
 export const ALL: APIRoute = async ({ request }) => {
   const url = new URL(request.url);
-  if (url.pathname.endsWith("/.well-known/openid-configuration")) {
-    return proxyOpenIdConfiguration(request, url.pathname);
-  }
   if (url.pathname.endsWith("/oauth2/token") && !(await validateDpopHeader(request))) {
     return new Response(
       JSON.stringify({
