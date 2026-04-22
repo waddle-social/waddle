@@ -31,6 +31,7 @@ export function createChatEditorExtensions(options: ChatEditorExtensionsOptions 
     ChatLink.configure({
       openOnClick: false,
       autolink: true,
+      linkOnPaste: true,
       HTMLAttributes: {
         class: "text-primary underline decoration-primary/40 hover:decoration-primary transition-colors",
       },
