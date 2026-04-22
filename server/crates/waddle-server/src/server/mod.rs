@@ -36,7 +36,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::XmppServerConfig;
-use waddle_xmpp::{mam::LibSqlMamStorage, muc::MucRoomRegistry, registry::ConnectionRegistry};
+use waddle_xmpp::{
+    mam::LibSqlMamStorage, muc::room_registry_actor::RoomRegistryActor,
+    registry::ConnectionRegistry,
+};
 
 mod routes;
 pub mod xmpp_state;
@@ -875,7 +878,7 @@ async fn create_router(
     // Create MUC room registry with the XMPP domain (not the HTTP base_url host)
     let xmpp_domain = auth_state.xmpp_domain.clone();
     let muc_domain = format!("muc.{}", xmpp_domain);
-    let muc_registry = Arc::new(MucRoomRegistry::new(muc_domain));
+    let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
 
     let extension_manager = Arc::new(
         ExtensionManager::from_config(server_config.extensions.clone()).unwrap_or_else(|error| {
@@ -935,7 +938,7 @@ async fn create_router(
         app_state: state.clone(),
         auth_state: auth_state.clone(),
         connection_registry,
-        muc_registry,
+        room_registry,
         mam_storage,
         inbox_storage: Arc::clone(&state.inbox_storage),
         command_registry: websocket_command_registry,

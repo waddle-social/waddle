@@ -15,6 +15,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use chrono::Utc;
 use futures::{Sink, SinkExt, StreamExt};
 use jid::{BareJid, FullJid, Jid};
+use kameo::actor::ActorRef;
 use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -40,7 +41,15 @@ use waddle_xmpp::{
         add_stanza_id as add_mam_stanza_id, build_fin_iq, build_result_messages, is_mam_query,
         parse_mam_query, ArchivedMessage, LibSqlMamStorage, MamStorage, STANZA_ID_NS,
     },
-    muc::{MucRoomRegistry, Occupant, RoomConfig},
+    muc::{
+        room_actor::{
+            BuildGroupchatBroadcast, GetSnapshot, JoinWithAffiliation, LeaveByRealJid, RoomActor,
+        },
+        room_registry_actor::{
+            DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, RoomRegistryActor,
+        },
+        RoomConfig,
+    },
     protocol::{
         frame::{inject_client_ns_if_missing, MAX_FRAME_SIZE},
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
@@ -92,8 +101,8 @@ pub struct WebSocketState {
     pub auth_state: Arc<AuthState>,
     /// Registry for tracking active connections by JID
     pub connection_registry: Arc<ConnectionRegistry>,
-    /// Registry for MUC rooms
-    pub muc_registry: Arc<MucRoomRegistry>,
+    /// Actor-backed registry for MUC rooms.
+    pub room_registry: ActorRef<RoomRegistryActor>,
     /// Shared XMPP MAM storage for archived message history.
     pub mam_storage: Arc<LibSqlMamStorage>,
     /// Shared XEP-0430 inbox projection storage.
@@ -474,14 +483,116 @@ pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid)
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
-    // Get all rooms and remove this user from any they're in
-    for room_jid in state.muc_registry.list_rooms() {
-        if let Some(room_data) = state.muc_registry.get_room_data(&room_jid) {
-            let mut room = room_data.write().await;
-            if let Some(nick) = room.find_nick_by_real_jid(jid).map(|s| s.to_owned()) {
-                room.remove_occupant(&nick);
-                debug!(room = %room_jid, nick = %nick, "Removed user from MUC room on disconnect");
+    for room_jid in list_room_jids(state).await {
+        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
+            continue;
+        };
+        match room_actor
+            .ask(LeaveByRealJid {
+                sender_jid: jid.clone(),
+            })
+            .await
+        {
+            Ok(Some(outcome)) => {
+                debug!(
+                    room = %room_jid,
+                    nick = %outcome.nick,
+                    removed_last_session = outcome.removed_last_session,
+                    "Removed user from MUC room on disconnect"
+                );
             }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    jid = %jid,
+                    error = ?error,
+                    "Failed to remove disconnected user from MUC room"
+                );
+            }
+        }
+    }
+}
+
+async fn get_room_actor(state: &WebSocketState, room_jid: &BareJid) -> Option<ActorRef<RoomActor>> {
+    match state
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(actor) => actor,
+        Err(error) => {
+            warn!(room = %room_jid, error = ?error, "Failed to get room actor");
+            None
+        }
+    }
+}
+
+async fn get_or_create_room_actor(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    config: RoomConfig,
+    waddle_id: String,
+    channel_id: String,
+) -> Option<ActorRef<RoomActor>> {
+    match state
+        .room_registry
+        .ask(GetOrCreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id,
+            channel_id,
+            config,
+        })
+        .await
+    {
+        Ok(actor) => Some(actor),
+        Err(error) => {
+            warn!(room = %room_jid, error = ?error, "Failed to get or create room actor");
+            None
+        }
+    }
+}
+
+async fn list_room_jids(state: &WebSocketState) -> Vec<BareJid> {
+    match state.room_registry.ask(ListRooms).await {
+        Ok(rooms) => rooms,
+        Err(error) => {
+            warn!(error = ?error, "Failed to list room actors");
+            Vec::new()
+        }
+    }
+}
+
+async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) -> bool {
+    match state
+        .room_registry
+        .ask(IsMucJid {
+            jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(is_muc_jid) => is_muc_jid,
+        Err(error) => {
+            warn!(room = %room_jid, error = ?error, "Failed to validate MUC JID");
+            false
+        }
+    }
+}
+
+async fn destroy_room_actor(state: &WebSocketState, room_jid: &BareJid) -> bool {
+    match state
+        .room_registry
+        .ask(DestroyRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+    {
+        Ok(destroyed) => destroyed,
+        Err(error) => {
+            warn!(room = %room_jid, error = ?error, "Failed to destroy room actor");
+            false
         }
     }
 }
@@ -964,7 +1075,15 @@ async fn handle_xmpp_frame(
 
     // Handle presence
     if frame.starts_with("<presence") {
-        return handle_presence(frame, domain, &muc_domain, state, session_jid).await;
+        return handle_presence(
+            frame,
+            domain,
+            &muc_domain,
+            state,
+            session_jid,
+            authenticated_session,
+        )
+        .await;
     }
 
     // Handle IQ stanzas
@@ -1314,6 +1433,7 @@ async fn handle_presence(
     muc_domain: &str,
     state: &WebSocketState,
     session_jid: &Option<FullJid>,
+    _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     let to = extract_attr(frame, "to");
     let presence_type = extract_attr(frame, "type");
@@ -1342,7 +1462,15 @@ async fn handle_presence(
             }
 
             // This is a join presence
-            return handle_muc_join(state, domain, &room_jid, sender_jid, nick).await;
+            return handle_muc_join(
+                state,
+                domain,
+                &room_jid,
+                sender_jid,
+                nick,
+                _authenticated_session,
+            )
+            .await;
         }
     }
 
@@ -1354,16 +1482,17 @@ async fn handle_presence(
 /// Handle MUC room join
 async fn handle_muc_join(
     state: &WebSocketState,
-    _domain: &str,
+    domain: &str,
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
+    _authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC join request");
 
-    // Get or create the room
-    let room_data = match state.muc_registry.get_room_data(room_jid) {
-        Some(data) => data,
+    let existing_room_actor = get_room_actor(state, room_jid).await;
+    let (room_actor, created_instant_room) = match existing_room_actor {
+        Some(actor) => (actor, false),
         None => {
             let managed_channel = get_managed_channel_for_room(state, room_jid).await;
             let config = managed_channel
@@ -1380,7 +1509,7 @@ async fn handle_muc_join(
                         .node()
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "Room".to_string()),
-                    members_only: false, // Allow anyone to join for now
+                    members_only: false,
                     ..Default::default()
                 });
 
@@ -1389,87 +1518,74 @@ async fn handle_muc_join(
                 .map(|channel| (channel.waddle_id.clone(), channel.id.clone()))
                 .unwrap_or_else(|| parse_room_jid_context(room_jid));
 
-            match state.muc_registry.get_or_create_room(
-                room_jid.clone(),
-                waddle_id,
-                channel_id,
-                config,
-            ) {
-                Ok(_handle) => state
-                    .muc_registry
-                    .get_room_data(room_jid)
-                    .expect("Room just created"),
-                Err(e) => {
-                    warn!(room = %room_jid, error = %e, "Failed to create room");
-                    return vec![];
-                }
-            }
+            let Some(actor) =
+                get_or_create_room_actor(state, room_jid, config, waddle_id, channel_id).await
+            else {
+                return vec![];
+            };
+            (actor, managed_channel.is_none())
         }
     };
 
-    let mut room = room_data.write().await;
+    let effective_affiliation = if created_instant_room {
+        Affiliation::Owner
+    } else {
+        Affiliation::Member
+    };
 
-    // Detect nickname conflict. MUC occupants are keyed by nick (see
-    // MucRoom::add_occupant), so a prior entry with the joiner's nick is
-    // either (a) the joiner themselves reconnecting on a new resource or
-    // (b) a different user already holding that nick.
-    //
-    // (a) silent replace — add_occupant overwrites; clients have already
-    //     seen "nick online" so we don't re-emit a ghost occupant presence.
-    // (b) XEP-0045 §7.2.9 conflict — return a presence error and leave the
-    //     existing occupant untouched.
-    if let Some(existing_jid) = room.get_occupant(nick).map(|o| o.real_jid.clone()) {
-        if existing_jid.to_bare() != sender_jid.to_bare() {
-            drop(room);
-            warn!(
-                room = %room_jid,
-                nick = %nick,
-                existing = %existing_jid,
-                sender = %sender_jid,
-                "MUC nick collision; returning conflict"
+    let join_outcome = match room_actor
+        .ask(JoinWithAffiliation {
+            sender_jid: sender_jid.clone(),
+            nick: nick.to_string(),
+            effective_affiliation,
+            local_domain: domain.to_string(),
+        })
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let nick_collision = matches!(
+                &error,
+                kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::RoomActorError::NickAlreadyInUse(_)
+                )
             );
-            return vec![build_muc_conflict_presence_xml(room_jid, nick, sender_jid)];
+            if nick_collision {
+                warn!(
+                    room = %room_jid,
+                    nick = %nick,
+                    sender = %sender_jid,
+                    "MUC nick collision; returning conflict"
+                );
+                return vec![build_muc_conflict_presence_xml(room_jid, nick, sender_jid)];
+            }
+            warn!(room = %room_jid, nick = %nick, error = ?error, "Failed to join MUC room");
+            return vec![];
         }
-    }
-
-    // Existing occupants for presence replay to the joiner. Filter by nick —
-    // the joiner's own prior resource (if any) must not be sent back as a
-    // separate occupant, which used to surface as a "ghost" presence that
-    // confused MUC libraries and caused self-presence to be ignored.
-    let existing_occupants: Vec<(FullJid, String, Affiliation, Role)> = room
-        .occupants
-        .values()
-        .filter(|o| o.nick != nick)
-        .map(|o| (o.real_jid.clone(), o.nick.clone(), o.affiliation, o.role))
-        .collect();
-
-    // Add (or silently replace) the occupant
-    let occupant = Occupant {
-        real_jid: sender_jid.clone(),
-        nick: nick.to_string(),
-        role: Role::Participant,
-        affiliation: Affiliation::Member,
-        is_remote: false,
-        home_server: None,
     };
-    room.add_occupant(occupant);
 
-    let occupant_count = room.occupant_count();
-    drop(room);
+    let occupant_count = join_outcome.occupant_count;
 
     info!(room = %room_jid, nick = %nick, occupants = occupant_count, "User joined MUC room");
 
     let mut responses = Vec::new();
 
-    // Send existing occupants' presence to the joining user
-    for (existing_jid, existing_nick, affiliation, role) in &existing_occupants {
+    // Replay one occupant presence per nick to the joiner. Same-bare multi-session
+    // joins must not turn into duplicate room occupants on the wire.
+    let mut replayed_nicks = std::collections::HashSet::new();
+    for existing in join_outcome
+        .existing_occupants
+        .iter()
+        .filter(|existing| existing.nick != nick)
+        .filter(|existing| replayed_nicks.insert(existing.nick.clone()))
+    {
         responses.push(build_muc_join_presence_xml(
             room_jid,
-            existing_nick,
+            &existing.nick,
             sender_jid,
-            affiliation_str(*affiliation),
-            role_str(*role),
-            existing_jid,
+            affiliation_str(existing.affiliation),
+            role_str(existing.role),
+            &existing.jid,
             false,
         ));
     }
@@ -1480,11 +1596,13 @@ async fn handle_muc_join(
     // Drop accounting is handled inside `try_send_to` (logs + metrics);
     // per-occupant outcome is discarded here because a missed join
     // presence self-heals via the next MUC presence/probe round-trip.
-    for (existing_jid, _, _, _) in &existing_occupants {
-        let presence_stanza =
-            create_presence_stanza(room_jid, nick, sender_jid, existing_jid, false);
-        let stanza = Stanza::Presence(presence_stanza);
-        let _outcome = state.connection_registry.try_send_to(existing_jid, stanza);
+    if !join_outcome.is_same_bare_multi_session_join {
+        for existing in &join_outcome.existing_occupants {
+            let presence_stanza =
+                create_presence_stanza(room_jid, nick, sender_jid, &existing.jid, false);
+            let stanza = Stanza::Presence(presence_stanza);
+            let _outcome = state.connection_registry.try_send_to(&existing.jid, stanza);
+        }
     }
 
     // Send self-presence to the joining user (with status code 110)
@@ -1492,8 +1610,8 @@ async fn handle_muc_join(
         room_jid,
         nick,
         sender_jid,
-        "member",
-        "participant",
+        affiliation_str(join_outcome.new_occupant_affiliation),
+        role_str(join_outcome.new_occupant_role),
         sender_jid,
         true,
     ));
@@ -1518,62 +1636,51 @@ async fn handle_muc_leave(
     nick: &str,
 ) -> Vec<String> {
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
-    let self_presence = build_muc_self_unavailable_xml(room_jid, nick, sender_jid);
 
-    let Some(room_data) = state.muc_registry.get_room_data(room_jid) else {
+    let Some(room_actor) = get_room_actor(state, room_jid).await else {
         debug!(room = %room_jid, "Room not found for leave");
-        return vec![self_presence];
+        return vec![build_muc_self_unavailable_xml(room_jid, nick, sender_jid)];
     };
 
-    let mut room = room_data.write().await;
-
-    match room.occupants.get(nick) {
-        Some(occupant) if occupant.real_jid == *sender_jid => {}
-        Some(occupant) => {
-            warn!(
-                room = %room_jid,
-                nick = %nick,
-                sender = %sender_jid,
-                current_jid = %occupant.real_jid,
-                "Ignoring stale MUC leave for nick owned by another resource"
-            );
-            return vec![self_presence];
-        }
-        None => {
+    let outcome = match room_actor
+        .ask(LeaveByRealJid {
+            sender_jid: sender_jid.clone(),
+        })
+        .await
+    {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => {
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
-            return vec![self_presence];
+            return vec![build_muc_self_unavailable_xml(room_jid, nick, sender_jid)];
         }
-    }
-
-    // Get remaining occupants before removing the leaving user
-    let remaining_occupants: Vec<FullJid> = room
-        .occupants
-        .values()
-        .filter(|o| o.real_jid != *sender_jid)
-        .map(|o| o.real_jid.clone())
-        .collect();
-
-    // Remove the occupant
-    room.remove_occupant(nick);
-    drop(room);
+        Err(error) => {
+            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
+            return vec![build_muc_self_unavailable_xml(room_jid, nick, sender_jid)];
+        }
+    };
 
     // Broadcast unavailable presence to remaining occupants (non-blocking).
     // Drop accounting is handled inside `try_send_to`.
-    for occupant_jid in &remaining_occupants {
-        let from_jid = room_jid
-            .clone()
-            .with_resource_str(nick)
-            .unwrap_or_else(|_| sender_jid.clone());
-        let mut presence =
-            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
-        presence.from = Some(jid::Jid::from(from_jid));
-        presence.to = Some(jid::Jid::from(occupant_jid.clone()));
-        let stanza = Stanza::Presence(presence);
-        let _outcome = state.connection_registry.try_send_to(occupant_jid, stanza);
+    if outcome.removed_last_session {
+        for occupant_jid in &outcome.remaining_occupants {
+            let from_jid = room_jid
+                .clone()
+                .with_resource_str(&outcome.nick)
+                .unwrap_or_else(|_| sender_jid.clone());
+            let mut presence =
+                xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
+            presence.from = Some(jid::Jid::from(from_jid));
+            presence.to = Some(jid::Jid::from(occupant_jid.clone()));
+            let stanza = Stanza::Presence(presence);
+            let _outcome = state.connection_registry.try_send_to(occupant_jid, stanza);
+        }
     }
 
-    // Send self-presence unavailable to the leaving user
-    vec![self_presence]
+    vec![build_muc_self_unavailable_xml(
+        room_jid,
+        &outcome.nick,
+        sender_jid,
+    )]
 }
 
 /// Handle IQ stanzas
@@ -1617,7 +1724,6 @@ async fn handle_iq_with_conn_state(
     resource_bound: bool,
     carbons_enabled: &mut bool,
 ) -> Vec<String> {
-    let muc_registry = state.muc_registry.as_ref();
     let spaces_domain = format!("spaces.{domain}");
     let single_tenant = std::env::var("WADDLE_SINGLE_TENANT")
         .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -1743,14 +1849,30 @@ async fn handle_iq_with_conn_state(
             if let Some(target) = to.as_deref() {
                 let room_target = target.split('/').next().unwrap_or(target);
                 if let Ok(room_jid) = room_target.parse::<BareJid>() {
-                    if let Some(room_data) = state.muc_registry.get_room_data(&room_jid) {
-                        let room = room_data.read().await;
-                        let identities = vec![Identity::muc_room(Some(&room.config.name))];
+                    if let Some(room_actor) = get_room_actor(state, &room_jid).await {
+                        let snapshot = match room_actor.ask(GetSnapshot).await {
+                            Ok(snapshot) => snapshot.room,
+                            Err(error) => {
+                                warn!(
+                                    room = %room_jid,
+                                    error = ?error,
+                                    "Failed to load room snapshot for disco#info"
+                                );
+                                return vec![build_iq_error_xml_with_addresses(
+                                    &id,
+                                    response_from,
+                                    response_to,
+                                    "wait",
+                                    "internal-server-error",
+                                )];
+                            }
+                        };
+                        let identities = vec![Identity::muc_room(Some(&snapshot.config.name))];
                         let mut features = muc_room_features(
-                            room.config.persistent,
-                            room.config.members_only,
-                            room.config.moderated,
-                            room.config.forum,
+                            snapshot.config.persistent,
+                            snapshot.config.members_only,
+                            snapshot.config.moderated,
+                            snapshot.config.forum,
                         );
                         features.extend(
                             state
@@ -1764,7 +1886,7 @@ async fn handle_iq_with_conn_state(
                         return vec![iq_to_xml(response)];
                     }
 
-                    if muc_registry.is_muc_jid(&room_jid) {
+                    if is_muc_room_jid(state, &room_jid).await {
                         if let Some(channel) = get_managed_channel_for_room(state, &room_jid).await
                         {
                             let identities = vec![Identity::muc_room(Some(&channel.name))];
@@ -1947,7 +2069,7 @@ async fn handle_iq_with_conn_state(
 
             if to.as_deref() == Some(muc_domain) {
                 debug!("Disco items query on MUC service");
-                let mut rooms = muc_registry.list_rooms();
+                let mut rooms = list_room_jids(state).await;
                 rooms.sort_by_key(|room| room.to_string());
 
                 let items: Vec<DiscoItem> = if rooms.is_empty() {
@@ -2153,7 +2275,7 @@ async fn handle_iq_with_conn_state(
             )];
         };
 
-        if !muc_registry.is_muc_jid(&room_jid) {
+        if !is_muc_room_jid(state, &room_jid).await {
             return vec![build_iq_error_xml_with_addresses(
                 &id,
                 response_from,
@@ -2164,7 +2286,7 @@ async fn handle_iq_with_conn_state(
         }
 
         if frame.contains("<destroy") {
-            if muc_registry.destroy_room(&room_jid).is_some() {
+            if destroy_room_actor(state, &room_jid).await {
                 debug!(room = %room_jid, "Destroyed MUC room via owner IQ");
                 let room_jid_string = room_jid.to_string();
                 return vec![build_iq_result_xml(
@@ -2219,7 +2341,7 @@ async fn handle_iq_with_conn_state(
                 .as_ref()
                 .is_some_and(|bare| *bare == target_bare);
 
-            if !is_personal && !muc_registry.is_muc_jid(&target_bare) {
+            if !is_personal && !is_muc_room_jid(state, &target_bare).await {
                 return vec![build_iq_error_xml(&id, "cancel", "item-not-found")];
             }
 
@@ -2705,50 +2827,55 @@ async fn handle_message(
 
         debug!(room = %room_jid, sender = %sender_jid, "Groupchat message");
 
-        // Get the room
-        let Some(room_data) = state.muc_registry.get_room_data(&room_jid) else {
+        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
             warn!(room = %room_jid, "Message to non-existent room");
             return vec![];
         };
 
-        let room = room_data.read().await;
-
-        // Find the sender's nick
-        let Some(sender_nick) = room.find_nick_by_real_jid(sender_jid) else {
-            warn!(sender = %sender_jid, room = %room_jid, "Sender not in room");
-            return vec![];
-        };
-        let sender_nick = sender_nick.to_string();
-
-        // Get all occupants
-        let occupants: Vec<(FullJid, String)> = room
-            .occupants
-            .values()
-            .map(|o| (o.real_jid.clone(), o.nick.clone()))
-            .collect();
-
-        drop(room);
-
-        // Build a prototype message, enrich once, then fan out to all occupants.
-        let from_room_jid = format!("{}/{}", room_jid, sender_nick);
+        // Build a prototype message, enrich once, then ask the room actor to fan it out.
         let mut prototype = incoming.clone();
         prototype.id = prototype
             .id
             .clone()
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+        prototype.type_ = XmppMessageType::Groupchat;
+
+        // Enrich: detect GitHub links and append embed XML elements (fail-open)
+        let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
+
+        let broadcast = match room_actor
+            .ask(BuildGroupchatBroadcast {
+                sender_jid: sender_jid.clone(),
+                message: prototype.clone(),
+            })
+            .await
+        {
+            Ok(broadcast) => broadcast,
+            Err(error) => {
+                warn!(
+                    sender = %sender_jid,
+                    room = %room_jid,
+                    error = ?error,
+                    "Sender not permitted to broadcast to MUC room"
+                );
+                return vec![];
+            }
+        };
+        let sender_nick = broadcast.sender_nick;
+        let mut local_messages = broadcast.federated_messages.local;
+        let occupant_bare_jids = broadcast.occupant_bare_jids;
+
+        let from_room_jid = format!("{}/{}", room_jid, sender_nick);
         if let Ok(from_jid) = from_room_jid.parse::<FullJid>() {
             prototype.from = Some(jid::Jid::from(from_jid));
         } else {
             prototype.from = Some(jid::Jid::from(sender_jid.clone()));
         }
-        prototype.type_ = XmppMessageType::Groupchat;
         prototype.to = None;
 
-        // Enrich: detect GitHub links and append embed XML elements (fail-open)
-        let _embeds_added = state.extension_manager.enrich_message(&mut prototype).await;
-
         // Archive body-bearing room messages in XMPP MAM storage.
-        if let Some(archive_id) = archive_groupchat_message(state, &room_jid, &prototype).await {
+        let archive_id = archive_groupchat_message(state, &room_jid, &prototype).await;
+        if let Some(ref archive_id) = archive_id {
             add_mam_stanza_id(&mut prototype, archive_id.as_str(), &room_jid.to_string());
         }
 
@@ -2789,11 +2916,12 @@ async fn handle_message(
                 )
             });
 
-            for (occupant_jid, _) in &occupants {
-                if occupant_jid == sender_jid {
-                    continue;
-                }
-                let occupant_bare = occupant_jid.to_bare();
+            let mut projected_bares = std::collections::HashSet::new();
+            for occupant_bare in occupant_bare_jids
+                .iter()
+                .filter_map(|jid| jid.parse::<BareJid>().ok())
+                .filter(|jid| projected_bares.insert(jid.clone()))
+            {
                 match state
                     .inbox_storage
                     .upsert(&occupant_bare, entry.clone(), true)
@@ -2848,21 +2976,19 @@ async fn handle_message(
         let mut dropped_full = 0u32;
         let mut dropped_closed = 0u32;
         let mut not_connected = 0u32;
-        for (occupant_jid, _) in &occupants {
-            if occupant_jid == sender_jid {
+        let intended = local_messages.len();
+        for mut outbound in local_messages.drain(..) {
+            if let Some(ref archive_id) = archive_id {
+                add_mam_stanza_id(&mut outbound.message, archive_id, &room_jid.to_string());
+            }
+
+            if outbound.to == *sender_jid {
                 // Echo back to sender — serialize the enriched prototype
-                let stanza = {
-                    let mut msg = prototype.clone();
-                    msg.to = Some(jid::Jid::from(occupant_jid.clone()));
-                    Stanza::Message(msg)
-                };
-                echo_response = Some(stanza_to_xml(&stanza));
+                echo_response = Some(stanza_to_xml(&Stanza::Message(outbound.message)));
                 delivered += 1;
             } else {
-                let mut msg = prototype.clone();
-                msg.to = Some(jid::Jid::from(occupant_jid.clone()));
-                let stanza = Stanza::Message(msg);
-                match state.connection_registry.try_send_to(occupant_jid, stanza) {
+                let stanza = Stanza::Message(outbound.message);
+                match state.connection_registry.try_send_to(&outbound.to, stanza) {
                     BroadcastOutcome::Delivered => delivered += 1,
                     BroadcastOutcome::DroppedFull => dropped_full += 1,
                     BroadcastOutcome::DroppedClosed => dropped_closed += 1,
@@ -2872,7 +2998,7 @@ async fn handle_message(
         }
 
         debug_assert_eq!(
-            occupants.len() as u32,
+            intended as u32,
             delivered + dropped_full + dropped_closed + not_connected,
             "broadcast accounting must cover every occupant exactly once"
         );
@@ -2880,7 +3006,7 @@ async fn handle_message(
         info!(
             room = %room_jid,
             sender = %sender_nick,
-            intended = occupants.len(),
+            intended,
             delivered,
             dropped_full,
             dropped_closed,
@@ -3729,7 +3855,7 @@ mod tests {
             app_state,
             auth_state,
             connection_registry: Arc::new(ConnectionRegistry::new()),
-            muc_registry: Arc::new(MucRoomRegistry::new("muc.example.com".to_string())),
+            room_registry: kameo::spawn(RoomRegistryActor::new("muc.example.com".to_string())),
             mam_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             command_registry: Arc::new(CommandRegistry::new()),
@@ -3750,6 +3876,14 @@ mod tests {
             .await
             .expect("session");
         session
+    }
+
+    async fn snapshot_room(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+    ) -> waddle_xmpp::muc::room_actor::RoomSnapshot {
+        let room_actor = get_room_actor(state, room_jid).await.expect("room actor");
+        room_actor.ask(GetSnapshot).await.expect("room snapshot")
     }
 
     #[tokio::test]
@@ -3993,6 +4127,7 @@ mod tests {
             &room_jid,
             &current_jid,
             "alice",
+            &None,
         )
         .await;
 
@@ -4003,11 +4138,7 @@ mod tests {
         assert_eq!(response.name(), "presence");
         assert_eq!(response.attr("type"), Some("unavailable"));
 
-        let room_data = state
-            .muc_registry
-            .get_room_data(&room_jid)
-            .expect("room data");
-        let room = room_data.read().await;
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
         assert_eq!(room.find_nick_by_real_jid(&current_jid), Some("alice"));
         assert!(room.find_nick_by_real_jid(&stale_jid).is_none());
         assert_eq!(room.occupant_count(), 1);
@@ -4025,6 +4156,7 @@ mod tests {
             &room_jid,
             &sender_jid,
             "alice",
+            &None,
         )
         .await;
 
@@ -4703,6 +4835,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resources() {
+        let state = create_test_websocket_state().await;
+        let sender_jid: FullJid = "bob@example.com/phone".parse().expect("sender jid");
+        let recipient_web: FullJid = "alice@example.com/web-123".parse().expect("recipient web");
+        let recipient_mobile: FullJid = "alice@example.com/mobile-456"
+            .parse()
+            .expect("recipient mobile");
+
+        let (web_tx, mut web_rx) = mpsc::channel(8);
+        let (mobile_tx, mut mobile_rx) = mpsc::channel(8);
+        state
+            .connection_registry
+            .register(recipient_web.clone(), web_tx);
+        state
+            .connection_registry
+            .register(recipient_mobile.clone(), mobile_tx);
+
+        let responses = handle_message(
+            "<message xmlns='jabber:client' to='alice@example.com' type='chat' id='dm-bare-1'>\
+                <body>hello all resources</body>\
+             </message>",
+            "muc.example.com",
+            state.as_ref(),
+            &Some(sender_jid),
+            &None,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "plain DM should not echo to sender");
+
+        let mut web_chat = None;
+        while let Ok(outbound) = web_rx.try_recv() {
+            let xml = stanza_to_xml(&outbound.stanza);
+            if xml.contains("hello all resources") && !xml.contains("urn:xmpp:carbons:2") {
+                web_chat = Some(xml);
+                break;
+            }
+        }
+
+        let mut mobile_chat = None;
+        while let Ok(outbound) = mobile_rx.try_recv() {
+            let xml = stanza_to_xml(&outbound.stanza);
+            if xml.contains("hello all resources") && !xml.contains("urn:xmpp:carbons:2") {
+                mobile_chat = Some(xml);
+                break;
+            }
+        }
+
+        let web_xml = web_chat.expect("web resource should receive original bare-JID message");
+        let mobile_xml =
+            mobile_chat.expect("mobile resource should receive original bare-JID message");
+        assert!(
+            web_xml.contains("to=\"alice@example.com/web-123\"")
+                || web_xml.contains("to='alice@example.com/web-123'"),
+            "web delivery should target the web resource: {web_xml}"
+        );
+        assert!(
+            mobile_xml.contains("to=\"alice@example.com/mobile-456\"")
+                || mobile_xml.contains("to='alice@example.com/mobile-456'"),
+            "mobile delivery should target the mobile resource: {mobile_xml}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resource() {
         let state = create_test_websocket_state().await;
         let sender_jid: FullJid = "alice@example.com/phone".parse().expect("sender jid");
@@ -4993,29 +5189,24 @@ mod tests {
         let sender_jid: FullJid = format!("{}@example.com/web", session.xmpp_localpart)
             .parse()
             .expect("sender jid");
-        state
-            .muc_registry
-            .get_or_create_room(
-                room_jid.clone(),
-                waddle_id.to_string(),
-                channel_id.to_string(),
-                RoomConfig::default(),
-            )
-            .expect("create room");
-        let room_data = state
-            .muc_registry
-            .get_room_data(&room_jid)
-            .expect("room data");
-        let mut room = room_data.write().await;
-        room.add_occupant(Occupant {
-            real_jid: sender_jid.clone(),
-            nick: "alice".to_string(),
-            role: Role::Participant,
-            affiliation: Affiliation::Member,
-            is_remote: false,
-            home_server: None,
-        });
-        drop(room);
+        let room_actor = get_or_create_room_actor(
+            state.as_ref(),
+            &room_jid,
+            RoomConfig::default(),
+            waddle_id.to_string(),
+            channel_id.to_string(),
+        )
+        .await
+        .expect("create room");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: sender_jid.clone(),
+                nick: "alice".to_string(),
+                effective_affiliation: Affiliation::Member,
+                local_domain: "example.com".to_string(),
+            })
+            .await
+            .expect("join room");
 
         let message_xml = format!(
             "<message xmlns='jabber:client' to='{room_jid}' type='groupchat' id='client-msg-1'>\
@@ -5390,9 +5581,24 @@ mod tests {
         let first: FullJid = "alice@example.com/tab-1".parse().expect("first");
         let second: FullJid = "alice@example.com/tab-2".parse().expect("second");
 
-        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &first, "alice").await;
-        let responses =
-            handle_muc_join(state.as_ref(), "example.com", &room_jid, &second, "alice").await;
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &first,
+            "alice",
+            &None,
+        )
+        .await;
+        let responses = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &second,
+            "alice",
+            &None,
+        )
+        .await;
 
         // Count presences emitted to the joiner that came from room/alice.
         // Only the self-presence (status 110) should be there — no "ghost".
@@ -5439,9 +5645,24 @@ mod tests {
         let alice: FullJid = "alice@example.com/desktop".parse().expect("alice");
         let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
 
-        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &alice, "dino").await;
-        let responses =
-            handle_muc_join(state.as_ref(), "example.com", &room_jid, &bob, "dino").await;
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "dino",
+            &None,
+        )
+        .await;
+        let responses = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "dino",
+            &None,
+        )
+        .await;
 
         assert_eq!(responses.len(), 1, "exactly one error presence");
         let el = Element::from_str(&responses[0]).expect("valid XML");
@@ -5458,11 +5679,7 @@ mod tests {
             .is_some());
 
         // Alice still owns the nick.
-        let room_data = state
-            .muc_registry
-            .get_room_data(&room_jid)
-            .expect("room data");
-        let room = room_data.read().await;
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
         assert_eq!(room.find_nick_by_real_jid(&alice), Some("dino"));
         assert!(room.find_nick_by_real_jid(&bob).is_none());
         assert_eq!(room.occupant_count(), 1);
@@ -5690,13 +5907,18 @@ mod tests {
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
 
         // Put alice in the room, as if she'd detached with SM.
-        let _ = handle_muc_join(state.as_ref(), "example.com", &room_jid, &jid, "alice").await;
-        assert!(state
-            .muc_registry
-            .get_room_data(&room_jid)
-            .expect("room")
-            .read()
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &jid,
+            "alice",
+            &None,
+        )
+        .await;
+        assert!(snapshot_room(state.as_ref(), &room_jid)
             .await
+            .room
             .find_nick_by_real_jid(&jid)
             .is_some());
 
@@ -5740,12 +5962,9 @@ mod tests {
 
         assert!(!state.resumable_sessions.contains_key(&stream_id));
         assert!(
-            state
-                .muc_registry
-                .get_room_data(&room_jid)
-                .expect("room")
-                .read()
+            snapshot_room(state.as_ref(), &room_jid)
                 .await
+                .room
                 .find_nick_by_real_jid(&jid)
                 .is_none(),
             "MUC occupant must be gone after janitor sweep"
