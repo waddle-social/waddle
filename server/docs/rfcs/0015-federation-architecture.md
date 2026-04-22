@@ -30,7 +30,7 @@ The current architecture requires ATProto authentication for all users and opera
 │  │ ATProto OAuth   │  │ XMPP Server     │  │ Hosted Waddles          │ │
 │  │ Identity Issuer │  │ (single domain) │  │ MUC namespaced          │ │
 │  │                 │  │                 │  │ general@penguin.w.s     │ │
-│  │ did:plc:abc →   │  │ C2S: 5222       │  │ general@devs.w.s        │ │
+│  │ did:plc:abc →   │  │ C2S: WebSocket  │  │ general@devs.w.s        │ │
 │  │ abc@waddle.soc  │  │ S2S: 5269       │  │ Each has own SQLite     │ │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────┘ │
 └───────────────────────────────┬─────────────────────────────────────────┘
@@ -43,7 +43,7 @@ The current architecture requires ATProto authentication for all users and opera
 │ (self-hosted)     │  │ (self-hosted)     │  │ (self-hosted)     │
 ├───────────────────┤  ├───────────────────┤  ├───────────────────┤
 │ XMPP Server       │  │ XMPP Server       │  │ XMPP Server       │
-│ C2S: 5222         │  │ C2S: 5222         │  │ C2S: 5222         │
+│ C2S: WebSocket    │  │ C2S: WebSocket    │  │ C2S: WebSocket    │
 │ S2S: 5269         │  │ S2S: 5269         │  │ S2S: 5269         │
 ├───────────────────┤  ├───────────────────┤  ├───────────────────┤
 │ Native JID users: │  │ Native JID users: │  │ Native JID users: │

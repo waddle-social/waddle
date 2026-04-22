@@ -7,8 +7,8 @@
 //!
 //! ## Architecture
 //!
-//! - **Server**: TCP listener on port 5222 (C2S) and 5269 (S2S, future)
-//! - **Connection Actors**: Each client connection managed by a Kameo actor
+//! - **Transport**: WebSocket C2S in `waddle-server`, optional TCP 5269 listener for S2S
+//! - **Connection Actors**: S2S connections managed by a Kameo actor
 //! - **MUC Room Actors**: Multi-user chat rooms as separate actors
 //! - **Stream Processing**: XML stream parsing via xmpp-parsers
 //!
@@ -518,7 +518,7 @@ pub struct ScramCredentials {
 pub async fn start<S: AppState>(
     config: XmppServerConfig,
     app_state: Arc<S>,
-    c2s_listener: tokio::net::TcpListener,
+    c2s_listener: Option<tokio::net::TcpListener>,
     s2s_listener: Option<tokio::net::TcpListener>,
     shutdown_token: tokio_util::sync::CancellationToken,
 ) -> Result<XmppServer<S>, XmppError> {

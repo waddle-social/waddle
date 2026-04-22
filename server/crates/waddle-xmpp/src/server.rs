@@ -1,37 +1,26 @@
-//! XMPP server implementation.
+//! XMPP listener implementation.
 //!
-//! The server listens on TCP port 5222 for client-to-server (C2S) connections
-//! and optionally on port 5269 for server-to-server (S2S) federation.
+//! The standalone listener only handles optional server-to-server (S2S)
+//! federation. Client-to-server traffic is served by the HTTP/WebSocket stack.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kameo::actor::ActorRef;
 use rustls::ServerConfig as RustlsServerConfig;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, info_span, warn, Instrument};
-use waddle_extensions::{ExtensionConfig, ExtensionManager};
+use tracing::info;
+use waddle_extensions::ExtensionConfig;
 
-use crate::commands::CommandRegistry;
-use crate::connection::ConnectionActor;
-use crate::isr::{create_shared_store, SharedIsrTokenStore};
-use crate::mam::LibSqlMamStorage;
-use crate::muc::room_registry_actor::RoomRegistryActor;
-use crate::pubsub::{InMemoryPubSubStorage, PubSubStorage};
-use crate::push::{HttpWebPushSender, InMemoryPushStore, PushSubscriptionStore, WebPushSender};
-use crate::registry::{ConnectionRegistry, UserRegistryActor};
+use crate::registry::ConnectionRegistry;
 use crate::routing::{RouterConfig, StanzaRouter};
 use crate::s2s::{S2sListener, S2sListenerConfig};
-use crate::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
 use crate::{AppState, XmppError};
 
 /// XMPP server configuration.
 #[derive(Debug, Clone)]
 pub struct XmppServerConfig {
-    /// Address to bind for C2S connections (default: 0.0.0.0:5222)
-    pub c2s_addr: SocketAddr,
     /// Address to bind for S2S connections (default: 0.0.0.0:5269)
     pub s2s_addr: Option<SocketAddr>,
     /// Whether S2S federation is enabled (default: false)
@@ -65,7 +54,6 @@ pub struct XmppServerConfig {
 impl Default for XmppServerConfig {
     fn default() -> Self {
         Self {
-            c2s_addr: "0.0.0.0:5222".parse().unwrap(),
             s2s_addr: Some("0.0.0.0:5269".parse().unwrap()),
             s2s_enabled: false, // S2S disabled by default
             tls_cert_path: "certs/server.crt".to_string(),
@@ -126,28 +114,9 @@ pub fn generate_ephemeral_tls_config(domain: &str) -> Result<Arc<RustlsServerCon
 /// XMPP server instance.
 pub struct XmppServer<S: AppState> {
     config: XmppServerConfig,
-    app_state: Arc<S>,
+    _app_state: std::marker::PhantomData<S>,
     tls_acceptor: TlsAcceptor,
-    room_registry: ActorRef<RoomRegistryActor>,
     connection_registry: Arc<ConnectionRegistry>,
-    user_registry: ActorRef<UserRegistryActor>,
-    mam_storage: Arc<LibSqlMamStorage>,
-    /// XEP-0397 ISR token store shared across all connections
-    isr_token_store: SharedIsrTokenStore,
-    /// XEP-0198 Stream Management session registry for resumption
-    sm_session_registry: Arc<dyn SmSessionRegistry>,
-    /// XEP-0060/0163 PubSub/PEP storage shared across all connections
-    pubsub_storage: Arc<dyn PubSubStorage + Send + Sync>,
-    /// Runtime extension manager shared across all connections
-    extension_manager: Arc<ExtensionManager>,
-    /// XEP-0357 Push subscription store
-    push_store: Arc<dyn PushSubscriptionStore + Send + Sync>,
-    /// XEP-0357 Push notification sender
-    push_sender: Arc<dyn WebPushSender + Send + Sync>,
-    /// XEP-0050 Ad-Hoc Commands registry
-    command_registry: Arc<CommandRegistry>,
-    /// C2S listener — passed in by the caller (Ecdysis or fresh-bound).
-    c2s_listener: TcpListener,
     /// S2S listener — passed in if S2S federation is enabled.
     s2s_listener: Option<TcpListener>,
     /// Shutdown token — when cancelled, the accept loop stops.
@@ -157,110 +126,27 @@ pub struct XmppServer<S: AppState> {
 impl<S: AppState> XmppServer<S> {
     /// Create a new XMPP server instance.
     ///
-    /// Requires a pre-bound C2S listener and a shutdown token.
-    /// The listener may be inherited from a parent process (Ecdysis) or freshly bound.
-    /// The shutdown token controls when the accept loop stops.
+    /// Requires a shutdown token.
     pub async fn new(
         config: XmppServerConfig,
-        app_state: Arc<S>,
-        c2s_listener: TcpListener,
+        _app_state: Arc<S>,
+        _c2s_listener: Option<TcpListener>,
         s2s_listener: Option<TcpListener>,
         shutdown_token: tokio_util::sync::CancellationToken,
     ) -> Result<Self, XmppError> {
         let tls_acceptor = Self::load_tls_config(&config)?;
 
-        // Create the MUC room registry actor with the MUC domain
-        let muc_domain = format!("muc.{}", config.domain);
-        let room_registry = kameo::spawn(RoomRegistryActor::new(muc_domain));
-
         // Create the connection registry for message routing
         let connection_registry = Arc::new(ConnectionRegistry::new());
-        let user_registry = kameo::spawn(UserRegistryActor::new());
-
-        // Create the MAM storage
-        let mam_storage = Self::create_mam_storage(&config).await?;
-
-        // Create the ISR token store for instant stream resumption (XEP-0397)
-        let isr_token_store = create_shared_store();
-        info!("ISR token store initialized");
-
-        // Create the SM session registry for stream resumption (XEP-0198)
-        let sm_session_registry: Arc<dyn SmSessionRegistry> =
-            Arc::new(InMemorySmSessionRegistry::new());
-        info!("SM session registry initialized");
-
-        // Create the shared PubSub storage for PEP (XEP-0060/0163)
-        let pubsub_storage: Arc<dyn PubSubStorage + Send + Sync> =
-            Arc::new(InMemoryPubSubStorage::new());
-        info!("PubSub storage initialized");
-
-        // Create the push subscription store and sender (XEP-0357)
-        let push_store: Arc<dyn PushSubscriptionStore + Send + Sync> =
-            Arc::new(InMemoryPushStore::new());
-        let push_sender: Arc<dyn WebPushSender + Send + Sync> = Arc::new(HttpWebPushSender::new());
-        info!("Push notification store initialized");
-
-        // Create runtime extension manager from config (fail-open behavior handled internally).
-        let extension_manager = Arc::new(
-            ExtensionManager::from_config(config.extensions.clone())
-                .map_err(|e| XmppError::config(format!("Failed to initialize extensions: {e}")))?,
-        );
-
-        // Create ad-hoc command registry (XEP-0050)
-        let command_registry = Arc::new(CommandRegistry::new());
-        info!("Command registry initialized");
 
         Ok(Self {
             config,
-            app_state,
+            _app_state: std::marker::PhantomData,
             tls_acceptor,
-            room_registry,
             connection_registry,
-            user_registry,
-            mam_storage,
-            isr_token_store,
-            sm_session_registry,
-            pubsub_storage,
-            extension_manager,
-            push_store,
-            push_sender,
-            command_registry,
-            c2s_listener,
             s2s_listener,
             shutdown_token,
         })
-    }
-
-    /// Create MAM storage from configuration.
-    async fn create_mam_storage(
-        config: &XmppServerConfig,
-    ) -> Result<Arc<LibSqlMamStorage>, XmppError> {
-        let db_path = config
-            .mam_db_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| ":memory:".to_string());
-
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
-            .await
-            .map_err(|e| XmppError::config(format!("Failed to create MAM database: {}", e)))?;
-
-        let conn = db
-            .connect()
-            .map_err(|e| XmppError::config(format!("Failed to connect to MAM database: {}", e)))?;
-
-        let storage = LibSqlMamStorage::new(conn);
-
-        // Initialize the schema
-        storage
-            .initialize()
-            .await
-            .map_err(|e| XmppError::config(format!("Failed to initialize MAM schema: {}", e)))?;
-
-        info!(db_path = %db_path, "MAM storage initialized");
-
-        Ok(Arc::new(storage))
     }
 
     /// Load TLS configuration from certificate and key files.
@@ -322,10 +208,9 @@ impl<S: AppState> XmppServer<S> {
         Ok(TlsAcceptor::from(Arc::new(server_config)))
     }
 
-    /// Start the XMPP server and listen for connections.
+    /// Start the XMPP listener tasks.
     ///
-    /// When S2S is enabled, this runs both C2S and S2S listeners concurrently.
-    /// Either listener failing will return an error.
+    /// When S2S is enabled, this runs the federation listener.
     pub async fn run(self) -> Result<(), XmppError> {
         // Start S2S listener if enabled and listener was provided
         let s2s_handle = if let Some(s2s_tcp_listener) = self.s2s_listener {
@@ -375,112 +260,8 @@ impl<S: AppState> XmppServer<S> {
             None
         };
 
-        // Start C2S listener
-        let c2s_handle = {
-            let listener = self.c2s_listener;
-            let addr = listener.local_addr().ok();
-            info!(addr = ?addr, "XMPP C2S server listening");
-
-            let shutdown_token = self.shutdown_token;
-            let app_state = self.app_state;
-            let tls_acceptor = self.tls_acceptor;
-            let domain = self.config.domain;
-            let room_registry = self.room_registry;
-            let connection_registry = self.connection_registry;
-            let user_registry = self.user_registry;
-            let mam_storage = self.mam_storage;
-            let isr_token_store = self.isr_token_store;
-            let sm_session_registry = self.sm_session_registry;
-            let pubsub_storage = self.pubsub_storage;
-            let push_store = self.push_store;
-            let push_sender = self.push_sender;
-            let registration_enabled = self.config.registration_enabled;
-            let single_tenant = self.config.single_tenant;
-            let extension_manager = self.extension_manager;
-            let command_registry = self.command_registry;
-
-            tokio::spawn(async move {
-                loop {
-                    let (stream, peer_addr) = tokio::select! {
-                        result = listener.accept() => {
-                            match result {
-                                Ok(conn) => conn,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to accept C2S connection");
-                                    continue;
-                                }
-                            }
-                        }
-                        _ = shutdown_token.cancelled() => {
-                            info!("C2S accept loop stopped (shutdown token cancelled)");
-                            break;
-                        }
-                    };
-
-                    let app_state = Arc::clone(&app_state);
-                    let tls_acceptor = tls_acceptor.clone();
-                    let domain = domain.clone();
-                    let room_registry = room_registry.clone();
-                    let connection_registry = Arc::clone(&connection_registry);
-                    let user_registry = user_registry.clone();
-                    let mam_storage = Arc::clone(&mam_storage);
-                    let isr_token_store = Arc::clone(&isr_token_store);
-                    let sm_session_registry = Arc::clone(&sm_session_registry);
-                    let pubsub_storage = Arc::clone(&pubsub_storage);
-                    let push_store = Arc::clone(&push_store);
-                    let push_sender = Arc::clone(&push_sender);
-                    let extension_manager = extension_manager.clone();
-                    let command_registry = Arc::clone(&command_registry);
-
-                    tokio::spawn(
-                        async move {
-                            if let Err(e) = ConnectionActor::handle_connection(
-                                stream,
-                                peer_addr,
-                                tls_acceptor,
-                                domain.clone(),
-                                app_state,
-                                room_registry,
-                                connection_registry,
-                                user_registry,
-                                mam_storage,
-                                isr_token_store,
-                                sm_session_registry,
-                                registration_enabled,
-                                pubsub_storage,
-                                extension_manager,
-                                single_tenant,
-                                push_store,
-                                push_sender,
-                                command_registry,
-                            )
-                            .await
-                            {
-                                tracing::warn!(error = %e, "Connection error");
-                            }
-                        }
-                        .instrument(info_span!(
-                            "xmpp.connection.lifecycle",
-                            client_ip = %peer_addr,
-                            transport = "tcp+tls",
-                            jid = tracing::field::Empty,  // Set later during authentication
-                        )),
-                    );
-                }
-            })
-        };
-
-        // Wait for either listener to complete (or error)
+        // Wait for the federation listener to complete (or error)
         tokio::select! {
-            result = c2s_handle => {
-                match result {
-                    Ok(()) => {
-                        info!("C2S listener task completed");
-                        Ok(())
-                    },
-                    Err(e) => Err(XmppError::internal(format!("C2S listener task failed: {}", e))),
-                }
-            }
             result = async {
                 match s2s_handle {
                     Some(handle) => handle.await,
@@ -499,25 +280,5 @@ impl<S: AppState> XmppServer<S> {
     /// Get the server configuration.
     pub fn config(&self) -> &XmppServerConfig {
         &self.config
-    }
-
-    /// Get the room registry.
-    pub fn room_registry(&self) -> &ActorRef<RoomRegistryActor> {
-        &self.room_registry
-    }
-
-    /// Get the connection registry.
-    pub fn connection_registry(&self) -> &Arc<ConnectionRegistry> {
-        &self.connection_registry
-    }
-
-    /// Get the MAM storage.
-    pub fn mam_storage(&self) -> &Arc<LibSqlMamStorage> {
-        &self.mam_storage
-    }
-
-    /// Get the ad-hoc command registry.
-    pub fn command_registry(&self) -> &Arc<CommandRegistry> {
-        &self.command_registry
     }
 }

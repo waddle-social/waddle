@@ -56,7 +56,7 @@ schema.#Project & {
 			args: ["run", "--bin", "waddle-server"]
 			readiness: {
 				kind: "port"
-				port: 5222
+				port: 3000
 			}
 			logs: color: "magenta"
 		}

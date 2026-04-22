@@ -3,13 +3,11 @@ resolver = "2"
 members = [
     "crates/waddle-ecdysis",
     "crates/waddle-server",
-    "crates/waddle-cli",
     "crates/waddle-xmpp",
     "crates/waddle-extensions",
     "crates/waddle-xmpp-core",
     "crates/waddle-xmpp-client",
     "crates/waddle-xmpp-client-ffi",
-    "tests/xmpp-e2e-suite",
 ]
 
 [workspace.package]

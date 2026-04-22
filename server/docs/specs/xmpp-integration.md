@@ -13,10 +13,10 @@ This document specifies how Waddle Social implements XMPP for real-time messagin
 │                                                                  │
 │  ┌──────────────────┐     ┌──────────────────────────────────┐  │
 │  │   Axum HTTP      │     │      waddle-xmpp                 │  │
-│  │   (REST API)     │     │      (XMPP Server)               │  │
+│  │   (REST + WS)    │     │      (Shared XMPP Protocol)      │  │
 │  │                  │     │                                  │  │
-│  │  /auth/*         │     │  TCP 5222 (C2S)                  │  │
-│  │  /waddles/*      │     │  TCP 5269 (S2S, Phase 5)         │  │
+│  │  /auth/*         │     │  WebSocket C2S (/xmpp-websocket) │  │
+│  │  /waddles/*      │     │  TCP 5269 (S2S, optional)        │  │
 │  │  /channels/*     │     │                                  │  │
 │  └────────┬─────────┘     │  Connection Actors (Kameo)       │  │
 │           │               │  MUC Room Actors (Kameo)         │  │
@@ -114,7 +114,6 @@ Response:
   "token": "xmpp-session-token",
   "expires_at": "2024-01-15T11:30:00Z",
   "xmpp_host": "waddle.social",
-  "xmpp_port": 5222,
   "websocket_url": "wss://waddle.social/xmpp-websocket"
 }
 ```
@@ -210,30 +209,21 @@ async fn handle_join(&mut self, jid: &Jid, app_state: &AppState) -> Result<(), M
 
 ## Transport Options
 
-### Native TCP
-
-For desktop/mobile/CLI clients:
-
-```
-Host: waddle.social
-Port: 5222 (STARTTLS)
-```
-
 ### WebSocket
 
-For web clients (future):
+For first-party clients:
 
 ```
 Endpoint: wss://waddle.social/xmpp-websocket
 ```
 
-The WebSocket transport is handled by Axum's WebSocket support, bridging to the same connection actor infrastructure.
+The WebSocket transport is handled by Axum's WebSocket support and is the only supported C2S transport.
 
 ## Client Library Recommendations
 
 | Platform | Library | Notes |
 |----------|---------|-------|
-| CLI (Rust) | `xmpp` crate | Native Rust, used by waddle-cli |
+| CLI (Rust) | `waddle-xmpp-client` | WebSocket-only native client runtime |
 | Web | Strophe.js | Mature, WebSocket support |
 | Web | XMPP.js | Modern, Promise-based |
 | iOS | XMPPFramework | Objective-C, Swift wrapper |

@@ -17,15 +17,9 @@ spec:
       port: {{ .Values.service.ports.http }}
       targetPort: http
       protocol: TCP
-    {{- if .Values.xmpp.enabled }}
-    - name: xmpp-c2s
-      port: {{ .Values.service.ports.xmppC2S }}
-      targetPort: xmpp-c2s
-      protocol: TCP
-    {{- if .Values.xmpp.s2sEnabled }}
+    {{- if and .Values.xmpp.enabled .Values.xmpp.s2sEnabled }}
     - name: xmpp-s2s
       port: {{ .Values.service.ports.xmppS2S }}
       targetPort: xmpp-s2s
       protocol: TCP
-    {{- end }}
     {{- end }}

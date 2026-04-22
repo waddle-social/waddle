@@ -62,7 +62,23 @@ pub struct DevicePollCompleteResponse {
     pub provider_id: String,
     pub jid: String,
     pub xmpp_host: String,
-    pub xmpp_port: u16,
+    pub websocket_url: String,
+}
+
+fn websocket_url_for_host(xmpp_host: &str) -> String {
+    if let Ok(base_url) = std::env::var("WADDLE_BASE_URL") {
+        if let Ok(mut url) = url::Url::parse(&base_url) {
+            let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
+            if url.set_scheme(scheme).is_ok() {
+                url.set_path("/xmpp-websocket");
+                url.set_query(None);
+                url.set_fragment(None);
+                return url.to_string();
+            }
+        }
+    }
+
+    format!("wss://{xmpp_host}/xmpp-websocket")
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,10 +259,7 @@ pub async fn device_poll_handler(
                 Ok(Some(session)) => {
                     let xmpp_host = std::env::var("WADDLE_XMPP_DOMAIN")
                         .unwrap_or_else(|_| "localhost".to_string());
-                    let xmpp_port = std::env::var("WADDLE_XMPP_PORT")
-                        .ok()
-                        .and_then(|v| v.parse::<u16>().ok())
-                        .unwrap_or(5222);
+                    let websocket_url = websocket_url_for_host(&xmpp_host);
 
                     let jid = localpart_to_jid(&session.xmpp_localpart, &xmpp_host)
                         .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, xmpp_host));
@@ -261,7 +274,7 @@ pub async fn device_poll_handler(
                             provider_id: auth.provider_id,
                             jid,
                             xmpp_host,
-                            xmpp_port,
+                            websocket_url,
                         }),
                     )
                         .into_response()

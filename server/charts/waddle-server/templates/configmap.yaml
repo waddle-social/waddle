@@ -9,8 +9,6 @@ data:
   WADDLE_BASE_URL: {{ .Values.config.baseUrl | quote }}
   WADDLE_XMPP_ENABLED: {{ .Values.xmpp.enabled | toString | quote }}
   WADDLE_XMPP_DOMAIN: {{ .Values.xmpp.domain | quote }}
-  WADDLE_XMPP_PORT: {{ .Values.xmpp.port | toString | quote }}
-  WADDLE_XMPP_C2S_ADDR: {{ .Values.xmpp.c2sAddr | quote }}
   WADDLE_XMPP_S2S_ENABLED: {{ .Values.xmpp.s2sEnabled | toString | quote }}
   WADDLE_XMPP_S2S_ADDR: {{ .Values.xmpp.s2sAddr | quote }}
   WADDLE_NATIVE_AUTH_ENABLED: {{ .Values.xmpp.nativeAuthEnabled | toString | quote }}

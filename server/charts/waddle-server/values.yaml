@@ -39,7 +39,6 @@ service:
   annotations: {}
   ports:
     http: 3000
-    xmppC2S: 5222
     xmppS2S: 5269
 
 ingress:
@@ -84,8 +83,6 @@ persistence:
 xmpp:
   enabled: true
   domain: waddle.local
-  port: 5222
-  c2sAddr: 0.0.0.0:5222
   s2sEnabled: false
   s2sAddr: 0.0.0.0:5269
   tls:
