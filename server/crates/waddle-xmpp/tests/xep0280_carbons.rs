@@ -75,6 +75,15 @@ async fn disable_carbons(client: &mut RawXmppClient, id: &str) {
     client.clear();
 }
 
+async fn set_presence_priority(client: &mut RawXmppClient, priority: i8) {
+    client
+        .send(&format!(
+            "<presence xmlns='jabber:client'><priority>{priority}</priority></presence>"
+        ))
+        .await
+        .expect("send presence with priority");
+}
+
 /// Drain any stanzas delivered within `window` so later assertions examine a
 /// fresh buffer.
 async fn settle(client: &mut RawXmppClient, window: Duration) {
@@ -244,5 +253,51 @@ async fn received_carbon_skipped_for_resource_that_did_not_opt_in() {
         !mobile_buffer.contains("urn:xmpp:carbons:2"),
         "mobile did not opt into carbons but received a <received> carbon:\n{}",
         mobile_buffer
+    );
+}
+
+#[tokio::test]
+async fn received_carbon_delivered_for_bare_jid_to_opted_in_non_target_resource() {
+    init_test_env();
+    let server = TestServer::start().await;
+
+    let mut alice_desktop = RawXmppClient::connect(server.addr).await.expect("connect");
+    bind_and_announce(&mut alice_desktop, &server, "alice", "desktop").await;
+    enable_carbons(&mut alice_desktop, "carbons-enable-desktop").await;
+    set_presence_priority(&mut alice_desktop, 1).await;
+
+    let mut alice_mobile = RawXmppClient::connect(server.addr).await.expect("connect");
+    bind_and_announce(&mut alice_mobile, &server, "alice", "mobile").await;
+    set_presence_priority(&mut alice_mobile, 5).await;
+
+    let mut bob = RawXmppClient::connect(server.addr).await.expect("connect");
+    bind_and_announce(&mut bob, &server, "bob", "laptop").await;
+
+    bob.send(
+        "<message type='chat' to='alice@localhost' id='dm-in-2' xmlns='jabber:client'>\
+            <body>priority bare routing</body>\
+        </message>",
+    )
+    .await
+    .expect("bob sends");
+
+    alice_mobile
+        .read_until("priority bare routing", DEFAULT_TIMEOUT)
+        .await
+        .expect("highest-priority resource receives original");
+
+    let desktop_buffer = alice_desktop
+        .read_until("priority bare routing", DEFAULT_TIMEOUT)
+        .await
+        .expect("desktop receives received carbon for bare-JID delivery");
+    assert!(
+        desktop_buffer.contains("<received"),
+        "desktop should receive a <received> carbon wrapper, got:\n{}",
+        desktop_buffer
+    );
+    assert!(
+        desktop_buffer.contains("urn:xmpp:carbons:2"),
+        "received carbon stanza should carry urn:xmpp:carbons:2, got:\n{}",
+        desktop_buffer
     );
 }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/waddle-ecdysis",
+    "crates/waddle-cli",
     "crates/waddle-server",
     "crates/waddle-xmpp",
     "crates/waddle-extensions",

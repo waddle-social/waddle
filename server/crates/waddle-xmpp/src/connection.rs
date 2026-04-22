@@ -2967,16 +2967,10 @@ impl<S: AppState, M: MamStorage> ConnectionActor<S, M> {
             }
         }
 
-        // Send "received" carbons to recipient's other clients only when a
-        // specific full JID was addressed.
-        if delivered
-            && should_carbon
-            && msg
-                .to
-                .as_ref()
-                .and_then(|jid| jid.clone().try_into_full().ok())
-                .is_some()
-        {
+        // Send "received" carbons to recipient resources that did not receive
+        // the original message directly (XEP-0280 §6). This applies to both
+        // bare- and full-JID addressing.
+        if delivered && should_carbon {
             self.send_received_carbons_to_user(
                 &msg_with_from,
                 &recipient_bare,

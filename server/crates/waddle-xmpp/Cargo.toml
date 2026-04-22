@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Waddle Social - Native XMPP server library"
 build = "build.rs"
-autotests = false
+autotests = true
 
 [dependencies]
 # Core Runtime & Async
