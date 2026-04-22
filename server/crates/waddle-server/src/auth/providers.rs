@@ -105,17 +105,6 @@ impl AuthProviderConfig {
 
         match self.kind {
             AuthProviderKind::Oidc => {
-                if self.dynamic_client_registration
-                    && !matches!(
-                        self.token_endpoint_auth_method,
-                        AuthProviderTokenEndpointAuthMethod::ClientSecretPost
-                    )
-                {
-                    return Err(AuthError::InvalidRequest(format!(
-                        "provider '{}' dynamic_client_registration currently requires token_endpoint_auth_method=client_secret_post",
-                        self.id
-                    )));
-                }
                 if self.issuer.as_deref().unwrap_or_default().trim().is_empty() {
                     return Err(AuthError::InvalidRequest(format!(
                         "provider '{}' (oidc) requires issuer",
@@ -363,12 +352,14 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_registration_rejects_none_auth_method() {
+    fn dynamic_registration_allows_public_client_auth_method() {
         let mut provider = oidc_provider();
         provider.dynamic_client_registration = true;
         provider.token_endpoint_auth_method = AuthProviderTokenEndpointAuthMethod::NoAuthentication;
-        let err = provider.validate().unwrap_err().to_string();
-        assert!(err.contains("dynamic_client_registration"));
+        provider.client_secret = "".to_string();
+        provider
+            .validate()
+            .expect("unauthenticated DCR public clients should be valid");
     }
 
     #[test]
