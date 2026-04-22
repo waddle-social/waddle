@@ -232,6 +232,11 @@ const conversationScope = computed(() => [
   props.channel?.id ?? "",
   props.dmPeer?.peerJid ?? "",
 ].join(":"));
+const lastDisplayedMessageId = ref<string | null>(null);
+const latestRemoteMessageId = computed(() => {
+  const last = [...props.messages].reverse().find((message) => !message.isSelf && !message.isRetracted);
+  return last?.id ?? null;
+});
 const hasSeenOnline = ref(props.xmppStatus.state === "online");
 const showReconnectedNotice = ref(false);
 let reconnectedNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -388,23 +393,19 @@ function onDrop(e: DragEvent) {
   if (files.length > 0) composerRef.value?.addAttachments(files);
 }
 
-// XEP-0333: Send displayed marker for the latest non-self message
-watch(
-  () => props.messages,
-  (msgs) => {
-    const last = [...msgs].reverse().find((m) => !m.isSelf && !m.isRetracted);
-    if (last) {
-      emit("displayed", last.id);
-    }
-  },
-  { deep: true },
-);
+// XEP-0333: Send one displayed marker per latest remote message id.
+watch(latestRemoteMessageId, (messageId) => {
+  if (!messageId || messageId === lastDisplayedMessageId.value) return;
+  lastDisplayedMessageId.value = messageId;
+  emit("displayed", messageId);
+});
 
 watch(conversationScope, () => {
   cancelReply();
   clearReplyJumpNotice();
   clearReconnectedNotice();
   forumTitle.value = "";
+  lastDisplayedMessageId.value = null;
 });
 
 // Clear reply context only on successful send; preserve on failure so user can retry
