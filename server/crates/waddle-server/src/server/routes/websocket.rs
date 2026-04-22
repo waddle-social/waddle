@@ -1284,8 +1284,13 @@ fn handle_resource_binding(
     };
 
     let id = extract_attr(frame, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let resource =
-        extract_element_text(frame, "resource").unwrap_or_else(|| "websocket".to_string());
+    let resource = extract_element_text(frame, "resource")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        // RFC 6120 allows servers to assign a resource when the client omits
+        // one. Use a unique value so separate devices never collide on the
+        // same FullJid slot in ConnectionRegistry.
+        .unwrap_or_else(|| format!("ws-{}", uuid::Uuid::new_v4()));
 
     // Create the full JID with the requested resource
     let bare_jid = jid.to_bare();
@@ -3923,6 +3928,55 @@ mod tests {
         assert!(
             session_jid.as_deref() == Some(expected_full.as_str()),
             "connection state should store the bound jid"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_resource_bind_without_resource_uses_unique_server_resource() {
+        let state = create_test_websocket_state().await;
+        let session = create_test_session(state.as_ref(), "alice").await;
+        let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+        let auth_frame = element_to_xml(
+            Element::builder("auth", waddle_xmpp::ns::SASL)
+                .attr("mechanism", "OAUTHBEARER")
+                .append(payload)
+                .build(),
+        );
+        let bind_frame = element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr("id", "bind-2")
+                .attr("type", "set")
+                .append(Element::builder("bind", waddle_xmpp::ns::BIND).build())
+                .build(),
+        );
+        let mut conn = LegacyConnState::new();
+
+        let auth_responses =
+            handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
+        assert_eq!(auth_responses, vec![sasl_success_xml()]);
+
+        let bind_responses =
+            handle_xmpp_frame(&bind_frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert!(conn.resource_bound);
+        assert_eq!(bind_responses.len(), 1);
+
+        let response = Element::from_str(&bind_responses[0]).expect("bind response XML");
+        let bind = response
+            .get_child("bind", waddle_xmpp::ns::BIND)
+            .expect("bind child");
+        let jid = bind
+            .get_child("jid", waddle_xmpp::ns::BIND)
+            .expect("jid child")
+            .text();
+
+        let expected_bare =
+            localpart_to_jid(&session.xmpp_localpart, &state.auth_state.xmpp_domain)
+                .expect("session localpart should produce JID");
+        let prefix = format!("{expected_bare}/ws-");
+        assert!(
+            jid.starts_with(&prefix),
+            "server-assigned resource should be unique ws-* value: {jid}"
         );
     }
 

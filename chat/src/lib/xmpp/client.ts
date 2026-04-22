@@ -1672,9 +1672,9 @@ export class BrowserXmppClient {
       this.handleInboundCarbonStanza(msg as { carbon?: { forward?: { message?: ReceivedMessage } } });
     });
 
-    xmpp.on("carbon:received", (msg) => {
-      this.handleInboundCarbonStanza(msg as { carbon?: { forward?: { message?: ReceivedMessage } } });
-    });
+    // stanza's messaging plugin already emits a synthetic `message` event for
+    // carbon:received forwarded payloads. Handling carbon:received here as well
+    // would process the same DM twice (double unread / duplicate notifications).
 
     xmpp.on("presence", (pres: ReceivedPresence) => {
       const from = barePeerJid(pres.from ?? "");

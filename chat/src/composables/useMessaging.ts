@@ -318,9 +318,6 @@ export function useMessaging(
         roomHats.value = hats;
       });
       client.setPresenceHandler((presence) => {
-        if (Object.keys(presence).length === 0) {
-          roomLastSeen.value = {};
-        }
         roomPresence.value = presence;
       });
       client.setLastSeenHandler((nick, timestamp) => {

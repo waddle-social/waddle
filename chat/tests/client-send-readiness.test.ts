@@ -253,7 +253,7 @@ describe("carbon forwarding", () => {
     }));
   });
 
-  test("forwards carbon:received messages to the DM handler", () => {
+  test("does not double-process carbon:received + forwarded message events", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
@@ -261,19 +261,23 @@ describe("carbon forwarding", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
+    const forwarded = {
+      id: "c-recv-1",
+      type: "chat",
+      from: "bob@example.com/phone",
+      to: "alice@example.com/desktop",
+      body: "hello from another resource path",
+    };
+    // stanza emits both `carbon:received` and a synthetic `message` event for
+    // the same forwarded stanza.
     xmpp.emit("carbon:received", {
       carbon: {
         forward: {
-          message: {
-            id: "c-recv-1",
-            type: "chat",
-            from: "bob@example.com/phone",
-            to: "alice@example.com/desktop",
-            body: "hello from another resource path",
-          },
+          message: forwarded,
         },
       },
     });
+    xmpp.emit("message", forwarded);
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
