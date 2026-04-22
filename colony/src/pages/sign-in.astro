@@ -1,4 +1,6 @@
 ---
+import ColonyLayout from "../layouts/ColonyLayout.astro";
+
 const user = Astro.locals.user;
 
 if (user) {
@@ -6,30 +8,25 @@ if (user) {
 }
 ---
 
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sign In - Colony</title>
-  </head>
-  <body>
-    <main>
-      <h1>Sign In</h1>
-      <p>Sign in to continue.</p>
-      <p><button id="sign-in" type="button">Sign in with GitHub</button></p>
-    </main>
+<ColonyLayout
+  title="Sign In - Colony"
+  heading="Sign in"
+  description="Use your Waddle account to continue."
+>
+  <div class="button-row">
+    <button class="button button--primary" id="sign-in" type="button">Continue with GitHub</button>
+  </div>
 
-    <script>
-      import { authClient } from "../lib/auth-client.ts";
+  <script>
+    import { authClient } from "../lib/auth-client.ts";
 
-      const signInButton = document.getElementById("sign-in");
+    const signInButton = document.getElementById("sign-in");
 
-      signInButton?.addEventListener("click", async () => {
-        await authClient.signIn.social({
-          provider: "github",
-          callbackURL: window.location.href,
-        });
+    signInButton?.addEventListener("click", async () => {
+      await authClient.signIn.social({
+        provider: "github",
+        callbackURL: window.location.href,
       });
-    </script>
-  </body>
-</html>
+    });
+  </script>
+</ColonyLayout>

@@ -1,11 +1,14 @@
 import { betterAuth } from "better-auth";
-import { jwt, oidcProvider } from "better-auth/plugins";
+import { oauthProvider } from "@better-auth/oauth-provider";
+import { jwt } from "better-auth/plugins";
 import { env } from "cloudflare:workers";
 
 import { database } from "./auth-database";
+import { getServerIdTokenClaims, oauthClaimsSupported } from "./oauth-claims";
 function createAuth(secret: string, githubClientSecret: string) {
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
+    disabledPaths: ["/token"],
     secret,
     database,
     trustedOrigins: [new URL(env.BETTER_AUTH_URL).origin],
@@ -31,33 +34,23 @@ function createAuth(secret: string, githubClientSecret: string) {
     plugins: [
       jwt({
         disableSettingJwtHeader: true,
+        jwt: {
+          issuer: env.BETTER_AUTH_URL,
+        },
       }),
-      oidcProvider({
+      oauthProvider({
         loginPage: "/sign-in",
         consentPage: "/oauth/consent",
         allowDynamicClientRegistration: true,
-        getAdditionalUserInfoClaim: (user, _scopes, client) => {
-          if (client.metadata?.product !== "server") {
-            return {};
-          }
-
-          const picture = typeof user.image === "string" ? user.image.trim() : "";
-          const githubUsername =
-            typeof user.githubUsername === "string"
-              ? user.githubUsername.trim()
-              : "";
-          const claims: Record<string, string> = {};
-
-          if (githubUsername) {
-            claims.preferred_username = githubUsername;
-          }
-          if (picture) {
-            claims.picture = picture;
-          }
-
-          return claims;
+        allowUnauthenticatedClientRegistration: true,
+        customIdTokenClaims: getServerIdTokenClaims,
+        advertisedMetadata: {
+          claims_supported: [...oauthClaimsSupported],
         },
-        useJWTPlugin: true,
+        silenceWarnings: {
+          oauthAuthServerConfig: true,
+          openidConfig: true,
+        },
       }),
     ],
   });
