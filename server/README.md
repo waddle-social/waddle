@@ -92,7 +92,7 @@ docker build -f Containerfile --target runtime -t waddle-server:local .
 
 # Run the server container
 docker run --rm \
-  -p 3000:3000 -p 5222:5222 -p 5269:5269 \
+  -p 3000:3000 -p 5269:5269 \
   -v waddle-data:/var/lib/waddle \
   -e WADDLE_DB_PATH=/var/lib/waddle/waddle.db \
   waddle-server:local

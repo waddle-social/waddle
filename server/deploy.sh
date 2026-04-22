@@ -344,7 +344,6 @@ WADDLE_UPLOAD_DIR=${DATA_DIR}/uploads
 # XMPP
 WADDLE_XMPP_ENABLED=true
 WADDLE_XMPP_DOMAIN=${DOMAIN}
-WADDLE_XMPP_PORT=5222
 WADDLE_XMPP_TLS_CERT=${CERT_DIR}/fullchain.pem
 WADDLE_XMPP_TLS_KEY=${CERT_DIR}/privkey.pem
 WADDLE_XMPP_MAM_DB=${DATA_DIR}/mam.db
@@ -426,9 +425,8 @@ ufw default allow outgoing > /dev/null 2>&1
 ufw allow 22/tcp   > /dev/null 2>&1   # SSH (always first to prevent lockout)
 ufw allow 80/tcp   > /dev/null 2>&1   # HTTP (certbot + redirect)
 ufw allow 443/tcp  > /dev/null 2>&1   # HTTPS
-ufw allow 5222/tcp > /dev/null 2>&1   # XMPP C2S
 ufw --force enable > /dev/null 2>&1
-ok "Firewall configured (22, 80, 443, 5222 open; 3000 blocked by default-deny)"
+ok "Firewall configured (22, 80, 443 open; 3000 blocked by default-deny)"
 
 # ─── Step 12: Enable and start services ─────────────────────────────────────
 info "Step 12: Starting services..."
@@ -520,12 +518,6 @@ run_test "HTTP health (via nginx/TLS)" \
 run_test "Server info endpoint" \
     curl -sf --max-time 5 "https://${DOMAIN}/api/v1/server-info"
 
-# XMPP STARTTLS needs a pipeline, so wrap in a function
-test_xmpp_starttls() {
-    echo 'QUIT' | openssl s_client -connect "${DOMAIN}:5222" -starttls xmpp -servername "${DOMAIN}" 2>&1 | grep -q 'Certificate chain\|CONNECTED'
-}
-run_test "XMPP STARTTLS on port 5222" test_xmpp_starttls
-
 run_test "systemd service active" \
     systemctl is-active --quiet waddle
 
@@ -557,7 +549,6 @@ echo "════════════════════════�
 ok "Waddle deployed to ${DOMAIN}"
 echo ""
 echo "  Web:    https://${DOMAIN}"
-echo "  XMPP:   ${DOMAIN}:5222 (STARTTLS)"
 echo "  WS:     wss://${DOMAIN}/xmpp-websocket"
 echo ""
 echo "  Logs:   journalctl -u waddle -f"
@@ -566,6 +557,5 @@ echo "  Config: ${ENV_FILE}"
 echo "  Data:   ${DATA_DIR}/"
 echo ""
 echo "  Remaining manual steps:"
-echo "    1. Add DNS SRV record: _xmpp-client._tcp.${DOMAIN} → ${DOMAIN}:5222"
-echo "    2. Set up DB backups:  cron + sqlite3 ${DATA_DIR}/waddle.db '.backup ...'"
+echo "    1. Set up DB backups:  cron + sqlite3 ${DATA_DIR}/waddle.db '.backup ...'"
 echo "════════════════════════════════════════════════════════════════"

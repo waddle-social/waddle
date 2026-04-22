@@ -520,8 +520,8 @@ External integrations and bot platform.
 
 ### M0: XMPP Foundation
 - [x] waddle-xmpp crate created
-- [x] TCP connections accepted on 5222
-- [x] STARTTLS working
+- [x] WebSocket C2S endpoint served at `/xmpp-websocket`
+- [x] RFC 7395 framing working
 - [x] Stream negotiation completes
 - [x] SASL authentication working (PLAIN mechanism)
 - [x] XML stanza parsing with RFC 6120 compliance (minidom/rxml)

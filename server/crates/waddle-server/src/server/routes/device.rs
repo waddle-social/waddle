@@ -62,7 +62,7 @@ pub struct DevicePollCompleteResponse {
     pub provider_id: String,
     pub jid: String,
     pub xmpp_host: String,
-    pub xmpp_port: u16,
+    pub websocket_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,10 +243,7 @@ pub async fn device_poll_handler(
                 Ok(Some(session)) => {
                     let xmpp_host = std::env::var("WADDLE_XMPP_DOMAIN")
                         .unwrap_or_else(|_| "localhost".to_string());
-                    let xmpp_port = std::env::var("WADDLE_XMPP_PORT")
-                        .ok()
-                        .and_then(|v| v.parse::<u16>().ok())
-                        .unwrap_or(5222);
+                    let websocket_url = state.websocket_url();
 
                     let jid = localpart_to_jid(&session.xmpp_localpart, &xmpp_host)
                         .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, xmpp_host));
@@ -261,7 +258,7 @@ pub async fn device_poll_handler(
                             provider_id: auth.provider_id,
                             jid,
                             xmpp_host,
-                            xmpp_port,
+                            websocket_url,
                         }),
                     )
                         .into_response()

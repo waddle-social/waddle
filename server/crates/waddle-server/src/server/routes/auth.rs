@@ -113,7 +113,7 @@ impl AuthState {
         format!("{}/api/auth/callback", self.base_url)
     }
 
-    fn websocket_url(&self) -> String {
+    pub(crate) fn websocket_url(&self) -> String {
         let parsed = match url::Url::parse(&self.base_url) {
             Ok(parsed) => parsed,
             Err(_) => return "ws://localhost/xmpp-websocket".to_string(),

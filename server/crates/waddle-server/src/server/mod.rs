@@ -107,8 +107,6 @@ pub struct XmppConfig {
     pub enabled: bool,
     /// XMPP server domain (default: "localhost")
     pub domain: String,
-    /// Client-to-server bind address (default: "0.0.0.0:5222")
-    pub c2s_addr: SocketAddr,
     /// Server-to-server bind address (default: "0.0.0.0:5269")
     pub s2s_addr: SocketAddr,
     /// Whether S2S federation is enabled (default: false)
@@ -146,7 +144,6 @@ impl Default for XmppConfig {
         Self {
             enabled: true,
             domain: "localhost".to_string(),
-            c2s_addr: "0.0.0.0:5222".parse().expect("Valid default address"),
             s2s_addr: "0.0.0.0:5269".parse().expect("Valid default S2S address"),
             s2s_enabled: false, // Disabled by default
             tls_cert_path: "certs/server.crt".to_string(),
@@ -177,11 +174,6 @@ impl XmppConfig {
 
         let domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-
-        let c2s_addr = std::env::var("WADDLE_XMPP_C2S_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:5222".to_string())
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0:5222".parse().expect("Valid fallback address"));
 
         let tls_cert_path = std::env::var("WADDLE_XMPP_TLS_CERT")
             .unwrap_or_else(|_| "certs/server.crt".to_string());
@@ -256,7 +248,6 @@ impl XmppConfig {
         Self {
             enabled,
             domain,
-            c2s_addr,
             s2s_addr,
             s2s_enabled,
             tls_cert_path,
@@ -283,7 +274,6 @@ impl XmppConfig {
         tls_server_config: Option<Arc<RustlsServerConfig>>,
     ) -> XmppServerConfig {
         XmppServerConfig {
-            c2s_addr: self.c2s_addr,
             s2s_addr: if self.s2s_enabled {
                 Some(self.s2s_addr)
             } else {
@@ -400,22 +390,17 @@ pub async fn start_with_config(
 
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
-    let (http_listener, c2s_listener, s2s_listener) = if let Some(ref mut set) = inherited {
+    let (http_listener, s2s_listener) = if let Some(ref mut set) = inherited {
         // Ecdysis restart path: all listeners MUST be inherited
         let http = set.take("http");
-        let c2s = if xmpp_config.enabled {
-            Some(set.take("xmpp-c2s"))
-        } else {
-            None
-        };
         let s2s = if xmpp_config.enabled && xmpp_config.s2s_enabled {
             Some(set.take("xmpp-s2s"))
         } else {
             None
         };
-        (http, c2s, s2s)
+        (http, s2s)
     } else {
-        // Cold start path: bind all listeners fresh
+        // Cold start path: bind listeners fresh
         let http_addr: SocketAddr = std::env::var("WADDLE_HTTP_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
             .parse()
@@ -427,14 +412,6 @@ pub async fn start_with_config(
             info!(addr = %http_addr, "Bound HTTP listener");
         }
 
-        let c2s = if xmpp_config.enabled {
-            let listener = tokio::net::TcpListener::bind(xmpp_config.c2s_addr).await?;
-            info!(addr = %xmpp_config.c2s_addr, "Bound XMPP C2S listener");
-            Some(listener)
-        } else {
-            None
-        };
-
         let s2s = if xmpp_config.enabled && xmpp_config.s2s_enabled {
             let listener = tokio::net::TcpListener::bind(xmpp_config.s2s_addr).await?;
             info!(addr = %xmpp_config.s2s_addr, "Bound XMPP S2S listener");
@@ -443,7 +420,7 @@ pub async fn start_with_config(
             None
         };
 
-        (http, c2s, s2s)
+        (http, s2s)
     };
 
     // If we inherited, verify we consumed everything
@@ -531,8 +508,11 @@ pub async fn start_with_config(
         .await
     });
 
-    // Start XMPP server
-    let xmpp_handle = if let Some(xmpp_app_state) = xmpp_app_state {
+    // Start the standalone XMPP listener only for optional federation.
+    // Client-to-server traffic is WebSocket-only and is served by the HTTP
+    // router at `/xmpp-websocket`.
+    let xmpp_handle = if xmpp_config.enabled && xmpp_config.s2s_enabled {
+        let xmpp_app_state = xmpp_app_state.expect("XMPP enabled but missing app state");
         let xmpp_tls_server_config = if xmpp_config.ephemeral_certs {
             info!(
                 "Using ephemeral self-signed TLS certificate for domain '{}'",
@@ -548,20 +528,12 @@ pub async fn start_with_config(
         };
         let xmpp_server_config = xmpp_config.to_xmpp_server_config(xmpp_tls_server_config);
         let xmpp_stop = stop_token.clone();
-        let c2s = c2s_listener.expect("XMPP enabled but no C2S listener");
 
         Some(tokio::spawn(async move {
-            start_xmpp_server(
-                xmpp_server_config,
-                xmpp_app_state,
-                c2s,
-                s2s_listener,
-                xmpp_stop,
-            )
-            .await
+            start_xmpp_server(xmpp_server_config, xmpp_app_state, s2s_listener, xmpp_stop).await
         }))
     } else {
-        info!("XMPP server disabled");
+        info!("TCP XMPP listener disabled; serving WebSocket C2S only");
         None
     };
 
@@ -674,7 +646,6 @@ async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
 async fn start_xmpp_server(
     config: XmppServerConfig,
     app_state: Arc<XmppAppState>,
-    c2s_listener: tokio::net::TcpListener,
     s2s_listener: Option<tokio::net::TcpListener>,
     stop_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -686,26 +657,12 @@ async fn start_xmpp_server(
     let server = waddle_xmpp::start(
         config,
         Arc::clone(&app_state),
-        c2s_listener,
+        None,
         s2s_listener,
         stop_token,
     )
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create XMPP server: {}", e))?;
-
-    // Register ad-hoc commands
-    {
-        use waddle_xmpp::commands::{handle_create_channel, NODE_CREATE_CHANNEL};
-        let registry = server.command_registry();
-        let app_state_for_command = Arc::clone(&app_state);
-        registry
-            .register(NODE_CREATE_CHANNEL, "Create Channel", move |ctx| {
-                let deps = Arc::clone(&app_state_for_command);
-                handle_create_channel(deps, ctx)
-            })
-            .await;
-        info!("Registered create-channel command");
-    }
 
     server
         .run()

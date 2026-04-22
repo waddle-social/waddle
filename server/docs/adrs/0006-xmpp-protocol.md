@@ -39,8 +39,8 @@ crates/
 ├── waddle-xmpp/           # XMPP server library
 │   ├── src/
 │   │   ├── lib.rs
-│   │   ├── server.rs      # TCP/TLS listener
-│   │   ├── connection.rs  # Connection actor
+│   │   ├── server.rs      # Optional S2S listener
+│   │   ├── connection.rs  # Legacy C2S actor (to be removed)
 │   │   ├── stream.rs      # XML stream handling
 │   │   ├── auth/          # SASL mechanisms
 │   │   ├── c2s/           # Client-to-server
@@ -56,9 +56,10 @@ crates/
 ```
 waddle-server binary
 ├── Axum HTTP (REST API)
+├── Axum WebSocket (RFC 7395 C2S)
 ├── waddle-xmpp (XMPP Server)
-│   ├── TCP Listener (5222 C2S, 5269 S2S)
-│   ├── Connection Actors (Kameo)
+│   ├── TCP Listener (5269 S2S)
+│   ├── Sans-I/O protocol + handlers
 │   └── MUC Room Actors (Kameo)
 └── Shared AppState
     ├── Sessions
@@ -124,8 +125,8 @@ rustls = "0.23"             # TLS
 
 ### Phase 0: Foundation
 - Create `crates/waddle-xmpp/` crate
-- TCP listener on 5222
-- TLS upgrade (STARTTLS) via rustls
+- WebSocket C2S endpoint at `/xmpp-websocket`
+- Optional TCP listener on 5269 for federation
 - XML stream parsing via xmpp-parsers
 - OpenTelemetry setup (traces, metrics)
 - Connection actor (Kameo) lifecycle
