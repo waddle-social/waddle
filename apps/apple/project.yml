@@ -55,6 +55,7 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers"
+        ARCHS: arm64
 schemes:
   Waddle:
     build:
