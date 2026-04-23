@@ -51,7 +51,9 @@ use waddle_xmpp::{
         RoomConfig,
     },
     protocol::{
-        frame::{parse_frame, InboundFrame, ParseError},
+        frame::{
+            inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
+        },
         StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
     registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza, SendResult},
@@ -957,6 +959,11 @@ async fn handle_xmpp_frame(
     state: &WebSocketState,
     conn: &mut LegacyConnState,
 ) -> Vec<String> {
+    if frame.len() > MAX_FRAME_SIZE {
+        warn!(len = frame.len(), "Dropping oversized XMPP frame");
+        return vec![];
+    }
+
     let LegacyConnState {
         authenticated,
         session_jid,
@@ -990,12 +997,17 @@ async fn handle_xmpp_frame(
 
     let inbound = match parse_frame(frame) {
         Ok(f) => f,
-        Err(ParseError::TooLarge) => {
-            warn!(len = frame.len(), "Dropping oversized XMPP frame");
-            return vec![];
-        }
         Err(ParseError::Empty) => return vec![],
         Err(err) => {
+            if let Some(responses) = parse_error_responses(frame, &err) {
+                warn!(
+                    error = %err,
+                    len = frame.len(),
+                    responses = responses.len(),
+                    "Handled XMPP parse error with protocol response"
+                );
+                return responses;
+            }
             warn!(error = %err, len = frame.len(), "Unhandled XMPP frame");
             return vec![];
         }
@@ -1115,6 +1127,251 @@ async fn handle_xmpp_frame(
             }
         }
     }
+}
+
+fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
+    match (parse_error_root_name(frame), err) {
+        (Some("auth" | "response"), ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)) =>
+        {
+            let namespace = raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL);
+            if namespace == waddle_xmpp::ns::SASL {
+                Some(vec![sasl_failure_xml("malformed-request")])
+            } else {
+                None
+            }
+        }
+        (
+            Some("iq"),
+            ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_),
+        ) => {
+            invalid_iq_parse_error_response(frame).map(|response| vec![response])
+        }
+        _ => None,
+    }
+}
+
+fn parse_error_root_name(frame: &str) -> Option<&str> {
+    let trimmed = frame.trim_start();
+    let rest = trimmed.strip_prefix('<')?;
+    if rest.starts_with('?') || rest.starts_with('!') {
+        return None;
+    }
+    let name_end = rest
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .unwrap_or(rest.len());
+    if name_end == 0 {
+        return None;
+    }
+    Some(&rest[..name_end])
+}
+
+fn invalid_iq_parse_error_response(frame: &str) -> Option<String> {
+    let patched = inject_client_ns_if_missing(frame);
+    let parsed = Element::from_str(&patched).ok();
+    let namespace = parsed
+        .as_ref()
+        .map(|element| element.ns().to_string())
+        .or_else(|| decoded_raw_xml_attr_value(frame, "xmlns"))
+        .unwrap_or(waddle_xmpp::ns::JABBER_CLIENT.to_string());
+    if namespace.as_str() != waddle_xmpp::ns::JABBER_CLIENT {
+        return None;
+    }
+    let iq_type = parsed
+        .as_ref()
+        .and_then(|element| element.attr("type"))
+        .map(ToString::to_string)
+        .or_else(|| decoded_raw_xml_attr_value(frame, "type"))?;
+    if matches!(iq_type.as_str(), "result" | "error") {
+        return None;
+    }
+
+    let id = parsed
+        .as_ref()
+        .and_then(|element| element.attr("id"))
+        .map(ToString::to_string)
+        .or_else(|| decoded_raw_xml_attr_value(frame, "id"))
+        .unwrap_or_default();
+    let response_from = parsed
+        .as_ref()
+        .and_then(|element| element.attr("to"))
+        .map(ToString::to_string)
+        .or_else(|| decoded_raw_xml_attr_value(frame, "to"));
+    let response_to = parsed
+        .as_ref()
+        .and_then(|element| element.attr("from"))
+        .map(ToString::to_string)
+        .or_else(|| decoded_raw_xml_attr_value(frame, "from"));
+    Some(build_iq_error_xml_with_addresses(
+        &id,
+        response_from.as_deref(),
+        response_to.as_deref(),
+        "cancel",
+        "feature-not-implemented",
+    ))
+}
+
+fn decoded_raw_xml_attr_value(xml: &str, attr: &str) -> Option<String> {
+    raw_xml_attr_value(xml, attr).map(decode_xml_attr_value)
+}
+
+fn decode_xml_attr_value(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(pos) = rest.find('&') {
+        decoded.push_str(&rest[..pos]);
+        let entity_start = &rest[pos + 1..];
+        let Some(entity_end) = entity_start.find(';') else {
+            decoded.push_str(&rest[pos..]);
+            return decoded;
+        };
+        let entity = &entity_start[..entity_end];
+        let replacement = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => entity
+                .strip_prefix("#x")
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse::<u32>().ok()))
+                .and_then(char::from_u32)
+                .filter(|&ch| is_valid_xml_char(ch)),
+        };
+
+        if let Some(ch) = replacement {
+            decoded.push(ch);
+        } else {
+            decoded.push('&');
+            decoded.push_str(entity);
+            decoded.push(';');
+        }
+        rest = &entity_start[entity_end + 1..];
+    }
+    decoded.push_str(rest);
+    decoded
+}
+
+fn is_valid_xml_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{9}'
+            | '\u{A}'
+            | '\u{D}'
+            | '\u{20}'..='\u{D7FF}'
+            | '\u{E000}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{10FFFF}'
+    )
+}
+
+fn looks_like_attr_token(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    looks_like_attr_name(name)
+}
+
+fn looks_like_attr_name(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.'))
+}
+
+fn raw_xml_attr_value<'a>(xml: &'a str, attr: &str) -> Option<&'a str> {
+    let trimmed = xml.trim_start();
+    let bytes = trimmed.as_bytes();
+    if bytes.first().copied()? != b'<' {
+        return None;
+    }
+
+    let mut idx = 1;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || matches!(bytes[idx], b'/' | b'!' | b'?') {
+        return None;
+    }
+
+    while idx < bytes.len()
+        && !bytes[idx].is_ascii_whitespace()
+        && !matches!(bytes[idx], b'/' | b'>')
+    {
+        idx += 1;
+    }
+
+    let mut fallback = None;
+    while idx < bytes.len() {
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() || matches!(bytes[idx], b'>' | b'/') {
+            break;
+        }
+
+        let name_start = idx;
+        while idx < bytes.len()
+            && !bytes[idx].is_ascii_whitespace()
+            && !matches!(bytes[idx], b'=' | b'>' | b'/')
+        {
+            idx += 1;
+        }
+        let name_end = idx;
+
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() || bytes[idx] != b'=' {
+            continue;
+        }
+        idx += 1;
+
+        let value_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        let had_value_whitespace = idx != value_start;
+        let Some(&quote) = bytes.get(idx) else {
+            return fallback;
+        };
+        if quote != b'"' && quote != b'\'' {
+            let rest = &trimmed[idx..];
+            let token_end = rest
+                .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                .unwrap_or(rest.len());
+            let token = &rest[..token_end];
+            let looks_like_next_attr = had_value_whitespace
+                && (looks_like_attr_token(token)
+                    || (looks_like_attr_name(token) && rest[token_end..].trim_start().starts_with('=')));
+            if !looks_like_next_attr {
+                if &trimmed[name_start..name_end] == attr {
+                    fallback = Some(token.trim_end_matches('/'));
+                }
+                idx += token_end;
+            }
+            continue;
+        }
+        idx += 1;
+        let value_start = idx;
+        while idx < bytes.len() && bytes[idx] != quote {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            return fallback;
+        }
+
+        if &trimmed[name_start..name_end] == attr {
+            return Some(&trimmed[value_start..idx]);
+        }
+
+        idx += 1;
+    }
+
+    fallback
 }
 
 /// Handle SASL OAUTHBEARER authentication.
@@ -3946,6 +4203,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_xmpp_frame_malformed_auth_returns_malformed_request() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl">payload</auth>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses, vec![sasl_failure_xml("malformed-request")]);
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_sasl_response_returns_malformed_request() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses, vec![sasl_failure_xml("malformed-request")]);
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_wrong_namespace_auth_stays_silent() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<auth xmlns="jabber:client" mechanism="SCRAM-SHA-256">x</auth>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "expected no response: {responses:?}");
+    }
+
+    #[tokio::test]
     async fn websocket_features_advertise_oauthbearer() {
         let state = create_test_websocket_state().await;
         let mut conn = LegacyConnState::new();
@@ -4302,6 +4607,472 @@ mod tests {
         );
         let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
         assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_drops_whitespace_padded_oversized_input() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        let huge = format!(
+            "{}<iq id=\"big\"/>",
+            " ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
+        );
+        let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
+        assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_drops_oversized_sm_nonza_before_parse() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        let huge = format!(
+            r#"<r xmlns="urn:xmpp:sm:3" note="{}"/>"#,
+            "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
+        );
+
+        let responses = handle_xmpp_frame(&huge, "example.com", state.as_ref(), &mut conn).await;
+
+        assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_invalid_iq_returns_feature_not_implemented() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="bad-iq" type="get"><nope/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"bad-iq\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_invalid_iq_result_returns_no_response() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="bad-result" type="result"><a/><b/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "expected no response: {responses:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_xml_iq_request_preserves_legacy_error() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="broken-iq" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"broken-iq\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_ignores_type_suffix_attributes() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="req-1" mimetype="result" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-1\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_recovers_attrs_with_spaces_and_gt() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq note="1 > 0" id = "req-2" type = "get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-2\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_and_keeps_scanning() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq bogus=x id="req-3" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-3\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_with_slashes() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq bogus=http://x id="req-4" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-4\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_keeps_id_after_empty_attr_value() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq bogus= id="req-5" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-5\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_recovers_unquoted_type_value() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type=get id="req-6"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-6\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_wrong_namespace_iq_stays_silent() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq xmlns="urn:ietf:params:xml:ns:xmpp-sasl" id="bad-ns" type="get"><ping xmlns="urn:xmpp:ping"/></iq>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "expected no response: {responses:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_self_closing_iq_result_stays_silent() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type=result/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "expected no response: {responses:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_skips_url_like_attr_with_equals() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq bogus=http://x=y id="req-7" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-7\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_does_not_shadow_real_type_attr() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq prev=type=result id="req-8" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-8\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_ignores_embedded_quoted_type_in_broken_value() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq prev=type="result" id="req-9" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-9\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_prefers_later_quoted_type_attr() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type=result id="req-10" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-10\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_prefers_later_unquoted_type_attr() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type=result type=get id="req-10b"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-10b\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_keeps_type_when_later_attr_is_truncated() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type=get id="req-11" bogus="#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-11\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_keeps_unquoted_type_when_later_quote_is_unterminated() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type=get id="req-12" to="alice@example.com"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains("type=\"error\""));
+        assert!(responses[0].contains("id=\"req-12\""));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_unescapes_recovered_id() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="a&amp;b" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains(r#"id="a&amp;b""#));
+        assert!(!responses[0].contains(r#"id="a&amp;amp;b""#));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_recovers_later_unquoted_type_attr() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq bogus= type=get id="req-13"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains(r#"id="req-13""#));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_recovers_later_spaced_quoted_type_attr() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq bogus= type = "get" id="req-13b"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains(r#"id="req-13b""#));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_id_attr_as_type_value() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq type= id="req-14"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert!(responses.is_empty(), "expected no response: {responses:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_type_attr_as_id_value() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id= type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(!responses[0].contains(r#"id="type=&quot;get&quot;""#));
+        assert!(responses[0].contains("feature-not-implemented"));
+    }
+
+    #[tokio::test]
+    async fn handle_xmpp_frame_malformed_iq_keeps_invalid_numeric_entity_escaped() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<iq id="&#1;" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
+        assert!(responses[0].contains(r#"id="&amp;#1;""#));
+        assert!(responses[0].contains("feature-not-implemented"));
     }
 
     #[tokio::test]

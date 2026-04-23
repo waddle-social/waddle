@@ -98,20 +98,20 @@ pub enum ParseError {
 /// when missing so `xmpp_parsers` can convert the element into a typed
 /// stanza.
 pub fn parse_frame(frame: &str) -> Result<InboundFrame, ParseError> {
+    if frame.len() > MAX_FRAME_SIZE {
+        return Err(ParseError::TooLarge);
+    }
     let trimmed = frame.trim();
     if trimmed.is_empty() {
         return Err(ParseError::Empty);
-    }
-    if trimmed.len() > MAX_FRAME_SIZE {
-        return Err(ParseError::TooLarge);
     }
 
     let root = peek_root_name(trimmed)
         .ok_or_else(|| ParseError::InvalidXml("missing root element".to_string()))?;
 
     match root {
-        "open" => Ok(InboundFrame::Open),
-        "close" => Ok(InboundFrame::Close),
+        "open" => parse_open(trimmed),
+        "close" => parse_close(trimmed),
         "auth" => parse_auth(trimmed),
         "response" => parse_response(trimmed),
         "iq" | "message" | "presence" => parse_stanza(trimmed, root),
@@ -142,6 +142,8 @@ fn peek_root_name(xml: &str) -> Option<&str> {
 fn parse_auth(frame: &str) -> Result<InboundFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    require_namespace(&element, "auth", crate::ns::SASL)?;
+    require_text_only_element(&element, "auth")?;
     let mechanism = element
         .attr("mechanism")
         .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?
@@ -155,9 +157,62 @@ fn parse_auth(frame: &str) -> Result<InboundFrame, ParseError> {
 fn parse_response(frame: &str) -> Result<InboundFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    require_namespace(&element, "response", crate::ns::SASL)?;
+    require_text_only_element(&element, "response")?;
     Ok(InboundFrame::SaslResponse(
         element.text().trim().to_string(),
     ))
+}
+
+fn parse_open(frame: &str) -> Result<InboundFrame, ParseError> {
+    let element =
+        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    require_namespace(&element, "open", "urn:ietf:params:xml:ns:xmpp-framing")?;
+    require_empty_element(&element, "open")?;
+    Ok(InboundFrame::Open)
+}
+
+fn parse_close(frame: &str) -> Result<InboundFrame, ParseError> {
+    let element =
+        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    require_namespace(&element, "close", "urn:ietf:params:xml:ns:xmpp-framing")?;
+    require_empty_element(&element, "close")?;
+    Ok(InboundFrame::Close)
+}
+
+fn require_namespace(
+    element: &Element,
+    name: &'static str,
+    expected_ns: &'static str,
+) -> Result<(), ParseError> {
+    if element.name() != name {
+        return Err(ParseError::UnknownRoot(element.name().to_string()));
+    }
+    if element.ns() != expected_ns {
+        return Err(ParseError::InvalidXml(format!(
+            "unexpected namespace for <{name}>: {}",
+            element.ns()
+        )));
+    }
+    Ok(())
+}
+
+fn require_empty_element(element: &Element, name: &'static str) -> Result<(), ParseError> {
+    if element.children().next().is_some() || !element.text().is_empty() {
+        return Err(ParseError::InvalidXml(format!(
+            "<{name}> must not contain payload"
+        )));
+    }
+    Ok(())
+}
+
+fn require_text_only_element(element: &Element, name: &'static str) -> Result<(), ParseError> {
+    if element.children().next().is_some() {
+        return Err(ParseError::InvalidXml(format!(
+            "<{name}> must not contain child elements"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
@@ -250,27 +305,63 @@ fn scan_start_tag(xml: &str) -> Option<StartTagScan> {
     }
     let name_end = idx;
 
-    let mut quote = None;
     let mut has_default_xmlns = false;
     while idx < bytes.len() {
-        let byte = bytes[idx];
-        match quote {
-            Some(q) if byte == q => quote = None,
-            Some(_) => {}
-            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
-            None if byte == b'>' => break,
-            None if byte == b'x' && xml[idx..].starts_with("xmlns") => {
-                idx += "xmlns".len();
-                if idx < bytes.len() && bytes[idx] == b'=' {
-                    has_default_xmlns = true;
-                    idx += 1;
-                    if idx < bytes.len() && (bytes[idx] == b'"' || bytes[idx] == b'\'') {
-                        quote = Some(bytes[idx]);
-                    }
-                    continue;
-                }
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() || matches!(bytes[idx], b'>' | b'/') {
+            break;
+        }
+
+        let attr_start = idx;
+        while idx < bytes.len()
+            && !bytes[idx].is_ascii_whitespace()
+            && !matches!(bytes[idx], b'=' | b'>' | b'/')
+        {
+            idx += 1;
+        }
+        let attr_end = idx;
+
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() || bytes[idx] != b'=' {
+            continue;
+        }
+        idx += 1;
+
+        let value_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        let had_value_whitespace = idx != value_start;
+        let quote = *bytes.get(idx)?;
+        if quote != b'"' && quote != b'\'' {
+            let rest = &xml[idx..];
+            let token_end = rest
+                .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                .unwrap_or(rest.len());
+            let token = &rest[..token_end];
+            let looks_like_next_attr =
+                had_value_whitespace
+                    && token.contains('=')
+                    && (token.contains('"') || token.contains('\''));
+            if !looks_like_next_attr {
+                idx += token_end;
             }
-            None => {}
+            continue;
+        }
+        idx += 1;
+        while idx < bytes.len() && bytes[idx] != quote {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+
+        if &xml[attr_start..attr_end] == "xmlns" {
+            has_default_xmlns = true;
         }
         idx += 1;
     }
@@ -292,9 +383,44 @@ mod tests {
     }
 
     #[test]
+    fn rejects_open_frame_with_wrong_namespace() {
+        let xml = r#"<open xmlns="jabber:client" version="1.0"/>"#;
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    }
+
+    #[test]
+    fn rejects_truncated_open_frame() {
+        assert!(matches!(parse_frame("<open"), Err(ParseError::InvalidXml(_))));
+    }
+
+    #[test]
+    fn rejects_open_frame_with_payload() {
+        let xml = r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing"><iq/></open>"#;
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    }
+
+    #[test]
+    fn rejects_open_frame_with_whitespace_payload() {
+        let xml = "<open xmlns=\"urn:ietf:params:xml:ns:xmpp-framing\">\n</open>";
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    }
+
+    #[test]
     fn parses_close_frame() {
         let xml = r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#;
         assert!(matches!(parse_frame(xml), Ok(InboundFrame::Close)));
+    }
+
+    #[test]
+    fn rejects_close_frame_with_payload() {
+        let xml = r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing">bye</close>"#;
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    }
+
+    #[test]
+    fn rejects_close_frame_with_whitespace_payload() {
+        let xml = "<close xmlns=\"urn:ietf:params:xml:ns:xmpp-framing\"> </close>";
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
     }
 
     #[test]
@@ -310,12 +436,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_auth_frame_with_wrong_namespace() {
+        let xml = r#"<auth xmlns="jabber:client" mechanism="SCRAM-SHA-256">x</auth>"#;
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    }
+
+    #[test]
     fn parses_oauthbearer_auth_frame() {
         let xml = r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="OAUTHBEARER">biwsdG9rZW49YWJjMTIz</auth>"#;
         match parse_frame(xml).expect("oauthbearer should parse") {
             InboundFrame::Auth { mechanism, .. } => assert_eq!(mechanism, "OAUTHBEARER"),
             other => panic!("expected Auth, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_auth_frame_with_child_payload() {
+        let xml = r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="SCRAM-SHA-256">YWJj<foo/>ZA==</auth>"#;
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
     }
 
     #[test]
@@ -326,6 +464,13 @@ mod tests {
             InboundFrame::SaslResponse(data) => assert_eq!(data, "Yz1iaXdzLHI9..."),
             other => panic!("expected SaslResponse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_sasl_response_with_child_payload() {
+        let xml =
+            r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1i<foo/>aXdz</response>"#;
+        assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
     }
 
     #[test]
@@ -435,6 +580,12 @@ mod tests {
     }
 
     #[test]
+    fn inject_default_ns_is_noop_when_xmlns_has_spaces_around_equals() {
+        let input = r#"<iq xmlns = "jabber:client" id="x"/>"#;
+        assert_eq!(inject_client_ns_if_missing(input), input);
+    }
+
+    #[test]
     fn inject_default_ns_adds_attr_after_tag_name() {
         let input = r#"<iq id="x"/>"#;
         assert_eq!(
@@ -453,6 +604,27 @@ mod tests {
     }
 
     #[test]
+    fn inject_default_ns_ignores_xmlns_suffix_attribute_names() {
+        let input = r#"<iq data-xmlns="bogus" id="x"/>"#;
+        assert_eq!(
+            inject_client_ns_if_missing(input),
+            r#"<iq xmlns="jabber:client" data-xmlns="bogus" id="x"/>"#
+        );
+    }
+
+    #[test]
+    fn inject_default_ns_handles_unquoted_attr_with_slash_before_xmlns() {
+        let input = r#"<iq bogus=http://x xmlns = "jabber:client" id="x"/>"#;
+        assert_eq!(inject_client_ns_if_missing(input), input);
+    }
+
+    #[test]
+    fn inject_default_ns_handles_unquoted_attr_with_equals_and_slash_before_xmlns() {
+        let input = r#"<iq bogus=http://x=y xmlns = "jabber:client" id="x"/>"#;
+        assert_eq!(inject_client_ns_if_missing(input), input);
+    }
+
+    #[test]
     fn inject_default_ns_handles_gt_inside_attribute_value() {
         let input = r#"<iq id="x" data="1 > 0"><ping xmlns="urn:xmpp:ping"/></iq>"#;
         let patched = inject_client_ns_if_missing(input);
@@ -466,6 +638,12 @@ mod tests {
     #[test]
     fn rejects_oversized_frame() {
         let huge = format!("<iq id=\"x\">{}</iq>", "a".repeat(MAX_FRAME_SIZE));
+        assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
+    }
+
+    #[test]
+    fn rejects_oversized_frame_with_whitespace_padding() {
+        let huge = format!("{}<iq id=\"x\"/>", " ".repeat(MAX_FRAME_SIZE));
         assert!(matches!(parse_frame(&huge), Err(ParseError::TooLarge)));
     }
 }
