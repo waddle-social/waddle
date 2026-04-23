@@ -532,7 +532,7 @@ html[data-theme="light"] .snow span {
 
 .waitlist-form {
   position: relative;
-  display: block;
+  display: grid;
   width: 100%;
   margin: 0;
   border: 1px solid var(--edge);
@@ -550,13 +550,17 @@ html[data-theme="light"] .snow span {
   transform: scale(0.995);
 }
 
+.waitlist-form-main {
+  position: relative;
+}
+
 .waitlist-form:focus-within {
   border-color: var(--halo);
   background: color-mix(in oklab, var(--halo) 8%, var(--card));
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--halo) 25%, transparent);
 }
 
-.waitlist-form input[type="email"] {
+.waitlist-form-main input[type="email"] {
   min-width: 0;
   width: 100%;
   height: 3.85rem;
@@ -571,14 +575,14 @@ html[data-theme="light"] .snow span {
   outline: none;
 }
 
-.waitlist-form input[type="email"]:disabled {
+.waitlist-form-main input[type="email"]:disabled {
   cursor: not-allowed;
   color: color-mix(in oklab, var(--fg) 58%, var(--bg-c));
   opacity: 1;
   -webkit-text-fill-color: color-mix(in oklab, var(--fg) 58%, var(--bg-c));
 }
 
-.waitlist-form input[type="email"]::placeholder {
+.waitlist-form-main input[type="email"]::placeholder {
   color: color-mix(in oklab, var(--fg) 40%, transparent);
 }
 
@@ -637,6 +641,25 @@ html[data-theme="light"] .snow span {
   transform: translateY(-50%);
 }
 
+.waitlist-turnstile-row {
+  display: grid;
+  padding: 0.85rem 0.95rem 1rem;
+  border-top: 1px solid color-mix(in oklab, var(--edge) 82%, transparent);
+  background: color-mix(in oklab, var(--card) 78%, transparent);
+  border-radius: 0 0 18px 18px;
+}
+
+.waitlist-turnstile {
+  min-height: 4.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.waitlist-turnstile > div {
+  width: 100%;
+}
+
 .waitlist-status {
   margin: 0;
   min-height: 1.5rem;
@@ -671,6 +694,12 @@ html[data-theme="light"] .snow span {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   font-size: 0.76rem;
   line-height: 1.55;
+}
+
+@media (max-width: 38rem) {
+  .waitlist-turnstile-row {
+    padding-inline: 0.7rem;
+  }
 }
 
 .sr-only {

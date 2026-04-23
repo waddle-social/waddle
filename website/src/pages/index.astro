@@ -6,19 +6,31 @@ import {
 	WAITLIST_QUERY_KEY,
 	WAITLIST_RETRY_MESSAGE,
 	WAITLIST_SUCCESS_MESSAGE,
+	WAITLIST_TURNSTILE_ACTION,
+	WAITLIST_UNAVAILABLE_MESSAGE,
+	WAITLIST_VERIFICATION_MESSAGE,
 } from "../lib/waitlist/constants";
+import { getWaitlistTurnstileConfig } from "../lib/waitlist/runtime";
 
 const waitlistState = Astro.url.searchParams.get(WAITLIST_QUERY_KEY);
+const { siteKey: turnstileSiteKey } = getWaitlistTurnstileConfig();
+const turnstileConfigured = turnstileSiteKey.length > 0;
 const initialStatus =
 	waitlistState === "submitted"
 		? { tone: "success", message: WAITLIST_SUCCESS_MESSAGE }
 		: waitlistState === "invalid"
 			? { tone: "error", message: WAITLIST_INVALID_MESSAGE }
-			: waitlistState === "retry"
-				? { tone: "error", message: WAITLIST_RETRY_MESSAGE }
-		: null;
+			: waitlistState === "verify"
+				? { tone: "error", message: WAITLIST_VERIFICATION_MESSAGE }
+				: waitlistState === "offline"
+					? { tone: "error", message: WAITLIST_UNAVAILABLE_MESSAGE }
+					: waitlistState === "retry"
+						? { tone: "error", message: WAITLIST_RETRY_MESSAGE }
+						: null;
 const waitlistStartsOpen = initialStatus !== null;
-const idleMessage = "Confirm first, launch notes later.";
+const idleMessage = turnstileConfigured
+	? "Confirm first, launch notes later."
+	: WAITLIST_UNAVAILABLE_MESSAGE;
 ---
 
 <WebsiteLayout>
@@ -71,22 +83,40 @@ const idleMessage = "Confirm first, launch notes later.";
 						method="post"
 						action="/api/waitlist"
 						autocomplete="on"
-						aria-disabled="false"
+						aria-disabled={turnstileConfigured ? "false" : "true"}
 						data-waitlist-form
+						data-turnstile-action={WAITLIST_TURNSTILE_ACTION}
+						data-turnstile-configured={turnstileConfigured ? "true" : "false"}
+						data-turnstile-site-key={turnstileSiteKey}
 					>
-						<label class="sr-only" for="email">Email address</label>
-						<input
-							id="email"
-							name="email"
-							type="email"
-							autocomplete="email"
-							inputmode="email"
-							placeholder="you@signal.example"
-							required
-						/>
-						<button type="submit" class="waitlist-send" aria-label="Join waitlist">
-							<img src="/waddle-mark.svg" alt="" width="32" height="32" />
-						</button>
+						<div class="waitlist-form-main">
+							<label class="sr-only" for="email">Email address</label>
+							<input
+								id="email"
+								name="email"
+								type="email"
+								autocomplete="email"
+								inputmode="email"
+								placeholder="you@signal.example"
+								required
+							/>
+							<button
+								type="submit"
+								class="waitlist-send"
+								aria-label="Join waitlist"
+								disabled={!turnstileConfigured}
+							>
+								<img src="/waddle-mark.svg" alt="" width="32" height="32" />
+							</button>
+						</div>
+						<input type="hidden" name="cf-turnstile-response" value="" data-turnstile-response />
+						{
+							turnstileConfigured && (
+								<div class="waitlist-turnstile-row">
+									<div class="waitlist-turnstile" data-waitlist-turnstile></div>
+								</div>
+							)
+						}
 					</form>
 
 					<p
@@ -97,6 +127,8 @@ const idleMessage = "Confirm first, launch notes later.";
 						data-pending-message={WAITLIST_PENDING_MESSAGE}
 						data-success-message={WAITLIST_SUCCESS_MESSAGE}
 						data-error-message={WAITLIST_RETRY_MESSAGE}
+						data-unavailable-message={WAITLIST_UNAVAILABLE_MESSAGE}
+						data-verification-message={WAITLIST_VERIFICATION_MESSAGE}
 						aria-live="polite"
 					>
 						{initialStatus?.message ?? idleMessage}
@@ -111,13 +143,39 @@ const idleMessage = "Confirm first, launch notes later.";
 		</div>
 	</div>
 
+	<script is:inline>
+		window.waddleTurnstileOnLoad = () => {
+			window.dispatchEvent(new Event("waddle:turnstile-ready"));
+		};
+	</script>
+	<script
+		is:inline
+		src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=waddleTurnstileOnLoad"
+		defer
+	></script>
+
 	<script>
 		const logoButton = document.querySelector<HTMLButtonElement>("[data-toggle-waitlist]");
 		const panel = document.querySelector<HTMLElement>("[data-waitlist-panel]");
 		const form = document.querySelector<HTMLFormElement>("[data-waitlist-form]");
 		const emailInput = form?.querySelector<HTMLInputElement>('input[name="email"]');
 		const submitButton = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
+		const turnstileContainer = form?.querySelector<HTMLElement>("[data-waitlist-turnstile]");
+		const turnstileResponseInput = form?.querySelector<HTMLInputElement>(
+			'input[name="cf-turnstile-response"]',
+		);
 		const status = document.querySelector<HTMLElement>("[data-waitlist-status]");
+		const turnstileConfigured = form?.dataset.turnstileConfigured === "true";
+		const turnstileSiteKey = form?.dataset.turnstileSiteKey?.trim() ?? "";
+		const turnstileAction = form?.dataset.turnstileAction ?? "";
+		const unavailableMessage =
+			status?.dataset.unavailableMessage ??
+			"Waitlist verification is offline right now. Try again in a minute.";
+		const verificationMessage =
+			status?.dataset.verificationMessage ??
+			"Complete the quick human check, then try again.";
+		let widgetId: string | null = null;
+		let turnstileRenderPromise: Promise<void> | null = null;
 
 		const setPanelOpen = (next: boolean) => {
 			if (!logoButton || !panel) {
@@ -150,10 +208,103 @@ const idleMessage = "Confirm first, launch notes later.";
 			submitButton.disabled = busy;
 		};
 
+		const waitForTurnstile = async () => {
+			if (window.turnstile) {
+				await new Promise<void>((resolve) => {
+					window.turnstile?.ready(() => resolve());
+				});
+				return true;
+			}
+
+			return await new Promise<boolean>((resolve) => {
+				const timeoutId = window.setTimeout(() => resolve(false), 4000);
+
+				window.addEventListener(
+					"waddle:turnstile-ready",
+					() => {
+						window.clearTimeout(timeoutId);
+						window.turnstile?.ready(() => resolve(true));
+					},
+					{ once: true },
+				);
+			});
+		};
+
+		const resetTurnstile = () => {
+			if (turnstileResponseInput) {
+				turnstileResponseInput.value = "";
+			}
+
+			if (widgetId && window.turnstile) {
+				window.turnstile.reset(widgetId);
+			}
+		};
+
+		const renderTurnstile = async () => {
+			if (!turnstileConfigured || !turnstileContainer || !turnstileResponseInput || !status) {
+				return;
+			}
+
+			if (turnstileRenderPromise) {
+				return turnstileRenderPromise;
+			}
+
+			turnstileRenderPromise = (async () => {
+				const ready = await waitForTurnstile();
+				if (!ready || !window.turnstile) {
+					setStatus("error", unavailableMessage);
+					return;
+				}
+
+				if (widgetId) {
+					window.turnstile.remove(widgetId);
+					widgetId = null;
+				}
+
+				turnstileResponseInput.value = "";
+				widgetId = window.turnstile.render(turnstileContainer, {
+					sitekey: turnstileSiteKey,
+					action: turnstileAction,
+					size: "flexible",
+					theme: document.documentElement.dataset.theme === "light" ? "light" : "dark",
+					callback: (token) => {
+						turnstileResponseInput.value = token;
+						if (status.dataset.state === "error") {
+							setStatus("idle", status.dataset.idleMessage ?? "Confirm first, launch notes later.");
+						}
+					},
+					"error-callback": () => {
+						turnstileResponseInput.value = "";
+						setStatus("error", unavailableMessage);
+					},
+					"expired-callback": () => {
+						turnstileResponseInput.value = "";
+						setStatus("error", verificationMessage);
+						resetTurnstile();
+					},
+				});
+			})().finally(() => {
+				turnstileRenderPromise = null;
+			});
+
+			return turnstileRenderPromise;
+		};
+
 		setPanelOpen(panel?.classList.contains("is-open") ?? false);
+		if (turnstileConfigured) {
+			void renderTurnstile();
+		}
 
 		logoButton?.addEventListener("click", () => {
 			setPanelOpen(!(panel?.classList.contains("is-open") ?? false));
+		});
+
+		window.addEventListener("waddle:theme-change", () => {
+			if (!turnstileConfigured) {
+				return;
+			}
+
+			void renderTurnstile();
 		});
 
 		form?.addEventListener("submit", async (event) => {
@@ -164,6 +315,18 @@ const idleMessage = "Confirm first, launch notes later.";
 			}
 
 			if (!form.reportValidity()) {
+				return;
+			}
+
+			if (!turnstileConfigured) {
+				setPanelOpen(true);
+				setStatus("error", unavailableMessage);
+				return;
+			}
+
+			if (!turnstileResponseInput?.value) {
+				setPanelOpen(true);
+				setStatus("error", verificationMessage);
 				return;
 			}
 
@@ -187,6 +350,7 @@ const idleMessage = "Confirm first, launch notes later.";
 
 				if (response.ok && payload.ok) {
 					form.reset();
+					resetTurnstile();
 					setStatus(
 						"success",
 						payload.message ??
@@ -196,6 +360,7 @@ const idleMessage = "Confirm first, launch notes later.";
 					return;
 				}
 
+				resetTurnstile();
 				setStatus(
 					"error",
 					payload.message ??
@@ -203,6 +368,7 @@ const idleMessage = "Confirm first, launch notes later.";
 						"Mail hiccup on our side. Try again in a minute.",
 				);
 			} catch {
+				resetTurnstile();
 				setStatus(
 					"error",
 					status.dataset.errorMessage ?? "Mail hiccup on our side. Try again in a minute.",

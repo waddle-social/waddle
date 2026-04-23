@@ -192,6 +192,7 @@ const footerMode = Astro.props.footerMode ?? "fixed";
 						const next = root.dataset.theme === "dark" ? "light" : "dark";
 						root.dataset.theme = next;
 						localStorage.setItem("waddle-theme", next);
+						window.dispatchEvent(new Event("waddle:theme-change"));
 					});
 				});
 		</script>

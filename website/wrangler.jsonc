@@ -36,6 +36,12 @@
 			"id": "a6cde7c2af9141ca804120e4b3f8bbe2"
 		}
 	],
+	"vars": {
+		"TURNSTILE_SITE_KEY": "0x4AAAAAADByIlSeuS43sI-m"
+	},
+	"secrets": {
+		"required": ["TURNSTILE_SECRET_KEY"]
+	},
 	"observability": {
 		"enabled": true
 	}
