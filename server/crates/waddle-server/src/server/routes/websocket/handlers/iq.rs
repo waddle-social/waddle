@@ -165,7 +165,11 @@ pub async fn handle_iq_with_conn_state(
         }
         let ctx = ProtocolStanzaContext { domain, full_jid };
         let events = state.deps.protocol.dispatcher.dispatch_iq(&iq, &ctx);
-        let outcome = crate::server::routes::interpret::interpret(events).await;
+        let outcome = crate::server::routes::interpret::interpret(
+            events,
+            &state.deps.protocol.connection_registry,
+        )
+        .await;
         if outcome.close {
             warn!(
                 ns = %payload_ns,

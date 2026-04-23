@@ -26,6 +26,7 @@
 use tracing::{debug, error, info, warn};
 use waddle_xmpp::parser::stanza_to_string;
 use waddle_xmpp::protocol::OutboundEvent;
+use waddle_xmpp::registry::ConnectionRegistry;
 
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
@@ -45,7 +46,10 @@ pub struct InterpretOutcome {
 /// that genuinely require `.await` (registry lookups, actor calls, MAM
 /// storage). The currently-supported variants are all synchronous, so this
 /// function will return immediately for the ping/session flow.
-pub async fn interpret(events: Vec<OutboundEvent>) -> InterpretOutcome {
+pub async fn interpret(
+    events: Vec<OutboundEvent>,
+    registry: &ConnectionRegistry,
+) -> InterpretOutcome {
     let mut outcome = InterpretOutcome::default();
 
     for event in events {
@@ -83,12 +87,18 @@ pub async fn interpret(events: Vec<OutboundEvent>) -> InterpretOutcome {
             // user content, and their `Debug` impls would leak that
             // content into logs.
             // -------------------------------------------------------
-            OutboundEvent::SendDirect { jid, .. } => {
-                warn!(
-                    variant = "SendDirect",
-                    jid = %jid,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+            OutboundEvent::SendDirect { jid, stanza } => {
+                match registry.send_to(&jid, *stanza).await {
+                    waddle_xmpp::registry::SendResult::Sent => {
+                        debug!(jid = %jid, "SendDirect delivered");
+                    }
+                    waddle_xmpp::registry::SendResult::NotConnected => {
+                        debug!(jid = %jid, "SendDirect: target offline, dropping");
+                    }
+                    waddle_xmpp::registry::SendResult::ChannelClosed => {
+                        warn!(jid = %jid, "SendDirect: target channel closed, dropping");
+                    }
+                }
             }
             OutboundEvent::BroadcastToRoom { room, .. } => {
                 warn!(
@@ -105,11 +115,8 @@ pub async fn interpret(events: Vec<OutboundEvent>) -> InterpretOutcome {
                 );
             }
             OutboundEvent::UnregisterConnection(jid) => {
-                warn!(
-                    variant = "UnregisterConnection",
-                    jid = %jid,
-                    "OutboundEvent variant not yet wired in interpreter"
-                );
+                let _entry = registry.unregister(&jid);
+                debug!(jid = %jid, "UnregisterConnection: removed from registry");
             }
             OutboundEvent::ArchiveGroupchat { room, sender, .. } => {
                 warn!(
@@ -209,6 +216,10 @@ mod tests {
     use xmpp_parsers::iq::{Iq, IqType};
     use xmpp_parsers::minidom::Element;
 
+    fn test_registry() -> ConnectionRegistry {
+        ConnectionRegistry::new()
+    }
+
     fn result_iq(id: &str) -> Iq {
         Iq {
             from: None,
@@ -223,7 +234,7 @@ mod tests {
         let events = vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq(
             "x",
         ))))];
-        let outcome = interpret(events).await;
+        let outcome = interpret(events, &test_registry()).await;
         assert_eq!(outcome.frames.len(), 1);
         assert!(outcome.frames[0].contains("type=\"result\""));
         assert!(outcome.frames[0].contains("id=\"x\""));
@@ -233,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn interprets_close_transport() {
         let events = vec![OutboundEvent::CloseTransport];
-        let outcome = interpret(events).await;
+        let outcome = interpret(events, &test_registry()).await;
         assert!(outcome.close);
         assert!(outcome.frames.is_empty());
     }
@@ -244,7 +255,7 @@ mod tests {
             level: tracing::Level::INFO,
             message: "hello".to_string(),
         }];
-        let outcome = interpret(events).await;
+        let outcome = interpret(events, &test_registry()).await;
         assert!(outcome.frames.is_empty());
         assert!(!outcome.close);
     }
@@ -259,7 +270,7 @@ mod tests {
             },
             OutboundEvent::SendStanza(Box::new(Stanza::Iq(result_iq("b")))),
         ];
-        let outcome = interpret(events).await;
+        let outcome = interpret(events, &test_registry()).await;
         assert_eq!(outcome.frames.len(), 2);
         assert!(outcome.frames[0].contains("id=\"a\""));
         assert!(outcome.frames[1].contains("id=\"b\""));
