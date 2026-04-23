@@ -202,14 +202,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push Helm chart
+      - name: Push Helm charts
         env:
           HELM_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           HELM_REGISTRY_USERNAME: ${{ github.actor }}
         run: |
           echo "${HELM_REGISTRY_PASSWORD}" | helm registry login ghcr.io --username "${HELM_REGISTRY_USERNAME}" --password-stdin
           helm package server/charts/waddle-server -d /tmp/charts
+          helm package infrastructure/waddle.cloud/charts/livekit-sfu -d /tmp/charts
           helm push /tmp/charts/waddle-server-*.tgz oci://ghcr.io/waddle-social/waddle/charts || echo "Chart version already exists, skipping"
+          helm push /tmp/charts/livekit-sfu-*.tgz oci://ghcr.io/waddle-social/waddle/charts || echo "Chart version already exists, skipping"
 
       - name: Pin image tag to commit SHA
         working-directory: infrastructure/waddle.cloud
