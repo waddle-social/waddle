@@ -1,18 +1,18 @@
 use jid::{BareJid, FullJid};
 use tracing::{debug, info, warn};
 use waddle_xmpp::{
-    Affiliation, Role, Stanza,
     muc::{
         room_actor::{JoinWithAffiliation, LeaveByRealJid},
         RoomConfig,
     },
+    Affiliation, Role, Stanza,
 };
 use xmpp_parsers::minidom::Element;
 
+use super::super::{element_to_xml, get_or_create_room_actor, get_room_actor, WebSocketState};
 use crate::auth::Session;
 use crate::server::routes::channels::get_channel_from_db;
 use waddle_xmpp::protocol::ConnectionPhase;
-use super::super::{WebSocketState, element_to_xml, get_room_actor, get_or_create_room_actor};
 
 pub async fn handle_presence(
     presence: xmpp_parsers::presence::Presence,

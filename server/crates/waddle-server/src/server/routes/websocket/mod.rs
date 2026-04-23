@@ -27,9 +27,7 @@ use waddle_xmpp::{
     inbox::storage::InboxStorage,
     mam::LibSqlMamStorage,
     muc::{
-        room_actor::{
-            LeaveByRealJid, RoomActor,
-        },
+        room_actor::{LeaveByRealJid, RoomActor},
         room_registry_actor::{
             DestroyRoom, GetOrCreateRoom, GetRoom, IsMucJid, ListRooms, RoomRegistryActor,
         },
@@ -39,14 +37,14 @@ use waddle_xmpp::{
         frame::{
             inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
         },
-        ConnectionPhase, ScramPendingState,
-        StanzaDispatcher,
+        ConnectionPhase, ScramPendingState, StanzaDispatcher,
     },
     registry::{ConnectionRegistry, OutboundStanza},
     stream_management::{
         InMemorySmSessionRegistry, SmEnable, SmResume, SmSessionRegistry, SmStanza,
         StreamManagementState, SM_NS,
-    }, Stanza,
+    },
+    Stanza,
 };
 use xmpp_parsers::minidom::Element;
 
@@ -495,7 +493,10 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
     }
 }
 
-pub(crate) async fn get_room_actor(state: &WebSocketState, room_jid: &BareJid) -> Option<ActorRef<RoomActor>> {
+pub(crate) async fn get_room_actor(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Option<ActorRef<RoomActor>> {
     match state
         .deps
         .protocol
@@ -618,7 +619,6 @@ pub(crate) fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String 
         .expect("serializing stanza to Vec<u8> should not fail");
     String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
 }
-
 
 pub(crate) fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
     stanza_to_xml(&Stanza::Iq(iq))
@@ -1103,7 +1103,14 @@ async fn handle_xmpp_frame(
                 }
 
                 Stanza::Message(message) => {
-                    handlers::message::handle_message(message, &muc_domain, state, phase, authenticated_session).await
+                    handlers::message::handle_message(
+                        message,
+                        &muc_domain,
+                        state,
+                        phase,
+                        authenticated_session,
+                    )
+                    .await
                 }
             }
         }

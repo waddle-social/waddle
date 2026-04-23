@@ -21,10 +21,6 @@ use waddle_xmpp::{
         build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
         build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubRequest,
     },
-    xep::{
-        build_command_items, build_command_result, build_spaces_metadata_form,
-        parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS,
-    },
     xep::xep0363::{
         build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
         parse_upload_request, sanitize_filename, UploadError, UploadSlot,
@@ -33,19 +29,23 @@ use waddle_xmpp::{
         build_inbox_query_result, build_mark_read_result, is_inbox_iq, parse_inbox_query,
         parse_mark_read,
     },
+    xep::{
+        build_command_items, build_command_result, build_spaces_metadata_form,
+        parse_command_from_iq, Command, CommandStatus, NODE_COMMANDS,
+    },
     Stanza, StanzaErrorCondition, StanzaErrorType, WaddleDetails, XmppError,
 };
 
+use super::super::{
+    build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml, destroy_room_actor,
+    get_room_actor, iq_to_xml, is_muc_room_jid, list_room_jids, stanza_to_xml, WebSocketState,
+};
+use super::presence::get_managed_channel_for_room;
 use crate::auth::Session;
 use crate::server::routes::channels::list_channels_from_db;
 use crate::server::routes::waddles::{
     get_waddle_by_id, list_all_waddles_from_db, list_user_waddles,
 };
-use super::super::{
-    WebSocketState, build_iq_error_xml, build_iq_error_xml_with_addresses, build_iq_result_xml,
-    destroy_room_actor, get_room_actor, iq_to_xml, is_muc_room_jid, list_room_jids, stanza_to_xml,
-};
-use super::presence::get_managed_channel_for_room;
 
 /// Only called from test helpers — suppress dead_code lint for binary crate.
 #[allow(dead_code)]
