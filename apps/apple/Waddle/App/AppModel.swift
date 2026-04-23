@@ -59,16 +59,14 @@ final class AppModel: ObservableObject {
     @Published var serverURLText: String
     @Published var providers: [AuthProvider] = []
     @Published var session: WaddleSession?
-    @Published var publicWaddles: [WaddleSummary] = []
-    @Published var selectedWaddleID: String?
+    /// Display name for the implicit single space (derived from the server URL host).
+    @Published var spaceName: String?
     @Published var channels: [ChannelSummary] = []
     @Published var selectedChannelID: String?
     @Published var members: [MemberSummary] = []
-    @Published var joinedWaddleIDs: Set<String> = []
     @Published var deviceAuth: DeviceStartResponse?
     @Published var errorMessage = ""
     @Published var isLoadingProviders = false
-    @Published var isLoadingWaddles = false
     @Published var isLoadingStructure = false
     @Published var isCreatingWaddle = false
 
@@ -118,9 +116,21 @@ final class AppModel: ObservableObject {
         Task { await bootstrap() }
     }
 
+    /// Synthetic display object for the implicit single space.
+    /// Has no backend ID — views use it only for `.name` and `.description`.
     var selectedWaddle: WaddleSummary? {
-        guard let selectedWaddleID else { return nil }
-        return publicWaddles.first(where: { $0.id == selectedWaddleID })
+        guard let spaceName else { return nil }
+        return WaddleSummary(
+            id: "",
+            name: spaceName,
+            description: nil,
+            ownerUserID: nil,
+            iconURL: nil,
+            isPublic: false,
+            role: nil,
+            createdAt: nil,
+            updatedAt: nil
+        )
     }
 
     var selectedChannel: ChannelSummary? {
@@ -239,25 +249,8 @@ final class AppModel: ObservableObject {
         await loadProviders()
     }
 
-    func selectWaddle(_ waddleID: String?) async {
-        guard selectedWaddleID != waddleID || channels.isEmpty else {
-            return
-        }
-
-        selectedWaddleID = waddleID
-        channels = []
-        selectedChannelID = nil
-        members = []
-        syncChatRooms()
-        syncChatMembers()
-        syncChatMessages()
-        updateChatSurfaceState()
-
-        guard let waddleID else {
-            return
-        }
-
-        await loadStructure(for: waddleID)
+    func reloadRooms() async {
+        await loadRooms()
     }
 
     func selectChannel(_ channelID: String?) async {
@@ -290,8 +283,7 @@ final class AppModel: ObservableObject {
     }
 
     func reloadSelectedWaddleStructure() async {
-        guard let selectedWaddleID else { return }
-        await loadStructure(for: selectedWaddleID)
+        await loadRooms()
     }
 
     func createWaddle(name: String, description: String?, isPublic: Bool) async {
@@ -306,15 +298,12 @@ final class AppModel: ObservableObject {
         defer { isCreatingWaddle = false }
 
         do {
-            let created = try await client.createWaddle(
+            try await client.createSpace(
                 sessionID: session.sessionID,
                 name: trimmedName,
-                description: description,
-                isPublic: isPublic
+                description: description
             )
-            joinedWaddleIDs.insert(created.id)
-            await loadSpace()
-            await selectWaddle(created.id)
+            await loadRooms()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -642,24 +631,23 @@ final class AppModel: ObservableObject {
     }
 
     func updateWaddle(name: String, description: String?) async {
-        guard let session, let waddleID = selectedWaddleID else { return }
+        guard let session else { return }
         do {
-            try await client.updateWaddle(sessionID: session.sessionID, waddleID: waddleID, name: name, description: description)
-            await loadSpace()
+            try await client.updateSpace(sessionID: session.sessionID, name: name, description: description)
+            spaceName = name
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     func deleteWaddle() async {
-        guard let session, let waddleID = selectedWaddleID else { return }
+        guard let session else { return }
         do {
-            try await client.deleteWaddle(sessionID: session.sessionID, waddleID: waddleID)
-            selectedWaddleID = nil
+            try await client.deleteSpace(sessionID: session.sessionID)
+            spaceName = nil
             channels = []
             selectedChannelID = nil
             members = []
-            await loadSpace()
             updateChatSurfaceState()
         } catch {
             errorMessage = error.localizedDescription
@@ -667,9 +655,9 @@ final class AppModel: ObservableObject {
     }
 
     func updateChannel(channelID: String, name: String, description: String?, position: Int) async {
-        guard let session, let waddleID = selectedWaddleID else { return }
+        guard let session else { return }
         do {
-            try await client.updateChannel(sessionID: session.sessionID, waddleID: waddleID, channelID: channelID, name: name, description: description, position: position)
+            try await client.updateChannel(sessionID: session.sessionID, channelID: channelID, name: name, description: description, position: position)
             await reloadSelectedWaddleStructure()
         } catch {
             errorMessage = error.localizedDescription
@@ -677,9 +665,9 @@ final class AppModel: ObservableObject {
     }
 
     func addMember(userID: String, role: String = "member") async {
-        guard let session, let waddleID = selectedWaddleID else { return }
+        guard let session else { return }
         do {
-            try await client.addMember(sessionID: session.sessionID, waddleID: waddleID, userID: userID, role: role)
+            try await client.addMember(sessionID: session.sessionID, userID: userID, role: role)
             await reloadSelectedWaddleStructure()
         } catch {
             errorMessage = error.localizedDescription
@@ -687,9 +675,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeMember(userID: String) async {
-        guard let session, let waddleID = selectedWaddleID else { return }
+        guard let session else { return }
         do {
-            try await client.removeMember(sessionID: session.sessionID, waddleID: waddleID, userID: userID)
+            try await client.removeMember(sessionID: session.sessionID, userID: userID)
             await reloadSelectedWaddleStructure()
         } catch {
             errorMessage = error.localizedDescription
@@ -697,9 +685,9 @@ final class AppModel: ObservableObject {
     }
 
     func changeMemberRole(userID: String, role: String) async {
-        guard let session, let waddleID = selectedWaddleID else { return }
+        guard let session else { return }
         do {
-            try await client.updateMemberRole(sessionID: session.sessionID, waddleID: waddleID, userID: userID, role: role)
+            try await client.updateMemberRole(sessionID: session.sessionID, userID: userID, role: role)
             await reloadSelectedWaddleStructure()
         } catch {
             errorMessage = error.localizedDescription
@@ -755,7 +743,7 @@ final class AppModel: ObservableObject {
     }
 
     func createChannel(name: String, description: String?, channelType: String) async {
-        guard let selectedWaddleID, let rustClient else { return }
+        guard let rustClient else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             errorMessage = "Channel name is required."
@@ -767,13 +755,13 @@ final class AppModel: ObservableObject {
 
         let position = channels.count
         let result = await rustClient.createChannel(
-            waddleID: selectedWaddleID,
+            waddleID: "",
             name: trimmedName,
             description: description,
             channelType: channelType,
             position: position
         )
-        await loadStructure(for: selectedWaddleID)
+        await loadRooms()
         if let channelID = result?.channelID {
             await selectChannel(channelID)
         }
@@ -946,27 +934,15 @@ final class AppModel: ObservableObject {
             updateConnectionBanner(for: .ready)
             await rustClient?.sendPresence()
             dlog(" presence sent")
-            await loadSpace()
-            dlog(" space loaded: waddles=\(self.publicWaddles.count)")
-            // Fire structure/channel loading in a separate Task so this event-loop iteration
+            // Fire room loading in a separate Task so this event-loop iteration
             // completes and can process incoming events (e.g. the MUC self-presence that
-            // resolves the join) while the structure load is in flight. Without this, the
+            // resolves the join) while the load is in flight. Without this, the
             // event loop deadlocks: joinSelectedChannel waits for a self-presence event that
             // can never be delivered because the event loop is blocked on joinSelectedChannel.
-            let waddleToLoad = selectedWaddleID ?? publicWaddles.first?.id
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if let waddleID = waddleToLoad {
-                    if waddleID == self.selectedWaddleID {
-                        dlog(" loading structure for \(waddleID)")
-                        await self.loadStructure(for: waddleID)
-                    } else {
-                        dlog(" selecting first waddle \(waddleID)")
-                        await self.selectWaddle(waddleID)
-                    }
-                } else {
-                    self.updateChatSurfaceState()
-                }
+                dlog(" loading rooms")
+                await self.loadRooms()
             }
         case .message(let message):
             handleIncomingMessage(message)
@@ -998,48 +974,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Discovers rooms via XMPP (no explicit waddle ID in the protocol) and
-    /// derives space context implicitly from the returned room JIDs.
-    private func loadSpace() async {
-        guard let rustClient else { return }
-
-        isLoadingWaddles = true
-        defer { isLoadingWaddles = false }
-
-        let rooms = await rustClient.listRooms()
-
-        // Derive the space context from room JIDs. The space identifier is
-        // embedded in each room JID as `{spaceId}_{channelId}@muc.domain` —
-        // we parse it locally and never expose it as a standalone API value.
-        if let firstJid = rooms.first?.jid,
-           let (spaceID, _) = parseManagedRoomBareJID(firstJid) {
-            let spaceName = serverURL.host ?? "Waddle"
-            let synthetic = WaddleSummary(
-                id: spaceID,
-                name: spaceName,
-                description: nil,
-                ownerUserID: nil,
-                iconURL: nil,
-                isPublic: false,
-                role: nil,
-                createdAt: nil,
-                updatedAt: nil
-            )
-            publicWaddles = [synthetic]
-            joinedWaddleIDs.insert(spaceID)
-            if selectedWaddleID == nil {
-                selectedWaddleID = spaceID
-            }
-        } else {
-            publicWaddles = []
-        }
-    }
-
-    private func loadStructure(for waddleID: String) async {
-        dlog(" loadStructure for \(waddleID)")
-        guard let session else { dlog(" loadStructure: no session"); return }
-        guard let rustClient else {
-            dlog(" loadStructure: no rustClient")
+    /// Loads the room list and member list for the implicit single space.
+    /// No waddle ID is fetched, stored, or passed — the space is entirely implicit.
+    private func loadRooms() async {
+        guard let session, let rustClient else {
             updateChatSurfaceState()
             return
         }
@@ -1048,17 +986,14 @@ final class AppModel: ObservableObject {
         updateChatSurfaceState()
 
         do {
-            // Fetch rooms via XMPP discovery (no waddle ID in the protocol).
             async let xmppRooms = rustClient.listRooms()
-            async let loadedMembers = client.listMembers(sessionID: session.sessionID, waddleID: waddleID)
+            async let loadedMembers = client.listMembers(sessionID: session.sessionID)
 
             let (rooms, loadedMembersValue) = try await (xmppRooms, loadedMembers)
-            dlog(" listed \(rooms.count) rooms, \(loadedMembersValue.count) members")
-            guard selectedWaddleID == waddleID else { return }
+            dlog(" loadRooms: \(rooms.count) rooms, \(loadedMembersValue.count) members")
 
             channels = rooms
                 .map { room in
-                    // Parse channel ID from the full room JID for internal use.
                     let channelID = parseManagedRoomBareJID(room.jid)?.channelID ?? room.jid
                     return ChannelSummary(
                         id: channelID,
@@ -1073,7 +1008,7 @@ final class AppModel: ObservableObject {
                     ($0.position ?? 0, $0.name.lowercased()) < ($1.position ?? 0, $1.name.lowercased())
                 }
             members = loadedMembersValue.sorted { $0.username.lowercased() < $1.username.lowercased() }
-            joinedWaddleIDs.insert(waddleID)
+            spaceName = serverURL.host ?? "Waddle"
 
             if let selectedChannelID,
                channels.contains(where: { $0.id == selectedChannelID }) {
@@ -1087,11 +1022,10 @@ final class AppModel: ObservableObject {
             syncChatMessages()
             updateChatSurfaceState()
 
-            if let selectedChannelID = self.selectedChannelID {
-                await selectChannel(selectedChannelID)
+            if let channelID = self.selectedChannelID {
+                await selectChannel(channelID)
             }
         } catch {
-            guard selectedWaddleID == waddleID else { return }
             errorMessage = error.localizedDescription
             chatStore.setSurfaceState(.error(title: "Unable to load channels", message: error.localizedDescription))
         }
@@ -1891,7 +1825,7 @@ final class AppModel: ObservableObject {
             return
         }
 
-        guard selectedWaddleID != nil || !channels.isEmpty else {
+        guard !channels.isEmpty || isLoadingStructure else {
             chatStore.setSurfaceState(.empty(title: "Connecting to space", message: "Loading channels…"))
             return
         }
@@ -1981,12 +1915,10 @@ final class AppModel: ObservableObject {
         rustClient = nil
 
         session = nil
-        publicWaddles = []
-        selectedWaddleID = nil
+        spaceName = nil
         channels = []
         selectedChannelID = nil
         members = []
-        joinedWaddleIDs.removeAll()
         joinedRoomJIDs.removeAll()
         messagesByRoomJID.removeAll()
         presenceByRoomJID.removeAll()
@@ -1996,7 +1928,7 @@ final class AppModel: ObservableObject {
         chatStore.replaceMembers([])
         chatStore.replaceMessages([])
         chatStore.setBannerState(.hidden)
-        chatStore.setSurfaceState(.empty(title: "Select a waddle", message: "Sign in to browse and join live rooms."))
+        chatStore.setSurfaceState(.empty(title: "Sign in", message: "Sign in to browse and join live rooms."))
     }
 
     func handleAppBecameActive() {

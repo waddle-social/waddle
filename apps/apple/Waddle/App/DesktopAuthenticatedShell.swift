@@ -51,15 +51,6 @@ private struct DesktopWorkspaceRail: View {
     let onShowSettings: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
-    private var orderedWaddles: [WaddleSummary] {
-        model.publicWaddles.sorted { lhs, rhs in
-            let lhsSelected = lhs.id == model.selectedWaddleID
-            let rhsSelected = rhs.id == model.selectedWaddleID
-            if lhsSelected != rhsSelected { return lhsSelected }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 14) {
@@ -83,22 +74,20 @@ private struct DesktopWorkspaceRail: View {
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 12) {
-                    if orderedWaddles.isEmpty {
-                        Text("No\nwaddles")
+                    if let space = model.selectedWaddle {
+                        DesktopWorkspaceAvatarButton(
+                            waddle: space,
+                            isSelected: true,
+                            isJoined: true
+                        ) {
+                            Task { await model.reloadRooms() }
+                        }
+                    } else {
+                        Text("No\nspace")
                             .font(.system(size: 10, weight: .semibold))
                             .multilineTextAlignment(.center)
                             .foregroundStyle(WaddleTheme.textMuted)
                             .padding(.top, 10)
-                    } else {
-                        ForEach(orderedWaddles.prefix(12)) { waddle in
-                            DesktopWorkspaceAvatarButton(
-                                waddle: waddle,
-                                isSelected: model.selectedWaddleID == waddle.id,
-                                isJoined: true
-                            ) {
-                                Task { await model.selectWaddle(waddle.id) }
-                            }
-                        }
                     }
                 }
                 .padding(.vertical, 4)

@@ -251,14 +251,14 @@ private struct WaddleListView: View {
     let onShowSettings: () -> Void
 
     var body: some View {
-        List(selection: $model.selectedWaddleID) {
+        List {
             Section {
-                ForEach(model.publicWaddles) { waddle in
+                if let space = model.selectedWaddle {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(waddle.name)
+                            Text(space.name)
                                 .font(.body.weight(.semibold))
-                            if let description = waddle.description, !description.isEmpty {
+                            if let description = space.description, !description.isEmpty {
                                 Text(description)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -266,26 +266,21 @@ private struct WaddleListView: View {
                             }
                         }
                         Spacer()
-                        Text("Joined")
+                        Text("Active")
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
                             .background(.green.opacity(0.16), in: Capsule())
                     }
-                    .tag(waddle.id)
                 }
             } header: {
-                Text("Waddles")
+                Text("Space")
             }
         }
-        .navigationTitle("Waddles")
-        .onChange(of: model.selectedWaddleID) { _, nextID in
-            guard nextID != nil else { return }
-            Task { await model.selectWaddle(nextID) }
-        }
+        .navigationTitle("Waddle")
         .toolbar {
             ToolbarItemGroup {
-                if model.isLoadingWaddles {
+                if model.isLoadingStructure {
                     ProgressView()
                 }
                 Button {

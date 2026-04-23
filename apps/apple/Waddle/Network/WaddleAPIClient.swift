@@ -123,85 +123,84 @@ final class WaddleAPIClient {
         _ = try await send(path: "/api/auth/logout", method: "POST", body: body)
     }
 
-    func createWaddle(sessionID: String, name: String, description: String?, isPublic: Bool) async throws -> WaddleSummary {
+    func createSpace(sessionID: String, name: String, description: String?) async throws {
         let body = try encoder.encode(
             CreateWaddleRequest(
                 name: name,
                 description: description?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                isPublic: isPublic
+                isPublic: false
             )
         )
-        let (data, _) = try await send(
-            path: "/v1/waddles",
+        let _ = try await send(
+            path: "/v1/space",
             method: "POST",
             queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
             body: body
         )
-        return try decoder.decode(WaddleSummary.self, from: data)
     }
 
-    func updateWaddle(sessionID: String, waddleID: String, name: String, description: String?) async throws {
+    func updateSpace(sessionID: String, name: String, description: String?) async throws {
         let payload: [String: String?] = ["name": name, "description": description]
         let body = try JSONEncoder().encode(payload)
         let _ = try await send(
-            path: "/v1/waddles/\(waddleID)",
-            method: "POST",
-            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
-            body: body
-        )
-    }
-
-    func deleteWaddle(sessionID: String, waddleID: String) async throws {
-        let _ = try await send(
-            path: "/v1/waddles/\(waddleID)",
-            method: "DELETE",
-            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
-            treatStatusesAsNil: [204]
-        )
-    }
-
-    func updateChannel(sessionID: String, waddleID: String, channelID: String, name: String, description: String?, position: Int) async throws {
-        let payload: [String: Any] = ["name": name, "description": description as Any, "position": position]
-        let body = try JSONSerialization.data(withJSONObject: payload)
-        let _ = try await send(
-            path: "/v1/waddles/\(waddleID)/channels/\(channelID)",
+            path: "/v1/space",
             method: "PATCH",
             queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
             body: body
         )
     }
 
-    func listMembers(sessionID: String, waddleID: String) async throws -> [MemberSummary] {
-        let (data, _) = try await send(
-            path: "/v1/waddles/\(waddleID)/members",
-            queryItems: [URLQueryItem(name: "session_id", value: sessionID)]
-        )
-        return try decoder.decode(MembersResponse.self, from: data).members
-    }
-
-    func addMember(sessionID: String, waddleID: String, userID: String, role: String = "member") async throws {
-        let body = try JSONEncoder().encode(["user_id": userID, "role": role])
+    func deleteSpace(sessionID: String) async throws {
         let _ = try await send(
-            path: "/v1/waddles/\(waddleID)/members",
-            method: "POST",
-            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
-            body: body
-        )
-    }
-
-    func removeMember(sessionID: String, waddleID: String, userID: String) async throws {
-        let _ = try await send(
-            path: "/v1/waddles/\(waddleID)/members/\(userID)",
+            path: "/v1/space",
             method: "DELETE",
             queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
             treatStatusesAsNil: [204]
         )
     }
 
-    func updateMemberRole(sessionID: String, waddleID: String, userID: String, role: String) async throws {
+    func updateChannel(sessionID: String, channelID: String, name: String, description: String?, position: Int) async throws {
+        let payload: [String: Any] = ["name": name, "description": description as Any, "position": position]
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let _ = try await send(
+            path: "/v1/channels/\(channelID)",
+            method: "PATCH",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            body: body
+        )
+    }
+
+    func listMembers(sessionID: String) async throws -> [MemberSummary] {
+        let (data, _) = try await send(
+            path: "/v1/space/members",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)]
+        )
+        return try decoder.decode(MembersResponse.self, from: data).members
+    }
+
+    func addMember(sessionID: String, userID: String, role: String = "member") async throws {
+        let body = try JSONEncoder().encode(["user_id": userID, "role": role])
+        let _ = try await send(
+            path: "/v1/space/members",
+            method: "POST",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            body: body
+        )
+    }
+
+    func removeMember(sessionID: String, userID: String) async throws {
+        let _ = try await send(
+            path: "/v1/space/members/\(userID)",
+            method: "DELETE",
+            queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
+            treatStatusesAsNil: [204]
+        )
+    }
+
+    func updateMemberRole(sessionID: String, userID: String, role: String) async throws {
         let body = try JSONEncoder().encode(["role": role])
         let _ = try await send(
-            path: "/v1/waddles/\(waddleID)/members/\(userID)",
+            path: "/v1/space/members/\(userID)",
             method: "PATCH",
             queryItems: [URLQueryItem(name: "session_id", value: sessionID)],
             body: body

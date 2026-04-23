@@ -42,7 +42,7 @@ struct MobileSlackShellView: View {
         )
     }
 
-    private var joinedWaddles: [WaddleSummary] { model.publicWaddles }
+    private var joinedWaddles: [WaddleSummary] { [model.selectedWaddle].compactMap { $0 } }
 
     private var serverLabel: String {
         if let url = AppConfig.normalizedServerURL(from: model.serverURLText) {
@@ -124,7 +124,7 @@ struct MobileSlackShellView: View {
 
     private func openWaddle(_ waddle: WaddleSummary) {
         Task {
-            await model.selectWaddle(waddle.id)
+            await model.reloadRooms()
             await MainActor.run {
                 updateSelectedTab(.chat)
             }
@@ -333,7 +333,7 @@ private struct MobileWorkspaceBrowserTab: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if model.isLoadingWaddles {
+                if model.isLoadingStructure {
                     ProgressView()
                 }
 
@@ -370,7 +370,7 @@ private struct MobileWorkspaceBrowserTab: View {
                         MobileWorkspaceCard(
                             waddle: waddle,
                             isJoined: true,
-                            isCurrent: model.selectedWaddleID == waddle.id,
+                            isCurrent: true,
                             primaryActionTitle: "Open chat",
                             onPrimaryAction: {
                                 onOpenWaddle(waddle)
@@ -440,7 +440,7 @@ private struct MobileYouTab: View {
                     }
 
                     HStack(spacing: 10) {
-                        Label("\(model.publicWaddles.count)", systemImage: "person.3.fill")
+                        Label("\(model.members.count)", systemImage: "person.3.fill")
                             .mobileStatPill()
                         Label("\(model.channels.count)", systemImage: "number")
                             .mobileStatPill()
