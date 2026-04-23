@@ -194,6 +194,34 @@ describe("dispatchChat", () => {
     expect(h.messages[0].body).toBe("updated text");
   });
 
+  test("dispatches body-less file-sharing messages", () => {
+    const h = makeHandlers();
+    dispatchChat(
+      makeMsg({
+        id: "dm-file-1",
+        fileSharing: {
+          name: "photo.jpg",
+          mediaType: "image/jpeg",
+          size: "42",
+          url: "https://files.example.com/photo.jpg",
+        },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("");
+    expect(h.messages[0].sharedFiles).toEqual([
+      {
+        url: "https://files.example.com/photo.jpg",
+        name: "photo.jpg",
+        mediaType: "image/jpeg",
+        size: 42,
+        disposition: "inline",
+      },
+    ]);
+  });
+
   test("ignores messages with no body/subject/replace", () => {
     const h = makeHandlers();
     dispatchChat(makeMsg({}), h);

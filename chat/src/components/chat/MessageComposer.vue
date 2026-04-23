@@ -345,7 +345,7 @@ function onGifSelected(url: string) {
   emit("selectGif", url);
 }
 
-function onPaste(e: ClipboardEvent) {
+function onEditorPaste(e: ClipboardEvent) {
   const files = extractImagesFromEvent(e);
   if (files.length > 0) {
     e.preventDefault();
@@ -366,7 +366,7 @@ watch(
 </script>
 
 <template>
-  <div class="relative px-4 py-3 flex-shrink-0" :class="isTopPinned ? 'border-b border-border' : ''" @keydown.capture="onKeydown" @paste="onPaste">
+  <div class="relative px-4 py-3 flex-shrink-0" :class="isTopPinned ? 'border-b border-border' : ''" @keydown.capture="onKeydown">
     <!-- Reply context chip -->
     <div
       v-if="replyingTo"
@@ -516,6 +516,7 @@ watch(
         @update="onEditorUpdate"
         @selection-update="checkAutocompleteFromEditor"
         @cancel="onEditorCancel"
+        @paste="onEditorPaste"
       />
       <button
         type="button"

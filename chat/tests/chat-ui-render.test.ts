@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderStyledBody, type MarkupSpan, type MessageReference } from "../src/lib/chat-ui";
+import { isImageFile, renderStyledBody, type MarkupSpan, type MessageReference } from "../src/lib/chat-ui";
 
 describe("renderStyledBody", () => {
   test("renders plain text literally instead of parsing Markdown", () => {
@@ -65,5 +65,12 @@ describe("renderStyledBody", () => {
 
     expect(html).toBe("<p>&lt;script&gt;x&lt;/script&gt;</p>");
     expect(html).not.toContain("javascript:");
+  });
+
+  test("identifies image attachments from media type or URL", () => {
+    expect(isImageFile("image/jpeg")).toBe(true);
+    expect(isImageFile(undefined, "https://cdn.example.com/cat.PNG?token=1")).toBe(true);
+    expect(isImageFile(undefined, "https://media2.giphy.com/media/abc123/200w")).toBe(true);
+    expect(isImageFile("application/octet-stream", "https://cdn.example.com/archive.bin")).toBe(false);
   });
 });

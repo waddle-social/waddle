@@ -78,6 +78,34 @@ describe("groupchat reply + thread parsing", () => {
     expect(h.messages[0].body).toBe("https://example.com/file.jpg");
   });
 
+  test("keeps body-less file-sharing messages in the timeline", () => {
+    const h = makeHandlers();
+    dispatchGroupchat(
+      makeMsg({
+        id: "msg-file-only",
+        fileSharing: {
+          name: "photo.jpg",
+          mediaType: "image/jpeg",
+          size: "42",
+          url: "https://files.example.com/photo.jpg",
+        },
+      }),
+      h,
+    );
+
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].body).toBe("");
+    expect(h.messages[0].sharedFiles).toEqual([
+      {
+        url: "https://files.example.com/photo.jpg",
+        name: "photo.jpg",
+        mediaType: "image/jpeg",
+        size: 42,
+        disposition: "inline",
+      },
+    ]);
+  });
+
   test("extracts thread id and parent thread id", () => {
     const h = makeHandlers();
     dispatchGroupchat(

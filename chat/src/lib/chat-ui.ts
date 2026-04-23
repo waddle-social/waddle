@@ -122,11 +122,19 @@ export function renderStyledBody(
 
 // ── Image / GIF URL detection ────────────────────────────────────────
 
-const IMAGE_URL_RE = /^https?:\/\/\S+\.(?:gif|png|jpe?g|webp)(?:\?\S*)?$/i;
+const IMAGE_URL_RE = /^https?:\/\/\S+\.(?:gif|png|jpe?g|webp|avif|bmp|svg)(?:[?#]\S*)?$/i;
 const GIPHY_URL_RE = /^https?:\/\/(?:media\d*\.giphy\.com|i\.giphy\.com)\//i;
+const IMAGE_MEDIA_TYPE_RE = /^image\//i;
 
 /** Check if a message body is a single image/GIF URL that should render inline. */
 export function isImageUrl(body: string): boolean {
   const trimmed = body.trim();
   return IMAGE_URL_RE.test(trimmed) || GIPHY_URL_RE.test(trimmed);
+}
+
+/** Check if an attachment should render as an inline image/GIF preview. */
+export function isImageFile(mediaType?: string, url?: string): boolean {
+  if (mediaType && IMAGE_MEDIA_TYPE_RE.test(mediaType)) return true;
+  if (!url) return false;
+  return isImageUrl(url);
 }

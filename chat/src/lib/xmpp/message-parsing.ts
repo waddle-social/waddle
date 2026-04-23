@@ -35,6 +35,23 @@ export function ext(msg: unknown): Record<string, unknown> {
   return msg as Record<string, unknown>;
 }
 
+function hasBodyOrSubject(msg: ReceivedMessage): boolean {
+  return !!msg.body || !!msg.subject;
+}
+
+/**
+ * True when a stanza should be treated as a user-visible message payload even
+ * if `<body/>` is omitted (for example, pure file-sharing messages).
+ */
+export function hasRenderableMessagePayload(msg: ReceivedMessage): boolean {
+  if (hasBodyOrSubject(msg)) return true;
+  const stanza = ext(msg);
+  const fileSharing = stanza.fileSharing;
+  if (Array.isArray(fileSharing)) return fileSharing.length > 0;
+  if (fileSharing) return true;
+  return !!stanza.sticker;
+}
+
 interface OriginIdPayload {
   id?: string;
 }
@@ -294,7 +311,7 @@ export function dispatchGroupchat(msg: ReceivedMessage, h: GroupchatHandlers): v
     return;
   }
 
-  if (!msg.body && !msg.subject) return;
+  if (!hasRenderableMessagePayload(msg)) return;
 
   const liveMsg: LiveRoomMessage = {
     id: messageIds.id, roomJid, nick,

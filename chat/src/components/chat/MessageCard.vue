@@ -7,7 +7,7 @@ import ChatEditor from "@/components/chat/ChatEditor.vue";
 import EditorBubbleToolbar from "@/components/chat/EditorBubbleToolbar.vue";
 import EmojiPicker from "@/components/chat/EmojiPicker.vue";
 import ImageLightbox from "@/components/ui/ImageLightbox.vue";
-import { renderStyledBody, isImageUrl, type TimelineMessage, type MarkupSpan, type MessageReference, type TimelineSharedFile } from "@/lib/chat-ui";
+import { renderStyledBody, isImageUrl, isImageFile, type TimelineMessage, type MarkupSpan, type MessageReference, type TimelineSharedFile } from "@/lib/chat-ui";
 import { richMessageToTiptap, tiptapToRichMessage } from "@/lib/rich-message";
 import { applyShikiToCodeBlocks } from "@/lib/shiki";
 import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachmentMetadata } from "@/lib/xmpp/encrypted-attachments";
@@ -64,10 +64,10 @@ const sharedFiles = computed(() => props.message.sharedFiles ?? []);
 const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
 
 const imageAttachments = computed(() =>
-  sharedFiles.value.filter((f) => f.disposition === "inline" && f.mediaType?.startsWith("image/")),
+  sharedFiles.value.filter((f) => isImageFile(f.mediaType, f.url)),
 );
 const nonImageAttachments = computed(() =>
-  sharedFiles.value.filter((f) => !(f.disposition === "inline" && f.mediaType?.startsWith("image/"))),
+  sharedFiles.value.filter((f) => !isImageFile(f.mediaType, f.url)),
 );
 /** Display the user's text body when present; hide body when it's just the fallback URL for a single image. */
 const displayBody = computed(() => {

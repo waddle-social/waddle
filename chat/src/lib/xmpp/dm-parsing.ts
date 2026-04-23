@@ -7,7 +7,7 @@ import type {
   LiveDmMessage,
 } from "./types";
 import { barePeerJid } from "./jid";
-import { ext, extractMessageExtensions, resolveMessageIds } from "./message-parsing";
+import { ext, extractMessageExtensions, hasRenderableMessagePayload, resolveMessageIds } from "./message-parsing";
 
 function localpart(jid: string): string {
   return barePeerJid(jid).split("@")[0] ?? "unknown";
@@ -70,7 +70,7 @@ export function dispatchChat(msg: ReceivedMessage, h: DmHandlers): void {
     return;
   }
 
-  if (!msg.body && !msg.subject && !msg.replace) return;
+  if (!msg.replace && !hasRenderableMessagePayload(msg)) return;
 
   const liveMsg: LiveDmMessage = {
     id: messageIds.id,

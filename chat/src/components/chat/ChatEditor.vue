@@ -24,6 +24,7 @@ const emit = defineEmits<{
   cancel: [];
   update: [doc: JSONContent];
   selectionUpdate: [];
+  paste: [event: ClipboardEvent];
 }>();
 
 const editor = useEditor({
@@ -46,6 +47,10 @@ const editor = useEditor({
         emit("cancel");
         return true;
       }
+      return false;
+    },
+    handlePaste: (_view, event) => {
+      emit("paste", event);
       return false;
     },
     attributes: {
