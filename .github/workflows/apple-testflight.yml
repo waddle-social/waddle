@@ -42,7 +42,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: WaddleXmppClientFFI-swift-bindings
-          path: apps/apple/Waddle/RustClient/Generated/
+          path: |
+            apps/apple/Waddle/RustClient/Generated/
+            apps/apple/Waddle/RustClient/module.modulemap
           retention-days: 30
 
   build-ios:
