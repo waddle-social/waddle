@@ -75,7 +75,7 @@ const emit = defineEmits<{
       <div class="flex gap-0.5 flex-shrink-0">
         <button
           v-if="canManageCommunity"
-          class="h-7 w-7 flex items-center justify-center rounded-lg hover:bg-sidebar-accent transition-all duration-200"
+          class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-sidebar-accent transition-all duration-200"
           title="Settings"
           @click="emit('openSettings')"
         >
@@ -83,7 +83,7 @@ const emit = defineEmits<{
         </button>
         <button
           v-if="canManageChannels"
-          class="h-7 w-7 flex items-center justify-center rounded-lg hover:bg-sidebar-accent transition-all duration-200"
+          class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-sidebar-accent transition-all duration-200"
           title="Add channel"
           @click="emit('createChannel')"
         >
@@ -115,7 +115,7 @@ const emit = defineEmits<{
       <div v-else class="space-y-0.5">
         <template v-for="{ channel, unread } in channelsWithUnread" :key="channel.id">
           <button
-            class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-200 text-left group"
+            class="w-full h-9 flex items-center gap-2.5 px-2.5 py-0 rounded-lg transition-all duration-200 text-left group"
             :class="activeChannelId === channel.id
               ? 'bg-sidebar-accent text-sidebar-foreground'
               : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"
@@ -183,9 +183,9 @@ const emit = defineEmits<{
     </div>
 
     <!-- Members footer -->
-    <div v-if="waddle" class="flex-shrink-0 px-2 py-2 border-t border-border">
+    <div v-if="waddle" class="flex-shrink-0 px-2 py-3 border-t border-border">
       <button
-        class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-all duration-200 text-left group"
+        class="w-full h-12 flex items-center gap-2.5 px-2.5 py-0 rounded-lg bg-sidebar-accent/40 text-sidebar-muted hover:bg-sidebar-accent/70 hover:text-sidebar-foreground transition-all duration-200 text-left group"
         @click="emit('openMembers')"
       >
         <Users class="w-3.5 h-3.5 flex-shrink-0 opacity-40 group-hover:opacity-70 transition-opacity" />

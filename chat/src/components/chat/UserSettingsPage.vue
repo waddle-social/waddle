@@ -44,10 +44,10 @@ interface StatusFeedback {
 }
 
 const fieldLabelClass = "text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75";
-const fieldClass = "w-full rounded-xl border border-border/70 bg-muted/65 px-3 py-2 text-[13px] transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50";
-const textareaClass = `${fieldClass} min-h-20 resize-y`;
-const primaryButtonClass = "rounded-xl bg-primary px-3 py-2 text-[13px] font-medium text-primary-foreground transition-all duration-200 hover:shadow-[0_0_12px_var(--glow)] disabled:opacity-40";
-const secondaryButtonClass = "rounded-xl border border-border px-3 py-2 text-[13px] font-medium transition-colors duration-200 hover:bg-muted disabled:opacity-40";
+const fieldClass = "h-9 w-full rounded-lg border border-border/70 bg-muted/65 px-3 text-[13px] transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50";
+const textareaClass = "min-h-20 w-full rounded-lg border border-border/70 bg-muted/65 px-3 py-2 text-[13px] transition-all duration-200 resize-y focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50";
+const primaryButtonClass = "h-9 rounded-lg bg-primary px-3 text-[13px] font-medium text-primary-foreground transition-all duration-200 hover:shadow-[0_0_12px_var(--glow)] disabled:opacity-40";
+const secondaryButtonClass = "h-9 rounded-lg border border-border px-3 text-[13px] font-medium transition-colors duration-200 hover:bg-muted disabled:opacity-40";
 
 const moodOptions = MOOD_KINDS.map((kind) => ({
   value: kind,
@@ -339,9 +339,9 @@ async function clearTuneStatus() {
 <template>
   <div class="flex-1 min-w-0 min-h-0 overflow-auto bg-background">
     <div class="sticky top-0 z-10 border-b border-border glass-surface">
-      <div class="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3 sm:px-6">
+      <div class="mx-auto flex h-14 max-w-3xl items-center gap-3 px-4 sm:px-6">
         <button
-          class="flex h-9 items-center gap-1.5 rounded-xl border border-border/70 px-3 text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-foreground"
+          class="flex h-9 items-center gap-1.5 rounded-lg border border-border/70 px-3 text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-foreground"
           @click="emit('close')"
         >
           <ChevronLeft class="h-4 w-4" />
@@ -354,8 +354,8 @@ async function clearTuneStatus() {
       </div>
     </div>
 
-    <div class="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6 sm:px-6">
-      <section class="glass-panel rounded-2xl border border-border p-4 sm:p-5">
+    <div class="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-4 sm:px-6">
+      <section class="glass-panel rounded-xl border border-border p-4">
         <div class="flex items-center gap-3">
           <AppAvatar :name="session.username" :src="session.avatar_url" size="md" />
           <div class="min-w-0">
@@ -369,9 +369,9 @@ async function clearTuneStatus() {
         </div>
       </section>
 
-      <section class="glass-panel rounded-2xl border border-border p-4 sm:p-5">
+      <section class="glass-panel rounded-xl border border-border p-4">
         <div class="mb-4 flex items-start gap-3">
-          <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <MessageCircle class="h-4 w-4" />
           </div>
           <div class="max-w-2xl">
@@ -384,14 +384,14 @@ async function clearTuneStatus() {
 
         <p
           v-if="!xmppClient"
-          class="mb-5 rounded-xl border border-border/70 bg-muted/50 px-3 py-2 text-[12px] text-muted-foreground"
+          class="mb-4 rounded-lg border border-border/70 bg-muted/50 px-3 py-2 text-[12px] text-muted-foreground"
         >
           Reconnect before publishing or clearing profile signals.
         </p>
 
         <div class="divide-y divide-border/70">
           <form
-            class="grid gap-4 pb-5 lg:grid-cols-[minmax(0,13rem)_1fr]"
+            class="grid gap-4 pb-4 lg:grid-cols-[minmax(0,13rem)_1fr]"
             @submit.prevent="publishMoodStatus"
           >
             <div class="space-y-1">
@@ -454,7 +454,7 @@ async function clearTuneStatus() {
           </form>
 
           <form
-            class="grid gap-4 py-5 lg:grid-cols-[minmax(0,13rem)_1fr]"
+            class="grid gap-4 py-4 lg:grid-cols-[minmax(0,13rem)_1fr]"
             @submit.prevent="publishActivityStatus"
           >
             <div class="space-y-1">
@@ -537,7 +537,7 @@ async function clearTuneStatus() {
           </form>
 
           <form
-            class="grid gap-4 pt-5 lg:grid-cols-[minmax(0,13rem)_1fr]"
+            class="grid gap-4 pt-4 lg:grid-cols-[minmax(0,13rem)_1fr]"
             @submit.prevent="publishTuneStatus"
           >
             <div class="space-y-1">
@@ -671,9 +671,9 @@ async function clearTuneStatus() {
         </div>
       </section>
 
-      <section class="glass-panel rounded-2xl border border-border p-4 sm:p-5">
+      <section class="glass-panel rounded-xl border border-border p-4">
         <div class="mb-4 flex items-start gap-3">
-          <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <ScanText class="h-4 w-4" />
           </div>
           <div>
@@ -686,7 +686,7 @@ async function clearTuneStatus() {
         <ScrollDirectionSwitcher />
       </section>
 
-      <section class="glass-panel rounded-2xl border border-border p-4 sm:p-5">
+      <section class="glass-panel rounded-xl border border-border p-4">
         <h2 class="text-[14px] font-semibold">About this build</h2>
         <p class="mt-1 text-[12px] leading-relaxed text-muted-foreground">
           Helpful version details when you need to compare client and server behavior.

@@ -153,11 +153,11 @@ onUnmounted(() => {
     </button>
     <div
       v-if="detailsOpen"
-      class="animate-fade-in absolute bottom-0 left-full z-20 ml-3 w-72 rounded-lg border border-border bg-popover/95 p-2 text-popover-foreground shadow-xl backdrop-blur-xl"
+      class="animate-fade-in absolute bottom-0 left-full z-20 ml-3 w-72 rounded-xl border border-border bg-popover/95 p-2 text-popover-foreground shadow-xl backdrop-blur-xl"
       role="dialog"
       :aria-label="`${session.username} account menu`"
     >
-      <div class="flex items-center gap-3 rounded-lg bg-muted/30 px-2.5 py-2">
+      <div class="flex min-h-12 items-center gap-3 rounded-lg bg-muted/30 px-2.5 py-2">
         <AppAvatar :name="session.username" :src="session.avatar_url" size="sm" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-[13px] font-semibold">{{ session.username }}</div>
@@ -165,16 +165,16 @@ onUnmounted(() => {
         </div>
         <ThemeSwitcher />
       </div>
-      <div class="mt-2 flex flex-col gap-0.5 border-t border-border pt-2">
+      <div class="mt-2 flex flex-col gap-1 border-t border-border pt-2">
         <button
-          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
           @click="handleOpenSettings"
         >
           <Settings class="h-3.5 w-3.5 text-primary/70" />
           <span>Settings</span>
         </button>
         <button
-          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
           @click="handleLogout"
         >
           <LogOut class="h-3.5 w-3.5" />
@@ -194,7 +194,7 @@ onUnmounted(() => {
   <div v-else class="flex flex-shrink-0 flex-col gap-2.5 border-t border-border px-3 py-2.5">
     <div ref="expandedMenuRootEl" class="relative flex items-center gap-2">
       <button
-        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-1.5 py-1.5 text-left transition-all duration-200 hover:bg-sidebar-accent"
+        class="flex h-10 min-w-0 flex-1 items-center gap-2.5 rounded-lg px-1.5 text-left transition-all duration-200 hover:bg-sidebar-accent"
         :title="`${session.username} — Account menu`"
         aria-haspopup="menu"
         :aria-expanded="accountMenuOpen"
@@ -208,7 +208,7 @@ onUnmounted(() => {
         />
       </button>
       <button
-        class="relative flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
+        class="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-all duration-200"
         :class="notificationPermission === 'denied'
           ? 'cursor-not-allowed opacity-30'
           : 'text-sidebar-muted hover:bg-sidebar-accent hover:text-primary'"
@@ -233,13 +233,13 @@ onUnmounted(() => {
       <ThemeSwitcher />
       <div
         v-if="accountMenuOpen"
-        class="animate-fade-in absolute bottom-full left-0 z-20 mb-2 flex w-56 flex-col gap-0.5 rounded-lg border border-border bg-popover/95 p-1 text-popover-foreground shadow-xl backdrop-blur-xl"
+        class="animate-fade-in absolute bottom-full left-0 z-20 mb-2 flex w-56 flex-col gap-1 rounded-xl border border-border bg-popover/95 p-2 text-popover-foreground shadow-xl backdrop-blur-xl"
         role="menu"
         :aria-label="`${session.username} account menu`"
       >
         <button
           role="menuitem"
-          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-foreground transition-colors duration-200 hover:bg-muted"
           @click="handleOpenSettings"
         >
           <Settings class="h-3.5 w-3.5 text-primary/70" />
@@ -247,7 +247,7 @@ onUnmounted(() => {
         </button>
         <button
           role="menuitem"
-          class="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-muted hover:text-destructive"
           @click="handleLogout"
         >
           <LogOut class="h-3.5 w-3.5" />

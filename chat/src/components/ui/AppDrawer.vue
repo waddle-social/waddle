@@ -22,10 +22,10 @@ function close() {
           ]"
           @click.stop
         >
-          <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border glass-panel">
+          <div class="h-14 flex-shrink-0 flex items-center justify-between px-4 py-0 border-b border-border glass-panel">
             <slot name="title" />
             <button
-              class="p-1.5 rounded-lg hover:bg-muted transition-all duration-200"
+              class="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-all duration-200"
               @click="close"
             >
               <X class="w-4 h-4" />

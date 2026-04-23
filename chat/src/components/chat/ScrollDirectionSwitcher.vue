@@ -24,7 +24,7 @@ const options: ReadonlyArray<{
     <div
       role="radiogroup"
       aria-label="Scroll direction"
-      class="grid grid-cols-2 gap-1 rounded-xl border border-border bg-muted/30 p-1"
+      class="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1"
     >
       <button
         v-for="option in options"
@@ -32,7 +32,7 @@ const options: ReadonlyArray<{
         type="button"
         role="radio"
         :aria-checked="mode === option.value"
-        class="rounded-lg px-3 py-2 text-left transition-colors duration-150"
+        class="min-h-16 rounded-md px-3 py-2 text-left transition-colors duration-150"
         :class="mode === option.value
           ? 'bg-background text-foreground shadow-sm'
           : 'text-muted-foreground hover:text-foreground'"

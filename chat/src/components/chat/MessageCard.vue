@@ -409,6 +409,12 @@ function submitEditFromEditor(doc: JSONContent) {
   editInitialContent.value = undefined;
 }
 
+function submitEditFromLink() {
+  const doc = editEditorRef.value?.getJSON();
+  if (!doc) return;
+  submitEditFromEditor(doc);
+}
+
 function emitAvatarClick() {
   emit("avatarClick", props.message.author);
 }
@@ -575,7 +581,7 @@ watch(
   <div
     v-if="message.isRetracted"
     :data-message-id="message.id"
-    class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-3 py-2 opacity-30 animate-message-in"
+    class="grid min-h-12 grid-cols-[2rem_minmax(0,1fr)] items-start gap-x-3 px-4 py-1.5 opacity-35 animate-message-in"
   >
     <AppAvatar
       class="mt-0.5"
@@ -586,13 +592,13 @@ watch(
       size="md"
     />
     <div class="min-w-0">
-      <div class="flex items-baseline gap-2 mb-0.5">
-        <span class="font-medium text-[13px]">{{ message.author }}</span>
-        <span class="text-[11px] font-mono text-muted-foreground tabular-nums">
+      <div class="mb-0.5 flex min-h-4 items-center gap-2">
+        <span class="text-[13px] font-medium leading-4">{{ message.author }}</span>
+        <span class="font-mono text-[11px] leading-4 text-muted-foreground tabular-nums">
           {{ formatStamp(message.createdAt) }}
         </span>
       </div>
-      <p class="text-[13px] italic text-muted-foreground">This message was deleted.</p>
+      <p class="text-[13px] leading-[18px] italic text-muted-foreground">This message was deleted.</p>
     </div>
   </div>
 
@@ -602,14 +608,14 @@ watch(
     ref="bubbleEl"
     :data-message-id="message.id"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
-    class="group relative grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-3 py-1.5 rounded-xl transition-all duration-200 animate-message-in"
+    class="group relative grid min-h-12 grid-cols-[2rem_minmax(0,1fr)] items-start gap-x-3 rounded-lg px-4 py-1.5 ring-1 ring-transparent transition-colors duration-150 animate-message-in"
     :class="[
       isMentioned
-        ? 'bg-warning/5 border-l-2 border-warning/30'
+        ? 'ring-warning/25 bg-warning/5'
         : isForumTopic
-          ? 'border border-border/70 bg-card/55 shadow-sm hover:bg-card/75'
+          ? 'ring-border/70 bg-card/55 shadow-sm hover:bg-card/75'
           : message.threadId
-            ? 'border-l-2 border-primary/20 hover:bg-muted/40'
+            ? 'ring-primary/15 hover:bg-muted/40'
             : 'hover:bg-muted/40',
       message.deliveryStatus === 'sending' || message.deliveryStatus === 'queued' ? 'opacity-50' : '',
       longPress.isPressing.value ? 'no-callout' : '',
@@ -622,15 +628,15 @@ watch(
     @contextmenu="onBubbleContextMenu"
   >
     <button
-      class="mt-0.5 rounded-lg self-start"
+      class="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg self-start"
       type="button"
       @click.stop="emitAvatarClick"
     >
       <AppAvatar :name="message.author" :src="avatarUrl" :presence="presence" :last-seen="lastSeen" size="md" />
     </button>
     <div class="min-w-0">
-      <div class="flex items-baseline gap-2 mb-0.5 flex-wrap">
-        <span class="font-semibold text-[13px]">{{ message.author }}</span>
+      <div class="mb-0.5 flex min-h-4 items-center gap-x-2 gap-y-1 flex-wrap">
+        <span class="text-[13px] font-semibold leading-4">{{ message.author }}</span>
         <span
           v-for="hat in hats"
           :key="hat.uri"
@@ -638,20 +644,20 @@ watch(
           :class="HAT_COLORS[hat.uri] ?? 'bg-muted text-muted-foreground'"
           :title="hat.title"
         >{{ HAT_LABELS[hat.uri] ?? hat.title }}</span>
-        <span class="text-[11px] font-mono text-muted-foreground/60 tabular-nums">
+        <span class="font-mono text-[11px] leading-4 text-muted-foreground/60 tabular-nums">
           {{ formatStamp(message.createdAt) }}
         </span>
-        <span v-if="message.isEdited" class="text-[11px] text-muted-foreground/50">(edited)</span>
+        <span v-if="message.isEdited" class="text-[11px] leading-4 text-muted-foreground/50">(edited)</span>
         <span
           v-if="message.isSelf && deliveryStatusLabel"
-          class="text-[11px]"
+          class="text-[11px] leading-4"
           :class="deliveryStatusClass"
         >
           {{ deliveryStatusLabel }}
         </span>
         <span
           v-if="message.isSelf && message.readBy && message.readBy.length > 0"
-          class="text-[11px] text-muted-foreground/50"
+          class="text-[11px] leading-4 text-muted-foreground/50"
           :title="message.readBy.join(', ')"
         >
           Read by {{ message.readBy.length }}
@@ -660,7 +666,7 @@ watch(
 
     <div
       v-if="isForumTopic && forumThreadLabel"
-      class="mb-2 rounded-xl border border-primary/10 bg-primary/6 px-3 py-2"
+      class="mb-2 rounded-lg border border-primary/10 bg-primary/6 px-3 py-2"
     >
       <div class="text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/75">
         Topic
@@ -671,7 +677,7 @@ watch(
     </div>
     <div
       v-else-if="isForumReply && forumThreadLabel"
-      class="mb-1 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-[11px] text-muted-foreground"
+      class="mb-1 inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 text-[11px] text-muted-foreground"
     >
       <CornerDownRight class="w-3 h-3 flex-shrink-0 text-primary/70" />
       <span class="truncate">In {{ forumThreadLabel }}</span>
@@ -680,15 +686,15 @@ watch(
          preview is available we also expand it inline so users still see the
          full quoted text even when the parent has scrolled off-screen or
          hasn't loaded from history yet. -->
-    <div v-if="message.replyTo" class="mb-0.5">
+    <div v-if="message.replyTo" class="mb-1">
       <button
         type="button"
-        class="flex items-start gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors max-w-full text-left"
+        class="flex min-h-7 max-w-full items-center gap-1.5 rounded-lg bg-muted/35 px-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
         :aria-expanded="replyChipExpanded"
         :title="message.replyTo.preview ? 'Show full quoted message and jump to it' : 'Jump to replied message'"
         @click="onReplyChipClick"
       >
-        <CornerDownRight class="w-3 h-3 flex-shrink-0 mt-0.5" />
+        <CornerDownRight class="w-3 h-3 flex-shrink-0" />
         <span class="text-primary/80 font-medium">@{{ replyAuthorName }}</span>
         <span
           v-if="message.replyTo.preview"
@@ -699,16 +705,36 @@ watch(
     </div>
 
     <!-- Edit mode -->
-    <div v-if="isEditing" class="mt-1 flex min-w-0 items-end gap-1.5">
-      <ChatEditor
-        :ref="setEditEditorRef"
-        compact
-        :initial-content="editInitialContent"
-        placeholder="Edit message..."
-        @send="submitEditFromEditor"
-        @cancel="cancelEdit"
-        class="flex-1"
-      />
+    <div v-if="isEditing" class="mt-1 flex min-w-0 items-start gap-1.5">
+      <div class="min-w-0 flex-1">
+        <ChatEditor
+          :ref="setEditEditorRef"
+          compact
+          :initial-content="editInitialContent"
+          placeholder="Edit message..."
+          @send="submitEditFromEditor"
+          @cancel="cancelEdit"
+        />
+        <p class="mt-1.5 text-[11px] leading-4 text-muted-foreground/70">
+          escape to
+          <button
+            type="button"
+            class="font-medium text-primary/85 transition-colors hover:text-primary hover:underline"
+            @click="cancelEdit"
+          >
+            cancel
+          </button>
+          <span class="mx-1 text-muted-foreground/35">•</span>
+          <button
+            type="button"
+            class="font-medium text-primary/85 transition-colors hover:text-primary hover:underline"
+            @click="submitEditFromLink"
+          >
+            enter
+          </button>
+          to save
+        </p>
+      </div>
       <EditorBubbleToolbar v-if="editTiptapEditor" :editor="editTiptapEditor" />
     </div>
 
@@ -727,7 +753,7 @@ watch(
       <div
         v-if="displayBody"
         :ref="setStyledBodyRef"
-        class="text-[13px] leading-relaxed break-words styled-body"
+        class="text-[13px] leading-[18px] break-words styled-body"
         v-html="styledHtml"
       />
 
@@ -955,7 +981,7 @@ watch(
     <button
       v-if="showThreadChip"
       type="button"
-      class="inline-flex items-center gap-1.5 mt-1.5 px-2 py-1 text-[11px] font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+      class="inline-flex h-7 items-center gap-1.5 mt-1.5 px-2 text-[11px] font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
       :title="`Open thread (${threadReplyCount} ${threadReplyCount === 1 ? 'reply' : 'replies'})`"
       @click="openThreadFromChip"
     >
@@ -968,7 +994,7 @@ watch(
       <button
         v-for="(nicks, emoji) in message.reactions"
         :key="emoji"
-        class="inline-flex items-center gap-1 px-2 py-0.5 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
+        class="inline-flex h-7 items-center gap-1 px-2 text-[12px] rounded-lg bg-muted/60 hover:bg-muted transition-all duration-200"
         :title="nicks.join(', ')"
         @click="emit('react', message.id, emoji)"
       >
@@ -984,7 +1010,7 @@ watch(
     <div
       v-if="!isEditing && !desktopToolbarLockedByAnother"
       :class="[
-        'absolute -top-3 right-3 flex items-center gap-0.5 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
+        'absolute -top-4 right-3 flex items-center gap-1 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1.5 [@media(pointer:coarse)]:hidden',
         desktopToolbarVisibilityClass,
       ]"
     >
@@ -992,7 +1018,7 @@ watch(
         v-for="e in quickEmojis"
         :key="e"
         type="button"
-        class="h-6 w-6 flex items-center justify-center text-[14px] leading-none rounded-md hover:bg-muted hover:scale-110 transition-all duration-150"
+        class="h-8 w-8 flex items-center justify-center text-[16px] leading-none rounded-md hover:bg-muted hover:scale-105 transition-all duration-150"
         :title="`React with ${e}`"
         :aria-label="`React to message with ${e}`"
         @click="react(e)"
@@ -1001,7 +1027,7 @@ watch(
         <button
           ref="pickerButtonEl"
           type="button"
-          class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
           :class="pickerOpen ? 'bg-muted text-foreground' : ''"
           title="Add reaction"
           aria-label="Add reaction"
@@ -1009,7 +1035,7 @@ watch(
           aria-haspopup="dialog"
           @click="togglePicker"
         >
-          <SmilePlus class="w-3.5 h-3.5" aria-hidden="true" />
+          <SmilePlus class="w-4 h-4" aria-hidden="true" />
         </button>
         <EmojiPicker
           :open="pickerOpen"
@@ -1020,41 +1046,41 @@ watch(
       </div>
       <button
         type="button"
-        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         title="Reply"
         aria-label="Reply to message"
         @click="startReplyFromMenu"
       >
-        <Reply class="w-3.5 h-3.5" aria-hidden="true" />
+        <Reply class="w-4 h-4" aria-hidden="true" />
       </button>
       <button
         type="button"
-        class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+        class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
         :title="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
         :aria-label="threadReplyCount > 0 ? 'Open thread' : 'Reply in thread'"
         @click="startReplyInThreadFromMenu"
       >
-        <MessageSquare class="w-3.5 h-3.5" aria-hidden="true" />
+        <MessageSquare class="w-4 h-4" aria-hidden="true" />
       </button>
       <template v-if="message.isSelf">
-        <div class="w-px h-4 bg-border mx-0.5" />
+        <div class="w-px h-5 bg-border mx-0.5" />
         <button
           type="button"
-          class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
+          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
           title="Edit message"
           aria-label="Edit message"
           @click="startEditFromMenu"
         >
-          <Pencil class="w-3.5 h-3.5" aria-hidden="true" />
+          <Pencil class="w-4 h-4" aria-hidden="true" />
         </button>
         <button
           type="button"
-          class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
+          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
           title="Delete message"
           aria-label="Delete message"
           @click="retractFromMenu"
         >
-          <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
+          <Trash2 class="w-4 h-4" aria-hidden="true" />
         </button>
       </template>
     </div>
@@ -1064,14 +1090,14 @@ watch(
     <button
       v-if="!isEditing"
       type="button"
-      class="absolute top-1 right-1 z-10 hidden h-6 w-6 [@media(pointer:coarse)]:flex [@media(pointer:coarse)]:h-10 [@media(pointer:coarse)]:w-10 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted opacity-70 transition-all duration-150"
+      class="absolute top-1 right-1 z-10 hidden h-8 w-8 [@media(pointer:coarse)]:flex [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted opacity-70 transition-all duration-150"
       title="Message actions"
       aria-label="Message actions"
       :aria-expanded="sheetOpen"
       aria-haspopup="dialog"
       @click="openSheet"
     >
-      <MoreHorizontal class="w-3.5 h-3.5 [@media(pointer:coarse)]:w-5 [@media(pointer:coarse)]:h-5" aria-hidden="true" />
+      <MoreHorizontal class="w-4 h-4 [@media(pointer:coarse)]:w-5 [@media(pointer:coarse)]:h-5" aria-hidden="true" />
     </button>
   </div>
 

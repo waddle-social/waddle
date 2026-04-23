@@ -57,53 +57,63 @@ function selectGif(gif: GiphyGif) {
 
 <template>
   <div
-    class="absolute left-0 right-0 glass-panel border border-border rounded-xl max-h-72 flex flex-col z-50 shadow-2xl animate-fade-in overflow-hidden"
+    class="absolute left-0 right-0 glass-panel border border-border rounded-xl max-h-96 flex flex-col z-50 shadow-2xl animate-fade-in overflow-hidden"
     :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
   >
     <!-- Header -->
-    <div class="flex items-center gap-2.5 px-4 py-2.5 border-b border-border">
-      <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-      <input
-        v-model="query"
-        placeholder="Search GIFs..."
-        class="flex-1 text-[13px] bg-transparent border-none focus:outline-none placeholder:text-muted-foreground/40"
-      />
-      <button
-        class="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-all duration-200 flex-shrink-0"
-        @click="emit('close')"
-      >
-        <X class="w-3.5 h-3.5" />
-      </button>
+    <div class="border-b border-border p-2">
+      <div class="relative min-w-0 rounded-lg bg-muted/60 transition-colors focus-within:bg-muted/75 focus-within:ring-1 focus-within:ring-inset focus-within:ring-primary/20">
+        <Search
+          class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+          aria-hidden="true"
+        />
+        <input
+          v-model="query"
+          type="text"
+          placeholder="Search GIFs..."
+          aria-label="Search GIFs"
+          class="min-h-10 w-full rounded-lg border-none bg-transparent py-2.5 pl-9 pr-11 text-[13px] leading-5 placeholder:text-muted-foreground/40 focus:outline-none"
+        />
+        <button
+          type="button"
+          class="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label="Close GIF picker"
+          @click="emit('close')"
+        >
+          <X class="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+      </div>
     </div>
 
     <!-- No API key -->
-    <div v-if="!apiKey" class="p-5 text-center text-[13px] text-muted-foreground">
+    <div v-if="!apiKey" class="flex h-24 items-center justify-center px-4 text-center text-[13px] text-muted-foreground">
       GIPHY_API_KEY not configured.
     </div>
 
     <!-- Results -->
     <div v-else class="flex-1 overflow-auto p-2">
-      <div v-if="isLoading" class="text-center py-5 text-[13px] text-muted-foreground">
+      <div v-if="isLoading" class="flex h-24 items-center justify-center text-[13px] text-muted-foreground">
         <div class="flex items-center justify-center gap-1.5">
           <span class="typing-dot" />
           <span class="typing-dot" />
           <span class="typing-dot" />
         </div>
       </div>
-      <div v-else-if="results.length === 0" class="text-center py-5 text-[13px] text-muted-foreground">
+      <div v-else-if="results.length === 0" class="flex h-24 items-center justify-center rounded-lg text-center text-[13px] text-muted-foreground">
         {{ query ? "No GIFs found" : "Loading trending GIFs..." }}
       </div>
-      <div v-else class="grid grid-cols-3 gap-1.5">
+      <div v-else class="grid grid-cols-3 gap-2">
         <button
           v-for="gif in results"
           :key="gif.id"
-          class="aspect-square overflow-hidden rounded-lg hover:ring-2 hover:ring-primary/40 hover:shadow-[0_0_8px_var(--glow)] transition-all duration-200"
+          type="button"
+          class="aspect-square overflow-hidden rounded-lg bg-muted/40 ring-1 ring-border/50 transition-all duration-200 hover:ring-primary/35 hover:shadow-[0_0_8px_var(--glow)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
           @click="selectGif(gif)"
         >
           <img
             :src="gif.images.fixed_height_small.url"
             :alt="gif.title"
-            class="w-full h-full object-cover"
+            class="h-full w-full object-cover"
             loading="lazy"
           />
         </button>
@@ -111,8 +121,8 @@ function selectGif(gif: GiphyGif) {
     </div>
 
     <!-- Attribution -->
-    <div class="px-4 py-1.5 border-t border-border text-right">
-      <span class="text-[10px] text-muted-foreground/50">Powered by GIPHY</span>
+    <div class="flex h-8 items-center justify-end border-t border-border px-3">
+      <span class="text-[10px] font-medium text-muted-foreground/50">Powered by GIPHY</span>
     </div>
   </div>
 </template>

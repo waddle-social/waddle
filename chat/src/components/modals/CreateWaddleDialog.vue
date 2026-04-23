@@ -22,21 +22,21 @@ function updateField(key: keyof CommunityFormData, value: string | boolean) {
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="border-b border-border px-6 py-4 flex items-center justify-between">
+    <div class="flex h-14 items-center justify-between border-b border-border px-4 sm:px-5">
       <h2 class="text-[16px] font-display font-bold">Create Waddle</h2>
-      <button class="p-1 rounded-xl hover:bg-muted transition-all duration-200" @click="open = false">
+      <button class="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200" @click="open = false">
         <X class="w-4 h-4 text-muted-foreground" />
       </button>
     </div>
 
-    <div class="px-6 py-4 space-y-4">
+    <div class="space-y-4 px-4 py-4 sm:px-5">
       <div>
         <label class="block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground mb-1.5">
           Name
         </label>
         <input
           :value="form.name"
-          class="w-full rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 px-3 py-2 text-[13px] transition-all duration-200"
+          class="h-9 w-full rounded-lg bg-muted px-3 text-[13px] transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
           placeholder="My Waddle"
           @input="$emit('update:form', { ...form, name: ($event.target as HTMLInputElement).value })"
         />
@@ -48,7 +48,7 @@ function updateField(key: keyof CommunityFormData, value: string | boolean) {
         </label>
         <textarea
           :value="form.description"
-          class="w-full rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 px-3 py-2 text-[13px] min-h-16 resize-y transition-all duration-200"
+          class="min-h-20 w-full rounded-lg bg-muted px-3 py-2 text-[13px] transition-all duration-200 resize-y focus:outline-none focus:ring-2 focus:ring-primary/20"
           placeholder="What is this waddle about?"
           @input="$emit('update:form', { ...form, description: ($event.target as HTMLTextAreaElement).value })"
         />
@@ -60,7 +60,7 @@ function updateField(key: keyof CommunityFormData, value: string | boolean) {
         </label>
         <div class="flex gap-1.5">
           <button
-            class="flex-1 text-[13px] font-medium py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-1.5 border"
+            class="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium transition-all duration-200"
             :class="!form.is_public ? 'border-primary bg-primary/5 text-foreground' : 'border-border hover:bg-muted'"
             @click="$emit('update:form', { ...form, is_public: false })"
           >
@@ -68,7 +68,7 @@ function updateField(key: keyof CommunityFormData, value: string | boolean) {
             Private
           </button>
           <button
-            class="flex-1 text-[13px] font-medium py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-1.5 border"
+            class="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium transition-all duration-200"
             :class="form.is_public ? 'border-primary bg-primary/5 text-foreground' : 'border-border hover:bg-muted'"
             @click="$emit('update:form', { ...form, is_public: true })"
           >
@@ -79,15 +79,15 @@ function updateField(key: keyof CommunityFormData, value: string | boolean) {
       </div>
     </div>
 
-    <div class="border-t border-border px-6 py-3 flex justify-end gap-2">
+    <div class="flex min-h-14 justify-end gap-2 border-t border-border px-4 py-3 sm:px-5">
       <button
-        class="text-[13px] font-medium py-1.5 px-3 rounded-xl border border-border hover:bg-muted transition-all duration-200"
+        class="h-9 rounded-lg border border-border px-3 text-[13px] font-medium hover:bg-muted transition-all duration-200"
         @click="open = false"
       >
         Cancel
       </button>
       <button
-        class="text-[13px] font-medium py-1.5 px-3 rounded-xl bg-primary text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200 disabled:opacity-40"
+        class="h-9 rounded-lg bg-primary px-3 text-[13px] font-medium text-primary-foreground hover:shadow-[0_0_12px_var(--glow)] transition-all duration-200 disabled:opacity-40"
         :disabled="isSubmitting || !form.name.trim()"
         @click="emit('submit')"
       >

@@ -36,7 +36,7 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
         <h2 class="text-[14px] font-display font-bold tracking-tight text-sidebar-foreground">Direct Messages</h2>
       </div>
       <button
-        class="h-7 w-7 flex items-center justify-center rounded-lg text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground transition-all duration-200"
+        class="h-8 w-8 flex items-center justify-center rounded-lg text-sidebar-muted hover:bg-sidebar-accent hover:text-sidebar-foreground transition-all duration-200"
         title="New message"
         @click="emit('newDm')"
       >
@@ -53,7 +53,7 @@ function dotClass(show?: DmConversation["presenceShow"]): string {
         <button
           v-for="conversation in conversations"
           :key="conversation.peerJid"
-          class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-200 text-left group"
+          class="w-full min-h-14 flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-200 text-left group"
           :class="activePeerJid === conversation.peerJid
             ? 'bg-sidebar-accent text-sidebar-foreground'
             : 'text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'"

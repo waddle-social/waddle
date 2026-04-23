@@ -92,7 +92,7 @@ watch(
 
 <template>
   <div
-    class="relative flex-shrink-0"
+    class="relative flex-shrink-0 leading-none"
     :class="[wrapperSizeClass, presence === 'offline' ? 'opacity-50' : '']"
     :title="presenceTooltip"
   >
@@ -100,7 +100,7 @@ watch(
       v-if="showImage"
       :src="props.src ?? undefined"
       :alt="name"
-      :class="[sizeClass, 'rounded-lg object-cover bg-muted']"
+      :class="[sizeClass, 'block rounded-lg object-cover bg-muted']"
       loading="lazy"
       @error="imageFailed = true"
     />

@@ -32,20 +32,20 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
 
 <template>
   <AppDialog v-model:open="open">
-    <div class="border-b border-border px-6 py-4 flex items-center justify-between">
+    <div class="flex h-14 items-center justify-between border-b border-border px-4 sm:px-5">
       <h2 class="text-[16px] font-display font-bold">Members</h2>
-      <button class="p-1 rounded-xl hover:bg-muted transition-all duration-200" @click="open = false">
+      <button class="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200" @click="open = false">
         <X class="w-4 h-4 text-muted-foreground" />
       </button>
     </div>
 
     <!-- Search -->
-    <div v-if="canManageMembers" class="px-6 py-4 border-b border-border space-y-3">
+    <div v-if="canManageMembers" class="space-y-3 border-b border-border px-4 py-3 sm:px-5">
       <div class="relative">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
         <input
           :value="memberQuery"
-          class="w-full rounded-xl bg-muted focus:outline-none focus:ring-2 focus:ring-primary/20 pl-9 pr-3 py-2 text-[13px] transition-all duration-200"
+          class="h-9 w-full rounded-lg bg-muted pl-9 pr-3 text-[13px] transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
           placeholder="Search users to add..."
           @input="$emit('update:memberQuery', ($event.target as HTMLInputElement).value)"
         />
@@ -55,7 +55,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         <button
           v-for="role in roles"
           :key="role"
-          class="text-[12px] font-medium py-1.5 px-3 rounded-xl capitalize transition-all duration-200 border"
+          class="h-8 rounded-lg border px-3 text-[12px] font-medium capitalize transition-all duration-200"
           :class="newMemberRole === role
             ? 'border-primary/30 bg-primary/8 text-foreground shadow-[0_0_12px_var(--glow)]'
             : 'border-border bg-muted/40 hover:bg-muted'"
@@ -70,7 +70,7 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         <button
           v-for="user in searchResults"
           :key="user.id"
-          class="w-full flex items-center gap-2.5 p-2.5 rounded-xl bg-muted/40 hover:bg-muted transition-all duration-200 text-left border border-border"
+          class="flex min-h-12 w-full items-center gap-2.5 rounded-lg border border-border bg-muted/40 p-2 text-left hover:bg-muted transition-all duration-200"
           @click="emit('addMember', user.id)"
         >
           <AppAvatar :name="user.display_name || user.username" :src="user.avatar_url" size="sm" />
@@ -93,11 +93,11 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
     </div>
 
     <!-- Member list -->
-    <div class="px-6 py-4 max-h-96 overflow-auto space-y-0.5">
+    <div class="max-h-96 space-y-1 overflow-auto px-4 py-3 sm:px-5">
       <div
         v-for="member in members"
         :key="member.user_id"
-        class="flex items-center gap-2.5 p-2.5 rounded-xl hover:bg-muted/50 transition-all duration-200"
+        class="flex min-h-12 items-center gap-2.5 rounded-lg p-2 hover:bg-muted/50 transition-all duration-200"
       >
         <AppAvatar :name="member.username" :src="member.avatar_url" :presence="roomPresence?.[member.username] ?? 'offline'" :last-seen="roomLastSeen?.[member.username]" size="sm" />
         <div class="flex-1 min-w-0">
@@ -109,13 +109,13 @@ const roles: EditableRole[] = ["member", "moderator", "admin"];
         <div v-if="canManageMembers && member.role !== 'owner'" class="flex items-center gap-1.5">
           <select
             :value="member.role"
-            class="appearance-none text-[11px] font-medium rounded-xl bg-muted/60 border border-border px-2.5 py-1.5 capitalize focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all duration-200"
+            class="h-8 appearance-none rounded-lg border border-border bg-muted/60 px-2.5 text-[11px] font-medium capitalize transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
             @change="emit('updateRole', member, ($event.target as HTMLSelectElement).value as EditableRole)"
           >
             <option v-for="role in roles" :key="role" :value="role">{{ role }}</option>
           </select>
           <button
-            class="p-1.5 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
+            class="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
             @click="emit('removeMember', member)"
           >
             <X class="w-3.5 h-3.5" />

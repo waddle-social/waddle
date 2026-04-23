@@ -974,13 +974,13 @@ onUnmounted(() => {
         <div class="space-y-1.5">
           <button
             v-if="waddles.currentChannel.value && waddles.canManageChannels.value"
-            class="w-full text-[13px] font-medium py-2 px-3 rounded-md border border-border hover:bg-muted transition-colors"
+            class="h-9 w-full rounded-lg border border-border px-3 text-[13px] font-medium hover:bg-muted transition-colors"
             @click="openChannelEdit(); ui.showMobileDetails.value = false"
           >
             Edit Channel
           </button>
           <button
-            class="w-full text-[13px] font-medium py-2 px-3 rounded-md border border-border hover:bg-muted transition-colors"
+            class="h-9 w-full rounded-lg border border-border px-3 text-[13px] font-medium hover:bg-muted transition-colors"
             @click="ui.showMobileDetails.value = false; ui.showMembers.value = true"
           >
             Members ({{ waddles.members.value.length }})

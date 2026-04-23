@@ -180,8 +180,8 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
 <template>
   <div class="flex flex-col flex-1 min-h-0 bg-background border-l border-border">
     <!-- Header: breadcrumb trail + close / back button -->
-    <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-border glass-panel">
-      <div class="flex items-center gap-1 text-[13px] font-semibold truncate flex-wrap">
+    <div class="h-14 flex-shrink-0 flex items-center justify-between gap-2 px-4 py-0 border-b border-border glass-panel">
+      <div class="flex min-w-0 flex-1 items-center gap-1 text-[13px] font-semibold truncate">
         <span class="text-muted-foreground">Thread</span>
         <template v-for="(label, i) in breadcrumbLabels" :key="i">
           <ChevronRight class="w-3 h-3 text-muted-foreground/60 flex-shrink-0" />
@@ -198,7 +198,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       <button
         v-if="threadStack.length > 1"
         type="button"
-        class="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-all duration-200 lg:hidden"
+        class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200 lg:hidden"
         title="Go back"
         @click="emit('popTo', threadStack.length - 2)"
       >
@@ -207,7 +207,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       <!-- Close button: closes the entire thread panel -->
       <button
         type="button"
-        class="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-all duration-200"
+        class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg hover:bg-muted transition-all duration-200"
         title="Close thread"
         @click="emit('close')"
       >
@@ -216,7 +216,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </div>
 
     <!-- Composer: top-pinned mode (social mode) -->
-    <div v-if="!hideComposer && isTopPinned" class="border-b border-border flex-shrink-0">
+    <div v-if="!hideComposer && isTopPinned" class="flex-shrink-0">
       <MessageComposer
         :ref="setComposerRef"
         v-model:draft="draft"
@@ -320,7 +320,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
     </div>
 
     <!-- Composer: bottom-pinned mode (chat mode) - hidden in parent context pane -->
-    <div v-if="!hideComposer && !isTopPinned" class="border-t border-border flex-shrink-0">
+    <div v-if="!hideComposer && !isTopPinned" class="flex-shrink-0">
       <MessageComposer
         :ref="setComposerRef"
         v-model:draft="draft"

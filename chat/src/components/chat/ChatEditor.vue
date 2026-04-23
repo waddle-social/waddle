@@ -9,12 +9,14 @@ const props = withDefaults(
     placeholder?: string;
     disabled?: boolean;
     compact?: boolean;
+    embedded?: boolean;
     initialContent?: JSONContent;
   }>(),
   {
     placeholder: "Type a message...",
     disabled: false,
     compact: false,
+    embedded: false,
   },
 );
 
@@ -97,10 +99,10 @@ defineExpose({
 
 <template>
   <div
-    class="chat-editor flex min-w-0 items-center rounded-lg bg-muted text-[13px] px-4 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)] cursor-text"
+    class="chat-editor flex min-w-0 items-center text-[13px] transition-all duration-300 cursor-text"
     :class="[
-      compact ? 'min-h-9 py-1' : 'min-h-10 py-1.5',
-      compact ? '' : 'flex-1',
+      embedded ? 'min-h-9 flex-1 px-2 py-1' : compact ? 'min-h-9 py-1' : 'min-h-10 flex-1 py-1.5',
+      embedded ? '' : 'rounded-lg bg-muted px-4 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]',
       disabled ? 'opacity-40 pointer-events-none' : '',
     ]"
     @click="editor?.commands.focus()"

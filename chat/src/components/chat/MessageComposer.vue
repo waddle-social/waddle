@@ -418,7 +418,11 @@ watch(
 </script>
 
 <template>
-  <div class="relative px-4 py-3 flex-shrink-0" :class="isTopPinned ? 'border-b border-border' : ''" @keydown.capture="onKeydown">
+  <div
+    class="relative px-4 py-3 flex-shrink-0"
+    :class="isTopPinned ? 'border-b border-border' : 'border-t border-border'"
+    @keydown.capture="onKeydown"
+  >
     <!-- Reply context chip -->
     <div
       v-if="replyingTo"
@@ -429,12 +433,12 @@ watch(
       <span v-if="replyingTo.preview" class="text-muted-foreground truncate flex-1">{{ replyingTo.preview }}</span>
       <button
         type="button"
-        class="ml-auto h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        class="ml-auto h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
         title="Cancel reply"
         aria-label="Cancel reply"
         @click="emit('cancelReply')"
       >
-        <X class="w-3 h-3" />
+        <X class="w-3.5 h-3.5" />
       </button>
     </div>
 
@@ -524,12 +528,12 @@ watch(
         </div>
         <button
           type="button"
-          class="absolute top-1 right-1 h-5 w-5 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
+          class="absolute top-1 right-1 h-6 w-6 flex items-center justify-center rounded-full bg-background/90 text-muted-foreground hover:text-destructive border border-border shadow-sm opacity-0 group-hover/att:opacity-100 focus:opacity-100 transition-opacity"
           :title="`Remove ${att.name}`"
           :aria-label="`Remove attachment ${att.name}`"
           @click="removeAttachment(att.id)"
         >
-          <X class="w-3 h-3" aria-hidden="true" />
+          <X class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
       </div>
     </div>
@@ -560,14 +564,14 @@ watch(
     <!-- @mention autocomplete -->
     <div
       v-if="showMentions && mentionResults.length > 0"
-      class="absolute left-[4.125rem] right-[4.125rem] glass-panel border border-border rounded-lg max-h-48 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in"
+      class="absolute left-4 right-4 glass-panel border border-border rounded-xl max-h-56 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in p-1"
       :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
-      <div class="py-1">
+      <div class="flex flex-col gap-1">
         <button
           v-for="(name, i) in mentionResults"
           :key="name"
-          class="w-full px-3 py-2 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
+          class="w-full h-9 px-3 py-0 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
           :class="i === selectedIndex ? 'bg-muted' : ''"
           @mousedown.prevent="insertMention(name)"
         >
@@ -580,14 +584,14 @@ watch(
     <!-- :emoji autocomplete -->
     <div
       v-if="showEmoji && emojiResults.length > 0"
-      class="absolute left-[4.125rem] right-[4.125rem] glass-panel border border-border rounded-lg max-h-48 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in"
+      class="absolute left-4 right-4 glass-panel border border-border rounded-xl max-h-56 overflow-auto z-50 min-w-0 shadow-xl animate-fade-in p-1"
       :class="isTopPinned ? 'top-full mt-2' : 'bottom-full mb-2'"
     >
-      <div class="py-1">
+      <div class="flex flex-col gap-1">
         <button
           v-for="(entry, i) in emojiResults"
           :key="entry.name"
-          class="w-full px-3 py-2 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
+          class="w-full h-9 px-3 py-0 text-left text-[13px] hover:bg-muted transition-colors flex items-center gap-2 rounded-lg"
           :class="i === selectedIndex ? 'bg-muted' : ''"
           @mousedown.prevent="insertEmoji(entry.emoji)"
         >
@@ -597,7 +601,9 @@ watch(
       </div>
     </div>
 
-    <div class="flex min-w-0 flex-nowrap items-end gap-2.5">
+    <div
+      class="flex min-w-0 flex-nowrap items-center gap-1.5 rounded-lg bg-muted p-1.5 transition-all duration-300 has-[:focus]:ring-2 has-[:focus]:ring-primary/20 has-[:focus]:shadow-[0_0_16px_var(--glow)]"
+    >
       <input
         :ref="setFileInputRef"
         type="file"
@@ -607,7 +613,7 @@ watch(
       />
       <button
         type="button"
-        class="h-10 w-10 shrink-0 flex items-center justify-center rounded-lg transition-all duration-200 text-muted-foreground hover:bg-muted hover:text-primary"
+        class="h-9 w-9 shrink-0 flex items-center justify-center rounded-md transition-all duration-200 text-muted-foreground hover:bg-background/70 hover:text-primary disabled:opacity-40"
         title="Attach files"
         aria-label="Attach files"
         :disabled="disabled"
@@ -615,20 +621,10 @@ watch(
       >
         <Paperclip class="w-4 h-4" aria-hidden="true" />
       </button>
-      <button
-        type="button"
-        class="h-10 w-10 shrink-0 flex items-center justify-center rounded-lg transition-all duration-200"
-        :class="showGifPicker ? 'bg-muted text-primary' : 'text-muted-foreground hover:bg-muted hover:text-primary'"
-        title="Open GIF picker"
-        aria-label="Open GIF picker"
-        :disabled="disabled"
-        @click="showGifPicker = !showGifPicker"
-      >
-        <Image class="w-4 h-4" aria-hidden="true" />
-      </button>
       <ChatEditor
         :ref="setEditorRef"
         class="min-w-0"
+        embedded
         :placeholder="editorPlaceholder"
         :disabled="disabled || slowModeCooldown > 0"
         @send="onSend"
@@ -639,7 +635,18 @@ watch(
       />
       <button
         type="button"
-        class="h-10 w-10 shrink-0 flex items-center justify-center bg-primary text-primary-foreground rounded-lg hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20"
+        class="h-9 w-9 shrink-0 flex items-center justify-center rounded-md transition-all duration-200"
+        :class="showGifPicker ? 'bg-background/80 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-primary'"
+        title="Open GIF picker"
+        aria-label="Open GIF picker"
+        :disabled="disabled"
+        @click="showGifPicker = !showGifPicker"
+      >
+        <Image class="w-4 h-4" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="h-9 w-9 shrink-0 flex items-center justify-center bg-primary text-primary-foreground rounded-md hover:shadow-[0_0_20px_var(--glow-strong)] transition-all duration-300 disabled:opacity-20"
         :disabled="!canSend"
         aria-label="Send message"
         @click="onSend(editorRef?.getJSON?.() ?? { type: 'doc', content: [] })"

@@ -34,7 +34,7 @@ function cycle() {
 <template>
   <button
     type="button"
-    class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-sidebar-muted transition-all duration-200 hover:bg-sidebar-accent hover:text-primary"
+    class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-sidebar-muted transition-all duration-200 hover:bg-sidebar-accent hover:text-primary"
     :aria-label="`Theme: ${current.label}. Click to switch to ${nextLabel}.`"
     :title="`Theme: ${current.label} — click for ${nextLabel}`"
     @click="cycle"
