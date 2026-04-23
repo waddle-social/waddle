@@ -22,6 +22,8 @@ targets:
           - "**/*.md"
     dependencies:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
+        link: true
     settings:
       base:
         PRODUCT_NAME: Waddle-iOS
@@ -46,6 +48,8 @@ targets:
           - LaunchScreen.storyboard
     dependencies:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
+        link: true
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS

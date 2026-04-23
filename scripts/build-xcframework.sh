@@ -9,7 +9,7 @@
 #   apps/apple/Waddle/RustClient/Generated/{waddle_xmpp_client.swift,*.h,*.modulemap}
 #
 # Prerequisites:
-#   rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios-sim
+#   rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 
 set -euo pipefail
 
@@ -41,11 +41,11 @@ cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
   --manifest-path "$SERVER/Cargo.toml"
 
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
-  --target x86_64-apple-ios-sim \
+  --target x86_64-apple-ios \
   --manifest-path "$SERVER/Cargo.toml"
 
 echo "==> Staging libraries"
-mkdir -p "$OUT/macos" "$OUT/ios" "$OUT/ios-sim" "$OUT/ios-sim-x86"
+mkdir -p "$OUT/macos" "$OUT/ios" "$OUT/ios-sim"
 
 cp "$SERVER/target/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.a" \
    "$OUT/macos/libwaddle_xmpp_client_ffi.a"
@@ -53,11 +53,11 @@ cp "$SERVER/target/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.a" \
 cp "$SERVER/target/aarch64-apple-ios/$PROFILE/libwaddle_xmpp_client_ffi.a" \
    "$OUT/ios/libwaddle_xmpp_client_ffi.a"
 
-cp "$SERVER/target/aarch64-apple-ios-sim/$PROFILE/libwaddle_xmpp_client_ffi.a" \
-   "$OUT/ios-sim/libwaddle_xmpp_client_ffi.a"
-
-cp "$SERVER/target/x86_64-apple-ios-sim/$PROFILE/libwaddle_xmpp_client_ffi.a" \
-   "$OUT/ios-sim-x86/libwaddle_xmpp_client_ffi.a"
+echo "==> Creating universal iOS Simulator library (arm64 + x86_64)"
+lipo -create \
+  "$SERVER/target/aarch64-apple-ios-sim/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+  "$SERVER/target/x86_64-apple-ios/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+  -output "$OUT/ios-sim/libwaddle_xmpp_client_ffi.a"
 
 echo "==> Generating Swift bindings"
 mkdir -p "$BINDINGS_DIR"
@@ -72,10 +72,9 @@ mkdir -p "$BINDINGS_DIR"
 echo "==> Assembling XCFramework"
 rm -rf "$XCFW"
 xcodebuild -create-xcframework \
-  -library "$OUT/macos/libwaddle_xmpp_client_ffi.a"      -headers "$BINDINGS_DIR" \
-  -library "$OUT/ios/libwaddle_xmpp_client_ffi.a"        -headers "$BINDINGS_DIR" \
-  -library "$OUT/ios-sim/libwaddle_xmpp_client_ffi.a"    -headers "$BINDINGS_DIR" \
-  -library "$OUT/ios-sim-x86/libwaddle_xmpp_client_ffi.a" -headers "$BINDINGS_DIR" \
+  -library "$OUT/macos/libwaddle_xmpp_client_ffi.a"   -headers "$BINDINGS_DIR" \
+  -library "$OUT/ios/libwaddle_xmpp_client_ffi.a"     -headers "$BINDINGS_DIR" \
+  -library "$OUT/ios-sim/libwaddle_xmpp_client_ffi.a" -headers "$BINDINGS_DIR" \
   -output "$XCFW"
 
 echo "==> Done: $XCFW"
