@@ -43,7 +43,7 @@ jobs:
         run: ./scripts/build-xcframework.sh --debug
 
       - name: Install xcodegen
-        run: brew install xcodegen
+        run: arch -arm64 brew install xcodegen
 
       - name: Generate Xcode project
         run: cd apps/apple && xcodegen generate

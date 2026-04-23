@@ -343,10 +343,9 @@ fn scan_start_tag(xml: &str) -> Option<StartTagScan> {
                 .find(|c: char| c.is_ascii_whitespace() || c == '>')
                 .unwrap_or(rest.len());
             let token = &rest[..token_end];
-            let looks_like_next_attr =
-                had_value_whitespace
-                    && token.contains('=')
-                    && (token.contains('"') || token.contains('\''));
+            let looks_like_next_attr = had_value_whitespace
+                && token.contains('=')
+                && (token.contains('"') || token.contains('\''));
             if !looks_like_next_attr {
                 idx += token_end;
             }
@@ -390,7 +389,10 @@ mod tests {
 
     #[test]
     fn rejects_truncated_open_frame() {
-        assert!(matches!(parse_frame("<open"), Err(ParseError::InvalidXml(_))));
+        assert!(matches!(
+            parse_frame("<open"),
+            Err(ParseError::InvalidXml(_))
+        ));
     }
 
     #[test]
@@ -468,8 +470,7 @@ mod tests {
 
     #[test]
     fn rejects_sasl_response_with_child_payload() {
-        let xml =
-            r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1i<foo/>aXdz</response>"#;
+        let xml = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">Yz1i<foo/>aXdz</response>"#;
         assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
     }
 

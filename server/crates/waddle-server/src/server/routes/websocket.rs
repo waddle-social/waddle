@@ -54,7 +54,7 @@ use waddle_xmpp::{
         frame::{
             inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
         },
-        StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
+        ConnectionPhase, StanzaContext as ProtocolStanzaContext, StanzaDispatcher,
     },
     registry::{BroadcastOutcome, ConnectionRegistry, OutboundStanza, SendResult},
     stream_management::{
@@ -155,6 +155,7 @@ struct PendingScramAuth {
 /// single struct cuts the per-function argument count and makes the
 /// invariants easier to audit.
 struct LegacyConnState {
+    phase: ConnectionPhase,
     authenticated: bool,
     session_jid: Option<FullJid>,
     authenticated_session: Option<Session>,
@@ -186,6 +187,7 @@ struct LegacyConnState {
 impl LegacyConnState {
     fn new() -> Self {
         Self {
+            phase: ConnectionPhase::new(),
             authenticated: false,
             session_jid: None,
             authenticated_session: None,
@@ -195,6 +197,40 @@ impl LegacyConnState {
             resumed: false,
             carbons_enabled: false,
             suppress_sm_record_next_batch: false,
+        }
+    }
+
+    fn sync_phase_from_legacy(&mut self) {
+        if matches!(self.phase, ConnectionPhase::Closing) {
+            return;
+        }
+
+        if self.resource_bound {
+            if let Some(full_jid) = self.session_jid.clone() {
+                let joined_rooms = match &mut self.phase {
+                    ConnectionPhase::Ready { joined_rooms, .. } => std::mem::take(joined_rooms),
+                    _ => Default::default(),
+                };
+                self.phase =
+                    ConnectionPhase::ready_with_joined_rooms(full_jid, joined_rooms, self.resumed);
+            }
+            return;
+        }
+
+        if self.authenticated {
+            if let Some(full_jid) = self.session_jid.as_ref() {
+                self.phase = ConnectionPhase::authenticated(full_jid);
+            }
+            return;
+        }
+
+        if let Some(scram) = self.pending_scram.as_ref() {
+            self.phase = ConnectionPhase::scram_pending(scram.username.clone());
+            return;
+        }
+
+        if !matches!(self.phase, ConnectionPhase::Closing) {
+            self.phase = ConnectionPhase::Unauthenticated;
         }
     }
 }
@@ -265,7 +301,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
 
                         // Register connection after successful authentication AND resource binding
                         // This ensures the JID in ConnectionRegistry matches the JID stored in MUC room occupants
-                        if conn.authenticated && conn.resource_bound && conn.session_jid.is_some() {
+                        if conn.phase.is_ready() && conn.session_jid.is_some() {
                             if let (Some(jid), Some(tx)) = (conn.session_jid.as_ref(), pending_tx.take()) {
                                 state.deps.protocol.connection_registry.register_with_carbons(
                                     jid.clone(),
@@ -310,6 +346,10 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
                         )
                         .await
                         {
+                            break;
+                        }
+
+                        if matches!(conn.phase, ConnectionPhase::Closing) {
                             break;
                         }
                     }
@@ -396,63 +436,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
-    if !superseded {
-        if let Some(jid) = conn.session_jid.clone() {
-            if conn.sm_state.is_resumable() {
-                let carbons_enabled = conn.carbons_enabled;
-                let user_id = conn
-                    .authenticated_session
-                    .as_ref()
-                    .map(|session| session.user_id.to_string())
-                    .unwrap_or_else(|| jid.to_bare().to_string());
-                if let Some(detached) =
-                    conn.sm_state
-                        .to_detached_session(user_id, jid.clone(), carbons_enabled)
-                {
-                    let stream_id = detached.stream_id.clone();
-                    if let Some(session) = conn.authenticated_session.clone() {
-                        state
-                            .deps
-                            .protocol
-                            .resumable_sessions
-                            .insert(stream_id.clone(), session);
-                    }
-                    match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .store_session(detached)
-                        .await
-                    {
-                        Ok(()) => {
-                            // Remove the routing entry only — the MUC occupant
-                            // slot stays. On a successful resume we'll re-register
-                            // the same FullJid and presence is preserved.
-                            state.deps.protocol.connection_registry.unregister(&jid);
-                            info!(
-                                jid = %jid,
-                                stream_id = %stream_id,
-                                "SM session detached; awaiting resume"
-                            );
-                        }
-                        Err(err) => {
-                            warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                            state.deps.protocol.resumable_sessions.remove(&stream_id);
-                            state.deps.protocol.connection_registry.unregister(&jid);
-                            cleanup_muc_presence(&state, &jid).await;
-                        }
-                    }
-                } else {
-                    state.deps.protocol.connection_registry.unregister(&jid);
-                    cleanup_muc_presence(&state, &jid).await;
-                }
-            } else {
-                state.deps.protocol.connection_registry.unregister(&jid);
-                info!(jid = %jid, "WebSocket connection unregistered");
-                cleanup_muc_presence(&state, &jid).await;
-            }
-        }
-    }
+    cleanup_connection_shutdown(state.as_ref(), &conn, superseded).await;
 
     info!("XMPP WebSocket connection closed");
 }
@@ -501,6 +485,78 @@ where
 /// to reimplement the room traversal.
 pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
     cleanup_muc_presence(state, jid).await
+}
+
+async fn cleanup_connection_shutdown(
+    state: &WebSocketState,
+    conn: &LegacyConnState,
+    superseded: bool,
+) {
+    // Short-circuit when this task was superseded: the registry and MUC
+    // occupant slots now belong to the newer connection for this FullJid,
+    // and any cleanup we do here would clobber the newcomer.
+    if superseded {
+        return;
+    }
+
+    let Some(jid) = conn.session_jid.clone() else {
+        return;
+    };
+
+    let should_detach_for_resume =
+        conn.sm_state.is_resumable() && !matches!(conn.phase, ConnectionPhase::Closing);
+
+    if should_detach_for_resume {
+        let carbons_enabled = conn.carbons_enabled;
+        let user_id = conn
+            .authenticated_session
+            .as_ref()
+            .map(|session| session.user_id.to_string())
+            .unwrap_or_else(|| jid.to_bare().to_string());
+        if let Some(detached) =
+            conn.sm_state
+                .to_detached_session(user_id, jid.clone(), carbons_enabled)
+        {
+            let stream_id = detached.stream_id.clone();
+            if let Some(session) = conn.authenticated_session.clone() {
+                state
+                    .deps
+                    .protocol
+                    .resumable_sessions
+                    .insert(stream_id.clone(), session);
+            }
+            match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .store_session(detached)
+                .await
+            {
+                Ok(()) => {
+                    // Remove the routing entry only — the MUC occupant
+                    // slot stays. On a successful resume we'll re-register
+                    // the same FullJid and presence is preserved.
+                    state.deps.protocol.connection_registry.unregister(&jid);
+                    info!(
+                        jid = %jid,
+                        stream_id = %stream_id,
+                        "SM session detached; awaiting resume"
+                    );
+                }
+                Err(err) => {
+                    warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
+                    state.deps.protocol.resumable_sessions.remove(&stream_id);
+                    state.deps.protocol.connection_registry.unregister(&jid);
+                    cleanup_muc_presence(state, &jid).await;
+                }
+            }
+            return;
+        }
+    }
+
+    state.deps.protocol.connection_registry.unregister(&jid);
+    info!(jid = %jid, "WebSocket connection unregistered");
+    cleanup_muc_presence(state, &jid).await;
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
@@ -758,6 +814,10 @@ fn build_stream_features_xml(authenticated: bool) -> String {
     element_to_xml(features.build())
 }
 
+fn build_stream_features_for_phase(phase: &ConnectionPhase) -> String {
+    build_stream_features_xml(phase.is_authenticated())
+}
+
 fn sasl_success_xml() -> String {
     element_to_xml(Element::builder("success", waddle_xmpp::ns::SASL).build())
 }
@@ -798,6 +858,7 @@ fn is_countable_stanza(frame: &str) -> bool {
 /// Passed through `handle_sm_stanza` and its helpers so each signature stays
 /// below the clippy too-many-arguments threshold.
 struct SmCtx<'a> {
+    phase: &'a mut ConnectionPhase,
     sm_state: &'a mut StreamManagementState,
     session_jid: &'a mut Option<FullJid>,
     authenticated: &'a mut bool,
@@ -866,6 +927,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     use waddle_xmpp::stream_management::{SmFailed, SmResumed};
 
     let SmCtx {
+        phase,
         sm_state,
         session_jid,
         authenticated,
@@ -930,6 +992,7 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     *authenticated_session = restored_session;
     *resumed = true;
     *carbons_enabled = detached.carbons_enabled;
+    *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —
     // the main loop must NOT push them through `record_outbound` again.
@@ -959,12 +1022,15 @@ async fn handle_xmpp_frame(
     state: &WebSocketState,
     conn: &mut LegacyConnState,
 ) -> Vec<String> {
+    conn.sync_phase_from_legacy();
+
     if frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
         return vec![];
     }
 
     let LegacyConnState {
+        phase,
         authenticated,
         session_jid,
         authenticated_session,
@@ -982,6 +1048,7 @@ async fn handle_xmpp_frame(
     if SmStanza::is_client_nonza_candidate(frame) {
         if let Some(sm) = SmStanza::parse(frame) {
             let ctx = SmCtx {
+                phase,
                 sm_state,
                 session_jid,
                 authenticated,
@@ -1021,18 +1088,19 @@ async fn handle_xmpp_frame(
                 domain,
                 uuid::Uuid::new_v4()
             );
-            let features_element = build_stream_features_xml(*authenticated);
+            let features_element = build_stream_features_for_phase(phase);
             vec![open_element, features_element]
         }
 
         InboundFrame::Close => {
             info!("XMPP stream close requested");
+            *phase = ConnectionPhase::Closing;
             vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
         }
 
         InboundFrame::Auth { mechanism, data } => match mechanism.as_str() {
             "SCRAM-SHA-256" => {
-                handle_sasl_scram_client_first(&data, domain, state, pending_scram).await
+                handle_sasl_scram_client_first(&data, domain, state, pending_scram, phase).await
             }
             "OAUTHBEARER" => {
                 handle_sasl_oauthbearer(
@@ -1041,6 +1109,7 @@ async fn handle_xmpp_frame(
                     authenticated,
                     session_jid,
                     authenticated_session,
+                    phase,
                 )
                 .await
             }
@@ -1059,6 +1128,7 @@ async fn handle_xmpp_frame(
                     authenticated,
                     session_jid,
                     authenticated_session,
+                    phase,
                 );
             }
             warn!("SASL response received without pending SCRAM state");
@@ -1082,7 +1152,7 @@ async fn handle_xmpp_frame(
                     };
                     if is_bind {
                         let (responses, success) =
-                            handle_resource_binding(&iq, domain, session_jid);
+                            handle_resource_binding(&iq, domain, session_jid, phase);
                         if success {
                             *resource_bound = true;
                         }
@@ -1131,8 +1201,7 @@ async fn handle_xmpp_frame(
 
 fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
     match (parse_error_root_name(frame), err) {
-        (Some("auth" | "response"), ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)) =>
-        {
+        (Some("auth" | "response"), ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)) => {
             let namespace = raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL);
             if namespace == waddle_xmpp::ns::SASL {
                 Some(vec![sasl_failure_xml("malformed-request")])
@@ -1140,10 +1209,7 @@ fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec<String>> {
                 None
             }
         }
-        (
-            Some("iq"),
-            ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_),
-        ) => {
+        (Some("iq"), ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_)) => {
             invalid_iq_parse_error_response(frame).map(|response| vec![response])
         }
         _ => None,
@@ -1238,7 +1304,11 @@ fn decode_xml_attr_value(value: &str) -> String {
             _ => entity
                 .strip_prefix("#x")
                 .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse::<u32>().ok()))
+                .or_else(|| {
+                    entity
+                        .strip_prefix('#')
+                        .and_then(|dec| dec.parse::<u32>().ok())
+                })
                 .and_then(char::from_u32)
                 .filter(|&ch| is_valid_xml_char(ch)),
         };
@@ -1346,7 +1416,8 @@ fn raw_xml_attr_value<'a>(xml: &'a str, attr: &str) -> Option<&'a str> {
             let token = &rest[..token_end];
             let looks_like_next_attr = had_value_whitespace
                 && (looks_like_attr_token(token)
-                    || (looks_like_attr_name(token) && rest[token_end..].trim_start().starts_with('=')));
+                    || (looks_like_attr_name(token)
+                        && rest[token_end..].trim_start().starts_with('=')));
             if !looks_like_next_attr {
                 if &trimmed[name_start..name_end] == attr {
                     fallback = Some(token.trim_end_matches('/'));
@@ -1381,6 +1452,7 @@ async fn handle_sasl_oauthbearer(
     authenticated: &mut bool,
     session_jid: &mut Option<FullJid>,
     authenticated_session: &mut Option<Session>,
+    phase: &mut ConnectionPhase,
 ) -> Vec<String> {
     debug!("SASL OAUTHBEARER auth attempt");
 
@@ -1443,6 +1515,11 @@ async fn handle_sasl_oauthbearer(
             *authenticated = true;
             *authenticated_session = Some(session);
             *session_jid = Some(full_jid);
+            *phase = ConnectionPhase::authenticated(
+                session_jid
+                    .as_ref()
+                    .expect("just stored authenticated full JID"),
+            );
 
             vec![sasl_success_xml()]
         }
@@ -1463,6 +1540,7 @@ async fn handle_sasl_scram_client_first(
     domain: &str,
     state: &WebSocketState,
     pending_scram: &mut Option<PendingScramAuth>,
+    phase: &mut ConnectionPhase,
 ) -> Vec<String> {
     debug!("SASL SCRAM-SHA-256 auth attempt");
 
@@ -1534,6 +1612,13 @@ async fn handle_sasl_scram_client_first(
         server_key: creds.server_key,
         username,
     });
+    *phase = ConnectionPhase::scram_pending(
+        pending_scram
+            .as_ref()
+            .expect("just stored SCRAM pending state")
+            .username
+            .clone(),
+    );
 
     vec![element_to_xml(
         Element::builder("challenge", waddle_xmpp::ns::SASL)
@@ -1553,6 +1638,7 @@ fn handle_sasl_scram_response(
     authenticated: &mut bool,
     session_jid: &mut Option<FullJid>,
     authenticated_session: &mut Option<Session>,
+    phase: &mut ConnectionPhase,
 ) -> Vec<String> {
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
@@ -1610,6 +1696,11 @@ fn handle_sasl_scram_response(
     *authenticated = true;
     *authenticated_session = Some(session);
     *session_jid = Some(full_jid);
+    *phase = ConnectionPhase::authenticated(
+        session_jid
+            .as_ref()
+            .expect("just stored authenticated full JID"),
+    );
 
     let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
     vec![element_to_xml(
@@ -1643,6 +1734,7 @@ fn handle_resource_binding(
     iq: &xmpp_parsers::iq::Iq,
     _domain: &str,
     session_jid: &mut Option<FullJid>,
+    phase: &mut ConnectionPhase,
 ) -> (Vec<String>, bool) {
     let Some(ref jid) = session_jid else {
         warn!("Resource binding without authenticated session");
@@ -1666,6 +1758,7 @@ fn handle_resource_binding(
     if let Ok(full_jid) = full_jid_str.parse::<FullJid>() {
         info!(jid = %full_jid, id = %id, "Resource bound");
         *session_jid = Some(full_jid.clone());
+        *phase = ConnectionPhase::ready(full_jid.clone(), false);
         (vec![build_bind_result_xml(&id, &full_jid)], true)
     } else {
         warn!(jid = %full_jid_str, "Invalid JID during resource binding");
@@ -4200,6 +4293,7 @@ mod tests {
         assert_eq!(responses, vec![sasl_success_xml()]);
         assert!(conn.authenticated);
         assert!(conn.authenticated_session.is_some());
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
     }
 
     #[tokio::test]
@@ -4280,6 +4374,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_close_moves_connection_into_closing_phase() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+
+        let responses = handle_xmpp_frame(
+            r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(
+            responses,
+            vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
+        );
+        assert!(matches!(conn.phase, ConnectionPhase::Closing));
+    }
+
+    #[tokio::test]
+    async fn websocket_close_keeps_bound_connection_in_closing_phase() {
+        let state = create_test_websocket_state().await;
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some("alice@example.com/web".parse().expect("valid jid"));
+
+        let responses = handle_xmpp_frame(
+            r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+
+        assert_eq!(
+            responses,
+            vec![r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#.to_string()]
+        );
+        assert!(matches!(conn.phase, ConnectionPhase::Closing));
+
+        let _ = handle_xmpp_frame(
+            r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
+            "example.com",
+            state.as_ref(),
+            &mut conn,
+        )
+        .await;
+        assert!(matches!(conn.phase, ConnectionPhase::Closing));
+    }
+
+    #[test]
+    fn sync_phase_from_legacy_preserves_joined_rooms() {
+        let room_jid: BareJid = "waddle_channel@muc.example.com".parse().expect("room jid");
+        let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let mut joined_rooms = std::collections::HashSet::new();
+        joined_rooms.insert(room_jid.clone());
+
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some(full_jid.clone());
+        conn.phase =
+            ConnectionPhase::ready_with_joined_rooms(full_jid.clone(), joined_rooms, false);
+
+        conn.sync_phase_from_legacy();
+
+        assert!(matches!(
+            &conn.phase,
+            ConnectionPhase::Ready {
+                full_jid: phase_jid,
+                joined_rooms,
+                resumed: false,
+            } if phase_jid == &full_jid && joined_rooms.contains(&room_jid)
+        ));
+    }
+
+    #[tokio::test]
     async fn websocket_rejects_plain_auth() {
         let state = create_test_websocket_state().await;
         let frame = element_to_xml(
@@ -4332,6 +4504,7 @@ mod tests {
                 .map(|jid| jid.to_bare().to_string()),
             Some(expected_bare)
         );
+        assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
     }
 
     #[tokio::test]
@@ -4397,6 +4570,14 @@ mod tests {
             session_jid.as_deref() == Some(expected_full.as_str()),
             "connection state should store the bound jid"
         );
+        assert!(matches!(
+            &conn.phase,
+            ConnectionPhase::Ready {
+                full_jid,
+                resumed: false,
+                ..
+            } if full_jid.to_string() == expected_full
+        ));
     }
 
     #[tokio::test]
@@ -4446,6 +4627,14 @@ mod tests {
             jid.starts_with(&prefix),
             "server-assigned resource should be unique ws-* value: {jid}"
         );
+        assert!(matches!(
+            &conn.phase,
+            ConnectionPhase::Ready {
+                full_jid,
+                resumed: false,
+                ..
+            } if full_jid.to_string() == jid
+        ));
     }
 
     #[tokio::test]
@@ -6661,9 +6850,17 @@ mod tests {
         // Session identity restored without SASL or bind frames.
         assert!(conn.authenticated);
         assert!(conn.resource_bound);
-        assert_eq!(conn.session_jid, Some(jid));
+        assert_eq!(conn.session_jid, Some(jid.clone()));
         assert!(conn.resumed);
         assert!(conn.carbons_enabled);
+        assert!(matches!(
+            &conn.phase,
+            ConnectionPhase::Ready {
+                full_jid,
+                resumed: true,
+                ..
+            } if full_jid == &jid
+        ));
     }
 
     #[tokio::test]
@@ -6733,6 +6930,108 @@ mod tests {
         // acknowledged, not the inflated post-re-record values (2, not 4).
         assert_eq!(conn.sm_state.outbound_count, 2);
         assert_eq!(conn.sm_state.queue_len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "detached_channel@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &jid,
+            "alice",
+            &None,
+        )
+        .await;
+        let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx);
+
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some(jid.clone());
+        conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        conn.sm_state
+            .enable("stream-detach".to_string(), true, Some(300));
+
+        cleanup_connection_shutdown(state.as_ref(), &conn, false).await;
+
+        assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+        let detached = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session("stream-detach")
+            .await
+            .expect("registry lookup");
+        assert!(
+            detached.is_some(),
+            "resumable transport drop must detach SM state"
+        );
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .find_nick_by_real_jid(&jid)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_shutdown_does_not_detach_explicit_close() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "closing_channel@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+        let _ = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &jid,
+            "alice",
+            &None,
+        )
+        .await;
+        let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx);
+
+        let mut conn = LegacyConnState::new();
+        conn.authenticated = true;
+        conn.resource_bound = true;
+        conn.session_jid = Some(jid.clone());
+        conn.phase = ConnectionPhase::Closing;
+        conn.sm_state
+            .enable("stream-close".to_string(), true, Some(300));
+
+        cleanup_connection_shutdown(state.as_ref(), &conn, false).await;
+
+        assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+        let detached = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .take_session("stream-close")
+            .await
+            .expect("registry lookup");
+        assert!(
+            detached.is_none(),
+            "explicit <close/> must not leave a resumable detached session behind"
+        );
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .find_nick_by_real_jid(&jid)
+            .is_none());
     }
 
     #[tokio::test]

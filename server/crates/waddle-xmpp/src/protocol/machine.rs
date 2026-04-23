@@ -201,10 +201,10 @@ impl XmppStateMachine {
     }
 
     fn on_frame(&mut self, frame: InboundFrame) -> Vec<OutboundEvent> {
-        // Stream-framing acknowledgements (Open/Close) become the transport
-        // adapter's responsibility in later migration steps. For now we
-        // treat them as no-ops so the machine can be driven end-to-end in
-        // tests without auth/bind wiring.
+        // Stream-framing acknowledgements remain the transport adapter's
+        // responsibility, but the machine still tracks lifecycle intent so
+        // later typed cleanup can distinguish an explicit `<close/>` from an
+        // unexpected transport drop.
         //
         // SASL Auth/SaslResponse are recognised by the frame parser but
         // their handling (SCRAM challenge/response, OAUTHBEARER validation)
@@ -212,7 +212,11 @@ impl XmppStateMachine {
         // and dropped so the existing WebSocket auth code keeps owning the
         // flow end-to-end.
         match frame {
-            InboundFrame::Open | InboundFrame::Close => Vec::new(),
+            InboundFrame::Open => Vec::new(),
+            InboundFrame::Close => {
+                self.phase = ConnectionPhase::Closing;
+                Vec::new()
+            }
             InboundFrame::Auth { mechanism, .. } => vec![OutboundEvent::Log {
                 level: Level::DEBUG,
                 message: format!(
@@ -233,7 +237,10 @@ impl XmppStateMachine {
         // violations and get logged.
         let full_jid = match &self.phase {
             ConnectionPhase::Ready { full_jid, .. } => full_jid,
-            ConnectionPhase::Unauthenticated => {
+            ConnectionPhase::Unauthenticated
+            | ConnectionPhase::ScramPending { .. }
+            | ConnectionPhase::Authenticated { .. }
+            | ConnectionPhase::Closing => {
                 return vec![OutboundEvent::Log {
                     level: Level::WARN,
                     message: format!(
@@ -285,8 +292,6 @@ pub(crate) mod test_support {
 
     use super::*;
     use jid::FullJid;
-    use std::collections::HashSet;
-
     /// Construct a machine already in the `Ready` phase, for unit tests that
     /// want to exercise stanza dispatch without going through the full auth
     /// + bind flow.
@@ -296,10 +301,7 @@ pub(crate) mod test_support {
         dispatcher: StanzaDispatcher,
     ) -> XmppStateMachine {
         XmppStateMachine {
-            phase: ConnectionPhase::Ready {
-                full_jid,
-                joined_rooms: HashSet::new(),
-            },
+            phase: ConnectionPhase::ready(full_jid, false),
             domain: domain.into(),
             dispatcher,
             next_callback: 0,
@@ -408,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn open_and_close_frames_are_noops() {
+    fn open_frame_is_noop_and_close_enters_closing_phase() {
         let mut sm = XmppStateMachine::new("waddle.social", StanzaDispatcher::new());
         assert!(sm
             .handle(InboundEvent::FrameReceived(InboundFrame::Open))
@@ -416,6 +418,7 @@ mod tests {
         assert!(sm
             .handle(InboundEvent::FrameReceived(InboundFrame::Close))
             .is_empty());
+        assert!(matches!(sm.phase(), ConnectionPhase::Closing));
     }
 
     #[test]
