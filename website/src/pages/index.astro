@@ -68,14 +68,6 @@ const idleMessage = turnstileConfigured
 				data-waitlist-panel
 				aria-hidden={waitlistStartsOpen ? "false" : "true"}
 			>
-				<div class="waitlist-copy">
-					<p class="waitlist-kicker">private beta, public signal</p>
-					<p class="waitlist-teaser">
-						Leave an address and we’ll send one confirmation note first. No public
-						roster, no surprise blasts, and no “already on the list” tells.
-					</p>
-				</div>
-
 				<div class="waitlist-control">
 					<form
 						id="waitlist-form"
@@ -151,7 +143,6 @@ const idleMessage = turnstileConfigured
 	<script
 		is:inline
 		src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=waddleTurnstileOnLoad"
-		defer
 	></script>
 
 	<script>
@@ -210,23 +201,20 @@ const idleMessage = turnstileConfigured
 
 		const waitForTurnstile = async () => {
 			if (window.turnstile) {
-				await new Promise<void>((resolve) => {
-					window.turnstile?.ready(() => resolve());
-				});
 				return true;
 			}
 
 			return await new Promise<boolean>((resolve) => {
-				const timeoutId = window.setTimeout(() => resolve(false), 4000);
+				const onReady = () => {
+					window.clearTimeout(timeoutId);
+					resolve(Boolean(window.turnstile));
+				};
+				const timeoutId = window.setTimeout(() => {
+					window.removeEventListener("waddle:turnstile-ready", onReady);
+					resolve(false);
+				}, 4000);
 
-				window.addEventListener(
-					"waddle:turnstile-ready",
-					() => {
-						window.clearTimeout(timeoutId);
-						window.turnstile?.ready(() => resolve(true));
-					},
-					{ once: true },
-				);
+				window.addEventListener("waddle:turnstile-ready", onReady, { once: true });
 			});
 		};
 
