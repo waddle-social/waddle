@@ -64,6 +64,7 @@ impl FromStr for ObjectType {
 pub enum SubjectType {
     User,
     Space,
+    Channel,
     Role,
 }
 
@@ -72,6 +73,7 @@ impl fmt::Display for SubjectType {
         match self {
             SubjectType::User => write!(f, "user"),
             SubjectType::Space => write!(f, "space"),
+            SubjectType::Channel => write!(f, "channel"),
             SubjectType::Role => write!(f, "role"),
         }
     }
@@ -84,6 +86,7 @@ impl FromStr for SubjectType {
         match s.to_lowercase().as_str() {
             "user" => Ok(SubjectType::User),
             "space" => Ok(SubjectType::Space),
+            "channel" => Ok(SubjectType::Channel),
             "role" => Ok(SubjectType::Role),
             _ => Err(PermissionError::InvalidSubject(format!(
                 "Unknown subject type: {}",

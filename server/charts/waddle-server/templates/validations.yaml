@@ -7,3 +7,13 @@
 {{- if and .Values.persistence.enabled (gt (int .Values.replicaCount) 1) (has "ReadWriteOnce" .Values.persistence.accessModes) (not .Values.persistence.allowUnsafeRwoScale) -}}
 {{- fail "replicaCount > 1 with persistence.accessModes containing ReadWriteOnce is usually unschedulable. Use ReadWriteMany/ReadOnlyMany, disable persistence, or set persistence.allowUnsafeRwoScale=true if your storage backend supports it." -}}
 {{- end -}}
+
+{{- if .Values.spicedb.enabled -}}
+{{- if not .Values.spicedb.endpoint -}}
+{{- fail "spicedb.endpoint is required when spicedb.enabled is true" -}}
+{{- end -}}
+{{- $spicedbKey := coalesce .Values.secret.spicedbPresharedKey "" -}}
+{{- if not $spicedbKey -}}
+{{- fail "secret.spicedbPresharedKey is required when spicedb.enabled is true" -}}
+{{- end -}}
+{{- end -}}

@@ -189,6 +189,7 @@ impl PermissionChecker {
                         match tuple_subject.subject_type {
                             SubjectType::User => continue, // Users can't be usersets
                             SubjectType::Space => ObjectType::Space,
+                            SubjectType::Channel => ObjectType::Channel,
                             SubjectType::Role => ObjectType::Role,
                         },
                         &tuple_subject.id,
@@ -258,6 +259,7 @@ impl PermissionChecker {
                                     match tuple_subject.subject_type {
                                         SubjectType::User => continue,
                                         SubjectType::Space => ObjectType::Space,
+                                        SubjectType::Channel => ObjectType::Channel,
                                         SubjectType::Role => ObjectType::Role,
                                     },
                                     &tuple_subject.id,
@@ -325,6 +327,7 @@ impl PermissionChecker {
                             match tuple.subject.subject_type {
                                 SubjectType::User => continue, // Users can't be parent objects
                                 SubjectType::Space => ObjectType::Space,
+                                SubjectType::Channel => ObjectType::Channel,
                                 SubjectType::Role => ObjectType::Role,
                             },
                             &tuple.subject.id,

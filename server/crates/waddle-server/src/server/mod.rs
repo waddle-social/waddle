@@ -2,6 +2,7 @@ use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::ServerConfig;
 use crate::db::{DatabasePool, PoolHealth};
 use crate::inbox::build_inbox_storage;
+use crate::permissions::PermissionActor;
 use anyhow::Result;
 use axum::{
     extract::State,
@@ -11,6 +12,7 @@ use axum::{
     Router,
 };
 use futures::StreamExt;
+use kameo::actor::ActorRef;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
 use routes::auth::AuthState;
@@ -67,6 +69,8 @@ pub struct AppState {
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
     /// Shared XEP-0430 inbox projection storage.
     pub inbox_storage: Arc<dyn InboxStorage>,
+    /// Shared permission actor handle.
+    pub permission_actor: ActorRef<PermissionActor>,
 }
 
 impl AppState {
@@ -78,10 +82,14 @@ impl AppState {
     pub fn new(db_pool: Arc<DatabasePool>) -> Self {
         let blob_storage = crate::storage::build_blob_storage()
             .unwrap_or_else(|e| panic!("failed to initialize blob storage: {e}"));
+        let permission_actor = kameo::spawn(PermissionActor::new_for_tests(Arc::new(
+            db_pool.global().clone(),
+        )));
         Self::new_with_deps(
             db_pool,
             blob_storage,
             Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
+            permission_actor,
         )
     }
 
@@ -89,11 +97,13 @@ impl AppState {
         db_pool: Arc<DatabasePool>,
         blob_storage: Arc<dyn crate::storage::BlobStorage>,
         inbox_storage: Arc<dyn InboxStorage>,
+        permission_actor: ActorRef<PermissionActor>,
     ) -> Self {
         Self {
             db_pool,
             blob_storage,
             inbox_storage,
+            permission_actor,
         }
     }
 }
@@ -423,6 +433,13 @@ pub async fn start_with_config(
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
+    let global_db = Arc::new(db_pool.global().clone());
+    let permission_actor_impl = PermissionActor::from_server_config(&server_config).await?;
+    info!(
+        backend = permission_actor_impl.backend_name(),
+        "Permission backend configured"
+    );
+    let permission_actor = kameo::spawn(permission_actor_impl);
     let inbox_storage = build_inbox_storage(xmpp_config.inbox_database_url.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?;
@@ -432,8 +449,9 @@ pub async fn start_with_config(
         Some(Arc::new(
             XmppAppState::new(
                 xmpp_config.domain.clone(),
-                Arc::new(db_pool.global().clone()),
+                Arc::clone(&global_db),
                 db_pool.global_actor().clone(),
+                permission_actor.clone(),
                 encryption_key.as_ref().map(|s| s.as_bytes()),
             )
             .with_db_pool(Arc::clone(&db_pool))
@@ -450,6 +468,7 @@ pub async fn start_with_config(
         Arc::clone(&db_pool),
         blob_storage,
         Arc::clone(&inbox_storage),
+        permission_actor.clone(),
     ));
     let websocket_mam_storage =
         create_websocket_mam_storage(xmpp_config.mam_database_url.clone()).await?;
@@ -845,6 +864,7 @@ async fn create_router(
                 xmpp_domain.clone(),
                 Arc::new(state.db_pool.global().clone()),
                 state.db_pool.global_actor().clone(),
+                state.permission_actor.clone(),
                 encryption_key.as_ref().map(|s| s.as_bytes()),
             )
             .with_db_pool(Arc::clone(&state.db_pool)),

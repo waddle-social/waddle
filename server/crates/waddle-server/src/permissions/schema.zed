@@ -1,0 +1,63 @@
+// waddle-schema-version: 1
+definition user {}
+
+definition space {
+  relation owner: user
+  relation admin: user | owner
+  relation moderator: user | admin
+  relation member: user | moderator
+
+  permission delete = owner
+  permission manage_settings = admin
+  permission manage_roles = admin
+  permission manage_members = admin + moderator
+  permission create_channel = admin
+  permission update = admin
+  permission view = member
+}
+
+definition channel {
+  relation parent: space
+  relation manager: user | parent->admin
+  relation moderator: user | parent->moderator | manager
+  relation writer: user | parent->member | moderator
+  relation viewer: user | writer
+
+  permission delete = parent->admin
+  permission manage = manager
+  permission moderate = moderator
+  permission send_message = writer
+  permission read = viewer
+  permission view = viewer
+}
+
+definition message {
+  relation channel: channel
+  relation author: user
+
+  permission edit = author
+  permission delete = author + channel->moderate
+  permission react = channel->view
+  permission read = channel->view
+}
+
+definition dm {
+  relation participant: user
+  relation owner: user
+
+  permission read = participant
+  permission send = participant
+  permission manage = owner
+  permission add_participant = owner
+  permission leave = participant
+}
+
+definition role {
+  relation space: space
+  relation member: user
+  relation manager: user | space->admin
+
+  permission assign = manager
+  permission delete = manager
+  permission edit = manager
+}

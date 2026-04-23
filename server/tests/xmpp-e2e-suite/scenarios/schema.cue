@@ -44,11 +44,14 @@ package xmpp_e2e_suite
 #ExpectContains: {
 	target:   #ActorRef
 	contains: [...string] & [string, ...string]
+	until:    *"</message>" | string
 	let targetRef = target
 	let containsRef = contains
+	let untilRef = until
 	expectStanza: {
 		target:   targetRef
 		contains: containsRef
+		until:    untilRef
 		...
 	}
 	...
@@ -68,5 +71,26 @@ package xmpp_e2e_suite
 		minRows: minRowsRef
 		...
 	}
+	...
+}
+
+#ChannelFixture: {
+	waddleId:   string
+	channelId:  string
+	channelName: string
+	channelType: string
+	...
+}
+
+#PermissionGrant: {
+	resource: string
+	relation: string
+	subject:  string
+	...
+}
+
+#ScenarioFixtures: {
+	channels?: [...#ChannelFixture]
+	permissionGrants?: [...#PermissionGrant]
 	...
 }

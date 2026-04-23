@@ -7,6 +7,8 @@ use std::collections::HashMap;
 
 use super::tuple::ObjectType;
 
+pub const SPICEDB_SCHEMA: &str = include_str!("schema.zed");
+
 /// How a permission is computed
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComputedPermission {
@@ -135,6 +137,10 @@ impl PermissionSchema {
             .get(&object_type)
             .and_then(|s| s.get_permission(permission))
     }
+
+    pub fn spicedb_schema(&self) -> &'static str {
+        SPICEDB_SCHEMA
+    }
 }
 
 impl Default for PermissionSchema {
@@ -158,50 +164,75 @@ fn space_schema() -> ObjectTypeSchema {
         .with_relation("moderator")
         .with_relation("member")
         // Permissions
+        .with_permission("owner", ComputedPermission::direct("owner"))
+        .with_permission(
+            "admin",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "moderator",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
+        .with_permission(
+            "member",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
         .with_permission("delete", ComputedPermission::direct("owner"))
         .with_permission(
             "manage_settings",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "manage_roles",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "manage_members",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
                 ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "create_channel",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "view",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
-                ComputedPermission::direct("admin"),
-                ComputedPermission::direct("moderator"),
                 ComputedPermission::direct("member"),
+                ComputedPermission::direct("moderator"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
         .with_permission(
             "update",
             ComputedPermission::union(vec![
-                ComputedPermission::direct("owner"),
                 ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
             ]),
         )
 }
@@ -354,6 +385,19 @@ mod tests {
         assert!(space_schema.get_permission("delete").is_some());
         assert!(space_schema.get_permission("view").is_some());
         assert!(space_schema.get_permission("invalid").is_none());
+    }
+
+    #[test]
+    fn test_spicedb_schema_embedded() {
+        let schema = PermissionSchema::default();
+        let spicedb = schema.spicedb_schema();
+
+        assert!(spicedb.contains("definition waddle"));
+        assert!(spicedb.contains("relation admin: user | owner"));
+        assert!(spicedb.contains("relation moderator: user | admin"));
+        assert!(spicedb.contains("relation member: user | moderator"));
+        assert!(spicedb.contains("permission edit = author"));
+        assert!(spicedb.contains("permission delete = author + channel->moderate"));
     }
 
     #[test]

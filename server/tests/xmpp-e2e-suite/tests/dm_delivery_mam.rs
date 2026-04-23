@@ -38,6 +38,10 @@ struct FileBackedMamTestServer {
 
 impl FileBackedMamTestServer {
     async fn start() -> Self {
+        Self::start_with_state(Arc::new(common::MockAppState::new("localhost"))).await
+    }
+
+    async fn start_with_state<S: AppState>(app_state: Arc<S>) -> Self {
         common::install_crypto_provider();
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -52,7 +56,6 @@ impl FileBackedMamTestServer {
         let mam_db_path = temp_dir.path().join("mam.db");
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let app_state = Arc::new(common::MockAppState::new(&domain));
 
         tokio::spawn(run_test_server(
             listener,
@@ -435,8 +438,37 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+fn build_scenario_app_state(scenario: &Scenario) -> common::MockAppState {
+    let mut app_state = common::MockAppState::new("localhost");
+    for channel in &scenario.fixtures.channels {
+        let details = waddle_xmpp::WaddleDetails {
+            id: channel.waddle_id.clone(),
+            name: channel.waddle_id.clone(),
+            description: None,
+            owner_id: "user-test-alice".to_string(),
+            icon_url: None,
+            is_public: false,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let channel_info = waddle_xmpp::ChannelInfo {
+            id: channel.channel_id.clone(),
+            name: channel.channel_name.clone(),
+            channel_type: channel.channel_type.clone(),
+        };
+        app_state = app_state.with_waddle(details, vec![channel_info]);
+    }
+
+    for grant in &scenario.fixtures.permission_grants {
+        app_state =
+            app_state.with_permission_grant(&grant.resource, &grant.relation, &grant.subject);
+    }
+
+    app_state
+}
+
 async fn run_scenario(scenario: &Scenario) -> Result<()> {
-    let server = FileBackedMamTestServer::start().await;
+    let app_state = Arc::new(build_scenario_app_state(scenario));
+    let server = FileBackedMamTestServer::start_with_state(app_state).await;
     let mut clients: HashMap<String, common::RawXmppClient> = HashMap::new();
 
     for (user_key, user) in &scenario.users {
@@ -554,7 +586,7 @@ async fn execute_step(
             .get_mut(target.as_str())
             .ok_or_else(|| anyhow!("unknown target '{}'", target))?;
         let received = client
-            .read_until("</message>", common::DEFAULT_TIMEOUT)
+            .read_until(expect_stanza.until.as_str(), common::DEFAULT_TIMEOUT)
             .await?;
         for expected in &expect_stanza.contains {
             if !received.contains(expected) {
