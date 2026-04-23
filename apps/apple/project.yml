@@ -26,9 +26,11 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Waddle
-        PRODUCT_BUNDLE_IDENTIFIER: social.waddle.ios
+        PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
   Waddle-macOS:
@@ -46,7 +48,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Waddle
-        PRODUCT_BUNDLE_IDENTIFIER: social.waddle.macos
+        PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
 schemes:

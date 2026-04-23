@@ -402,14 +402,6 @@ struct WaddleDetailView: View {
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
 #endif
-        .overlay(alignment: .bottomLeading) {
-            if !model.errorMessage.isEmpty {
-                Text(model.errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .padding()
-            }
-        }
     }
 }
 

@@ -1042,6 +1042,17 @@ final class AppModel: ObservableObject {
             updateChatSurfaceState()
             return
         }
+        guard joinedWaddleIDs.contains(waddleID) else {
+            dlog(" loadStructure: skipping discovery for unjoined waddle \(waddleID)")
+            channels = []
+            members = []
+            selectedChannelID = nil
+            syncChatRooms()
+            syncChatMembers()
+            syncChatMessages()
+            updateChatSurfaceState()
+            return
+        }
 
         isLoadingStructure = true
         updateChatSurfaceState()
@@ -1743,7 +1754,8 @@ final class AppModel: ObservableObject {
 
         publicWaddles = byID.values.sorted { $0.name.lowercased() < $1.name.lowercased() }
         if selectedWaddleID == nil {
-            selectedWaddleID = publicWaddles.first?.id
+            selectedWaddleID = publicWaddles.first(where: { joinedWaddleIDs.contains($0.id) })?.id
+                ?? publicWaddles.first?.id
         }
     }
 

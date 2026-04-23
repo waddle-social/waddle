@@ -7,27 +7,40 @@ struct DesktopAuthenticatedShell: View {
     @Binding var showCreateSheet: Bool
     let onShowSettings: () -> Void
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showWorkspaceSidebar = true
 
     var body: some View {
-        NavigationSplitView {
-            DesktopWorkspaceSidebar(
+        HStack(spacing: 0) {
+            DesktopWorkspaceRail(
                 model: model,
-                showCreateSheet: $showCreateSheet,
+                showWorkspaceSidebar: $showWorkspaceSidebar,
                 onShowSettings: onShowSettings
             )
-            .navigationSplitViewColumnWidth(
-                min: AppConfig.desktopSidebarMinWidth,
-                ideal: AppConfig.desktopSidebarIdealWidth,
-                max: AppConfig.desktopSidebarMaxWidth
-            )
-        } detail: {
+
+            if showWorkspaceSidebar {
+                DesktopWorkspaceSidebar(
+                    model: model,
+                    showCreateSheet: $showCreateSheet,
+                    onShowSettings: onShowSettings
+                )
+                .frame(
+                    minWidth: AppConfig.desktopSidebarMinWidth,
+                    idealWidth: AppConfig.desktopSidebarIdealWidth,
+                    maxWidth: AppConfig.desktopSidebarMaxWidth
+                )
+
+                Divider()
+                    .overlay(Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.05))
+            }
+
             DesktopWorkspaceStage(
                 model: model,
                 showCreateSheet: $showCreateSheet,
                 onShowSettings: onShowSettings
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationSplitViewStyle(.balanced)
+        .animation(.easeOut(duration: 0.18), value: showWorkspaceSidebar)
         .background(shellBackdrop.ignoresSafeArea())
         .sheet(isPresented: $showCreateSheet) {
             CreateWaddleSheet(model: model)
@@ -47,6 +60,78 @@ struct DesktopAuthenticatedShell: View {
                 endPoint: .bottomTrailing
             )
         }
+    }
+}
+
+private struct DesktopWorkspaceRail: View {
+    @ObservedObject var model: AppModel
+    @Binding var showWorkspaceSidebar: Bool
+    let onShowSettings: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    showWorkspaceSidebar.toggle()
+                }
+            } label: {
+                Image(systemName: showWorkspaceSidebar ? "sidebar.left" : "sidebar.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 8) {
+                    ForEach(model.publicWaddles.prefix(10)) { waddle in
+                        let initial = waddle.name.first.map { String($0).uppercased() } ?? "?"
+                        Button {
+                            Task { await model.selectWaddle(waddle.id) }
+                        } label: {
+                            Text(initial)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(model.selectedWaddleID == waddle.id ? Color.accentColor : .secondary)
+                                .frame(width: 30, height: 30)
+                                .background(
+                                    (model.selectedWaddleID == waddle.id
+                                        ? Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.12)
+                                        : Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.025)),
+                                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                Task { await model.refreshPublicWaddles() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onShowSettings) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 10)
+        .frame(width: 46)
+        .frame(maxHeight: .infinity)
+        .background(Color(nsColor: colorScheme == .dark ? .underPageBackgroundColor : .controlBackgroundColor))
     }
 }
 
@@ -277,14 +362,6 @@ private struct DesktopWorkspaceSidebar: View {
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 16)
-
-            if !model.errorMessage.isEmpty {
-                Text(model.errorMessage)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-            }
         }
         .padding(.bottom, 16)
     }
@@ -438,18 +515,6 @@ private struct DesktopWorkspaceStage: View {
             utilityBar
 
             WaddleDetailView(model: model)
-                .clipShape(RoundedRectangle(cornerRadius: AppConfig.desktopPanelCornerRadius, style: .continuous))
-                .background(panelBackground, in: RoundedRectangle(cornerRadius: AppConfig.desktopPanelCornerRadius, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: AppConfig.desktopPanelCornerRadius, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06))
-                }
-                .shadow(
-                    color: colorScheme == .dark ? .clear : Color.black.opacity(0.06),
-                    radius: 22,
-                    x: 0,
-                    y: 10
-                )
         }
         .padding(12)
     }
@@ -509,10 +574,6 @@ private struct DesktopWorkspaceStage: View {
             return "\(model.channels.count) live channels · \(serverLabel)"
         }
         return "Select a waddle from the sidebar to open live rooms on \(serverLabel)."
-    }
-
-    private var panelBackground: Color {
-        Color(nsColor: colorScheme == .dark ? .windowBackgroundColor : .textBackgroundColor)
     }
 }
 
@@ -620,4 +681,5 @@ private struct DesktopBannerChip: View {
         }
     }
 }
+
 #endif

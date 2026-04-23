@@ -28,15 +28,22 @@ struct WaddleChatWorkspaceView: View {
     @State private var newTopicTitle = ""
     @State private var newTopicBody = ""
     @State private var forumReplyText = ""
+    @State private var showDesktopChannelRail = true
+    @State private var showDesktopMemberPane = false
+    @AppStorage(AppConfig.scrollDirectionKey) private var scrollDirectionRaw = ChatScrollDirection.chat.rawValue
 
     private var isForumChannel: Bool {
         model.selectedChannel?.channelType == "forum"
     }
 
+    private var isSocialMode: Bool {
+        ChatScrollDirection(rawValue: scrollDirectionRaw) == .social
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let compactLayout = proxy.size.width < 760
-            let showMembersInline = proxy.size.width > 1040
+            let showMembersInline = proxy.size.width > 1280
 
             Group {
                 if compactLayout {
@@ -279,19 +286,29 @@ struct WaddleChatWorkspaceView: View {
     @ViewBuilder
     private func regularLayout(showMembersInline: Bool) -> some View {
 #if os(macOS)
-        HStack(spacing: 16) {
-            desktopChannelRail
-                .frame(minWidth: 260, idealWidth: 280, maxWidth: 310)
+        HStack(spacing: 10) {
+            if showDesktopChannelRail {
+                desktopChannelRail
+                    .frame(minWidth: 210, idealWidth: 224, maxWidth: 236)
+            } else {
+                desktopCollapsedChannelRail
+                    .frame(width: 44)
+            }
 
             desktopConversationPane(showMembersInline: showMembersInline)
                 .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity)
 
             if showMembersInline {
-                desktopMemberPane
-                    .frame(width: 280)
+                if showDesktopMemberPane {
+                    desktopMemberPane
+                        .frame(width: 220)
+                } else {
+                    desktopCollapsedMemberRail
+                        .frame(width: 44)
+                }
             }
         }
-        .padding(18)
+        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 #else
         VStack(spacing: 0) {
@@ -512,66 +529,45 @@ struct WaddleChatWorkspaceView: View {
 
     private var desktopChannelRail: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Workspace")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-
-                HStack(alignment: .top, spacing: 12) {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.14))
-                        .frame(width: 44, height: 44)
-                        .overlay {
-                            Image(systemName: "bubble.left.and.bubble.right.fill")
-                                .font(.headline.weight(.semibold))
-                                .foregroundColor(Color.accentColor)
-                        }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(waddle.name)
-                            .font(.title3.weight(.semibold))
-                            .lineLimit(2)
-
-                        if let description = waddle.description, !description.isEmpty {
-                            Text(description)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(3)
-                        }
-                    }
-
-                    Spacer(minLength: 0)
-
-                    Button {
-                        editWaddleName = waddle.name
-                        editWaddleDescription = waddle.description ?? ""
-                        showWaddleSettingsSheet = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(waddle.name)
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(1)
+                    Text("\(store.rooms.count) channels · \(model.members.count) people")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
-                HStack(spacing: 8) {
-                    desktopSidebarStat(title: "Channels", value: store.rooms.count)
-                    desktopSidebarStat(title: "People", value: model.members.count)
-                }
+                Spacer(minLength: 0)
 
-                HStack(spacing: 10) {
-                    joinButton
-                    Spacer(minLength: 0)
-                    if model.isLoadingStructure {
-                        Label("Syncing", systemImage: "arrow.triangle.2.circlepath")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(.secondary)
+                joinButton
+
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        showDesktopChannelRail = false
                     }
+                } label: {
+                    Image(systemName: "sidebar.leading")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
+
+                Button {
+                    editWaddleName = waddle.name
+                    editWaddleDescription = waddle.description ?? ""
+                    showWaddleSettingsSheet = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .padding(18)
-            .background(desktopPaneBackground)
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .center) {
@@ -595,10 +591,6 @@ struct WaddleChatWorkspaceView: View {
                         .padding(.vertical, 4)
                         .background(.quaternary.opacity(0.7), in: Capsule())
                 }
-
-                Text("Focused rooms with live activity and quick switching.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 18)
             .padding(.top, 2)
@@ -688,15 +680,21 @@ struct WaddleChatWorkspaceView: View {
                 bannerState: store.bannerState,
                 memberCount: model.chatMembers.count,
                 messageCount: store.messages.count,
-                showsMemberButton: !showMembersInline,
-                onShowMembers: !showMembersInline ? { showMembersSheet = true } : nil,
+                showsMemberButton: !showMembersInline || !showDesktopMemberPane,
+                onShowMembers: {
+                    if showMembersInline {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            showDesktopMemberPane = true
+                        }
+                    } else {
+                        showMembersSheet = true
+                    }
+                },
                 usesOperationalChrome: true
             )
-            .padding(12)
-            .padding(.bottom, 4)
-
-            Divider()
-                .padding(.horizontal, 12)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
             desktopConversationContent
         }
@@ -824,6 +822,13 @@ struct WaddleChatWorkspaceView: View {
     @ViewBuilder
     private var regularChatContent: some View {
         VStack(spacing: 0) {
+            if isSocialMode {
+                regularComposer
+                ChatTypingIndicatorView(typingUsers: store.typingUsers)
+                Divider()
+                    .padding(.horizontal, 12)
+            }
+
             ChatTimelineView(
                 messages: store.mainTimelineMessages,
                 historyState: store.roomHistoryState,
@@ -841,33 +846,12 @@ struct WaddleChatWorkspaceView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            ChatTypingIndicatorView(typingUsers: store.typingUsers)
-
-            Divider()
-                .padding(.horizontal, 12)
-
-            ChatComposerView(
-                text: $store.composerText,
-                placeholder: model.selectedChannel == nil ? "Select a channel" : "Message #\(model.selectedChannel?.name ?? "channel")",
-                isSending: store.isSendingMessage,
-                canSend: model.selectedChannel != nil,
-                replyingToMessage: store.replyingToMessage,
-                onCancelReply: { store.setReplyingTo(nil) },
-                onFileSelected: { data, name, type in
-                    Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
-                },
-                onGifSelected: { url in
-                    store.composerText = url
-                    Task { await store.sendComposerMessage() }
-                },
-                isUploadingFile: model.isUploadingFile,
-                mentionSuggestions: mentionSuggestions,
-                onMentionQueryChanged: { query in store.mentionQuery = query }
-                ) {
-                    Task { await store.sendComposerMessage() }
-                }
-                .onChange(of: store.composerText) { _, _ in model.notifyComposing() }
-                .padding(12)
+            if !isSocialMode {
+                ChatTypingIndicatorView(typingUsers: store.typingUsers)
+                Divider()
+                    .padding(.horizontal, 12)
+                regularComposer
+            }
         }
     }
 
@@ -893,6 +877,12 @@ struct WaddleChatWorkspaceView: View {
         case .idle:
             return AnyView(
                 VStack(spacing: 0) {
+                    if isSocialMode {
+                        compactComposer
+                        ChatTypingIndicatorView(typingUsers: store.typingUsers)
+                        Divider()
+                    }
+
                     ChatTimelineView(
                         messages: store.mainTimelineMessages,
                         historyState: store.roomHistoryState,
@@ -910,35 +900,64 @@ struct WaddleChatWorkspaceView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    ChatTypingIndicatorView(typingUsers: store.typingUsers)
-
-                    Divider()
-
-                    ChatComposerView(
-                        text: $store.composerText,
-                        placeholder: model.selectedChannel == nil ? "Select a channel" : "Message #\(model.selectedChannel?.name ?? "channel")",
-                        isSending: store.isSendingMessage,
-                        canSend: model.selectedChannel != nil,
-                        channelName: model.selectedChannel?.name,
-                        replyingToMessage: store.replyingToMessage,
-                        onCancelReply: { store.setReplyingTo(nil) },
-                        onFileSelected: { data, name, type in
-                            Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
-                        },
-                        onGifSelected: { url in
-                            store.composerText = url
-                            Task { await store.sendComposerMessage() }
-                        },
-                        isUploadingFile: model.isUploadingFile,
-                        mentionSuggestions: mentionSuggestions,
-                        onMentionQueryChanged: { query in store.mentionQuery = query }
-                    ) {
-                        Task { await store.sendComposerMessage() }
+                    if !isSocialMode {
+                        ChatTypingIndicatorView(typingUsers: store.typingUsers)
+                        Divider()
+                        compactComposer
                     }
-                    .onChange(of: store.composerText) { _, _ in model.notifyComposing() }
                 }
             )
         }
+    }
+
+    private var regularComposer: some View {
+        ChatComposerView(
+            text: $store.composerText,
+            placeholder: model.selectedChannel == nil ? "Select a channel" : "Message #\(model.selectedChannel?.name ?? "channel")",
+            isSending: store.isSendingMessage,
+            canSend: model.selectedChannel != nil,
+            replyingToMessage: store.replyingToMessage,
+            onCancelReply: { store.setReplyingTo(nil) },
+            onFileSelected: { data, name, type in
+                Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+            },
+            onGifSelected: { url in
+                store.composerText = url
+                Task { await store.sendComposerMessage() }
+            },
+            isUploadingFile: model.isUploadingFile,
+            mentionSuggestions: mentionSuggestions,
+            onMentionQueryChanged: { query in store.mentionQuery = query }
+        ) {
+            Task { await store.sendComposerMessage() }
+        }
+        .onChange(of: store.composerText) { _, _ in model.notifyComposing() }
+        .padding(12)
+    }
+
+    private var compactComposer: some View {
+        ChatComposerView(
+            text: $store.composerText,
+            placeholder: model.selectedChannel == nil ? "Select a channel" : "Message #\(model.selectedChannel?.name ?? "channel")",
+            isSending: store.isSendingMessage,
+            canSend: model.selectedChannel != nil,
+            channelName: model.selectedChannel?.name,
+            replyingToMessage: store.replyingToMessage,
+            onCancelReply: { store.setReplyingTo(nil) },
+            onFileSelected: { data, name, type in
+                Task { await model.uploadAndSendFile(data: data, fileName: name, mediaType: type) }
+            },
+            onGifSelected: { url in
+                store.composerText = url
+                Task { await store.sendComposerMessage() }
+            },
+            isUploadingFile: model.isUploadingFile,
+            mentionSuggestions: mentionSuggestions,
+            onMentionQueryChanged: { query in store.mentionQuery = query }
+        ) {
+            Task { await store.sendComposerMessage() }
+        }
+        .onChange(of: store.composerText) { _, _ in model.notifyComposing() }
     }
 
     private var desktopMemberPane: some View {
@@ -950,6 +969,16 @@ struct WaddleChatWorkspaceView: View {
                 HStack {
                     Text("Members")
                         .font(.headline)
+                    Button {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            showDesktopMemberPane = false
+                        }
+                    } label: {
+                        Image(systemName: "sidebar.trailing")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
                     Spacer(minLength: 12)
                     Text("\(model.chatMembers.count)")
                         .font(.caption.weight(.semibold))
@@ -991,6 +1020,58 @@ struct WaddleChatWorkspaceView: View {
                 }
             }
         }
+        .background(desktopPaneBackground)
+    }
+
+    private var desktopCollapsedChannelRail: some View {
+        VStack(spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    showDesktopChannelRail = true
+                }
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+
+            Text("\(store.rooms.count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 18)
+                .background(.quaternary.opacity(0.65), in: Capsule())
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 12)
+        .frame(maxHeight: .infinity)
+        .background(desktopPaneBackground)
+    }
+
+    private var desktopCollapsedMemberRail: some View {
+        VStack(spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    showDesktopMemberPane = true
+                }
+            } label: {
+                Image(systemName: "person.2")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+
+            Text("\(model.chatMembers.count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 18)
+                .background(.quaternary.opacity(0.65), in: Capsule())
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 12)
+        .frame(maxHeight: .infinity)
         .background(desktopPaneBackground)
     }
 
@@ -1065,13 +1146,20 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var desktopPaneBackground: some View {
-        RoundedRectangle(cornerRadius: 26, style: .continuous)
-            .fill(.thinMaterial)
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(desktopPaneFill)
             .overlay {
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.08))
             }
-            .shadow(color: .black.opacity(0.06), radius: 18, y: 10)
+    }
+
+    private var desktopPaneFill: Color {
+#if os(iOS)
+        Color(.secondarySystemGroupedBackground)
+#else
+        Color(nsColor: .controlBackgroundColor)
+#endif
     }
 
     private func channelRailBackground(isSelected: Bool) -> some ShapeStyle {

@@ -1,5 +1,11 @@
 import SwiftUI
 import PhotosUI
+import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 struct ChatConversationHeaderView: View {
     let room: ChatRoomSelection?
@@ -11,66 +17,13 @@ struct ChatConversationHeaderView: View {
     var usesOperationalChrome: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: usesOperationalChrome ? 14 : 10) {
-            HStack(alignment: .top, spacing: 14) {
-                if usesOperationalChrome {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.14))
-                        .frame(width: 44, height: 44)
-                        .overlay {
-                            Image(systemName: "number")
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(Color.accentColor)
-                        }
-                }
+        VStack(alignment: .leading, spacing: usesOperationalChrome ? 8 : 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(usesOperationalChrome ? "#\(room?.title ?? "chat")" : (room?.title ?? "Chat"))
+                    .font(usesOperationalChrome ? .title3.weight(.semibold) : .title2.weight(.semibold))
 
-                VStack(alignment: .leading, spacing: usesOperationalChrome ? 6 : 4) {
-                    if usesOperationalChrome {
-                        Text("Conversation")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .textCase(.uppercase)
-                    }
-
-                    HStack(spacing: 8) {
-                        Text(room?.title ?? "Chat")
-                            .font(usesOperationalChrome ? .title3.weight(.semibold) : .title2.weight(.semibold))
-
-                        if let room, room.isMuted {
-                            headerPill(title: "Muted", systemImage: "bell.slash.fill", tint: .secondary)
-                        }
-
-                        if !usesOperationalChrome, let room, room.unreadCount > 0 {
-                            headerPill(title: "\(room.unreadCount)", systemImage: nil, tint: .secondary)
-                        }
-                    }
-
-                    if let subtitle = room?.subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .foregroundStyle(.secondary)
-                            .font(.subheadline)
-                            .lineLimit(2)
-                    } else {
-                        Text("\(memberCount) member\(memberCount == 1 ? "" : "s")")
-                            .foregroundStyle(.secondary)
-                            .font(.subheadline)
-                    }
-
-                    HStack(spacing: 8) {
-                        headerMetaLabel(systemImage: "person.2.fill", text: "\(memberCount)")
-
-                        if messageCount > 0 {
-                            headerMetaLabel(systemImage: "text.bubble.fill", text: "\(messageCount)")
-                        }
-
-                        if let room, room.unreadCount > 0, usesOperationalChrome {
-                            headerMetaLabel(systemImage: "circle.fill", text: "\(room.unreadCount) new", tint: .accentColor, emphasized: true)
-                        }
-
-                        if let lastActivityAt = room?.lastActivityAt {
-                            headerMetaLabel(systemImage: "clock", text: RelativeDateTimeFormatter().localizedString(for: lastActivityAt, relativeTo: Date()))
-                        }
-                    }
+                if let room, room.isMuted {
+                    headerPill(title: "Muted", systemImage: "bell.slash.fill", tint: .secondary)
                 }
 
                 Spacer(minLength: 12)
@@ -84,11 +37,22 @@ struct ChatConversationHeaderView: View {
                 }
             }
 
+            if let subtitle = room?.subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .foregroundStyle(.secondary)
+                    .font(.footnote)
+                    .lineLimit(2)
+            } else if usesOperationalChrome {
+                Text("\(memberCount) member\(memberCount == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+                    .font(.footnote)
+            }
+
             if bannerState.isVisible {
                 ChatConnectionBannerView(state: bannerState, usesOperationalChrome: usesOperationalChrome)
             }
         }
-        .padding(usesOperationalChrome ? 18 : 16)
+        .padding(usesOperationalChrome ? 14 : 16)
         .background(headerBackground)
     }
 
@@ -129,8 +93,8 @@ struct ChatConversationHeaderView: View {
     @ViewBuilder
     private var headerBackground: some View {
         if usesOperationalChrome {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.primary.opacity(0.04))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(0.03))
         } else {
             Color.clear
         }
@@ -637,6 +601,7 @@ struct ChatMessageRowView: View {
         HStack(spacing: 4) {
             ForEach(reactions.keys.sorted(), id: \.self) { emoji in
                 let count = reactions[emoji]?.count ?? 0
+                let senders = reactions[emoji] ?? []
                 HStack(spacing: 3) {
                     Text(emoji).font(.caption)
                     Text("\(count)").font(.caption2.weight(.medium)).foregroundStyle(WaddleTheme.textSecondary)
@@ -645,6 +610,7 @@ struct ChatMessageRowView: View {
                 .padding(.vertical, 3)
                 .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(WaddleTheme.divider))
+                .help(senders.isEmpty ? "" : senders.joined(separator: ", "))
             }
         }
     }
@@ -921,6 +887,11 @@ struct ChatComposerView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 8)
                     .onSubmit { if hasSendableText { onSend() } }
+#if os(macOS) || os(iOS)
+                    .onPasteCommand(of: [.image]) { providers in
+                        handlePastedImages(providers)
+                    }
+#endif
 
                 HStack(spacing: 18) {
                     attachmentPickerButton
@@ -1103,6 +1074,67 @@ struct ChatComposerView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func handlePastedImages(_ providers: [NSItemProvider]) {
+        guard let onFileSelected else { return }
+        for provider in providers {
+            guard let imageType = provider.registeredTypeIdentifiers
+                .compactMap({ UTType($0) })
+                .first(where: { $0.conforms(to: .image) }) else {
+#if os(macOS)
+                if provider.canLoadObject(ofClass: NSImage.self) {
+                    provider.loadObject(ofClass: NSImage.self) { object, _ in
+                        guard let image = object as? NSImage,
+                              let tiffData = image.tiffRepresentation,
+                              let bitmap = NSBitmapImageRep(data: tiffData),
+                              let pngData = bitmap.representation(using: .png, properties: [:]) else { return }
+                        let fileName = "paste-\(Int(Date().timeIntervalSince1970)).png"
+                        Task { @MainActor in
+                            onFileSelected(pngData, fileName, "image/png")
+                        }
+                    }
+                    return
+                }
+#elseif os(iOS)
+                if provider.canLoadObject(ofClass: UIImage.self) {
+                    provider.loadObject(ofClass: UIImage.self) { object, _ in
+                        guard let image = object as? UIImage,
+                              let pngData = image.pngData() else { return }
+                        let fileName = "paste-\(Int(Date().timeIntervalSince1970)).png"
+                        Task { @MainActor in
+                            onFileSelected(pngData, fileName, "image/png")
+                        }
+                    }
+                    return
+                }
+#endif
+                continue
+            }
+
+            provider.loadDataRepresentation(forTypeIdentifier: imageType.identifier) { data, _ in
+                if let data {
+                    let ext = imageType.preferredFilenameExtension ?? "png"
+                    let mime = imageType.preferredMIMEType ?? "image/png"
+                    let fileName = "paste-\(Int(Date().timeIntervalSince1970)).\(ext)"
+                    Task { @MainActor in
+                        onFileSelected(data, fileName, mime)
+                    }
+                    return
+                }
+
+                provider.loadFileRepresentation(forTypeIdentifier: imageType.identifier) { url, _ in
+                    guard let url, let fileData = try? Data(contentsOf: url) else { return }
+                    let ext = imageType.preferredFilenameExtension ?? url.pathExtension
+                    let mime = imageType.preferredMIMEType ?? "image/png"
+                    let fileName = "paste-\(Int(Date().timeIntervalSince1970)).\(ext)"
+                    Task { @MainActor in
+                        onFileSelected(fileData, fileName, mime)
+                    }
+                }
+            }
+            return
         }
     }
 
@@ -1376,66 +1408,6 @@ struct ChatGifPickerView: View {
                     await fetchGifs(query: query)
                 }
             }
-
-            if isLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if results.isEmpty {
-                Text("No GIFs found")
-                    .font(.caption)
-                    .foregroundStyle(WaddleTheme.textMuted)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 4)], spacing: 4) {
-                        ForEach(results) { gif in
-                            Button {
-                                onSelect(gif.images.original.url)
-                            } label: {
-                                AsyncImage(url: URL(string: gif.images.fixed_height_small.url)) { phase in
-                                    switch phase {
-                                    case .success(let image):
-                                        image
-                                            .resizable()
-                                            .aspectRatio(contentMode: .fill)
-                                            .frame(height: 80)
-                                            .clipped()
-                                    case .empty:
-                                        WaddleTheme.surfaceRaised
-                                            .frame(height: 80)
-                                            .overlay { ProgressView() }
-                                    default:
-                                        WaddleTheme.surfaceRaised
-                                            .frame(height: 80)
-                                    }
-                                }
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(8)
-                }
-            }
-        }
-        .frame(width: 360, height: 340)
-        .background(WaddleTheme.sidebarBackground)
-        .task {
-            await fetchGifs(query: "")
-        }
-    }
-
-    private func fetchGifs(query: String) async {
-        isLoading = true
-        defer { isLoading = false }
-
-        let endpoint: String
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            endpoint = "https://api.giphy.com/v1/gifs/trending?api_key=\(apiKey)&limit=24&rating=g"
-        } else {
-            let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-            endpoint = "https://api.giphy.com/v1/gifs/search?q=\(encoded)&api_key=\(apiKey)&limit=24&rating=g"
-        }
 
             if isLoading {
                 ProgressView()
