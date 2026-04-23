@@ -20,7 +20,6 @@ use waddle_xmpp::{
     pubsub::{
         build_pubsub_error, build_pubsub_items_result, build_pubsub_publish_result,
         build_pubsub_success, is_pubsub_iq, parse_pubsub_iq, PubSubError, PubSubRequest,
-        PubSubStorage,
     },
     xep::{
         build_command_items, build_command_result, build_spaces_metadata_form,
@@ -48,6 +47,8 @@ use super::super::{
 };
 use super::presence::get_managed_channel_for_room;
 
+/// Only called from test helpers — suppress dead_code lint for binary crate.
+#[allow(dead_code)]
 pub async fn handle_iq(
     frame: &str,
     domain: &str,
