@@ -1,0 +1,70 @@
+---
+import WebsiteLayout from "../../layouts/WebsiteLayout.astro";
+import { getWaitlistRuntime } from "../../lib/waitlist/runtime";
+import { inspectConfirmToken } from "../../lib/waitlist/service";
+
+const result = Astro.url.searchParams.get("result");
+const token = Astro.url.searchParams.get("token");
+
+let mode: "ready" | "success" | "stale" = "stale";
+
+if (result === "confirmed") {
+	mode = "success";
+} else {
+	const { store } = getWaitlistRuntime();
+	mode = (await inspectConfirmToken(token, store)) === "ready" ? "ready" : "stale";
+}
+---
+
+<WebsiteLayout
+	title="Confirm Waitlist"
+	description="Confirm your Waddle waitlist request."
+	canonicalPath="/waitlist/confirm"
+	footerMode="stacked"
+>
+	<section class="action-shell">
+		<div class:list={["action-card", mode === "success" && "action-card--success"]}>
+			<p class="action-kicker">waitlist checkpoint</p>
+			<h1 class="action-title">
+				{
+					mode === "ready"
+						? "Lock in your place."
+						: mode === "success"
+							? "You’re confirmed."
+							: "That link is no longer active."
+				}
+			</h1>
+			<p class="action-copy">
+				{
+					mode === "ready"
+						? "One tap confirms that this inbox really wants Waddle beta notes."
+						: mode === "success"
+							? "Your spot is saved. When Waddle is ready, the note comes from humans@waddle.social."
+							: "Confirmation links are single-use. If you still want in, start again from the homepage."
+				}
+			</p>
+
+			{
+				mode === "ready" ? (
+					<form method="post" action="/api/waitlist/confirm" class="action-form">
+						<input type="hidden" name="token" value={token ?? ""} />
+						<div class="action-actions">
+							<button type="submit" class="action-button">
+								confirm waitlist signup
+							</button>
+							<a href="/" class="action-link">
+								back home
+							</a>
+						</div>
+					</form>
+				) : (
+					<div class="action-actions">
+						<a href="/" class="action-button action-button--ghost">
+							return to homepage
+						</a>
+					</div>
+				)
+			}
+		</div>
+	</section>
+</WebsiteLayout>

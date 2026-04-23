@@ -20,7 +20,14 @@
 		{
 			"binding": "DB",
 			"database_name": "waddle-social",
-			"database_id": "fd7af7f7-d271-4d90-a7df-7fe1fa6a3e42"
+			"database_id": "fd7af7f7-d271-4d90-a7df-7fe1fa6a3e42",
+			"migrations_dir": "drizzle"
+		}
+	],
+	"send_email": [
+		{
+			"name": "EMAIL",
+			"allowed_sender_addresses": ["humans@waddle.social"]
 		}
 	],
 	"kv_namespaces": [
