@@ -80,7 +80,7 @@ impl ExtensionManager {
                 }
             };
 
-            let wasm_path = match puller.resolve_wasm_path(module) {
+            let wasm_path = match puller.resolve_wasm_path(module).await {
                 Ok(path) => path,
                 Err(error) => {
                     warn!(
