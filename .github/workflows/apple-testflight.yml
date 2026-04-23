@@ -35,7 +35,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: WaddleXmppClientFFI-xcframework
-          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework/
+          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework
           retention-days: 30
 
       - name: Upload Swift bindings artifact
@@ -58,13 +58,46 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: WaddleXmppClientFFI-xcframework
-          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework/
+          path: apps/apple/.artifacts/xcframework
+
+      - name: Install xcframework artifact
+        run: |
+          set -euo pipefail
+          source_root="apps/apple/.artifacts/xcframework"
+          target_dir="apps/apple/Generated/WaddleXmppClientFFI.xcframework"
+          source_dir="$(find "$source_root" -type d -name 'WaddleXmppClientFFI.xcframework' -print -quit || true)"
+          if [ -z "$source_dir" ]; then
+            source_dir="$source_root"
+          fi
+
+          rm -rf "$target_dir"
+          mkdir -p "$(dirname "$target_dir")"
+          ditto "$source_dir" "$target_dir"
 
       - name: Download Swift bindings artifact
         uses: actions/download-artifact@v4
         with:
           name: WaddleXmppClientFFI-swift-bindings
-          path: apps/apple/Waddle/RustClient/
+          path: apps/apple/.artifacts/swift-bindings
+
+      - name: Install Swift bindings artifact
+        run: |
+          set -euo pipefail
+          source_root="apps/apple/.artifacts/swift-bindings"
+          swift_file="$(find "$source_root" -type f -name 'waddle_xmpp_client.swift' -print -quit || true)"
+          modulemap_file="$(find "$source_root" -type f -name 'module.modulemap' -print -quit || true)"
+
+          if [ -z "$swift_file" ] || [ -z "$modulemap_file" ]; then
+            echo "Swift bindings artifact is missing expected files"
+            find "$source_root" -maxdepth 4 -print | sort
+            exit 1
+          fi
+
+          target_root="apps/apple/Waddle/RustClient"
+          rm -rf "$target_root/Generated"
+          mkdir -p "$target_root"
+          ditto "$(dirname "$swift_file")" "$target_root/Generated"
+          cp "$modulemap_file" "$target_root/module.modulemap"
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -94,13 +127,46 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: WaddleXmppClientFFI-xcframework
-          path: apps/apple/Generated/WaddleXmppClientFFI.xcframework/
+          path: apps/apple/.artifacts/xcframework
+
+      - name: Install xcframework artifact
+        run: |
+          set -euo pipefail
+          source_root="apps/apple/.artifacts/xcframework"
+          target_dir="apps/apple/Generated/WaddleXmppClientFFI.xcframework"
+          source_dir="$(find "$source_root" -type d -name 'WaddleXmppClientFFI.xcframework' -print -quit || true)"
+          if [ -z "$source_dir" ]; then
+            source_dir="$source_root"
+          fi
+
+          rm -rf "$target_dir"
+          mkdir -p "$(dirname "$target_dir")"
+          ditto "$source_dir" "$target_dir"
 
       - name: Download Swift bindings artifact
         uses: actions/download-artifact@v4
         with:
           name: WaddleXmppClientFFI-swift-bindings
-          path: apps/apple/Waddle/RustClient/
+          path: apps/apple/.artifacts/swift-bindings
+
+      - name: Install Swift bindings artifact
+        run: |
+          set -euo pipefail
+          source_root="apps/apple/.artifacts/swift-bindings"
+          swift_file="$(find "$source_root" -type f -name 'waddle_xmpp_client.swift' -print -quit || true)"
+          modulemap_file="$(find "$source_root" -type f -name 'module.modulemap' -print -quit || true)"
+
+          if [ -z "$swift_file" ] || [ -z "$modulemap_file" ]; then
+            echo "Swift bindings artifact is missing expected files"
+            find "$source_root" -maxdepth 4 -print | sort
+            exit 1
+          fi
+
+          target_root="apps/apple/Waddle/RustClient"
+          rm -rf "$target_root/Generated"
+          mkdir -p "$target_root"
+          ditto "$(dirname "$swift_file")" "$target_root/Generated"
+          cp "$modulemap_file" "$target_root/module.modulemap"
 
       - name: Install xcodegen
         run: brew install xcodegen
