@@ -17,10 +17,16 @@ struct ChatConversationHeaderView: View {
     var usesOperationalChrome: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: usesOperationalChrome ? 8 : 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(usesOperationalChrome ? "#\(room?.title ?? "chat")" : (room?.title ?? "Chat"))
-                    .font(usesOperationalChrome ? .title3.weight(.semibold) : .title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: bannerState.isVisible ? 10 : 0) {
+            HStack(alignment: .center, spacing: 10) {
+                if usesOperationalChrome {
+                    Image(systemName: "number")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(WaddleTheme.accent)
+                }
+
+                Text(usesOperationalChrome ? (room?.title ?? "chat") : (room?.title ?? "Chat"))
+                    .font(usesOperationalChrome ? .system(size: 17, weight: .semibold) : .title2.weight(.semibold))
 
                 if let room, room.isMuted {
                     headerPill(title: "Muted", systemImage: "bell.slash.fill", tint: .secondary)
@@ -28,32 +34,70 @@ struct ChatConversationHeaderView: View {
 
                 Spacer(minLength: 12)
 
-                if showsMemberButton, let onShowMembers {
-                    Button(action: onShowMembers) {
-                        Label("Members", systemImage: "person.2.fill")
-                            .font(.footnote.weight(.medium))
+                if usesOperationalChrome {
+                    headerPill(
+                        title: memberCount == 1 ? "1 member" : "\(memberCount) members",
+                        systemImage: "person.2.fill",
+                        tint: .secondary
+                    )
+
+                    if messageCount > 0 {
+                        headerPill(
+                            title: "\(messageCount)",
+                            systemImage: "bubble.left.fill",
+                            tint: .secondary
+                        )
                     }
-                    .buttonStyle(.bordered)
+                }
+
+                if showsMemberButton, let onShowMembers {
+                    if usesOperationalChrome {
+                        Button(action: onShowMembers) {
+                            Image(systemName: "person.2")
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(width: 32, height: 32)
+                                .background(
+                                    WaddleTheme.surfaceRaised,
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Button(action: onShowMembers) {
+                            Label("Members", systemImage: "person.2.fill")
+                                .font(.footnote.weight(.medium))
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
             }
 
             if let subtitle = room?.subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .foregroundStyle(.secondary)
-                    .font(.footnote)
+                    .foregroundStyle(WaddleTheme.textSecondary)
+                    .font(usesOperationalChrome ? .system(size: 12, weight: .medium) : .footnote)
                     .lineLimit(2)
-            } else if usesOperationalChrome {
-                Text("\(memberCount) member\(memberCount == 1 ? "" : "s")")
-                    .foregroundStyle(.secondary)
-                    .font(.footnote)
             }
 
             if bannerState.isVisible {
                 ChatConnectionBannerView(state: bannerState, usesOperationalChrome: usesOperationalChrome)
             }
         }
-        .padding(usesOperationalChrome ? 14 : 16)
+        .padding(.horizontal, usesOperationalChrome ? 18 : 16)
+        .padding(.top, usesOperationalChrome ? 14 : 16)
+        .padding(.bottom, usesOperationalChrome ? 12 : 16)
         .background(headerBackground)
+        .overlay(alignment: .bottom) {
+            if usesOperationalChrome {
+                Rectangle()
+                    .fill(WaddleTheme.divider)
+                    .frame(height: 1)
+            }
+        }
     }
 
     @ViewBuilder
@@ -93,8 +137,7 @@ struct ChatConversationHeaderView: View {
     @ViewBuilder
     private var headerBackground: some View {
         if usesOperationalChrome {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.primary.opacity(0.03))
+            WaddleTheme.chatBackground
         } else {
             Color.clear
         }
@@ -893,7 +936,7 @@ struct ChatComposerView: View {
                     }
 #endif
 
-                HStack(spacing: 18) {
+                HStack(spacing: 16) {
                     attachmentPickerButton
                     gifPickerButton
                     emojiPickerButton
@@ -902,17 +945,29 @@ struct ChatComposerView: View {
 
                     Button(action: onSend) {
                         Image(systemName: "paperplane.fill")
-                            .font(.title3)
-                            .foregroundStyle(hasSendableText ? WaddleTheme.accent : WaddleTheme.textMuted)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(hasSendableText ? Color.white : WaddleTheme.textMuted)
+                            .frame(width: 34, height: 34)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(hasSendableText ? WaddleTheme.accent : WaddleTheme.surfaceRaised)
+                            )
                     }
                     .disabled(!canSend || isSending || !hasSendableText)
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
             }
-            .waddleGlass(in: .rect(cornerRadius: 16))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .background(
+                WaddleTheme.composerBackground,
+                in: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                    .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+            }
+            .padding(.horizontal, usesCompactConversationChrome ? 12 : 14)
+            .padding(.vertical, usesCompactConversationChrome ? 8 : 12)
         }
         .onChange(of: text) { _, newValue in
             updateMentionQuery(newValue)
@@ -933,7 +988,7 @@ struct ChatComposerView: View {
                                 .font(.caption.weight(.medium))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
-                                .background(Color.accentColor.opacity(0.1), in: Capsule())
+                                .background(WaddleTheme.channelSelected, in: Capsule())
                         }
                         .buttonStyle(.plain)
                     }
@@ -956,7 +1011,7 @@ struct ChatComposerView: View {
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
-                            .background(Color.secondary.opacity(0.08), in: Capsule())
+                            .background(WaddleTheme.surfaceRaised, in: Capsule())
                         }
                         .buttonStyle(.plain)
                     }
@@ -1025,9 +1080,6 @@ struct ChatComposerView: View {
     private var composerReplyPreview: some View {
         if let reply = replyingToMessage {
             HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(WaddleTheme.accent)
-                    .frame(width: 2)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Replying to \(reply.senderDisplayName)")
                         .font(.caption.weight(.semibold))
@@ -1047,7 +1099,12 @@ struct ChatComposerView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(WaddleTheme.surfaceRaised)
+            .background(
+                WaddleTheme.channelSelected,
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .padding(.horizontal, usesCompactConversationChrome ? 12 : 14)
+            .padding(.top, usesCompactConversationChrome ? 8 : 10)
         }
     }
 
@@ -1058,9 +1115,7 @@ struct ChatComposerView: View {
                     .frame(width: 20, height: 20)
             } else {
                 PhotosPicker(selection: $selectedPhoto, matching: .any(of: [.images, .videos])) {
-                    Image(systemName: "paperclip")
-                        .font(.body)
-                        .foregroundStyle(WaddleTheme.textSecondary)
+                    composerAccessoryLabel(systemName: "paperclip")
                 }
                 .buttonStyle(.plain)
                 .onChange(of: selectedPhoto) { _, newValue in
@@ -1142,9 +1197,7 @@ struct ChatComposerView: View {
         Button {
             showGifPicker.toggle()
         } label: {
-            Image(systemName: "play.rectangle")
-                .font(.body)
-                .foregroundStyle(WaddleTheme.textSecondary)
+            composerAccessoryLabel(systemName: "play.rectangle")
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showGifPicker) {
@@ -1159,9 +1212,7 @@ struct ChatComposerView: View {
         Button {
             showEmojiPicker.toggle()
         } label: {
-            Image(systemName: "face.smiling")
-                .font(.body)
-                .foregroundStyle(WaddleTheme.textSecondary)
+            composerAccessoryLabel(systemName: "face.smiling")
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showEmojiPicker) {
@@ -1170,6 +1221,18 @@ struct ChatComposerView: View {
                 showEmojiPicker = false
             }
         }
+    }
+
+    private var composerCornerRadius: CGFloat {
+        usesCompactConversationChrome ? 18 : 20
+    }
+
+    @ViewBuilder
+    private func composerAccessoryLabel(systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(WaddleTheme.textSecondary)
+            .frame(width: 28, height: 28)
     }
 
 }
@@ -1246,14 +1309,10 @@ struct ChatMemberListSection: View {
 
     private func presenceColor(for state: ChatPresenceState) -> Color {
         switch state {
-        case .available:
-            return .green
-        case .away:
-            return .orange
-        case .dnd:
-            return .red
-        case .offline, .unknown:
-            return .secondary
+        case .available: return WaddleTheme.presenceOnline
+        case .away:      return WaddleTheme.presenceAway
+        case .dnd:       return WaddleTheme.presenceDnd
+        case .offline, .unknown: return WaddleTheme.presenceOffline
         }
     }
 }
@@ -1556,7 +1615,7 @@ struct ChatDmListView: View {
                                             .foregroundStyle(.white)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
-                                            .background(Color.accentColor, in: Capsule())
+                                            .background(WaddleTheme.unreadBadge, in: Capsule())
                                     }
                                 }
                                 .padding(.horizontal, 12)
@@ -1573,10 +1632,10 @@ struct ChatDmListView: View {
 
     private func dmPresenceColor(_ state: ChatPresenceState) -> Color {
         switch state {
-        case .available: return .green
-        case .away: return .orange
-        case .dnd: return .red
-        case .offline, .unknown: return .secondary
+        case .available: return WaddleTheme.presenceOnline
+        case .away:      return WaddleTheme.presenceAway
+        case .dnd:       return WaddleTheme.presenceDnd
+        case .offline, .unknown: return WaddleTheme.presenceOffline
         }
     }
 }
@@ -1636,16 +1695,37 @@ struct ChatDmConversationView: View {
             }
 
             Divider()
+                .overlay(WaddleTheme.divider)
 
             HStack(spacing: 10) {
-                TextField("Message \(peerUsername)", text: $composerText)
-                    .textFieldStyle(.roundedBorder)
+                TextField("Message \(peerUsername)", text: $composerText, axis: .vertical)
+                    .lineLimit(1...4)
+                    .font(.body)
+                    .foregroundStyle(WaddleTheme.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
 
                 Button(action: onSend) {
                     Image(systemName: "paperplane.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? WaddleTheme.textMuted : .white)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? WaddleTheme.surfaceRaised : WaddleTheme.accent)
+                        )
                 }
                 .disabled(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .padding(.trailing, 10)
+            }
+            .background(
+                WaddleTheme.composerBackground,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(WaddleTheme.divider, lineWidth: 1)
             }
             .padding(12)
         }
@@ -1695,7 +1775,11 @@ struct ChatForumTopicListView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(12)
-                            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(WaddleTheme.divider, lineWidth: 0.5)
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -1754,7 +1838,11 @@ struct ChatForumThreadView: View {
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(WaddleTheme.ownMessageBubble, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(WaddleTheme.accent.opacity(0.15), lineWidth: 0.5)
+                    )
 
                     ForEach(replies) { reply in
                         VStack(alignment: .leading, spacing: 4) {
@@ -1777,16 +1865,37 @@ struct ChatForumThreadView: View {
             }
 
             Divider()
+                .overlay(WaddleTheme.divider)
 
             HStack(spacing: 10) {
-                TextField("Reply to thread…", text: $replyText)
-                    .textFieldStyle(.roundedBorder)
+                TextField("Reply to thread…", text: $replyText, axis: .vertical)
+                    .lineLimit(1...4)
+                    .font(.body)
+                    .foregroundStyle(WaddleTheme.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
 
                 Button(action: onSendReply) {
                     Image(systemName: "paperplane.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? WaddleTheme.textMuted : .white)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? WaddleTheme.surfaceRaised : WaddleTheme.accent)
+                        )
                 }
                 .disabled(replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .padding(.trailing, 10)
+            }
+            .background(
+                WaddleTheme.composerBackground,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(WaddleTheme.divider, lineWidth: 1)
             }
             .padding(12)
         }

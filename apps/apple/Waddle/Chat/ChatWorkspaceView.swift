@@ -4,6 +4,7 @@ struct WaddleChatWorkspaceView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: ChatSurfaceStore
     let waddle: WaddleSummary
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showMembersSheet = false
     @State private var showChannelSidebar = false
     private var mentionSuggestions: [ChatRoomMember] {
@@ -38,6 +39,14 @@ struct WaddleChatWorkspaceView: View {
 
     private var isSocialMode: Bool {
         ChatScrollDirection(rawValue: scrollDirectionRaw) == .social
+    }
+
+    private var serverLabel: String {
+        guard let host = AppConfig.normalizedServerURL(from: model.serverURLText)?.host, !host.isEmpty else {
+            return model.serverURLText.replacingOccurrences(of: "https://", with: "")
+        }
+
+        return host
     }
 
     var body: some View {
@@ -286,30 +295,48 @@ struct WaddleChatWorkspaceView: View {
     @ViewBuilder
     private func regularLayout(showMembersInline: Bool) -> some View {
 #if os(macOS)
-        HStack(spacing: 10) {
+        let shellShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+
+        HStack(spacing: 0) {
             if showDesktopChannelRail {
                 desktopChannelRail
-                    .frame(minWidth: 210, idealWidth: 224, maxWidth: 236)
+                    .frame(minWidth: 240, idealWidth: 264, maxWidth: 292)
             } else {
                 desktopCollapsedChannelRail
-                    .frame(width: 44)
+                    .frame(width: 52)
             }
+
+            Divider()
+                .overlay(WaddleTheme.divider)
 
             desktopConversationPane(showMembersInline: showMembersInline)
                 .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity)
 
             if showMembersInline {
+                Divider()
+                    .overlay(WaddleTheme.divider)
+
                 if showDesktopMemberPane {
                     desktopMemberPane
-                        .frame(width: 220)
+                        .frame(width: 240)
                 } else {
                     desktopCollapsedMemberRail
-                        .frame(width: 44)
+                        .frame(width: 52)
                 }
             }
         }
-        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(WaddleTheme.chatBackground, in: shellShape)
+        .overlay {
+            shellShape
+                .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+        }
+        .clipShape(shellShape)
+        .shadow(
+            color: .black.opacity(colorScheme == .dark ? 0.24 : 0.06),
+            radius: colorScheme == .dark ? 28 : 18,
+            y: colorScheme == .dark ? 10 : 6
+        )
 #else
         VStack(spacing: 0) {
             compactChatHeader
@@ -528,72 +555,82 @@ struct WaddleChatWorkspaceView: View {
     }
 
     private var desktopChannelRail: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                WaddleBrandMark(size: 32)
+                    .frame(width: 38, height: 38)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(WaddleTheme.surfaceRaised)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+                    }
+
+                VStack(alignment: .leading, spacing: 3) {
                     Text(waddle.name)
-                        .font(.title3.weight(.semibold))
+                        .font(.system(size: 17, weight: .semibold))
                         .lineLimit(1)
-                    Text("\(store.rooms.count) channels · \(model.members.count) people")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(serverLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(WaddleTheme.textSecondary)
                         .lineLimit(1)
                 }
 
                 Spacer(minLength: 0)
 
-                joinButton
-
-                Button {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        showDesktopChannelRail = false
-                    }
-                } label: {
-                    Image(systemName: "sidebar.leading")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                DesktopActionButton(systemName: "plus", accessibilityLabel: "Create channel") {
+                    showCreateChannelSheet = true
                 }
-                .buttonStyle(.plain)
 
-                Button {
+                DesktopActionButton(systemName: "gearshape", accessibilityLabel: "Workspace settings") {
                     editWaddleName = waddle.name
                     editWaddleDescription = waddle.description ?? ""
                     showWaddleSettingsSheet = true
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+
+                DesktopActionButton(systemName: "sidebar.leading", accessibilityLabel: "Collapse channels") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        showDesktopChannelRail = false
+                    }
+                }
             }
             .padding(.horizontal, 18)
-            .padding(.top, 18)
+            .padding(.vertical, 16)
+
+            Divider()
+                .overlay(WaddleTheme.divider)
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .center) {
+                HStack(alignment: .center, spacing: 10) {
                     Text("Channels")
-                        .font(.headline)
+                        .font(.system(size: 12, weight: .bold))
+                        .tracking(1.4)
+                        .foregroundStyle(WaddleTheme.textMuted)
+                        .textCase(.uppercase)
+
                     Spacer()
 
-                    Button {
-                        showCreateChannelSheet = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.body)
-                            .foregroundStyle(Color.accentColor)
+                    if model.isJoined(waddle.id) {
+                        Text("Joined")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(WaddleTheme.presenceOnline)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(WaddleTheme.presenceOnline.opacity(0.10), in: Capsule())
+                    } else {
+                        joinButton
                     }
-                    .buttonStyle(.plain)
-
-                    Text("\(store.rooms.count)")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.quaternary.opacity(0.7), in: Capsule())
                 }
+
+                Text("\(store.rooms.count) channels · \(model.members.count) people")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(WaddleTheme.textSecondary)
+                    .lineLimit(1)
             }
             .padding(.horizontal, 18)
-            .padding(.top, 2)
+            .padding(.vertical, 14)
 
             if store.rooms.isEmpty {
                 ChatEmptyStateView(
@@ -605,7 +642,7 @@ struct WaddleChatWorkspaceView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 8) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(store.rooms) { room in
                             ChatDesktopChannelRowView(
                                 room: room,
@@ -624,53 +661,85 @@ struct WaddleChatWorkspaceView: View {
                                 }
                             }
                         }
+
+                        if !store.dmConversations.isEmpty {
+                            Text("Direct messages")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(WaddleTheme.textMuted)
+                                .textCase(.uppercase)
+                                .padding(.horizontal, 12)
+                                .padding(.top, 18)
+                                .padding(.bottom, 6)
+
+                            ForEach(store.dmConversations) { convo in
+                                Button {
+                                    Task { await model.openDm(peerJID: convo.peerJID, peerUsername: convo.peerUsername) }
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Circle()
+                                            .fill(convo.presenceShow == .available ? WaddleTheme.presenceOnline : WaddleTheme.presenceOffline)
+                                            .frame(width: 8, height: 8)
+                                        Text(convo.peerUsername)
+                                            .font(.system(size: 14, weight: .medium))
+                                            .foregroundStyle(WaddleTheme.textPrimary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        if convo.unreadCount > 0 {
+                                            Text("\(convo.unreadCount)")
+                                                .font(.caption2.weight(.bold))
+                                                .foregroundStyle(Color.white)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(WaddleTheme.unreadBadge, in: Capsule())
+                                        }
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
                     .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
+                    .padding(.vertical, 10)
                 }
             }
 
-            if !store.dmConversations.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Direct Messages")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                        .padding(.horizontal, 18)
+            Divider()
+                .overlay(WaddleTheme.divider)
 
-                    ForEach(store.dmConversations) { convo in
-                        Button {
-                            Task { await model.openDm(peerJID: convo.peerJID, peerUsername: convo.peerUsername) }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Circle()
-                                    .fill(convo.presenceShow == .available ? .green : .secondary)
-                                    .frame(width: 8, height: 8)
-                                Text(convo.peerUsername)
-                                    .font(.subheadline)
-                                    .lineLimit(1)
-                                Spacer()
-                                if convo.unreadCount > 0 {
-                                    Text("\(convo.unreadCount)")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(Color.accentColor)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.accentColor.opacity(0.14), in: Capsule())
-                                }
-                            }
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 6)
-                        }
-                        .buttonStyle(.plain)
+            Button {
+                if showDesktopMemberPane {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        showDesktopMemberPane = false
+                    }
+                } else if model.chatMembers.isEmpty {
+                    showMembersSheet = true
+                } else {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        showDesktopMemberPane = true
                     }
                 }
-                .padding(.top, 8)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "person.2")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(WaddleTheme.textSecondary)
+                    Text("Members")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(WaddleTheme.textPrimary)
+                    Spacer()
+                    Text("\(model.chatMembers.count)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(WaddleTheme.textSecondary)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
             }
+            .buttonStyle(.plain)
         }
-        .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(desktopPaneBackground)
+        .background(WaddleTheme.sidebarBackground)
     }
 
     private func desktopConversationPane(showMembersInline: Bool) -> some View {
@@ -692,13 +761,10 @@ struct WaddleChatWorkspaceView: View {
                 },
                 usesOperationalChrome: true
             )
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
 
             desktopConversationContent
         }
-        .background(desktopPaneBackground)
+        .background(WaddleTheme.chatBackground)
     }
 
     @ViewBuilder
@@ -927,7 +993,8 @@ struct WaddleChatWorkspaceView: View {
             },
             isUploadingFile: model.isUploadingFile,
             mentionSuggestions: mentionSuggestions,
-            onMentionQueryChanged: { query in store.mentionQuery = query }
+            onMentionQueryChanged: { query in store.mentionQuery = query },
+            usesOperationalChrome: true
         ) {
             Task { await store.sendComposerMessage() }
         }
@@ -953,7 +1020,8 @@ struct WaddleChatWorkspaceView: View {
             },
             isUploadingFile: model.isUploadingFile,
             mentionSuggestions: mentionSuggestions,
-            onMentionQueryChanged: { query in store.mentionQuery = query }
+            onMentionQueryChanged: { query in store.mentionQuery = query },
+            usesCompactConversationChrome: true
         ) {
             Task { await store.sendComposerMessage() }
         }
@@ -968,7 +1036,7 @@ struct WaddleChatWorkspaceView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Text("Members")
-                        .font(.headline)
+                        .font(.system(size: 17, weight: .semibold))
                     Button {
                         withAnimation(.easeOut(duration: 0.18)) {
                             showDesktopMemberPane = false
@@ -982,10 +1050,14 @@ struct WaddleChatWorkspaceView: View {
                     Spacer(minLength: 12)
                     Text("\(model.chatMembers.count)")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(WaddleTheme.textSecondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(.quaternary.opacity(0.7), in: Capsule())
+                        .background(WaddleTheme.surfaceRaised, in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+                        }
                 }
 
                 HStack(spacing: 8) {
@@ -996,7 +1068,7 @@ struct WaddleChatWorkspaceView: View {
             .padding(18)
 
             Divider()
-                .padding(.horizontal, 12)
+                .overlay(WaddleTheme.divider)
 
             if model.chatMembers.isEmpty {
                 ChatEmptyStateView(
@@ -1020,7 +1092,7 @@ struct WaddleChatWorkspaceView: View {
                 }
             }
         }
-        .background(desktopPaneBackground)
+        .background(WaddleTheme.sidebarBackground)
     }
 
     private var desktopCollapsedChannelRail: some View {
@@ -1038,15 +1110,19 @@ struct WaddleChatWorkspaceView: View {
 
             Text("\(store.rooms.count)")
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textSecondary)
                 .frame(width: 28, height: 18)
-                .background(.quaternary.opacity(0.65), in: Capsule())
+                .background(WaddleTheme.surfaceRaised, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+                }
 
             Spacer(minLength: 0)
         }
         .padding(.vertical, 12)
         .frame(maxHeight: .infinity)
-        .background(desktopPaneBackground)
+        .background(WaddleTheme.sidebarBackground)
     }
 
     private var desktopCollapsedMemberRail: some View {
@@ -1064,15 +1140,19 @@ struct WaddleChatWorkspaceView: View {
 
             Text("\(model.chatMembers.count)")
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textSecondary)
                 .frame(width: 28, height: 18)
-                .background(.quaternary.opacity(0.65), in: Capsule())
+                .background(WaddleTheme.surfaceRaised, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+                }
 
             Spacer(minLength: 0)
         }
         .padding(.vertical, 12)
         .frame(maxHeight: .infinity)
-        .background(desktopPaneBackground)
+        .background(WaddleTheme.sidebarBackground)
     }
 
     private var memberPane: some View {
@@ -1080,7 +1160,7 @@ struct WaddleChatWorkspaceView: View {
             ChatMemberListSection(members: model.chatMembers)
                 .padding(16)
         }
-        .background(workspaceBackground)
+        .background(WaddleTheme.sidebarBackground)
     }
 
     private func desktopMemberSection(title: String, members: [ChatRoomMember]) -> some View {
@@ -1130,36 +1210,27 @@ struct WaddleChatWorkspaceView: View {
                 .font(.subheadline.weight(.semibold))
             Text(title)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textSecondary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(WaddleTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+        }
     }
 
     private var workspaceBackground: Color {
-#if os(iOS)
-        return Color(.systemGroupedBackground)
-#else
-        return Color(nsColor: .windowBackgroundColor)
-#endif
+        WaddleTheme.chatBackground
     }
 
     private var desktopPaneBackground: some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(desktopPaneFill)
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08))
-            }
+        WaddleTheme.sidebarBackground
     }
 
     private var desktopPaneFill: Color {
-#if os(iOS)
-        Color(.secondarySystemGroupedBackground)
-#else
-        Color(nsColor: .controlBackgroundColor)
-#endif
+        WaddleTheme.sidebarBackground
     }
 
     private func channelRailBackground(isSelected: Bool) -> some ShapeStyle {
@@ -1199,68 +1270,53 @@ private struct ChatDesktopChannelRowView: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 12) {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.10))
-                    .frame(width: 36, height: 36)
-                    .overlay {
-                        Image(systemName: room.subtitle == nil ? "number" : "bubble.left.and.text.bubble.right")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(isSelected ? Color.accentColor : Color.secondary)
-                    }
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: room.subtitle == nil ? "number" : "bubble.left.and.text.bubble.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? WaddleTheme.accent : WaddleTheme.textMuted)
+                    .frame(width: 16)
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
                         Text(room.title)
-                            .font(.subheadline.weight(.semibold))
+                            .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
+                            .foregroundStyle(WaddleTheme.textPrimary)
                             .lineLimit(1)
 
                         if room.unreadCount > 0 {
                             Text("\(room.unreadCount)")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(Color.accentColor)
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(Color.white)
                                 .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(Color.accentColor.opacity(0.14), in: Capsule())
+                                .padding(.vertical, 2)
+                                .background(WaddleTheme.unreadBadge, in: Capsule())
                         }
                     }
 
                     if let subtitle = room.subtitle, !subtitle.isEmpty {
                         Text(subtitle)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(WaddleTheme.textSecondary)
                             .lineLimit(1)
                     }
-
-                    Text(lastActivityLabel)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
                 }
 
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(rowBackground)
         }
         .buttonStyle(.plain)
     }
 
-    private var lastActivityLabel: String {
-        guard let lastActivityAt = room.lastActivityAt else {
-            return "No recent activity"
-        }
-        return "Updated \(RelativeDateTimeFormatter().localizedString(for: lastActivityAt, relativeTo: Date()))"
-    }
-
     private var rowBackground: some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(isSelected ? WaddleTheme.channelSelected : Color.clear)
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.04))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.20) : Color.clear)
             }
     }
 }
@@ -1272,9 +1328,9 @@ private struct ChatDesktopMemberRowView: View {
         HStack(spacing: 10) {
             Text(member.avatarInitials ?? initials(from: member.displayName))
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WaddleTheme.textSecondary)
                 .frame(width: 30, height: 30)
-                .background(presenceColor.opacity(0.16), in: Circle())
+                .background(presenceColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(alignment: .bottomTrailing) {
                     Circle()
                         .fill(presenceColor)
@@ -1312,21 +1368,21 @@ private struct ChatDesktopMemberRowView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(WaddleTheme.surfaceRaised)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(WaddleTheme.divider, lineWidth: 1)
+        }
     }
 
     private var presenceColor: Color {
         switch member.presence {
-        case .available:
-            return .green
-        case .away:
-            return .orange
-        case .dnd:
-            return .red
-        case .offline, .unknown:
-            return .secondary
+        case .available: return WaddleTheme.presenceOnline
+        case .away:      return WaddleTheme.presenceAway
+        case .dnd:       return WaddleTheme.presenceDnd
+        case .offline, .unknown: return WaddleTheme.presenceOffline
         }
     }
 
