@@ -15,18 +15,35 @@ export const oauthClaimsSupported = [
 ] as const;
 
 type ServerIdTokenClaimsInput = {
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> | undefined;
+  scopes?: readonly string[] | undefined;
   user: {
     githubUsername?: unknown;
     image?: unknown;
   };
 };
 
-export function getServerIdTokenClaims({
+type UserInfoClaimsInput = {
+  scopes?: readonly string[] | undefined;
+  user: {
+    githubUsername?: unknown;
+    image?: unknown;
+  };
+};
+
+function shouldExposeProfileClaims(
+  metadata: Record<string, unknown> | undefined,
+  scopes: readonly string[] | undefined,
+) {
+  return metadata?.product === "server" || scopes?.includes("profile") === true;
+}
+
+function getProfileClaims({
   metadata,
+  scopes,
   user,
 }: ServerIdTokenClaimsInput) {
-  if (metadata?.product !== "server") {
+  if (!shouldExposeProfileClaims(metadata, scopes)) {
     return {};
   }
 
@@ -43,4 +60,12 @@ export function getServerIdTokenClaims({
   }
 
   return claims;
+}
+
+export function getServerIdTokenClaims(input: ServerIdTokenClaimsInput) {
+  return getProfileClaims(input);
+}
+
+export function getServerUserInfoClaims({ scopes, user }: UserInfoClaimsInput) {
+  return getProfileClaims({ scopes, user });
 }

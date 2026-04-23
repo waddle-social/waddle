@@ -3,6 +3,10 @@ import ColonyLayout from "../layouts/ColonyLayout.astro";
 
 const user = Astro.locals.user;
 const session = Astro.locals.session;
+const githubUsername =
+  user && "githubUsername" in user && typeof user.githubUsername === "string"
+    ? user.githubUsername.trim()
+    : "";
 ---
 
 <ColonyLayout
@@ -15,6 +19,12 @@ const session = Astro.locals.session;
   {user && session ? (
     <div class="stack">
       <dl class="detail-list">
+        {githubUsername && (
+          <div class="detail-row">
+            <dt>Username</dt>
+            <dd>{githubUsername}</dd>
+          </div>
+        )}
         <div class="detail-row">
           <dt>Name</dt>
           <dd>{user.name ?? user.email}</dd>

@@ -4,7 +4,11 @@ import { jwt } from "better-auth/plugins";
 import { env } from "cloudflare:workers";
 
 import { database } from "./auth-database";
-import { getServerIdTokenClaims, oauthClaimsSupported } from "./oauth-claims";
+import {
+  getServerIdTokenClaims,
+  getServerUserInfoClaims,
+  oauthClaimsSupported,
+} from "./oauth-claims";
 function createAuth(secret: string, githubClientSecret: string) {
   return betterAuth({
     baseURL: env.BETTER_AUTH_URL,
@@ -44,6 +48,7 @@ function createAuth(secret: string, githubClientSecret: string) {
         allowDynamicClientRegistration: true,
         allowUnauthenticatedClientRegistration: true,
         customIdTokenClaims: getServerIdTokenClaims,
+        customUserInfoClaims: getServerUserInfoClaims,
         advertisedMetadata: {
           claims_supported: [...oauthClaimsSupported],
         },
