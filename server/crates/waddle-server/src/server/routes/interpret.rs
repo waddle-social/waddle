@@ -191,9 +191,9 @@ trait ToElementString {
     fn to_element_string(&self) -> Result<String, waddle_xmpp::XmppError>;
 }
 
-impl ToElementString for waddle_xmpp::connection::Stanza {
+impl ToElementString for waddle_xmpp::Stanza {
     fn to_element_string(&self) -> Result<String, waddle_xmpp::XmppError> {
-        use waddle_xmpp::connection::Stanza;
+        use waddle_xmpp::Stanza;
         match self {
             Stanza::Iq(iq) => stanza_to_string(iq.clone()),
             Stanza::Message(msg) => stanza_to_string(msg.clone()),
@@ -205,7 +205,7 @@ impl ToElementString for waddle_xmpp::connection::Stanza {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::connection::Stanza;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::iq::{Iq, IqType};
     use xmpp_parsers::minidom::Element;
 

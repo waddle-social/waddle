@@ -1,4 +1,14 @@
-//! Connection actor for handling individual XMPP client connections.
+//! TCP C2S connection actor — **legacy test infrastructure only**.
+//!
+//! This module implements the TCP-based XMPP C2S server. Production C2S
+//! traffic is served exclusively via WebSocket (`waddle-server`). This
+//! module is kept alive only because the XEP compliance test suite in
+//! `waddle-xmpp/tests/common/mod.rs` uses `ConnectionActor::handle_connection`
+//! as its XMPP server harness.
+//!
+//! TODO(transport-unification): Migrate the test harness to WebSocket
+//! connections and delete this file.
+//!
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};

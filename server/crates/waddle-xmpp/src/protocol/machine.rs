@@ -208,25 +208,16 @@ impl XmppStateMachine {
         //
         // SASL Auth/SaslResponse are recognised by the frame parser but
         // their handling (SCRAM challenge/response, OAUTHBEARER validation)
-        // lands in step 6 of the migration plan. Until then they are logged
-        // and dropped so the existing WebSocket auth code keeps owning the
-        // flow end-to-end.
+        // is owned by the WebSocket frame dispatcher in websocket.rs.
+        // The state machine delegates silently.
         match frame {
             InboundFrame::Open => Vec::new(),
             InboundFrame::Close => {
                 self.phase = ConnectionPhase::closing(self.phase.bound_jid().cloned());
                 Vec::new()
             }
-            InboundFrame::Auth { mechanism, .. } => vec![OutboundEvent::Log {
-                level: Level::DEBUG,
-                message: format!(
-                    "SASL <auth mechanism=\"{mechanism}\"> received; handled by legacy path"
-                ),
-            }],
-            InboundFrame::SaslResponse(_) => vec![OutboundEvent::Log {
-                level: Level::DEBUG,
-                message: "SASL <response> received; handled by legacy path".to_string(),
-            }],
+            InboundFrame::Auth { .. } => vec![],
+            InboundFrame::SaslResponse(_) => vec![],
             InboundFrame::Stanza(stanza) => self.on_stanza(*stanza),
         }
     }

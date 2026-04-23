@@ -1,6 +1,9 @@
-//! XMPP over WebSocket (RFC 7395)
+//! XMPP over WebSocket (RFC 7395) — WebSocket-only C2S transport.
 //!
-//! Provides WebSocket transport for XMPP, allowing all traffic over port 443.
+//! Provides the single WebSocket XMPP endpoint on port 443.  Each accepted
+//! connection runs through a typed [`ConnectionPhase`] lifecycle state machine
+//! (Unauthenticated → Authenticated → Ready → Closing) with no TCP fallback
+//! and no legacy dispatch paths.
 
 use axum::{
     extract::{
@@ -23,7 +26,6 @@ use waddle_xmpp::{
     auth::{parse_oauthbearer, OAuthBearerResult},
     carbons::{build_received_carbon, build_sent_carbon, should_copy_message, CARBONS_NS},
     commands::{CommandContext, CommandRegistry, CommandResult},
-    connection::Stanza,
     disco::{
         build_disco_info_response, build_disco_info_response_with_extensions,
         build_disco_items_response, muc_room_features, parse_disco_info_query,
@@ -68,7 +70,7 @@ use waddle_xmpp::{
         is_retraction_message, is_sticker_message, parse_command_from_iq, should_skip_storage,
         Command, CommandStatus, NODE_COMMANDS, NS_REPLY,
     },
-    Affiliation, Role, StanzaErrorCondition, StanzaErrorType, WaddleDetails, XmppError,
+    Affiliation, Role, Stanza, StanzaErrorCondition, StanzaErrorType, WaddleDetails, XmppError,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
@@ -140,11 +142,12 @@ pub struct ProtocolServices {
     pub resumable_sessions: Arc<dashmap::DashMap<String, Session>>,
 }
 
-/// Per-connection mutable state threaded through the legacy dispatch path.
+/// Per-connection mutable state for a single WebSocket XMPP transport.
 ///
-/// Holds the typed connection phase plus the remaining mutable transport/session
-/// adjuncts that have not moved into the protocol state machine yet.
-struct LegacyConnState {
+/// Bundles the typed lifecycle phase and the remaining transport/session
+/// adjuncts (SM state, carbons flag, suppress-SM-record flag) into a single
+/// value threaded through the frame dispatcher.
+struct WsConnState {
     phase: ConnectionPhase,
     /// The authenticated backend Session for this connection, if any.
     /// Populated on SASL success and used for SM resume/detach.
@@ -166,7 +169,7 @@ struct LegacyConnState {
     suppress_sm_record_next_batch: bool,
 }
 
-impl LegacyConnState {
+impl WsConnState {
     fn new() -> Self {
         Self {
             phase: ConnectionPhase::new(),
@@ -219,7 +222,7 @@ async fn handle_xmpp_websocket(socket: WebSocket, state: Arc<WebSocketState>) {
     let mut pending_tx: Option<mpsc::Sender<OutboundStanza>> = Some(outbound_tx);
 
     // Track connection state
-    let mut conn = LegacyConnState::new();
+    let mut conn = WsConnState::new();
     // Set when our own registry slot was replaced by a newer connection for
     // the same FullJid (detected via outbound_rx closing). In that case the
     // cleanup block below must NOT touch the registry or MUC state — those
@@ -430,11 +433,7 @@ pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid)
     cleanup_muc_presence(state, jid).await
 }
 
-async fn cleanup_connection_shutdown(
-    state: &WebSocketState,
-    conn: &LegacyConnState,
-    superseded: bool,
-) {
+async fn cleanup_connection_shutdown(state: &WebSocketState, conn: &WsConnState, superseded: bool) {
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
@@ -998,14 +997,14 @@ async fn handle_xmpp_frame(
     frame: &str,
     domain: &str,
     state: &WebSocketState,
-    conn: &mut LegacyConnState,
+    conn: &mut WsConnState,
 ) -> Vec<String> {
     if frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
         return vec![];
     }
 
-    let LegacyConnState {
+    let WsConnState {
         phase,
         authenticated_session,
         sm_state,
@@ -4275,7 +4274,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_open_dispatches_via_typed_ingress() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
@@ -4301,7 +4300,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
@@ -4314,7 +4313,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_auth_returns_malformed_request() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl">payload</auth>"#,
@@ -4330,7 +4329,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_sasl_response_returns_malformed_request() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#,
@@ -4346,7 +4345,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_wrong_namespace_auth_stays_silent() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<auth xmlns="jabber:client" mechanism="SCRAM-SHA-256">x</auth>"#,
@@ -4362,7 +4361,7 @@ mod tests {
     #[tokio::test]
     async fn websocket_features_advertise_oauthbearer() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="example.com" version="1.0"/>"#,
@@ -4391,7 +4390,7 @@ mod tests {
     #[tokio::test]
     async fn websocket_close_moves_connection_into_closing_phase() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
@@ -4411,7 +4410,7 @@ mod tests {
     #[tokio::test]
     async fn websocket_close_keeps_bound_connection_in_closing_phase() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         conn.phase = ConnectionPhase::ready(jid, false);
 
@@ -4448,7 +4447,7 @@ mod tests {
                 .append(BASE64_STANDARD.encode("\0alice\0session-token"))
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
@@ -4469,7 +4468,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
 
@@ -4503,7 +4502,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let first = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
         assert_eq!(first, vec![sasl_success_xml()]);
@@ -4545,7 +4544,7 @@ mod tests {
                 .append(BASE64_STANDARD.encode("not-valid"))
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let auth_responses =
             handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
@@ -4576,7 +4575,7 @@ mod tests {
                 .build(),
         );
         let malformed_response = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let first = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
         assert_eq!(first.len(), 1);
@@ -4608,7 +4607,7 @@ mod tests {
                 .append(client_first)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let first = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
         assert_eq!(first.len(), 1);
@@ -4639,7 +4638,7 @@ mod tests {
                 .append(BASE64_STANDARD.encode(format!("n,,n=alice,r={client_nonce}")))
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let auth_responses =
             handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
@@ -4708,7 +4707,7 @@ mod tests {
                 )
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let auth_responses =
             handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
@@ -4773,7 +4772,7 @@ mod tests {
                 .append(Element::builder("bind", waddle_xmpp::ns::BIND).build())
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let auth_responses =
             handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
@@ -4853,7 +4852,7 @@ mod tests {
                 )
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let auth_responses =
             handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
@@ -5053,7 +5052,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_drops_oversized_input() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let huge = format!(
             "<iq id=\"big\">{}</iq>",
             "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
@@ -5065,7 +5064,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_drops_whitespace_padded_oversized_input() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let huge = format!(
             "{}<iq id=\"big\"/>",
             " ".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
@@ -5077,7 +5076,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_drops_oversized_sm_nonza_before_parse() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let huge = format!(
             r#"<r xmlns="urn:xmpp:sm:3" note="{}"/>"#,
             "a".repeat(waddle_xmpp::protocol::frame::MAX_FRAME_SIZE)
@@ -5091,7 +5090,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_invalid_iq_returns_feature_not_implemented() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id="bad-iq" type="get"><nope/></iq>"#,
@@ -5110,7 +5109,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_invalid_iq_result_returns_no_response() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id="bad-result" type="result"><a/><b/></iq>"#,
@@ -5126,7 +5125,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_xml_iq_request_preserves_legacy_error() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id="broken-iq" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5145,7 +5144,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_ignores_type_suffix_attributes() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id="req-1" mimetype="result" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5164,7 +5163,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_recovers_attrs_with_spaces_and_gt() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq note="1 > 0" id = "req-2" type = "get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5183,7 +5182,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_and_keeps_scanning() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq bogus=x id="req-3" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5202,7 +5201,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_with_slashes() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq bogus=http://x id="req-4" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5221,7 +5220,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_keeps_id_after_empty_attr_value() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq bogus= id="req-5" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5240,7 +5239,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_recovers_unquoted_type_value() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type=get id="req-6"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5259,7 +5258,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_wrong_namespace_iq_stays_silent() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq xmlns="urn:ietf:params:xml:ns:xmpp-sasl" id="bad-ns" type="get"><ping xmlns="urn:xmpp:ping"/></iq>"#,
@@ -5275,7 +5274,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_self_closing_iq_result_stays_silent() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type=result/>"#,
@@ -5291,7 +5290,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_skips_url_like_attr_with_equals() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq bogus=http://x=y id="req-7" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5310,7 +5309,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_does_not_shadow_real_type_attr() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq prev=type=result id="req-8" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5329,7 +5328,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_ignores_embedded_quoted_type_in_broken_value() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq prev=type="result" id="req-9" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5348,7 +5347,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_prefers_later_quoted_type_attr() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type=result id="req-10" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5367,7 +5366,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_prefers_later_unquoted_type_attr() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type=result type=get id="req-10b"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5386,7 +5385,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_keeps_type_when_later_attr_is_truncated() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type=get id="req-11" bogus="#,
@@ -5405,7 +5404,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_keeps_unquoted_type_when_later_quote_is_unterminated() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type=get id="req-12" to="alice@example.com"#,
@@ -5424,7 +5423,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_unescapes_recovered_id() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id="a&amp;b" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5443,7 +5442,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_recovers_later_unquoted_type_attr() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq bogus= type=get id="req-13"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5461,7 +5460,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_recovers_later_spaced_quoted_type_attr() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq bogus= type = "get" id="req-13b"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5479,7 +5478,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_id_attr_as_type_value() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq type= id="req-14"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5495,7 +5494,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_type_attr_as_id_value() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id= type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5513,7 +5512,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_malformed_iq_keeps_invalid_numeric_entity_escaped() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let responses = handle_xmpp_frame(
             r#"<iq id="&#1;" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
@@ -5531,7 +5530,7 @@ mod tests {
     #[tokio::test]
     async fn handle_xmpp_frame_ping_roundtrips_through_sans_io_path() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
         conn.phase = ConnectionPhase::ready(jid, false);
 
@@ -7179,7 +7178,7 @@ mod tests {
     #[tokio::test]
     async fn sm_enable_requires_resource_binding() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         // Without resource_bound, enable must fail.
         let frame = "<enable xmlns='urn:xmpp:sm:3' resume='true'/>";
         let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
@@ -7200,7 +7199,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
 
         let auth_responses =
             handle_xmpp_frame(&auth_frame, "example.com", state.as_ref(), &mut conn).await;
@@ -7238,7 +7237,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let auth_responses =
             handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
@@ -7309,7 +7308,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let auth_responses =
             handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
@@ -7380,7 +7379,7 @@ mod tests {
                 .append(payload)
                 .build(),
         );
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let auth_responses =
             handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
         assert_eq!(auth_responses, vec![sasl_success_xml()]);
@@ -7448,7 +7447,7 @@ mod tests {
     #[tokio::test]
     async fn sm_resume_rejects_ready_phase() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
         conn.phase = ConnectionPhase::ready(jid, false);
 
@@ -7472,7 +7471,7 @@ mod tests {
     #[tokio::test]
     async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let jid: FullJid = "alice@example.com/web".parse().expect("jid");
         conn.phase = ConnectionPhase::ready(jid, false);
 
@@ -7558,7 +7557,7 @@ mod tests {
             .await
             .expect("store");
 
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         // Client reports it has acked through 9, so only m10 needs replay.
         let frame = format!(
             "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='9'/>",
@@ -7598,7 +7597,7 @@ mod tests {
     #[tokio::test]
     async fn sm_resume_with_unknown_stream_id_fails() {
         let state = create_test_websocket_state().await;
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let frame = "<resume xmlns='urn:xmpp:sm:3' previd='does-not-exist' h='0'/>";
         let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
         assert_eq!(responses.len(), 1);
@@ -7645,7 +7644,7 @@ mod tests {
             .await
             .expect("store");
 
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         let frame = format!(
             "<resume xmlns='urn:xmpp:sm:3' previd='{}' h='0'/>",
             stream_id
@@ -7686,7 +7685,7 @@ mod tests {
             .connection_registry
             .register(jid.clone(), tx);
 
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::ready(jid.clone(), false);
         conn.sm_state
             .enable("stream-detach".to_string(), true, Some(300));
@@ -7734,7 +7733,7 @@ mod tests {
             .connection_registry
             .register(jid.clone(), tx);
 
-        let mut conn = LegacyConnState::new();
+        let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::ready(jid.clone(), false);
         conn.sm_state
             .enable("stream-close".to_string(), false, Some(300));

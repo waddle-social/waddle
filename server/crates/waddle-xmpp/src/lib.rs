@@ -26,6 +26,7 @@ pub mod auth;
 pub mod c2s;
 pub mod carbons;
 pub mod commands;
+#[doc(hidden)]
 pub mod connection;
 pub mod disco;
 pub mod inbox;
@@ -61,6 +62,7 @@ pub use routing::{RouterConfig, RoutingDestination, RoutingResult, StanzaRouter}
 pub use server::{generate_ephemeral_tls_config, XmppServer, XmppServerConfig};
 pub use stream::{PreAuthResult, SaslAuthResult};
 pub use types::*;
+pub use waddle_xmpp_core::Stanza;
 pub use waddle_xmpp_core::{
     managed_room_jid, managed_room_localpart, parse_managed_room_jid, parse_managed_room_localpart,
     ChannelInfo, ChannelRoomInfo, ChannelType, UploadSlotInfo, WaddleDetails, WaddleInfo,
