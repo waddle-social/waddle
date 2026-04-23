@@ -11,7 +11,7 @@ use crate::db::Database;
 use crate::server::AppState;
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, put},
@@ -42,6 +42,21 @@ impl UploadState {
     }
 }
 
+fn configured_max_upload_size() -> u64 {
+    std::env::var("WADDLE_MAX_UPLOAD_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10 * 1024 * 1024)
+}
+
+fn upload_body_limit() -> DefaultBodyLimit {
+    // The upload handler extracts the request body as `Bytes`, so Axum's
+    // default 2 MiB limit would reject larger uploads before our slot/size
+    // validation runs. Keep the HTTP body cap aligned with the XMPP slot cap.
+    let limit = usize::try_from(configured_max_upload_size()).unwrap_or(usize::MAX);
+    DefaultBodyLimit::max(limit)
+}
+
 /// Create the uploads router
 pub fn router(upload_state: Arc<UploadState>) -> Router {
     Router::new()
@@ -52,6 +67,7 @@ pub fn router(upload_state: Arc<UploadState>) -> Router {
         )
         // Download endpoint (GET /api/files/:slot_id/:filename)
         .route("/api/files/:slot_id/:filename", get(download_handler))
+        .layer(upload_body_limit())
         .with_state(upload_state)
 }
 
@@ -772,6 +788,47 @@ mod tests {
         assert_eq!(json["error"], "size_mismatch");
 
         // Cleanup
+        std::fs::remove_dir_all(&upload_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_upload_above_axum_default_limit_succeeds() {
+        let (state, upload_dir) = create_test_upload_state().await;
+        let slot_id = uuid::Uuid::new_v4().to_string();
+        let file_content = vec![b'a'; 4 * 1024 * 1024];
+
+        create_test_slot(
+            &state,
+            &slot_id,
+            "large.bin",
+            file_content.len() as i64,
+            "application/octet-stream",
+        )
+        .await;
+
+        let app = router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/upload/{}", slot_id))
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Content-Length", file_content.len().to_string())
+                    .body(Body::from(file_content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let slot = get_upload_slot(state.global_db(), &slot_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slot.status, "uploaded");
+
         std::fs::remove_dir_all(&upload_dir).ok();
     }
 
