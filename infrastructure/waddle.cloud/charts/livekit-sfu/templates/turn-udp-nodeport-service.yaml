@@ -1,0 +1,23 @@
+{{- if and .Values.nodePorts.turnUdp.enabled .Values.livekit.turn.enabled .Values.livekit.turn.udp_port }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "livekit-sfu.fullname" . }}-turn-udp
+  labels:
+    {{- include "livekit-sfu.labels" . | nindent 4 }}
+  {{- with .Values.nodePorts.turnUdp.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: NodePort
+  externalTrafficPolicy: {{ .Values.nodePorts.turnUdp.externalTrafficPolicy }}
+  ports:
+    - name: turn-udp
+      port: {{ .Values.livekit.turn.udp_port }}
+      targetPort: turn-udp
+      nodePort: {{ .Values.nodePorts.turnUdp.udp }}
+      protocol: UDP
+  selector:
+    {{- include "livekit-sfu.selectorLabels" . | nindent 4 }}
+{{- end }}

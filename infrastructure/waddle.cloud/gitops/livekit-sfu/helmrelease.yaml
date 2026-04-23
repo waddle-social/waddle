@@ -26,15 +26,23 @@ spec:
       log_level: info
       rtc:
         use_external_ip: true
-        tcp_port: 7881
-        udp_port: 7882
+        tcp_port: 30881
+        udp_port: 30882
       turn:
         enabled: true
         domain: turn.waddle.social
-        udp_port: 3478
-        tls_port: 5349
+        udp_port: 30478
+        tls_port: 443
         relay_range_start: 30000
         relay_range_end: 40000
+    nodePorts:
+      rtc:
+        enabled: true
+        tcp: 30881
+        udp: 30882
+      turnUdp:
+        enabled: true
+        udp: 30478
     turn:
       secretName: turn-waddle-social-tls
     resources:

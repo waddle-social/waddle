@@ -9,23 +9,51 @@
 {{- if ne (int .Values.replicaCount) 1 -}}
 {{- fail "livekit-sfu is intentionally single-node for now; replicaCount must be 1" -}}
 {{- end -}}
-{{- if not .Values.podHostNetwork -}}
-{{- fail "livekit-sfu requires podHostNetwork=true so LiveKit can advertise node-reachable RTC ports" -}}
+{{- $nodePortMin := 30000 -}}
+{{- $nodePortMax := 32767 -}}
+{{- $capabilities := default (list) .Values.securityContext.capabilities.add -}}
+{{- $canBindPrivileged := has "NET_BIND_SERVICE" $capabilities -}}
+{{- if and .Values.livekit.port (lt (int .Values.livekit.port) 1024) (not $canBindPrivileged) -}}
+{{- fail "livekit.port below 1024 requires securityContext.capabilities.add to include NET_BIND_SERVICE" -}}
 {{- end -}}
-{{- if and .Values.livekit.port (lt (int .Values.livekit.port) 1024) -}}
-{{- fail "livekit.port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- if and .Values.livekit.rtc.tcp_port (lt (int .Values.livekit.rtc.tcp_port) 1024) (not $canBindPrivileged) -}}
+{{- fail "livekit.rtc.tcp_port below 1024 requires securityContext.capabilities.add to include NET_BIND_SERVICE" -}}
 {{- end -}}
-{{- if and .Values.livekit.rtc.tcp_port (lt (int .Values.livekit.rtc.tcp_port) 1024) -}}
-{{- fail "livekit.rtc.tcp_port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- if and .Values.livekit.rtc.udp_port (lt (int .Values.livekit.rtc.udp_port) 1024) (not $canBindPrivileged) -}}
+{{- fail "livekit.rtc.udp_port below 1024 requires securityContext.capabilities.add to include NET_BIND_SERVICE" -}}
 {{- end -}}
-{{- if and .Values.livekit.rtc.udp_port (lt (int .Values.livekit.rtc.udp_port) 1024) -}}
-{{- fail "livekit.rtc.udp_port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- if and .Values.livekit.turn.tls_port (lt (int .Values.livekit.turn.tls_port) 1024) (not $canBindPrivileged) -}}
+{{- fail "livekit.turn.tls_port below 1024 requires securityContext.capabilities.add to include NET_BIND_SERVICE" -}}
 {{- end -}}
-{{- if and .Values.livekit.turn.tls_port (lt (int .Values.livekit.turn.tls_port) 1024) -}}
-{{- fail "livekit.turn.tls_port must be >= 1024 with the hardened non-root container securityContext; expose 443 through the Gateway/LB instead" -}}
+{{- if and .Values.livekit.turn.udp_port (lt (int .Values.livekit.turn.udp_port) 1024) (not $canBindPrivileged) -}}
+{{- fail "livekit.turn.udp_port below 1024 requires securityContext.capabilities.add to include NET_BIND_SERVICE" -}}
 {{- end -}}
-{{- if and .Values.livekit.turn.udp_port (lt (int .Values.livekit.turn.udp_port) 1024) -}}
-{{- fail "livekit.turn.udp_port must be >= 1024 with the hardened non-root container securityContext" -}}
+{{- if and .Values.nodePorts.rtc.enabled .Values.livekit.rtc.tcp_port (not .Values.nodePorts.rtc.tcp) -}}
+{{- fail "nodePorts.rtc.tcp is required when nodePorts.rtc.enabled=true and livekit.rtc.tcp_port is set" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.rtc.enabled .Values.livekit.rtc.udp_port (not .Values.nodePorts.rtc.udp) -}}
+{{- fail "nodePorts.rtc.udp is required when nodePorts.rtc.enabled=true and livekit.rtc.udp_port is set" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.rtc.enabled .Values.livekit.rtc.tcp_port .Values.nodePorts.rtc.tcp (ne (int .Values.nodePorts.rtc.tcp) (int .Values.livekit.rtc.tcp_port)) -}}
+{{- fail "nodePorts.rtc.tcp must match livekit.rtc.tcp_port so LiveKit advertises a reachable TCP candidate" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.rtc.enabled .Values.livekit.rtc.udp_port .Values.nodePorts.rtc.udp (ne (int .Values.nodePorts.rtc.udp) (int .Values.livekit.rtc.udp_port)) -}}
+{{- fail "nodePorts.rtc.udp must match livekit.rtc.udp_port so LiveKit advertises a reachable UDP candidate" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.rtc.enabled .Values.nodePorts.rtc.tcp (or (lt (int .Values.nodePorts.rtc.tcp) $nodePortMin) (gt (int .Values.nodePorts.rtc.tcp) $nodePortMax)) -}}
+{{- fail "nodePorts.rtc.tcp must be inside the Kubernetes NodePort range 30000-32767" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.rtc.enabled .Values.nodePorts.rtc.udp (or (lt (int .Values.nodePorts.rtc.udp) $nodePortMin) (gt (int .Values.nodePorts.rtc.udp) $nodePortMax)) -}}
+{{- fail "nodePorts.rtc.udp must be inside the Kubernetes NodePort range 30000-32767" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.turnUdp.enabled (not (and .Values.livekit.turn.enabled .Values.livekit.turn.udp_port)) -}}
+{{- fail "nodePorts.turnUdp.enabled=true requires livekit.turn.enabled=true and livekit.turn.udp_port to be set" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.turnUdp.enabled .Values.livekit.turn.udp_port .Values.nodePorts.turnUdp.udp (ne (int .Values.nodePorts.turnUdp.udp) (int .Values.livekit.turn.udp_port)) -}}
+{{- fail "nodePorts.turnUdp.udp must match livekit.turn.udp_port so LiveKit advertises a reachable TURN/UDP port" -}}
+{{- end -}}
+{{- if and .Values.nodePorts.turnUdp.enabled .Values.nodePorts.turnUdp.udp (or (lt (int .Values.nodePorts.turnUdp.udp) $nodePortMin) (gt (int .Values.nodePorts.turnUdp.udp) $nodePortMax)) -}}
+{{- fail "nodePorts.turnUdp.udp must be inside the Kubernetes NodePort range 30000-32767" -}}
 {{- end -}}
 {{- if and (not .Values.livekit.rtc.udp_port) (not (and .Values.livekit.rtc.port_range_start .Values.livekit.rtc.port_range_end)) -}}
 {{- fail "livekit-sfu requires either livekit.rtc.udp_port or livekit.rtc.port_range_start/livekit.rtc.port_range_end" -}}

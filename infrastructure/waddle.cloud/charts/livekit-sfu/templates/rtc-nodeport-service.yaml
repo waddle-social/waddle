@@ -1,0 +1,32 @@
+{{- if and .Values.nodePorts.rtc.enabled (or .Values.livekit.rtc.tcp_port .Values.livekit.rtc.udp_port) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "livekit-sfu.fullname" . }}-rtc
+  labels:
+    {{- include "livekit-sfu.labels" . | nindent 4 }}
+  {{- with .Values.nodePorts.rtc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: NodePort
+  externalTrafficPolicy: {{ .Values.nodePorts.rtc.externalTrafficPolicy }}
+  ports:
+    {{- if .Values.livekit.rtc.tcp_port }}
+    - name: rtc-tcp
+      port: {{ .Values.livekit.rtc.tcp_port }}
+      targetPort: rtc-tcp
+      nodePort: {{ .Values.nodePorts.rtc.tcp }}
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.livekit.rtc.udp_port }}
+    - name: rtc-udp
+      port: {{ .Values.livekit.rtc.udp_port }}
+      targetPort: rtc-udp
+      nodePort: {{ .Values.nodePorts.rtc.udp }}
+      protocol: UDP
+    {{- end }}
+  selector:
+    {{- include "livekit-sfu.selectorLabels" . | nindent 4 }}
+{{- end }}

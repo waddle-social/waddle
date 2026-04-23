@@ -13,4 +13,4 @@ spec:
   rules:
     - backendRefs:
         - name: livekit-sfu-turn
-          port: 5349
+          port: 443
