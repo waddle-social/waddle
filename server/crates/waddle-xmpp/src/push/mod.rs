@@ -43,7 +43,7 @@ pub struct PushSubscription {
     pub node: Option<String>,
     /// The APNS device token registered by the Apple client.
     pub device_token: Option<String>,
-    /// Client platform marker (for now expected to be `apple`).
+    /// Client platform marker (currently validated as `apple`).
     pub platform: Option<String>,
     /// Whether this subscription should use APNS sandbox delivery.
     pub sandbox: bool,
