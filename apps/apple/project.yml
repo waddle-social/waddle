@@ -22,7 +22,6 @@ targets:
           - "**/*.md"
     dependencies:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
-        embed: false
     settings:
       base:
         PRODUCT_NAME: Waddle-iOS
@@ -34,7 +33,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
-        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
+        MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
   Waddle-macOS:
     type: application
     platform: macOS
@@ -46,7 +46,6 @@ targets:
           - LaunchScreen.storyboard
     dependencies:
       - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
-        embed: false
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS
@@ -54,7 +53,8 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Waddle
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.social-networking
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
-        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
+        MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
         ARCHS: arm64
 schemes:
   Waddle:
