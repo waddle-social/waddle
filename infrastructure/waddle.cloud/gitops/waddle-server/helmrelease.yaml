@@ -27,6 +27,18 @@ spec:
       s3Bucket: "waddle-social-files"
     extraSecretRefs:
       - waddle-r2-credentials
+    # Ship traces + OTel-native metrics to Grafana Cloud via the
+    # in-cluster Alloy collector. `telemetry.rs` reads these env vars
+    # (default endpoint was `localhost:4317`, which silently dropped
+    # everything before this was wired up). Chart-modelled keys go in
+    # `telemetry`; `containerExtraEnv` is reserved for settings the
+    # chart doesn't model (currently just the OTLP protocol).
+    telemetry:
+      otlpEndpoint: "http://grafana-alloy.grafana-alloy.svc.cluster.local:4317"
+      serviceName: "waddle-server"
+    containerExtraEnv:
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "grpc"
     xmpp:
       domain: waddle.social
       mamDbPath: /data/mam.db
@@ -36,40 +48,7 @@ spec:
       storageClassName: openebs-mayastor
     service:
       type: ClusterIP
-    # Extension modules: non-sensitive fields only.
-    # Sensitive credentials (e.g. GitHub App private key) are delivered as
-    # file mounts and referenced below via config_secret_files.
-    extensions:
-      enabled: true
-      cache_dir: /var/lib/waddle/extensions
-      modules:
-        - name: github-enricher
-          registry: ghcr.io/waddle-social/waddle/extensions/github-enricher
-          tag: latest
-          namespace: urn:waddle:github:0
-          config: {}
-          # Maps extension config key -> absolute path of the mounted secret file.
-          # The server reads each file at startup and injects its content into the
-          # module config under the corresponding key (see ExtensionModuleConfig).
-          config_secret_files:
-            github_token: /etc/waddle/secrets/github-app/private-key
-
-    # CSI-style secret file mount: the ExternalSecret "waddle-github-app-credentials"
-    # syncs the GitHub App private key from 1Password into a Kubernetes Secret.
-    # Mounting it as a read-only file avoids injecting the key as a plain env var.
-    extraVolumes:
-      - name: github-app-credentials
-        secret:
-          secretName: waddle-github-app-credentials
-          # Group-readable for fsGroup 1000; still read-only and least-privilege.
-          defaultMode: 0440
-
-    extraVolumeMounts:
-      - name: github-app-credentials
-        mountPath: /etc/waddle/secrets/github-app
-        readOnly: true
-
     secret:
       create: true
       authProvidersJson: >-
-        [{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","client_secret":"","token_endpoint_auth_method":"client_secret_post","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]
+        [{"id":"colony","display_name":"Colony","kind":"oidc","dynamic_client_registration":true,"client_id":"","token_endpoint_auth_method":"none","require_dpop":true,"issuer":"https://colony.waddle.social","scopes":["openid","profile","email"],"subject_claim":"sub","username_claim":"preferred_username","email_claim":"email"}]
