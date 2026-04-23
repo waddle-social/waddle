@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useStore } from "@nanostores/vue";
 import { ref, computed, nextTick, onBeforeUnmount, watch } from "vue";
 import { MoreHorizontal, Pencil, Reply, SmilePlus, Trash2, FileDown, CornerDownRight, MessageSquare, Lock } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
@@ -14,6 +15,7 @@ import { decryptEncryptedAttachment, encryptedAttachmentKey, hasEncryptedAttachm
 import type { OccupantHat, OccupantPresence } from "@/lib/xmpp-client";
 import { formatStamp } from "@/composables/useMessaging";
 import { useLongPress } from "@/composables/useLongPress";
+import { $desktopToolbarOwnerId } from "@/stores/message-toolbar";
 
 const HAT_LABELS: Record<string, string> = {
   "urn:xmpp:hats:owner": "OWNER",
@@ -350,6 +352,7 @@ function emitAvatarClick() {
 }
 
 const bubbleEl = ref<HTMLElement | null>(null);
+const pickerButtonEl = ref<HTMLButtonElement | null>(null);
 // Inline hover toolbar's SmilePlus popover. Desktop-only; bound to hover.
 const pickerOpen = ref(false);
 // Unified action sheet: touch long-press and the mobile MoreHorizontal trigger
@@ -358,7 +361,31 @@ const sheetOpen = ref(false);
 type SheetView = "actions" | "emoji";
 const sheetView = ref<SheetView>("actions");
 
+const desktopToolbarOwnerId = useStore($desktopToolbarOwnerId);
+const ownsDesktopToolbarLock = computed(() => desktopToolbarOwnerId.value === props.message.id);
+const desktopToolbarLockedByAnother = computed(() =>
+  desktopToolbarOwnerId.value !== null && desktopToolbarOwnerId.value !== props.message.id,
+);
+const desktopToolbarVisibilityClass = computed(() => (
+  ownsDesktopToolbarLock.value
+    ? "opacity-100 pointer-events-auto z-[60]"
+    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-10"
+));
 const anyOverlayOpen = computed(() => pickerOpen.value || sheetOpen.value);
+
+function blurToolbarFocus() {
+  if (typeof document === "undefined") return;
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return;
+  if (!bubbleEl.value?.contains(active)) return;
+  active.blur();
+}
+
+function closePicker(blur = false) {
+  if (ownsDesktopToolbarLock.value) $desktopToolbarOwnerId.set(null);
+  pickerOpen.value = false;
+  if (blur) blurToolbarFocus();
+}
 
 function closeSheet() {
   sheetOpen.value = false;
@@ -366,7 +393,7 @@ function closeSheet() {
 }
 
 function openSheet() {
-  pickerOpen.value = false;
+  closePicker();
   sheetView.value = "actions";
   sheetOpen.value = true;
 }
@@ -374,27 +401,34 @@ function openSheet() {
 function togglePicker() {
   const next = !pickerOpen.value;
   closeSheet();
-  pickerOpen.value = next;
+  if (next) {
+    $desktopToolbarOwnerId.set(props.message.id);
+    pickerOpen.value = true;
+  }
+  else closePicker(true);
 }
 
 function react(emoji: string) {
   emit("react", props.message.id, emoji);
-  pickerOpen.value = false;
+  closePicker(true);
   closeSheet();
 }
 
 function startReplyFromMenu() {
   emit("reply", props.message);
+  closePicker(true);
   closeSheet();
 }
 
 function startEditFromMenu() {
   startEdit();
+  closePicker(true);
   closeSheet();
 }
 
 function retractFromMenu() {
   emit("retract", props.message.id);
+  closePicker(true);
   closeSheet();
 }
 
@@ -416,13 +450,13 @@ function onWindowPointerDown(event: PointerEvent) {
   if (!bubbleEl.value) return;
   const target = event.target as Node | null;
   if (target && bubbleEl.value.contains(target)) return;
-  pickerOpen.value = false;
+  closePicker(true);
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
   if (event.key !== "Escape") return;
   if (sheetOpen.value) closeSheet();
-  else pickerOpen.value = false;
+  else closePicker(true);
 }
 
 // Only listen globally while an overlay is actually open. Otherwise every
@@ -441,6 +475,18 @@ watch(
     }
   },
 );
+
+watch(
+  () => desktopToolbarOwnerId.value,
+  (ownerId) => {
+    if (ownerId === props.message.id) return;
+    if (pickerOpen.value) pickerOpen.value = false;
+  },
+);
+
+onBeforeUnmount(() => {
+  if (ownsDesktopToolbarLock.value) $desktopToolbarOwnerId.set(null);
+});
 
 onBeforeUnmount(() => {
   if (typeof URL !== "undefined") {
@@ -757,17 +803,16 @@ watch(
         <span class="text-muted-foreground font-mono text-[10px] tabular-nums">{{ nicks.length }}</span>
       </button>
     </div>
-    </div>
 
     <!-- Floating action toolbar — desktop-only hover/focus affordance. On
          touch devices (where hover never fires) long-press opens the action
          sheet instead, so this toolbar stays hidden and we never show two
          emoji rails at once. -->
     <div
-      v-if="!isEditing"
+      v-if="!isEditing && !desktopToolbarLockedByAnother"
       :class="[
-        'absolute -top-3 right-3 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
-        pickerOpen ? 'z-[60]' : 'z-10',
+        'absolute -top-3 right-3 flex items-center gap-0.5 transition-opacity duration-150 bg-card/95 backdrop-blur border border-border rounded-lg shadow-lg p-1 [@media(pointer:coarse)]:hidden',
+        desktopToolbarVisibilityClass,
       ]"
     >
       <button
@@ -781,6 +826,7 @@ watch(
       >{{ e }}</button>
       <div class="relative">
         <button
+          ref="pickerButtonEl"
           type="button"
           class="h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-150"
           :class="pickerOpen ? 'bg-muted text-foreground' : ''"
@@ -794,8 +840,9 @@ watch(
         </button>
         <EmojiPicker
           :open="pickerOpen"
+          :anchor-el="pickerButtonEl"
           @select="react"
-          @close="pickerOpen = false"
+          @close="closePicker(true)"
         />
       </div>
       <button
@@ -837,6 +884,7 @@ watch(
           <Trash2 class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
       </template>
+    </div>
     </div>
 
     <!-- Action-sheet trigger. Touch-only; desktop already has the hover toolbar. -->
