@@ -140,7 +140,7 @@ export function extractFilesFromEvent(event: ClipboardEvent | DragEvent): File[]
     if (!items) return out;
     for (let i = 0; i < items.length; i++) {
       const f = items[i].getAsFile();
-      if (f) out.push(f);
+      if (f && f.type.startsWith("image/")) out.push(f);
     }
   } else if (event instanceof DragEvent) {
     const files = event.dataTransfer?.files;

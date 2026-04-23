@@ -87,21 +87,29 @@ const sharedFiles = computed(() => props.message.sharedFiles ?? []);
 const isGif = computed(() => sharedFiles.value.length === 0 && isImageUrl(props.message.body));
 
 const imageAttachments = computed(() =>
-  sharedFiles.value.filter((f) => isImageFile(f.mediaType, f.url)),
+  sharedFiles.value.filter((f) =>
+    f.disposition === "inline" && isImageFile(f.mediaType, f.url),
+  ),
 );
 const videoAttachments = computed(() =>
-  sharedFiles.value.filter((f) => !isImageFile(f.mediaType, f.url) && isVideoFile(f.mediaType, f.url)),
+  sharedFiles.value.filter((f) =>
+    f.disposition === "inline"
+    && !isImageFile(f.mediaType, f.url)
+    && isVideoFile(f.mediaType, f.url),
+  ),
 );
 const audioAttachments = computed(() =>
   sharedFiles.value.filter((f) =>
-    !isImageFile(f.mediaType, f.url)
+    f.disposition === "inline"
+    && !isImageFile(f.mediaType, f.url)
     && !isVideoFile(f.mediaType, f.url)
     && isAudioFile(f.mediaType, f.url),
   ),
 );
 const pdfAttachments = computed(() =>
   sharedFiles.value.filter((f) =>
-    !isImageFile(f.mediaType, f.url)
+    f.disposition === "inline"
+    && !isImageFile(f.mediaType, f.url)
     && !isVideoFile(f.mediaType, f.url)
     && !isAudioFile(f.mediaType, f.url)
     && isPdfFile(f.mediaType, f.url),
@@ -109,10 +117,13 @@ const pdfAttachments = computed(() =>
 );
 const downloadableAttachments = computed(() =>
   sharedFiles.value.filter((f) =>
-    !isImageFile(f.mediaType, f.url)
-    && !isVideoFile(f.mediaType, f.url)
-    && !isAudioFile(f.mediaType, f.url)
-    && !isPdfFile(f.mediaType, f.url),
+    f.disposition !== "inline"
+    || (
+      !isImageFile(f.mediaType, f.url)
+      && !isVideoFile(f.mediaType, f.url)
+      && !isAudioFile(f.mediaType, f.url)
+      && !isPdfFile(f.mediaType, f.url)
+    ),
   ),
 );
 /** Display the user's text body when present; hide body when it's just the fallback URL for a single image. */
