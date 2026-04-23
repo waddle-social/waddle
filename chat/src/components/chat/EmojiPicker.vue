@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } from "vue";
 import { Search, X } from "lucide-vue-next";
 import { searchEmoji } from "@/lib/emoji";
 
 const props = withDefaults(
   defineProps<{
     open: boolean;
+    anchorEl?: HTMLElement | null;
     /**
      * "popover" (default): absolutely positioned panel anchored to an anchor
      * element outside this component — desktop inline-toolbar usage.
@@ -77,23 +78,38 @@ const searchResults = computed(() => {
 
 const panelEl = ref<HTMLElement | null>(null);
 const searchInputEl = ref<HTMLInputElement | null>(null);
-const flipAbove = ref(false);
+const popoverStyle = ref<CSSProperties>({});
 
 // Rough upper bound matching `max-h-80` (20rem). Used before the panel has a
 // measured height so the first frame picks the right side instead of flashing.
 const ESTIMATED_PANEL_HEIGHT = 320;
+const ESTIMATED_PANEL_WIDTH = 288;
 const VIEWPORT_MARGIN = 8;
+const PANEL_GAP = 4;
 
-function updateFlipAbove() {
+function updatePopoverPosition() {
   if (props.variant !== "popover") return;
+  const anchor = props.anchorEl;
   const panel = panelEl.value;
-  const anchor = panel?.parentElement;
   if (!anchor || typeof window === "undefined") return;
+
   const anchorRect = anchor.getBoundingClientRect();
   const panelHeight = panel.offsetHeight || ESTIMATED_PANEL_HEIGHT;
+  const panelWidth = panel.offsetWidth || ESTIMATED_PANEL_WIDTH;
   const spaceBelow = window.innerHeight - anchorRect.bottom - VIEWPORT_MARGIN;
   const spaceAbove = anchorRect.top - VIEWPORT_MARGIN;
-  flipAbove.value = spaceBelow < panelHeight && spaceAbove > spaceBelow;
+  const flipAbove = spaceBelow < panelHeight + PANEL_GAP && spaceAbove > spaceBelow;
+  const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - panelWidth - VIEWPORT_MARGIN);
+  const left = Math.min(Math.max(anchorRect.right - panelWidth, VIEWPORT_MARGIN), maxLeft);
+  const maxTop = Math.max(VIEWPORT_MARGIN, window.innerHeight - panelHeight - VIEWPORT_MARGIN);
+  const top = flipAbove
+    ? Math.max(VIEWPORT_MARGIN, anchorRect.top - panelHeight - PANEL_GAP)
+    : Math.min(maxTop, anchorRect.bottom + PANEL_GAP);
+
+  popoverStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+  };
 }
 
 function onSelect(emoji: string) {
@@ -105,7 +121,9 @@ function onWindowPointer(event: PointerEvent | MouseEvent) {
   if (!panelEl.value) return;
   const target = event.target as Node | null;
   if (!target) return;
-  if (!panelEl.value.contains(target)) emit("close");
+  if (panelEl.value.contains(target)) return;
+  if (props.anchorEl?.contains(target)) return;
+  emit("close");
 }
 
 function onKey(event: KeyboardEvent) {
@@ -119,16 +137,16 @@ function attachWindowListeners() {
   if (props.variant === "sheet") return;
   window.addEventListener("pointerdown", onWindowPointer, true);
   window.addEventListener("keydown", onKey);
-  window.addEventListener("resize", updateFlipAbove);
-  window.addEventListener("scroll", updateFlipAbove, true);
+  window.addEventListener("resize", updatePopoverPosition);
+  window.addEventListener("scroll", updatePopoverPosition, true);
 }
 
 function detachWindowListeners() {
   if (typeof window === "undefined") return;
   window.removeEventListener("pointerdown", onWindowPointer, true);
   window.removeEventListener("keydown", onKey);
-  window.removeEventListener("resize", updateFlipAbove);
-  window.removeEventListener("scroll", updateFlipAbove, true);
+  window.removeEventListener("resize", updatePopoverPosition);
+  window.removeEventListener("scroll", updatePopoverPosition, true);
 }
 
 watch(
@@ -138,9 +156,8 @@ watch(
       loadRecents();
       attachWindowListeners();
       query.value = "";
-      flipAbove.value = false;
       void nextTick().then(() => {
-        updateFlipAbove();
+        updatePopoverPosition();
         searchInputEl.value?.focus();
       });
     } else {
@@ -150,98 +167,106 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => [query.value, searchResults.value.length, recents.value.length],
+  () => {
+    if (!props.open || props.variant !== "popover") return;
+    void nextTick().then(updatePopoverPosition);
+  },
+);
+
 onBeforeUnmount(detachWindowListeners);
 </script>
 
 <template>
-  <div
-    v-if="open"
-    ref="panelEl"
-    :role="variant === 'popover' ? 'dialog' : 'group'"
-    aria-label="Choose a reaction"
-    :class="[
-      'flex flex-col overflow-hidden',
-      variant === 'popover'
-        ? [
-            'absolute right-0 w-72 glass-panel border border-border rounded-xl z-50 shadow-2xl animate-fade-in max-h-80',
-            flipAbove ? 'bottom-full mb-1' : 'top-full mt-1',
-          ]
-        : 'w-full max-h-[60vh]',
-    ]"
-    @pointerdown.stop
-  >
-    <div class="flex items-center gap-2.5 px-3 py-2 border-b border-border">
-      <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" aria-hidden="true" />
-      <input
-        ref="searchInputEl"
-        v-model="query"
-        type="text"
-        placeholder="Search emoji…"
-        aria-label="Search emoji"
-        class="flex-1 text-[13px] bg-transparent border-none focus:outline-none placeholder:text-muted-foreground/40"
-      />
-      <button
-        type="button"
-        class="p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
-        aria-label="Close emoji picker"
-        @click="emit('close')"
-      >
-        <X class="w-3.5 h-3.5" aria-hidden="true" />
-      </button>
-    </div>
+  <Teleport to="body" :disabled="variant !== 'popover'">
+    <div
+      v-if="open"
+      ref="panelEl"
+      :role="variant === 'popover' ? 'dialog' : 'group'"
+      aria-label="Choose a reaction"
+      :class="[
+        'flex flex-col overflow-hidden',
+        variant === 'popover'
+          ? 'fixed w-72 glass-panel border border-border rounded-xl z-[80] shadow-2xl animate-fade-in max-h-80'
+          : 'w-full max-h-[60vh]',
+      ]"
+      :style="variant === 'popover' ? popoverStyle : undefined"
+      @pointerdown.stop
+    >
+      <div class="flex items-center gap-2.5 px-3 py-2 border-b border-border">
+        <Search class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" aria-hidden="true" />
+        <input
+          ref="searchInputEl"
+          v-model="query"
+          type="text"
+          placeholder="Search emoji…"
+          aria-label="Search emoji"
+          class="flex-1 text-[13px] bg-transparent border-none focus:outline-none placeholder:text-muted-foreground/40"
+        />
+        <button
+          type="button"
+          class="p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+          aria-label="Close emoji picker"
+          @click="emit('close')"
+        >
+          <X class="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
+      </div>
 
-    <div class="flex-1 overflow-auto p-2">
-      <template v-if="searchResults.length > 0">
-        <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Results</div>
-        <div :class="['grid gap-0.5', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
-          <button
-            v-for="e in searchResults"
-            :key="`s-${e}`"
-            type="button"
-            :class="[
-              'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
-              variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
-            ]"
-            :aria-label="`React with ${e}`"
-            @click="onSelect(e)"
-          >{{ e }}</button>
-        </div>
-      </template>
-      <template v-else-if="query.trim().length >= 2">
-        <div class="text-center py-4 text-[12px] text-muted-foreground">No emoji found</div>
-      </template>
-      <template v-else>
-        <template v-if="recents.length > 0">
-          <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Recent</div>
-          <div :class="['grid gap-0.5 mb-2', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
+      <div class="flex-1 overflow-auto p-2">
+        <template v-if="searchResults.length > 0">
+          <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Results</div>
+          <div :class="['grid gap-0.5', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
             <button
-              v-for="e in recents"
-              :key="`r-${e}`"
+              v-for="e in searchResults"
+              :key="`s-${e}`"
               type="button"
               :class="[
-              'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
-              variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
-            ]"
+                'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
+                variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
+              ]"
               :aria-label="`React with ${e}`"
               @click="onSelect(e)"
             >{{ e }}</button>
           </div>
         </template>
-        <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Common</div>
-        <div :class="['grid gap-0.5', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
-          <button
-            v-for="e in COMMON_EMOJIS"
-            :key="`c-${e}`"
-            type="button"
-            :class="[
-              'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
-              variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
-            ]"
-            :aria-label="`React with ${e}`"
-            @click="onSelect(e)"
-          >{{ e }}</button>
-        </div>
-      </template>
+        <template v-else-if="query.trim().length >= 2">
+          <div class="text-center py-4 text-[12px] text-muted-foreground">No emoji found</div>
+        </template>
+        <template v-else>
+          <template v-if="recents.length > 0">
+            <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Recent</div>
+            <div :class="['grid gap-0.5 mb-2', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
+              <button
+                v-for="e in recents"
+                :key="`r-${e}`"
+                type="button"
+                :class="[
+                  'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
+                  variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
+                ]"
+                :aria-label="`React with ${e}`"
+                @click="onSelect(e)"
+              >{{ e }}</button>
+            </div>
+          </template>
+          <div class="text-[10px] uppercase tracking-wider text-muted-foreground/70 px-1 pb-1">Common</div>
+          <div :class="['grid gap-0.5', variant === 'sheet' ? 'grid-cols-7' : 'grid-cols-8']">
+            <button
+              v-for="e in COMMON_EMOJIS"
+              :key="`c-${e}`"
+              type="button"
+              :class="[
+                'flex items-center justify-center leading-none rounded-md hover:bg-muted transition-all duration-150',
+                variant === 'sheet' ? 'h-11 text-[24px]' : 'h-8 w-8 text-[18px]',
+              ]"
+              :aria-label="`React with ${e}`"
+              @click="onSelect(e)"
+            >{{ e }}</button>
+          </div>
+        </template>
+      </div>
     </div>
-  </div>
+  </Teleport>
 </template>
