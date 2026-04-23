@@ -19,7 +19,7 @@ on:
 jobs:
   build-framework:
     name: Build Rust FFI Framework
-    runs-on: macos-latest-xlarge
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +48,7 @@ jobs:
   build-ios:
     name: Build iOS App
     needs: build-framework
-    runs-on: macos-latest-xlarge
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -84,7 +84,7 @@ jobs:
   build-macos:
     name: Build macOS App
     needs: build-framework
-    runs-on: macos-latest-xlarge
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
